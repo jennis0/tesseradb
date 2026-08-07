@@ -2000,3 +2000,294 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
     }
     kept
 }
+
+// =============================================================================================
+// P4 — a live viewport against a real fold, with and without the advice (compaction §6.1)
+// =============================================================================================
+
+/// The name this probe registers under, so [`p4_across_arms`] can re-invoke exactly it.
+const P4_TEST: &str = "a_live_viewport_against_a_real_fold_with_and_without_the_advice";
+
+/// **P4 — what a concurrent viewport pays for a fold, and what `MADV_SEQUENTIAL` is worth.**
+///
+/// `compaction.md` §6.1 rules the fold's page-cache mitigation to be `madvise(MADV_SEQUENTIAL)` on
+/// the mappings its streaming passes open (decision 0052). This measures it, and it is a **new
+/// probe rather than a re-run of P3**.
+///
+/// # Why P3 could not answer this
+///
+/// P3 modelled the *harm*: a buffered reader streaming the bundle past the page cache while a
+/// viewport served, which is faithful to what a fold does to a cache and faithful to nothing a fold
+/// can do about it. Every one of the fold's inputs is a mapping, so there are no `read(2)` calls to
+/// sleep between and no mapping for P3's reader to advise. The hint lives on `SegmentCursor` and
+/// `RunCursor`, which only a real fold or a merge constructs — so the only way to measure it is to
+/// run a fold. That was impossible when P3 was written and is possible now.
+///
+/// **And the first thing it measures is not the mitigation.** P3's 2.03× is what an unthrottled
+/// *reader* costs a viewport; what a **fold** costs is a different number, because a fold
+/// interleaves five passes, writes as much as it reads, and spends real time in Roaring and Arrow.
+/// That figure is this probe's headline and P3's is its upper bound.
+///
+/// # The regime is the whole of what makes a number here mean anything
+///
+/// With the bundle inside the page cache nothing is ever evicted, the fold costs bandwidth alone,
+/// and both arms report ~1.0 for the same uninteresting reason. The probe prints which regime it
+/// ran in ([`page_cache_bound`]) rather than leaving a reader to reconstruct it. A fold doubles
+/// disc, so a bundle larger than RAM needs ~2× its size free to fold at all; the affordable way to
+/// the evicting regime is a cgroup, which charges page cache and reclaims against `memory.max`:
+///
+/// ```text
+/// systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 -- \
+///   env TESSERA_P4_BUNDLE=<prebuilt> TESSERA_P4_BASE=100000000 \
+///       TESSERA_P4_ROUNDS=2 TESSERA_P4_BATCH=500000 \
+///   ./target/release/deps/scale-<hash> --exact <this test> --ignored --nocapture
+/// ```
+///
+/// Its hard limit puts the allocating task into direct reclaim, which is where P3's discounted
+/// 15.7× excursion came from. **Use the cap to compare the two arms, and a real larger-than-RAM
+/// bundle to quote an absolute.** The comparison is what this probe is for, and it is the half a
+/// cap does honestly: both arms meet the same limit.
+///
+/// # What it asserts, which is not the figures
+///
+/// A latency bound would be a flake generator (see this module's doc). What is asserted is that
+/// each arm measured the thing it claims: a fold published rather than discarded, at least one
+/// sweep ran *inside* its flight, and the corpus is intact at the end.
+///
+/// | variable | default | what it is |
+/// |---|---|---|
+/// | `TESSERA_P4_BASE` | 2,000,000 | items in the base build |
+/// | `TESSERA_P4_ROUNDS` | 4 | published ingest rounds, so the fold has several segments |
+/// | `TESSERA_P4_BUNDLE` | — | a prebuilt bundle to copy per arm instead of building one |
+/// | `TESSERA_P4_KEEP` | — | build a bundle at this path and stop, for `TESSERA_P4_BUNDLE` to use |
+/// | `TESSERA_P4_ADVICE` | — | set by the parent; presence selects the single-arm form |
+///
+/// # `TESSERA_P4_BUNDLE`, and why a capped run needs it
+///
+/// **A cgroup charges page cache to the cgroup**, so a build inside a tight cap thrashes and is
+/// killed — the write-heavy phase fills the limit with its own output's cache. Measured, not
+/// supposed: an 80M-row build inside a 3 GiB cap died before it published. So the build goes
+/// *outside* the cap (`TESSERA_P4_KEEP`) and the measurement goes inside, over a copy per arm. A
+/// copy rather than a shared directory because a fold consumes what it folds: it flips `CURRENT`
+/// and reclaims the prefix it superseded, so the second arm would open a bundle the first replaced.
+#[test]
+#[ignore = "minutes to hours, and wants a release build — see the module doc"]
+fn a_live_viewport_against_a_real_fold_with_and_without_the_advice() {
+    if let Ok(keep) = std::env::var("TESSERA_P4_KEEP") {
+        let keep = std::path::PathBuf::from(keep);
+        let base = env_usize("TESSERA_P4_BASE", 2_000_000) as u64;
+        std::fs::create_dir_all(&keep).unwrap();
+        let points = keep.with_extension("points.parquet");
+        let pairs = keep.with_extension("pairs.parquet");
+        build_fixture_n(&keep, &points, &pairs, base);
+        let _ = std::fs::remove_file(&points);
+        let _ = std::fs::remove_file(&pairs);
+        eprintln!(
+            "P4: built {base} items at {} ({:.2} GiB) — now run the arms with TESSERA_P4_BUNDLE",
+            keep.display(),
+            bundle_bytes(&keep) as f64 / (1u64 << 30) as f64
+        );
+        return;
+    }
+    match std::env::var("TESSERA_P4_ADVICE").ok() {
+        Some(arm) => p4_one_arm(arm == "on"),
+        None => p4_across_arms(),
+    }
+}
+
+/// The parent arm: one child process per setting.
+///
+/// **A process each, and it is not tidiness.** The two arms differ in what the *page cache* holds
+/// during a fold; running them in one process would give the second arm a cache the first warmed
+/// and a bundle the first had already folded.
+///
+/// **Run the pair in both orders before believing a difference.** Measured: the first pair taken
+/// here disagreed with the reversed pair about the sign of the effect, and fold wall clock varied
+/// 4.7× at one configuration across four runs — larger than anything between the arms.
+fn p4_across_arms() {
+    let exe = std::env::current_exe().expect("the test binary knows its own path");
+    let (cache, source) = page_cache_bound();
+    eprintln!(
+        "P4: page cache bound {:.2} GiB ({source}) — the bundle must exceed it for these ratios \
+         to be about eviction",
+        cache as f64 / (1u64 << 30) as f64
+    );
+
+    for arm in ["on", "off"] {
+        eprintln!("P4: ---- MADV_SEQUENTIAL {arm} (child process) ----");
+        let status = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                P4_TEST,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("TESSERA_P4_ADVICE", arm)
+            // Inherited anyway; passed explicitly because a child that silently *built* its own
+            // fixture instead of copying the prebuilt one is a run that measures a different
+            // bundle and says nothing about it.
+            .envs(std::env::var("TESSERA_P4_BUNDLE").map(|v| ("TESSERA_P4_BUNDLE", v)))
+            .status()
+            .expect("the child test binary runs");
+        assert!(status.success(), "the {arm} arm failed");
+    }
+    eprintln!(
+        "\nP4: the two arms are above, each against its own quiet baseline. A difference is only \
+         believable if it exceeds the drift between that arm's two quiet sweeps — which reached \
+         23% in one measured run."
+    );
+}
+
+/// Copy a bundle tree — the whole of what `TESSERA_P4_BUNDLE` needs, and deliberately not a
+/// dependency on `cp`.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    // A worklist rather than recursion: a bundle tree is shallow, but a probe that aborts on a
+    // stack overflow while copying its own fixture is a probe nobody can debug.
+    let mut work = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((src, dst)) = work.pop() {
+        std::fs::create_dir_all(&dst).unwrap();
+        for entry in std::fs::read_dir(&src).unwrap().flatten() {
+            let target = dst.join(entry.file_name());
+            if entry.metadata().unwrap().is_dir() {
+                work.push((entry.path(), target));
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+}
+
+/// One arm: build or copy, warm a session, sweep quiet, sweep *during* a real fold, sweep quiet.
+fn p4_one_arm(advice: bool) {
+    let base = env_usize("TESSERA_P4_BASE", 2_000_000) as u64;
+    let rounds = env_usize("TESSERA_P4_ROUNDS", 4);
+    let batch = env_usize("TESSERA_P4_BATCH", (base / 20).max(1) as usize);
+    let total = base + (rounds * batch) as u64;
+    tessera_store::read::set_streaming_advice_for_test(advice);
+    eprintln!(
+        "P4: base={base} rounds={rounds} batch={batch} MADV_SEQUENTIAL={}",
+        if advice { "on" } else { "off" }
+    );
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    match std::env::var("TESSERA_P4_BUNDLE") {
+        Ok(prebuilt) => {
+            let t = Instant::now();
+            copy_tree(std::path::Path::new(&prebuilt), &root);
+            eprintln!("  copied a prebuilt bundle in {:.1?}", t.elapsed());
+        }
+        Err(_) => {
+            let (points, pairs) = (
+                tmp.path().join("points.parquet"),
+                tmp.path().join("pairs.parquet"),
+            );
+            build_fixture_n(&root, &points, &pairs, base);
+            let _ = std::fs::remove_file(&points);
+            let _ = std::fs::remove_file(&pairs);
+        }
+    }
+
+    let engine = engine_at(tmp.path(), &root, total);
+    // The refresh is off for P1's reason: what a fold's *flip* costs a resident session is P2's
+    // subject, and leaving it on would put that term inside these sweeps.
+    engine.set_background_refresh_for_test(false);
+    for round in 0..rounds {
+        ingest_and_publish(&engine, round, batch);
+    }
+
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let on_disc = bundle_bytes(&root);
+    let (cache, source) = page_cache_bound();
+    eprintln!(
+        "  bundle {:.2} GiB | page cache {:.2} GiB ({source}) ⇒ {}",
+        on_disc as f64 / (1u64 << 30) as f64,
+        cache as f64 / (1u64 << 30) as f64,
+        if on_disc <= cache {
+            "RESIDENT — nothing is evicted, so both arms will read ~1.0 for the wrong reason"
+        } else {
+            "EVICTING — the regime a fold actually creates"
+        }
+    );
+
+    // Discarded, for P3's measured reason: the first sweep of a run pays the first touch of every
+    // freshly published segment's mapped pages, and without this the quiet baseline comes out
+    // slower than every contended sweep.
+    zoom_sweep(&engine, &full);
+    let quiet = zoom_sweep(&engine, &full);
+
+    // ---- the fold, with the viewport sweeping through it -------------------------------------
+    let before = engine.write_executor_stats();
+    let started = Instant::now();
+    engine.request_fold();
+    let mut contended: Vec<Vec<(u8, Duration, usize)>> = Vec::new();
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded, so these sweeps contended with nothing"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(7200),
+            "the fold never published"
+        );
+        contended.push(zoom_sweep(&engine, &full));
+    }
+    let fold_wall = started.elapsed();
+    let quiet_after = zoom_sweep(&engine, &full);
+
+    // **The mean over the sweeps that ran during the fold**, per zoom. A single sweep would be
+    // whichever pass happened to be running at the time; the fold's passes differ in what they
+    // touch, and the number the design wants is what a viewer pays across the whole thing.
+    assert!(
+        !contended.is_empty(),
+        "no sweep completed inside the fold's flight, so this arm measured nothing"
+    );
+    eprintln!(
+        "  fold {fold_wall:.1?}, {} sweeps inside it",
+        contended.len()
+    );
+    let report = |label: &str, rows: &[Vec<(u8, Duration, usize)>]| {
+        let line = quiet
+            .iter()
+            .enumerate()
+            .map(|(i, (zoom, base, tiles))| {
+                let mean: Duration =
+                    rows.iter().map(|r| r[i].1).sum::<Duration>() / rows.len() as u32;
+                format!(
+                    "z{zoom}({tiles}t) {mean:.1?} [{:.2}x]",
+                    mean.as_secs_f64() / base.as_secs_f64().max(f64::MIN_POSITIVE)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        eprintln!("  {label:<18} {line}");
+    };
+    eprintln!(
+        "  {:<18} {}",
+        "quiet (before):",
+        quiet
+            .iter()
+            .map(|(z, d, t)| format!("z{z}({t}t) {d:.1?}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+    report("during the fold:", &contended);
+    report("quiet (after):", std::slice::from_ref(&quiet_after));
+
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        before.folds + 1,
+        "exactly one fold"
+    );
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        masked_total(&engine, &after),
+        total,
+        "and the corpus is intact after all of it"
+    );
+}

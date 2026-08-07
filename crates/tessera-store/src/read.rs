@@ -1046,7 +1046,9 @@ impl MortonSlice {
     /// a real fraction of the bundle; `MADV_COLD` behind the cursor is the escalation if it proves
     /// insufficient (compaction §6.1).
     pub fn advise_sequential(&self) {
-        let _ = self.mmap.advise(memmap2::Advice::Sequential);
+        if streaming_advice_enabled() {
+            let _ = self.mmap.advise(memmap2::Advice::Sequential);
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -1220,7 +1222,9 @@ impl ColumnsRef {
     /// `madvise(MADV_SEQUENTIAL)` on this mapping — see [`MortonSlice::advise_sequential`], which
     /// states why this is the streaming passes' call and not the request path's.
     pub fn advise_sequential(&self) {
-        let _ = self.mapping.advise(memmap2::Advice::Sequential);
+        if streaming_advice_enabled() {
+            let _ = self.mapping.advise(memmap2::Advice::Sequential);
+        }
     }
 
     pub fn row_count(&self) -> u32 {
@@ -1708,6 +1712,30 @@ pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
         out[i] = start as u32..end as u32;
     }
     out
+}
+
+/// Whether the streaming passes issue `madvise(MADV_SEQUENTIAL)` on the mappings they open —
+/// **on by default**, and switchable only so a probe can measure what it is worth.
+///
+/// Compaction §6.1 rules the hint in (decision 0052) and §14 recorded its effect as *unmeasured*:
+/// P3 measured the harm an unthrottled streaming read does to a concurrent viewport and could not
+/// measure any mitigation, because it modelled a buffered reader and the fold's inputs are all
+/// mappings. Answering "does the hint help" needs the same fold run twice, and a compile-time
+/// constant cannot be run twice. Probe **P4** is what runs it.
+///
+/// A process-global rather than a parameter threaded to every cursor: the answer is the same for
+/// every mapping in a process, the only writer is a probe before it starts, and a parameter would
+/// put a measurement's switch in the signature of two hot constructors.
+static STREAMING_ADVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn streaming_advice_enabled() -> bool {
+    STREAMING_ADVICE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn [`STREAMING_ADVICE`] off or on. **Probe use only** — a deployment has no reason to want the
+/// hint off, and this is not a configuration key.
+pub fn set_streaming_advice_for_test(enabled: bool) {
+    STREAMING_ADVICE.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
