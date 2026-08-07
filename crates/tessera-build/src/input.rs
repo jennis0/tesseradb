@@ -23,7 +23,7 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
@@ -869,9 +869,20 @@ fn plain_scalar(
         detail: format!(
             "attribute '{}' is declared '{}', but the points file holds {found:?}. The width is \
              baked into every row and changing it rewrites the corpus (per-point-attributes \
-             §2.2), so it is taken from the declaration and the data must match it",
+             §2.2), so it is taken from the declaration and the data must match it.{}",
             attribute.name,
-            attribute.ty.arrow_type_name()
+            attribute.ty.arrow_type_name(),
+            match found {
+                // The one mismatch a caller is likely to hit while doing everything right: a
+                // timestamp column is an `i64` and reads as one, but only in microseconds.
+                DataType::Timestamp(unit, _) if *unit != TimeUnit::Microsecond => format!(
+                    " This is a timestamp in {unit:?}, and only microseconds are accepted: \
+                     nothing records a unit, so accepting two would store incomparable numbers \
+                     under one declaration. Cast the column to timestamp[us] (or to a plain i64 \
+                     of whatever unit you mean) before building"
+                ),
+                _ => String::new(),
+            }
         ),
     };
     if column.is_null(row) {
@@ -921,6 +932,17 @@ fn plain_scalar(
             read_integer(any, column.data_type()).ok_or_else(|| mismatch(column.data_type()))?
                 [row],
         ),
+        // **`f64` rounds to `f32` and is not refused, unlike a too-wide integer.** The asymmetry
+        // is deliberate and is easy to read as an oversight, so: narrowing an integer produces a
+        // *different value* — a `u8` given 300 stores 44 — whereas narrowing a float produces the
+        // nearest value the declared width can hold, which is what declaring `f32` asks for. The
+        // caller chose four bytes per row; rounding is that choice being honoured, not a silent
+        // failure to honour it.
+        //
+        // It is worth knowing that most parquet writers emit `double` by default, so a caller who
+        // wanted full precision and declared `f32` out of habit gets rounding without being told.
+        // The remedy is a declarable `f64`, which does not exist — there is no way to ask for
+        // eight-byte floats today.
         ScalarType::F32 => {
             if let Some(a) = any.downcast_ref::<Float32Array>() {
                 ScalarValue::F32(a.value(row))
@@ -972,17 +994,24 @@ fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
             .iter()
             .map(|v| *v as i64)
             .collect(),
-        DataType::Int64 | DataType::Timestamp(_, _) => {
-            // A timestamp is an `i64` of its declared unit; the schema declares `i64` and the
-            // *unit* stays the caller's business, exactly as it is in the source file.
-            any.downcast_ref::<Int64Array>()
-                .map(|a| a.values().to_vec())
-                .or_else(|| {
-                    use arrow::array::TimestampMicrosecondArray;
-                    any.downcast_ref::<TimestampMicrosecondArray>()
-                        .map(|a| a.values().to_vec())
-                })?
-        }
+        DataType::Int64 => any.downcast_ref::<Int64Array>()?.values().to_vec(),
+        // **Microseconds only, and the other units are refused rather than accepted.** A timestamp
+        // is an `i64` of its unit, and nothing records which unit: `MANIFEST.declared_scalars`
+        // says `i64`. So a build that silently took milliseconds from one source and microseconds
+        // from another would store two incomparable numbers under one declaration, and the
+        // difference would surface as dates a thousandfold wrong rather than as an error.
+        //
+        // Normalising here was the alternative and is worse: it would rewrite the caller's values
+        // on a rule they never stated. Refusing tells them to cast, which is a decision they make
+        // once, visibly, in their own pipeline.
+        //
+        // The arm previously matched `Timestamp(_, _)` and then downcast only to
+        // `TimestampMicrosecondArray`, so every other unit fell through to a type-mismatch error
+        // complaining about a type the caller had declared correctly.
+        DataType::Timestamp(TimeUnit::Microsecond, _) => any
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()?
+            .values()
+            .to_vec(),
         _ => return None,
     })
 }
