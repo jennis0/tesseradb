@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (21 rows)
+## Leak register (23 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -58,6 +58,8 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C19** | Per-tile selection work varies with the viewer's own visible count | Low | Accepted — C4/C14 shape |
 | **C20** | Probing how identifiers moved across a key rotation | Medium | Closed |
 | **C21** | Mask-staleness hint (write-path §4.6) | Low | Accepted — C15 shape |
+| **C22** | A category code discloses vocabulary size | Low | Accepted — owner ruling |
+| **C23** | An authored gate label on a vocabulary value | Medium | Accepted — caller's control (⊘ not built) |
 
 ## Documents
 
@@ -65,13 +67,13 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r34 | 16 |
+| `architecture.md` | Normative — r35 | 20 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Provisional — under review | 14 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
 | `conformance.md` | Normative — r8 | 15 |
-| `contracts.md` | Normative — r21 | 15 |
+| `contracts.md` | Normative — r22 | 16 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
