@@ -1110,12 +1110,22 @@ impl Engine {
     /// bundle identity, the fragment cache and the external-id sidecar onto it, retire `retired`,
     /// and swap — steps 5 and 6 of compaction §4, as one call.
     ///
-    /// **The fold does not take this route** — it publishes from the executor thread, where a
-    /// submission to the executor would deadlock, so it calls [`open_rotation`] and publishes
-    /// inline (`crate::write::Executor::publish_fold`). What survives here is the same seam for a
-    /// caller *outside* the write path: an embedder that wrote a prefix by some other means, and
-    /// the prefix-rotation cases in `tests/prefix_rotation.rs`, which exercise the swap's half of
-    /// compaction §4 against a stand-in prefix rather than a whole fold.
+    /// # There is no production caller, and the name now says so
+    ///
+    /// **The fold does not take this route.** It publishes from the executor thread, where a
+    /// submission to the executor would deadlock, so it calls [`open_rotation`] — the seam both
+    /// share — and publishes inline (`crate::write::Executor::publish_fold`). Nothing else writes a
+    /// prefix. This entry point existed for "an embedder that wrote a prefix by some other means",
+    /// which is a caller that does not exist, and its only real users are the prefix-rotation cases
+    /// in `tests/prefix_rotation.rs`, which exercise the swap's half of compaction §4 against a
+    /// stand-in prefix rather than a whole fold.
+    ///
+    /// That mattered because of what it accepts. `retired` is Rule F's executed set and **this
+    /// function retires whatever it is handed** — the one place compaction §5's derivation is
+    /// enforced by documentation rather than by construction, since a caller could pass any bitmap
+    /// and make a deletion's tombstone leave `deleted` while its item is still visible. Keeping a
+    /// `pub` name that reads like the production route, in front of that, is an invitation. The
+    /// seam stays covered; what changes is that nobody reaches for this by accident.
     ///
     /// The refusals, the identity, and why the open skips verification are all [`open_rotation`]'s
     /// and documented there.
@@ -1138,7 +1148,7 @@ impl Engine {
     /// external-id run. See `tessera_lifecycle::Overlay::retire`, which states what retiring one
     /// entity too many costs. Empty is always safe: an un-retired tombstone is fail-closed, and
     /// the next fold takes it.
-    pub fn publish_rotated_prefix(
+    pub fn publish_rotated_prefix_for_test(
         &self,
         prefix: &str,
         segments_version: u64,
@@ -1988,7 +1998,7 @@ impl Engine {
 /// [`PrefixRotation`](crate::geometry::PrefixRotation) that must ride the swap with it.
 ///
 /// **Two callers, one on each side of the executor queue**, which is why this is a free function
-/// rather than an `Engine` method. [`Engine::publish_rotated_prefix`] calls it and then *submits*
+/// rather than an `Engine` method. [`Engine::publish_rotated_prefix_for_test`] calls it and then *submits*
 /// the publication; the fold's own publication (`crate::write::Executor::publish_fold`) calls it on
 /// the executor thread and publishes inline, because a submission from the executor to itself is a
 /// deadlock. A second copy of this sequence is how the two would come to rotate different subsets

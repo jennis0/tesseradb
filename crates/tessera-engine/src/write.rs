@@ -1939,6 +1939,7 @@ impl WritePath {
                     fold_publication_paused: flush.fold_publication_paused,
                     compaction: flush.compaction,
                     last_fold_start_unix: None,
+                    superseded_sidecars: Vec::new(),
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
@@ -2233,14 +2234,14 @@ pub enum PublishGeometryError {
     /// publish at all. Reachable only by an embedder that skipped `start_write_executor`;
     /// `tessera-server` starts it unconditionally.
     NoExecutor,
-    /// [`crate::Engine::publish_rotated_prefix`] was offered a prefix `CURRENT` does not name.
+    /// [`crate::Engine::publish_rotated_prefix_for_test`] was offered a prefix `CURRENT` does not name.
     ///
     /// **Refused rather than published**, because `CURRENT` is the commit point and the bundle
     /// identity *is* the digest it names (contracts §2.1). Publishing an uncommitted prefix would
     /// leave the process serving geometry a restart could not find, and nothing would detect the
     /// disagreement until that restart.
     PrefixNotCommitted { offered: String, current: String },
-    /// [`crate::Engine::publish_rotated_prefix`] could not open the prefix it was handed, or one of
+    /// [`crate::Engine::publish_rotated_prefix_for_test`] could not open the prefix it was handed, or one of
     /// the artefacts inside it. Its files stand as orphans under a prefix nothing serves, and
     /// nothing was swapped.
     PrefixNotOpenable(String),
@@ -2816,6 +2817,9 @@ fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) ->
 struct PendingReclaim {
     generation: Arc<Generation>,
     prefix_dir: PathBuf,
+    /// Every sidecar that was live over this prefix **before** the one the held generation carries
+    /// — see [`Executor::superseded_sidecars`].
+    superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
 }
 
 /// Seconds since the Unix epoch, or `None` if the clock is before it.
@@ -2892,7 +2896,7 @@ fn available_memory() -> Option<u64> {
 /// **Called synchronously from `start_executor`, before the thread is spawned, and that is not a
 /// detail.** A directory that exists but is not yet committed is indistinguishable from an orphan —
 /// which is correct for a fold's output, since a fold cannot run before this does, and wrong for a
-/// prefix a *caller* is staging through `Engine::publish_rotated_prefix`. Running on the spawned
+/// prefix a *caller* is staging through `Engine::publish_rotated_prefix_for_test`. Running on the spawned
 /// thread leaves exactly that race: `start_write_executor` returns, the caller begins staging, and
 /// the sweep reads the directory between its creation and the `CURRENT` flip. Running here makes
 /// "the sweep has finished" something the caller can observe, by `start_write_executor` having
@@ -3219,6 +3223,21 @@ struct Executor {
     /// Process-local, and `crate::compact::due` argues why that is harmless for the *success*
     /// case: both gauges are read against the bundle a fold itself produced.
     last_fold_start_unix: Option<u64>,
+    /// Every external-id sidecar that has been **replaced** over the live prefix, weakly.
+    ///
+    /// **A `Weak`, and that is the whole trick.** The question reclamation has to answer is "can any
+    /// live generation still resolve a path under this prefix", and a generation resolves external
+    /// ids through its sidecar. A flush publishes by *cloning* the live sidecar `Arc`, so one
+    /// pointer answers for every generation a flush produced — which is what
+    /// [`Executor::reclaim_superseded_prefixes`] counts. **A coalesce does not**: it builds a new
+    /// sidecar over the same prefix, so a generation still holding the pre-coalesce one is invisible
+    /// to that count, and unlinking the tree under it turns its next external-id lookup into a typed
+    /// IO error. Holding the old sidecars *strongly* would answer the question and keep their
+    /// mappings alive for the prefix's whole life; a `Weak` answers it and costs a pointer.
+    ///
+    /// Pruned at each push, so a long-lived prefix does not accumulate dead entries, and moved into
+    /// the [`PendingReclaim`] at a fold's publication — the new prefix starts with none.
+    superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
     /// Superseded prefixes awaiting reclamation, each held by the generation that named it.
     ///
     /// **The `Arc` is the wait.** Compaction §8 reclaims the old prefix whole, and lifecycle §2
@@ -4195,6 +4214,15 @@ impl Executor {
                 return;
             }
         }
+        // **Partition-wide here where the segment loop above is per-slice, and that is correct
+        // rather than a coarsening.** `ext-locator.u32` is one array per partition (§3, pass 3), so
+        // there is no per-slice bound to compare against — but the reason it cannot falsely fire is
+        // the allocator, not the file: entity ids are issued monotonically from **one** bundle-wide
+        // high-water (I9), so a locator extent published after the fold's snapshot begins above
+        // every entity that had a row at it, in every slice. `plan.entity_bound` is the maximum of
+        // those per-slice bounds and is therefore at or below that high-water. A slice whose own
+        // bound is lower cannot produce an extent beneath the maximum, because it does not get to
+        // choose its ids.
         if carried_locators
             .iter()
             .any(|extent| extent.entity_lo < plan.entity_bound)
@@ -4499,6 +4527,9 @@ impl Executor {
         self.pending_reclaim.push(PendingReclaim {
             generation: live,
             prefix_dir: from_prefix_dir,
+            // Taken, not cloned: these belong to the prefix being superseded, and the prefix this
+            // fold just published starts with none.
+            superseded_sidecars: std::mem::take(&mut self.superseded_sidecars),
         });
         self.reclaim_superseded_prefixes();
 
@@ -4598,6 +4629,13 @@ impl Executor {
     /// has already moved, so no new holder can appear; holding the `Arc` here and reclaiming only
     /// at a count of one turns "wait for the readers" into a condition rather than a delay.
     ///
+    /// **And it is now exhaustive rather than a narrowing.** It once counted the held generation
+    /// and its sidecar, which together answer for every generation a *flush* produced over the
+    /// prefix and for none of the ones holding a sidecar a **coalesce** replaced — a set the counts
+    /// could not see at all. `superseded_sidecars` closes that, weakly, so the three counts between
+    /// them name every sidecar that was ever live over the prefix and therefore every generation
+    /// that could still resolve a path inside it.
+    ///
     /// A failure alarms once and drops the entry: `remove_dir_all` failing is a permissions or
     /// device fault rather than a transient one, and retrying it every tick is a log flood around a
     /// condition an operator has to act on. The tree then stands as an orphan, which is the same
@@ -4608,15 +4646,24 @@ impl Executor {
         }
         let mut still_read = Vec::new();
         for pending in std::mem::take(&mut self.pending_reclaim) {
-            // **Two counts, because they reach different sets** — see `pending_reclaim`. The
-            // generation's own count answers for itself; its sidecar's answers for every *other*
-            // generation over the same prefix, because a flush publishes by cloning the live
-            // sidecar `Arc` rather than building one. Read off the held generation, so at rest both
-            // are 1: this entry is the only holder of the generation, and the generation is the
-            // only holder of the sidecar. The post-fold generation has a sidecar of its own and
-            // does not appear in either.
+            // **Three counts, because they reach three different sets** — see `pending_reclaim`
+            // and `superseded_sidecars`. The generation's own count answers for itself; its
+            // sidecar's answers for every *other* generation a flush produced over the same prefix,
+            // because a flush publishes by cloning the live sidecar `Arc` rather than building one;
+            // and the weak list answers for the generations that hold a sidecar a **coalesce**
+            // replaced, which is the one publication that builds a new one over an unchanged
+            // prefix and so the one case the second count cannot see.
+            //
+            // Read off the held generation, so at rest the two strong counts are 1 — this entry is
+            // the only holder of the generation, and the generation is the only holder of the
+            // sidecar — and every weak count is 0. The post-fold generation has a sidecar of its
+            // own and appears in none of the three.
             if Arc::strong_count(&pending.generation) > 1
                 || Arc::strong_count(&pending.generation.external_index) > 1
+                || pending
+                    .superseded_sidecars
+                    .iter()
+                    .any(|held| held.strong_count() > 0)
             {
                 still_read.push(pending);
                 continue;
@@ -4624,7 +4671,9 @@ impl Executor {
             let PendingReclaim {
                 generation,
                 prefix_dir,
+                superseded_sidecars,
             } = pending;
+            drop(superseded_sidecars);
             drop(generation);
             match tessera_store::reclaim_prefix(&prefix_dir) {
                 Ok(()) => tracing::info!(
@@ -4824,6 +4873,15 @@ impl Executor {
             buffer: Arc::clone(&live.buffer),
             denied: Arc::clone(&live.denied),
         };
+        // **The outgoing sidecar is remembered before it stops being live.** A coalesce is the one
+        // publication that builds a *new* one over the same prefix, so from here a generation
+        // holding the old one is invisible to the sidecar count reclamation takes — see
+        // `superseded_sidecars`. Weakly, and pruned as it goes, so a prefix that coalesces all day
+        // accumulates pointers rather than mappings.
+        self.superseded_sidecars
+            .retain(|held| held.strong_count() > 0);
+        self.superseded_sidecars
+            .push(Arc::downgrade(&live.external_index));
         let _published = self.publish(next, started);
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
     }

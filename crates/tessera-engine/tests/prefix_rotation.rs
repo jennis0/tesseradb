@@ -3,7 +3,7 @@
 //! These cases stand in for a fold by publishing a *second prefix* whose bytes are the first's,
 //! under a `MANIFEST.json` that differs — so the bundle identity rotates, every file still
 //! verifies, and the seam is exercised in exactly the shape a fold uses it: `CURRENT` flipped, then
-//! [`Engine::publish_rotated_prefix`]. What the stand-in does not model is the fold's *content*
+//! [`Engine::publish_rotated_prefix_for_test`]. What the stand-in does not model is the fold's *content*
 //! (dropped rows, rewritten postings, dropped keys); it models the identity rotation, which is the
 //! half Rule F's safety hangs on.
 //!
@@ -191,7 +191,7 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_sidecar_togethe
 
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -257,7 +257,7 @@ fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
 
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -321,7 +321,7 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -394,7 +394,7 @@ fn a_deny_published_after_a_flip_writes_into_the_new_prefix() {
 
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -461,7 +461,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -487,7 +487,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
 /// **Rule F rides the rotation: the executed deletions leave `deleted` in the swap, and a
 /// suppression beside them does not** (write-path §5.4).
 ///
-/// The seam's half of retirement — [`Engine::publish_rotated_prefix`]'s `retired` argument, the
+/// The seam's half of retirement — [`Engine::publish_rotated_prefix_for_test`]'s `retired` argument, the
 /// `Overlay::retire` it reaches, and the deny mask re-derived over the result. **Deriving
 /// `executed` is not this task's and is not modelled here**: compaction §5's rule is
 /// `{ e ∈ D₀ : no carried-forward artefact names e }`, evaluated against what a publication
@@ -528,7 +528,7 @@ fn a_rotation_retires_the_deletions_it_is_given_and_leaves_suppressions_alone() 
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -572,7 +572,7 @@ fn a_rotation_with_an_empty_retirement_set_retires_nothing() {
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,
@@ -605,7 +605,7 @@ fn publishing_a_prefix_current_does_not_name_is_refused() {
     copy_tree(&root.join("v00000"), &root.join("v00001"));
 
     let refused = engine
-        .publish_rotated_prefix(
+        .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
             before.watermark,

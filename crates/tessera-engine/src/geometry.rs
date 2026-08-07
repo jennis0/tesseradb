@@ -141,7 +141,7 @@ impl GeometryPublication {
     }
 
     /// Carry a [`PrefixRotation`] — what a fold's publication makes, and nothing else. Assembled
-    /// by [`crate::session::Engine::publish_rotated_prefix`], which is the only producer.
+    /// by [`crate::session::Engine::publish_rotated_prefix_for_test`], which is the only producer.
     pub(crate) fn rotating(mut self, rotation: PrefixRotation) -> Self {
         self.rotation = Some(rotation);
         self

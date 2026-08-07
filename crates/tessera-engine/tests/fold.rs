@@ -703,6 +703,95 @@ fn the_startup_sweep_reclaims_an_orphaned_prefix_and_leaves_everything_else() {
     );
 }
 
+/// **A generation holding a sidecar that a coalesce replaced still holds the prefix back.**
+///
+/// Reclamation waits on the readers, and the question it has to answer is *"can any live generation
+/// still resolve a path under this prefix"* — a generation resolves external ids through its
+/// sidecar, and the sidecar opens its runs **lazily**, so unlinking the tree under one turns its
+/// next lookup into an IO error rather than an answer.
+///
+/// **The wait used to reach every generation but this one.** A flush publishes by *cloning* the
+/// live sidecar `Arc`, so one strong count answers for every generation a flush produced. A
+/// **coalesce** does not: it builds a new sidecar over an unchanged prefix, and from that moment a
+/// generation still holding the old one is counted by neither the held generation's own reference
+/// nor its sidecar's. `Executor::superseded_sidecars` closes it with a `Weak` per replaced sidecar —
+/// which answers the question and, unlike holding them strongly, does not keep the mappings of every
+/// sidecar the prefix ever had alive for its whole life.
+///
+/// **Mutations this kills:** dropping the weak list (the prefix is unlinked while this generation
+/// holds it, and the lookup below fails); holding the list *strongly* (nothing is ever reclaimable,
+/// because the executor itself is a holder — the assertion after the drop fails).
+#[test]
+fn a_generation_holding_a_coalesce_superseded_sidecar_holds_the_prefix_back() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        EngineConfig {
+            // Two same-tier runs select a coalesce, so one extra flush reaches it.
+            ..config_uncapped()
+        },
+    );
+    ingest(&engine, b"coalesce-witness".to_vec(), "w0").expect("ingest is accepted");
+    engine.request_flush();
+    wait_for("the witness to be flushed", || {
+        engine.write_executor_stats().flushes > 0
+    });
+
+    // **A generation captured before any coalesce**, held for the rest of the case. This is the
+    // holder the two old counts could not see once a coalesce replaced what it points at: it is
+    // neither the generation the fold supersedes (several publications newer) nor a holder of that
+    // generation's sidecar (the coalesce built a new one).
+    let held = engine.generation();
+
+    // Drive flushes until a coalesce publishes a *new* sidecar over the same prefix.
+    let mut round = 1;
+    while engine.write_executor_stats().coalesces == 0 {
+        assert!(round < 64, "no coalesce published in {round} rounds");
+        ingest(
+            &engine,
+            format!("c{round}").into_bytes(),
+            &format!("c{round}"),
+        )
+        .expect("ingest is accepted");
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_for("a flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+        round += 1;
+    }
+    // That a coalesce builds a *new* sidecar rather than cloning the live one is stated at its
+    // publication site and is the whole reason this case differs from a flush's; the sidecar
+    // pointer itself is crate-internal, so what is asserted here is that a coalesce happened at
+    // all — without one, this test is about nothing.
+    assert!(engine.write_executor_stats().coalesces > 0);
+
+    fold(&engine);
+
+    // **The prefix stands while the pre-coalesce generation is held.** Reclamation is retried at
+    // every tick, so this is not a race that has not happened yet; it is a wait that is holding.
+    for _ in 0..5 {
+        tick(&engine);
+    }
+    assert!(
+        root.join("v00000").exists(),
+        "the superseded prefix must not be unlinked while a generation over it is still held"
+    );
+    // Released — and now it goes.
+    drop(held);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while root.join("v00000").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the prefix was never reclaimed after its last reader released it"
+        );
+        tick(&engine);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// **Obligation 15's converging half: a restart onto the folded prefix serves the same state.**
 ///
 /// `CURRENT` is the commit point, so a process that has flipped it has already published whatever

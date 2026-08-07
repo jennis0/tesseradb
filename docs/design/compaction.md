@@ -629,10 +629,20 @@ viewport's mapped hot pages are evicted for bytes nothing will read again. `MADV
 exactly what is true — this range is streamed and may be freed soon after access — in one call per
 input, with no rate and no device-specific constant.
 
-**⊘ It is a hint, and nothing measures it yet.** P3 must be re-run with it applied, over a sweep
-long enough to displace a real fraction of the bundle. `MADV_COLD` behind the cursor is the
-escalation if it proves insufficient; decision 0052 records why the windowed-unmap and
-producer-pacing routes were declined.
+**⊘ It is a hint, nothing measures it yet, and the site is not the one this paragraph implies.**
+"Each input mapping" is not a set the fold owns. Pass 1's segments are opened by the fold itself
+(`SegmentCursor::open`), so advising those is safe. **Pass 2's are the live readers** — §3 hands the
+fold `Arc<PostingsReader>` and the live `Arc<DeltaTier>`s deliberately, *"the same mappings every
+request is already serving from"*, because reopening them would double the fold's resident cost.
+`MADV_SEQUENTIAL` on one of those tells the kernel to drop pages **the viewport is reading**, which
+is the harm this mitigation exists to prevent, applied by hand. So the hint has one safe site today
+and one that needs a ruling: either the fold reopens its postings and tiers — which P1 has made
+cheaper to argue than it was, since the duplicated cost is reclaimable page cache rather than heap —
+or pass 2 goes unadvised and the mitigation covers row space alone.
+
+P3 must then be re-run with whatever is applied, over a sweep long enough to displace a real
+fraction of the bundle. `MADV_COLD` behind the cursor is the escalation if it proves insufficient;
+decision 0052 records why the windowed-unmap and producer-pacing routes were declined.
 
 **The write side is a separate mechanism and is still open.** The fold spools column bytes, maps
 them back, writes assembled batches, and dirties a 4 GB `permutation.bin` mapping —
@@ -810,6 +820,15 @@ is the reclamation event rather than merely one of its beneficiaries.
 Carried-forward files are **hard-linked** into the new prefix before `CURRENT` flips, so deleting
 the old tree unlinks directory entries and never live data. On an object store the link is a copy,
 and the fold's disc estimate has to say which it is.
+
+✔ **The wait for the readers is exhaustive.** Reclamation cannot unlink the tree while a live
+generation could still resolve a path inside it — the sidecar opens its runs lazily, so a request
+holding one is about to open a path under it. What answers that is one strong count per sidecar that
+was ever live over the prefix: a flush publishes by *cloning* the live sidecar, so one pointer
+covers every generation a flush produced, and a **coalesce** builds a new one over an unchanged
+prefix, so every sidecar it replaces is remembered weakly until its last holder releases. Weakly
+rather than strongly: the question is whether anyone still holds one, and keeping them alive to ask
+would pin the mappings of every sidecar the prefix ever had for its whole life.
 
 ✔ **They are also fsynced before the flip, and the reason is not obvious from the link.** A hard
 link copies no bytes, so the directory entry is plainly the new thing and it is tempting to conclude
