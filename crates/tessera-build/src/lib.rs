@@ -715,7 +715,7 @@ fn write_manifests(
                                 tessera_store::manifest::VocabularyKind::Discovered
                             }
                         },
-                        listing: v.listing.as_str().to_string(),
+                        listing: v.listing,
                         values,
                         reserved: v.reserved.clone(),
                     }

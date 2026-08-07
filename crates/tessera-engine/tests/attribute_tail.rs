@@ -310,7 +310,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .iter()
         .find(|v| v.name == "band")
         .expect("the declared vocabulary reaches the manifest");
-    assert_eq!(vocabulary.listing, "public");
+    assert_eq!(vocabulary.listing, tessera_store::manifest::Listing::Public);
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
         .iter()

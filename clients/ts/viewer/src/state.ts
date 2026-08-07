@@ -1,4 +1,13 @@
-import type {DepthChoice, Meta, Session, TileCounts, Timings, ViewportResult} from '@tessera/client';
+import type {
+  CategoryValue,
+  DepthChoice,
+  Meta,
+  Session,
+  TileCounts,
+  Timings,
+  ViewportResult
+} from '@tessera/client';
+import type {Domain, Ranks} from './colour.js';
 
 /** What one loaded tile contributes. Counts come from the server; nothing here is derived. */
 export type LoadedTile = {
@@ -50,6 +59,35 @@ export type AppState = {
   selectedWorldXY: [number, number] | null;
   /** A refused `/v1/items` call. Distinct from `selected: null`, which means nothing is picked. */
   itemError: {code: string; detail: string} | null;
+
+  /**
+   * The declared column marks are coloured by, or `null` for the uniform colour.
+   *
+   * **Changing it must not refetch.** Every declared column is already in the response, so a
+   * different encoding is a layer rebuild — which is also what makes the switch a usable check
+   * that no selection changed: the mark count cannot move.
+   */
+  colourBy: string | null;
+  /**
+   * Resolved category values per **column**, not per vocabulary.
+   *
+   * Keyed by column even though two columns may share a vocabulary, because visibility is
+   * per-column (contracts §3.2): a value resolvable under one is not thereby resolvable under
+   * another. Sharing the map would be the one shortcut that turns a correct gate into a leak.
+   */
+  categories: Record<string, CategoryValue[]>;
+  /** A refused `/v1/categories` call, per column — notably the ⊘ `per_viewer` refusal. */
+  categoryErrors: Record<string, {code: string; detail: string}>;
+  /**
+   * Palette rank per code, per column: assigned by observed frequency and never reordered, so a
+   * pan cannot change what a colour means. See `colour.ts`'s `extendRanks`.
+   */
+  ranks: Record<string, Ranks>;
+  /**
+   * Sticky numeric domains per column: widened as marks arrive, never narrowed, cleared on
+   * principal change. See `colour.ts` for why the server does not supply these.
+   */
+  domains: Record<string, Domain>;
 };
 
 export type Store = {

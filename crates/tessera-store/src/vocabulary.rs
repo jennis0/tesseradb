@@ -32,7 +32,7 @@ use rand::RngCore;
 use tessera_spatial::tiler::ScalarType;
 
 use crate::manifest::{
-    DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
+    DeclaredScalar, Listing, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
     VocabularyKind,
 };
 
@@ -176,8 +176,17 @@ impl Minted {
 pub struct VocabularyMinter {
     name: String,
     kind: VocabularyKind,
+    listing: Listing,
     width: ScalarType,
     codes: BTreeMap<String, u32>,
+    /// Per-value presentation, keyed as `codes` is; absent for a value given no label, which is
+    /// every value a *discovered* vocabulary mints — there was no author to write one.
+    ///
+    /// **Here rather than read back from the manifest at the point of use**, because a bound value
+    /// lives in one of two homes (the manifest, or a `SEGMENTS-<n>.json` extension) and a reader
+    /// that consulted only the first would serve a legend missing every value minted since the
+    /// last build. This type already exists to be the union of those homes.
+    labels: BTreeMap<String, String>,
     /// Every code that must never be drawn: bound values and authored `reserved` retirements
     /// alike. [`ABSENT_CODE`] is excluded by the draw itself rather than held here, so that a
     /// vocabulary's assigned count is the number of codes it has actually spent.
@@ -190,12 +199,19 @@ impl VocabularyMinter {
     /// `width` must be a category width (§3.6); anything else is a schema defect caught at parse,
     /// and is treated here as `u32` rather than panicking — the widest domain, so a wrong width can
     /// only fail to exhaust, never to collide.
-    pub fn new(name: impl Into<String>, kind: VocabularyKind, width: ScalarType) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        kind: VocabularyKind,
+        listing: Listing,
+        width: ScalarType,
+    ) -> Self {
         VocabularyMinter {
             name: name.into(),
             kind,
+            listing,
             width,
             codes: BTreeMap::new(),
+            labels: BTreeMap::new(),
             assigned: BTreeSet::new(),
         }
     }
@@ -248,6 +264,9 @@ impl VocabularyMinter {
     ) -> Result<(), BindingConflict> {
         for value in &vocabulary.values {
             self.seed_value(&value.key, value.code)?;
+            if let Some(label) = &value.label {
+                self.labels.insert(value.key.clone(), label.clone());
+            }
         }
         for &code in &vocabulary.reserved {
             self.seed_reserved(code);
@@ -257,6 +276,12 @@ impl VocabularyMinter {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether the existence of this vocabulary's values is sensitive (§3.8) — what
+    /// `/v1/categories` gates on.
+    pub fn listing(&self) -> Listing {
+        self.listing
     }
 
     pub fn width(&self) -> ScalarType {
@@ -282,8 +307,21 @@ impl VocabularyMinter {
     }
 
     /// Every binding, ascending by key.
+    ///
+    /// **Key order, and `/v1/categories` pages in it.** Code order would be the obvious choice for
+    /// a numeric cursor and is the wrong one twice over: codes are drawn at random from the width
+    /// (§3.4), so code order is arbitrary to a reader and sorts a legend into nonsense, and the
+    /// map is keyed by key, so producing it would mean collecting and sorting the whole vocabulary
+    /// on every page of every request. Keys are unique, so a key is a total order and therefore a
+    /// usable cursor.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, u32)> {
         self.codes.iter().map(|(k, &c)| (k.as_str(), c))
+    }
+
+    /// This value's presentation label, where an author wrote one. `None` is ordinary — the key is
+    /// the display fallback, and a discovered value never has one.
+    pub fn label_of(&self, key: &str) -> Option<&str> {
+        self.labels.get(key).map(String::as_str)
     }
 
     /// How many codes are spent — the quantity a cardinality alarm watches.
@@ -480,7 +518,12 @@ impl Vocabularies {
                 .get(vocabulary.name.as_str())
                 .map(|&(w, _)| w)
                 .unwrap_or(ScalarType::U32);
-            let mut minter = VocabularyMinter::new(vocabulary.name.clone(), vocabulary.kind, width);
+            let mut minter = VocabularyMinter::new(
+                vocabulary.name.clone(),
+                vocabulary.kind,
+                vocabulary.listing,
+                width,
+            );
             minter.seed_manifest(vocabulary)?;
             by_name.insert(vocabulary.name.clone(), minter);
         }
@@ -618,7 +661,12 @@ mod tests {
     use super::*;
 
     fn minter(width: ScalarType) -> VocabularyMinter {
-        VocabularyMinter::new("departments", VocabularyKind::Discovered, width)
+        VocabularyMinter::new(
+            "departments",
+            VocabularyKind::Discovered,
+            Listing::PerViewer,
+            width,
+        )
     }
 
     /// **Never-reuse holds only if the assigned set is seeded from every home a binding lives in.**
@@ -631,7 +679,7 @@ mod tests {
         m.seed_manifest(&ManifestVocabulary {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
-            listing: "per_viewer".to_string(),
+            listing: Listing::PerViewer,
             values: (1..=100)
                 .map(|c| ManifestVocabularyValue {
                     key: format!("built-{c}"),
@@ -783,7 +831,7 @@ mod tests {
         ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Declared,
-            listing: "per_viewer".to_string(),
+            listing: Listing::PerViewer,
             values: values
                 .iter()
                 .map(|(key, code)| ManifestVocabularyValue {
@@ -919,7 +967,7 @@ mod tests {
         let mut built = vec![ManifestVocabulary {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
-            listing: "per_viewer".to_string(),
+            listing: Listing::PerViewer,
             values: vec![ManifestVocabularyValue {
                 key: "ops".to_string(),
                 code: 4711,

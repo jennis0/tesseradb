@@ -313,6 +313,15 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
              partially"
                 .to_string(),
         ),
+        // ⊘ `/v1/categories` on a `per_viewer` column: the §3.3 predicate that would filter the
+        // value set per principal is not built. Fail-closed 500 rather than an empty 200, because
+        // an empty value set is a *real* answer — it is what a principal who may see none of these
+        // values is told — and returning it for an unbuilt predicate would make the two
+        // indistinguishable. Named explicitly, though the catch-all would map it identically, so
+        // that the choice is visible here rather than inherited.
+        unbuilt @ EngineError::VocabularyVisibilityUnbuilt { .. } => {
+            ApiError::FailClosed(unbuilt.to_string())
+        }
         other => ApiError::FailClosed(other.to_string()),
     }
 }

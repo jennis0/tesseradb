@@ -2894,7 +2894,7 @@ mod vocabulary_extensions_tests {
         ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
-            listing: "per_viewer".to_string(),
+            listing: crate::Listing::PerViewer,
             values: Vec::new(),
             reserved: Vec::new(),
         }

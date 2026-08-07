@@ -89,6 +89,56 @@ describe('decodeViewport', () => {
     expect([...underlay.ids]).toEqual([...plain.ids]);
   });
 
+  it('decodes every declared scalar the manifest names, at its declared type', () => {
+    // The golden is captured against the wide fixture, whose nineteen columns exist to cover the
+    // whole type set — so this asserts against `meta.json` rather than a hand-written list, and a
+    // column added to the schema is covered without touching the test.
+    const r = decodeViewport(fixture('viewport-plain.bin'));
+    const declared = meta.declared_scalars as {name: string; arrow_type: string}[];
+    expect(declared.length).toBeGreaterThan(0);
+    for (const {name, arrow_type} of declared) {
+      const column = r.scalars[name];
+      expect(column, `column ${name} is missing`).toBeDefined();
+      expect(column!.arrowType, `column ${name}`).toBe(arrow_type);
+      expect(column!.values.length, `column ${name}`).toBe(r.ids.length);
+    }
+  });
+
+  it('hands back typed arrays rather than boxed values', () => {
+    // The reason the decoder exists in this shape: `[...child]` allocates one heap object per
+    // value per column, which at a full budget across this fixture's tail is ~10⁶ per response.
+    // `bool` and `utf8` are the two Arrow has no typed form for, and are the only ones exempt.
+    const r = decodeViewport(fixture('viewport-plain.bin'));
+    const boxed = ['bool', 'utf8'];
+    let typedColumns = 0;
+    for (const [name, column] of Object.entries(r.scalars)) {
+      if (boxed.includes(column.arrowType)) {
+        expect(Array.isArray(column.values), `column ${name}`).toBe(true);
+        continue;
+      }
+      typedColumns++;
+      expect(ArrayBuffer.isView(column.values), `column ${name} must be a typed array`).toBe(true);
+    }
+    expect(typedColumns).toBeGreaterThan(0);
+  });
+
+  it('reads a category code as a plain integer of the declared width', () => {
+    // Categories cross the wire as codes and nothing else — the key never appears here. Code 0 is
+    // the *absent* sentinel, so a column that is absent for part of the corpus legitimately
+    // carries it, and the decoder must not confuse it with a missing value.
+    const r = decodeViewport(fixture('viewport-plain.bin'));
+    const category = (meta.declared_scalars as {name: string; category: unknown}[]).find(
+      (s) => s.category !== null
+    );
+    expect(category, 'the golden fixture must declare at least one category').toBeDefined();
+    const column = r.scalars[category!.name]!;
+    expect(['u8', 'u16', 'u32']).toContain(column.arrowType);
+    for (const code of column.values as Uint8Array | Uint16Array | Uint32Array) {
+      expect(Number.isInteger(code)).toBe(true);
+      expect(code).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it('sums the underlay’s sub-cell counts to the visible total', () => {
     // The underlay is an exact masked breakdown of the same visible set the tile batch counts, so
     // the two must agree. If they ever do not, one of them is a sample and the panel that renders

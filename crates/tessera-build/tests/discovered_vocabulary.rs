@@ -266,7 +266,7 @@ fn discovered_vocabulary_mints_every_novel_key_and_records_it() {
         .iter()
         .find(|v| v.name == "department")
         .expect("MANIFEST.vocabularies carries 'department'");
-    assert_eq!(vocab.listing, "per_viewer");
+    assert_eq!(vocab.listing, tessera_store::manifest::Listing::PerViewer);
     assert!(vocab.reserved.is_empty());
     let mut got_keys: Vec<&str> = vocab.values.iter().map(|v| v.key.as_str()).collect();
     got_keys.sort_unstable();

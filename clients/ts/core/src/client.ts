@@ -1,5 +1,13 @@
 import {decodeViewport} from './decode.js';
-import type {ItemDetail, Meta, Session, ViewportRequest, ViewportResponse} from './types.js';
+import type {
+  ArrowType,
+  CategoryValue,
+  ItemDetail,
+  Meta,
+  Session,
+  ViewportRequest,
+  ViewportResponse
+} from './types.js';
 
 /**
  * A Tessera error body, `{"error": code, "detail": string}`, with its HTTP status.
@@ -44,7 +52,7 @@ export type TesseraClientOptions = {
 };
 
 /**
- * The four viewer/session verbs, and nothing else.
+ * The five viewer/session verbs, and nothing else.
  *
  * No cache, no view key, no session lifetime, no replica state — client-interaction §10's session
  * client layer, which is what a REST user would have written anyway. The replica store goes
@@ -88,13 +96,22 @@ export class TesseraClient {
         yMin: m.quantisation.y_min,
         yMax: m.quantisation.y_max
       },
-      declaredScalars: m.declared_scalars.map((s) => ({name: s.name, arrowType: s.arrow_type})),
+      declaredScalars: m.declared_scalars.map((s) => ({
+        name: s.name,
+        arrowType: s.arrow_type,
+        // Null for a plain column, and the absence is the whole signal: without it a `u16`
+        // category is indistinguishable from a `u16` integer, since the hot path ships the code.
+        category: s.category
+          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, listing: s.category.listing}
+          : null
+      })),
       selection: {
         kMin: m.selection.k_min,
         kMaxMarks: m.selection.k_max_marks,
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
-        maxUnderlayOffset: m.selection.max_underlay_offset
+        maxUnderlayOffset: m.selection.max_underlay_offset,
+        maxCategoryValues: m.selection.max_category_values ?? 1_000
       },
       // Older servers do not publish it; fall back to the documented default rather than
       // refusing to run against them.
@@ -141,6 +158,66 @@ export class TesseraClient {
     };
   }
 
+  /**
+   * `GET /v1/categories/{column}`: what this column's codes stand for.
+   *
+   * Two forms, and **the first is the one to reach for**. Passing `codes` resolves exactly those —
+   * which is what a viewer wants, since it knows which codes it drew, and it means a 60,000-value
+   * vocabulary never crosses the wire. Omitting them enumerates the whole set, paging until the
+   * server stops handing back a cursor.
+   *
+   * **A code that comes back unresolved is not an error.** "No such code" and "a value you cannot
+   * see" are one outcome by contract (contracts §3.2), so the caller gets a shorter list rather
+   * than a refusal, and must not treat a missing code as a failure. A code the client actually
+   * *drew* always resolves: its point was admitted by the mask, so the value has a visible member.
+   *
+   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `per_viewer`
+   * column, whose gate is specified and unbuilt.
+   */
+  async categories(
+    token: string,
+    column: string,
+    opts: {codes?: readonly number[]; limit?: number} = {}
+  ): Promise<CategoryValue[]> {
+    // Encoded, because a column name reaches this from `/v1/meta` rather than from a literal.
+    const base = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}`;
+    const out: CategoryValue[] = [];
+
+    if (opts.codes) {
+      // Nothing to ask about. Returning early rather than sending `codes=` keeps an empty request
+      // from being read as the *enumeration* form, which would fetch the whole vocabulary.
+      if (opts.codes.length === 0) return out;
+      const url = `${base}?codes=${[...opts.codes].join(',')}`;
+      const page = await this.categoryPage(token, url);
+      return page.values;
+    }
+
+    let cursor: string | null = null;
+    do {
+      const params = new URLSearchParams();
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+      if (cursor !== null) params.set('after', cursor);
+      const query = params.toString();
+      const page = await this.categoryPage(token, query ? `${base}?${query}` : base);
+      out.push(...page.values);
+      cursor = page.next;
+    } while (cursor !== null);
+    return out;
+  }
+
+  private async categoryPage(
+    token: string,
+    url: string
+  ): Promise<{values: CategoryValue[]; next: string | null}> {
+    const response = await fetch(url, {headers: {authorization: `Bearer ${token}`}});
+    if (!response.ok) await fail(response);
+    const body = (await response.json()) as RawCategories;
+    return {
+      values: body.values.map((v) => ({code: v.code, key: v.key, label: v.label ?? null})),
+      next: body.next
+    };
+  }
+
   async item(token: string, tesseraId: bigint): Promise<ItemDetail> {
     const response = await fetch(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
       method: 'POST',
@@ -159,7 +236,11 @@ type RawMeta = {
   idset: number;
   slices: {id: string; display_name: string}[];
   quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
-  declared_scalars: {name: string; arrow_type: string}[];
+  declared_scalars: {
+    name: string;
+    arrow_type: ArrowType;
+    category: {vocabulary: string; kind: 'declared' | 'discovered'; listing: 'per_viewer' | 'public'} | null;
+  }[];
   selection: {
     k_min: number;
     k_max_marks: number;
@@ -167,5 +248,13 @@ type RawMeta = {
     theta_target_marks: number;
     max_underlay_offset: number;
     max_tiles_per_request?: number;
+    max_category_values?: number;
   };
+};
+
+/** `GET /v1/categories/{column}`'s wire shape. */
+type RawCategories = {
+  column: string;
+  values: {code: number; key: string; label?: string | null}[];
+  next: string | null;
 };

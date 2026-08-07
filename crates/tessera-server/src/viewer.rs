@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -29,6 +29,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
     let router = Router::new()
         .route("/v1/meta", get(meta))
+        .route("/v1/categories/{column}", get(categories))
         .route("/v1/viewport", post(viewport))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/healthz", get(healthz))
@@ -144,7 +145,37 @@ async fn meta(
             "y_min": meta.quantisation.y_min,
             "y_max": meta.quantisation.y_max,
         },
-        "declared_scalars": meta.declared_scalars.iter().map(|s| serde_json::json!({"name": s.name, "arrow_type": s.arrow_type.arrow_type_name()})).collect::<Vec<_>>(),
+        // The column schema, and the **whole** of it: name, storage type, and — for a category —
+        // the vocabulary it draws from, that vocabulary's kind and its `listing`. Without the
+        // `category` block a client cannot tell a `u16` category from a `u16` integer, since the
+        // hot path ships the code and nothing else.
+        //
+        // **The name is the column's identifier**, here and in `/v1/categories/{column}`. It is
+        // unique bundle-wide (`tessera_build::schema` refuses a duplicate) and restricted to a
+        // path-safe character set for that reason, so no second identifier is minted for it.
+        //
+        // **Values are not here.** A large vocabulary is megabytes against a measured 79 KB
+        // viewport response, and `per_viewer` filtering means no shared cache — so values are a
+        // separate, paged, per-principal endpoint and this stays a small shared document
+        // (per-point-attributes §3.8).
+        "declared_scalars": meta.declared_scalars.iter().map(|s| {
+            let category = s.vocabulary.as_deref().and_then(|name| {
+                let vocabulary = meta.vocabularies.get(name)?;
+                Some(serde_json::json!({
+                    "vocabulary": name,
+                    "kind": match vocabulary.kind() {
+                        tessera_engine::VocabularyKind::Declared => "declared",
+                        tessera_engine::VocabularyKind::Discovered => "discovered",
+                    },
+                    "listing": vocabulary.listing().as_str(),
+                }))
+            });
+            serde_json::json!({
+                "name": s.name,
+                "arrow_type": s.arrow_type.arrow_type_name(),
+                "category": category,
+            })
+        }).collect::<Vec<_>>(),
         // Reference Sheet R5: the filter operand names a client may use.
         // ⊘ Specified, not implemented: no filter contract exists yet, so this is always `[]` and a
         // client must not read an empty list as "this deployment declined to expose its filters".
@@ -179,7 +210,105 @@ async fn meta(
             // the deployment's ceiling. It discloses nothing: a deployment constant, identical for
             // every principal, and the tile grid is public.
             "max_tiles_per_request": selection.max_tiles_per_request,
+            // `/v1/categories`' page ceiling, published for the same reason the others are: a
+            // client that pages must know when a short page means "the set ended" rather than
+            // "the deployment truncated".
+            "max_category_values": state.max_category_values,
         },
+    })))
+}
+
+/// `GET /v1/categories/{column}`'s query string.
+#[derive(Debug, Deserialize)]
+struct CategoriesQuery {
+    /// Comma-separated codes to resolve. Present means bulk lookup; absent means enumerate.
+    #[serde(default)]
+    codes: Option<String>,
+    /// Resume enumeration after this value **key** — the cursor.
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /v1/categories/{column}` (contracts §3.2): what this column's codes stand for.
+///
+/// **Two forms, one gate.** `?codes=` resolves the codes a caller already holds — the viewer's
+/// normal path, since it knows exactly which codes it drew — and the bare form pages the whole
+/// value set. Both run `Engine::categories`, which applies `listing` before the forms diverge; a
+/// gate reached by one door and not the other is the existence oracle by another route.
+///
+/// **404 `unknown` covers three cases and distinguishes none of them**: no such column, a column
+/// that is a plain scalar rather than a category, and a column whose vocabulary is missing. What a
+/// caller may learn about which columns exist is `/v1/meta`'s answer, and this route must not
+/// become a second, finer one.
+///
+/// **Not behind the compute gate**, unlike `/v1/viewport` and `/v1/items`. The work is a bounded
+/// walk of an in-memory `BTreeMap` — no mask composition, no projection, no file IO — so it is the
+/// same class of request as `/v1/meta`, which is also ungated. There is nothing here for a queue
+/// to protect.
+async fn categories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(column): AxumPath<String>,
+    AxumQuery(query): AxumQuery<CategoriesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+
+    // Clamped, not refused: the ceiling is a response bound rather than a disclosure control, so a
+    // caller asking for more than the deployment serves gets the deployment's answer plus a cursor
+    // — which is what pagination is for. `0` is refused, because a zero-length page with a cursor
+    // that never advances is an infinite loop dressed as a response.
+    let limit = match query.limit {
+        Some(0) => {
+            return Err(ApiError::Contract(
+                "limit must be at least 1; a zero-length page cannot make progress".to_string(),
+            ))
+        }
+        Some(n) => n.min(state.max_category_values),
+        None => state.max_category_values,
+    };
+
+    // Parsed before the engine call so a malformed code list is a 422 about the request rather
+    // than an empty 200 that reads as "you may see none of these".
+    let codes: Option<Vec<u32>> = match &query.codes {
+        Some(raw) if raw.is_empty() => Some(Vec::new()),
+        Some(raw) => Some(
+            raw.split(',')
+                .map(|c| c.trim().parse::<u32>())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    ApiError::Contract(format!("`codes` must be a comma-separated list of u32: {e}"))
+                })?,
+        ),
+        None => None,
+    };
+
+    let query = match &codes {
+        Some(codes) => tessera_engine::CategoryQuery::Codes(codes),
+        None => tessera_engine::CategoryQuery::Page {
+            after: query.after.as_deref(),
+            limit,
+        },
+    };
+
+    let page = state
+        .engine
+        .categories(&entry.session, &column, query)
+        .map_err(map_engine_error)?
+        .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "column": page.column,
+        "values": page.values.iter().map(|v| serde_json::json!({
+            "code": v.code,
+            "key": v.key,
+            // Omitted rather than null when no author wrote one — which is every value a
+            // discovered vocabulary mints. The key is the display fallback (§3.1).
+            "label": v.label,
+        })).collect::<Vec<_>>(),
+        "next": page.next,
     })))
 }
 

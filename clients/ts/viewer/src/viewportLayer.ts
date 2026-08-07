@@ -10,6 +10,7 @@ import {
   type TesseraClient,
   type ViewportResult
 } from '@tessera/client';
+import {buildColourAttribute, widenDomain, type Encoding} from './colour.js';
 import type {Store} from './state.js';
 
 export const VIEW = new OrthographicView({id: 'ortho', flipY: true});
@@ -225,6 +226,14 @@ export class ViewportController {
       this.store.update((s) => {
         s.result = response.result;
         s.worldPositions = positionsToWorld(response.result.positions);
+        // Widened for the coloured column only. Widening every column would walk eighteen arrays
+        // per response to build ramps nothing is displaying; the cost is paid when a column is
+        // chosen, which is also when the domain first has a reader.
+        if (s.colourBy) {
+          const column = response.result.scalars[s.colourBy];
+          const widened = column ? widenDomain(s.domains[s.colourBy] ?? null, column) : null;
+          if (widened) s.domains[s.colourBy] = widened;
+        }
         s.lastTimings = response.timings;
         s.lastBytes = response.bytes;
         s.lastVisibleInView = visible;
@@ -306,6 +315,36 @@ function worldToDataBbox(
 }
 
 /**
+ * The current colour encoding, resolved from state.
+ *
+ * **Falls back to uniform rather than throwing** at every step where the state is not yet ready —
+ * a column chosen before its values have resolved, a refused `/v1/categories`. Colour is
+ * presentation, so an incomplete encoding must degrade to a drawn map, never to no map.
+ */
+function encodingOf(store: Store): Encoding {
+  const {colourBy, meta, categories, categoryErrors, ranks, domains} = store.state;
+  if (!colourBy || !meta) return {kind: 'uniform'};
+  const column = meta.declaredScalars.find((c) => c.name === colourBy);
+  if (!column) return {kind: 'uniform'};
+
+  // A refused column colours every mark unmapped, not uniform. The distinction is the whole point:
+  // uniform means "no encoding chosen", unmapped means "this value could not be named" — and the
+  // legend says the latter, so the map must not quietly show the former.
+  if (categoryErrors[colourBy]) return {kind: 'unmapped'};
+
+  if (column.category) {
+    const values = categories[colourBy];
+    // Not yet resolved. Uniform rather than unmapped, because this state is transient and
+    // flashing the whole map grey on the way to a legend is worse than leaving it alone.
+    if (!values) return {kind: 'uniform'};
+    return {kind: 'category', column: colourBy, rankOfCode: ranks[colourBy] ?? {}};
+  }
+  const domain = domains[colourBy];
+  if (!domain) return {kind: 'uniform'};
+  return {kind: 'numeric', column: colourBy, domain};
+}
+
+/**
  * The mark layer.
  *
  * **Every served mark is drawn.** The length handed to deck.gl is the served count, unconditionally
@@ -324,15 +363,27 @@ export function buildViewportLayers(store: Store): Layer[] {
           `The client must draw every mark it is served.`
       );
     }
+    // One entry per served mark by construction — see `buildColourAttribute`. Asserted anyway,
+    // because a short buffer is the one way colour could silently drop marks: deck.gl reads
+    // `length` from `data`, so a short attribute renders garbage rather than failing.
+    const colours = buildColourAttribute(result.ids.length, result.scalars, encodingOf(store));
+    if (colours.length !== result.ids.length * 4) {
+      throw new Error(
+        `I7: colour buffer covers ${colours.length / 4} of ${result.ids.length} marks. ` +
+          `Colour is presentation and must never decide what is drawn.`
+      );
+    }
     layers.push(
       new ScatterplotLayer({
         id: 'marks',
         data: {
           length: result.ids.length,
-          attributes: {getPosition: {value: worldPositions, size: 2}}
+          attributes: {
+            getPosition: {value: worldPositions, size: 2},
+            getFillColor: {value: colours, size: 4, normalized: true}
+          }
         },
         tesseraIds: result.ids,
-        getFillColor: [120, 190, 255, 200],
         radiusUnits: 'pixels' as const,
         getRadius: 1.6,
         radiusMinPixels: 1,

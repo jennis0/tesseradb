@@ -654,6 +654,8 @@ struct RawServe {
     #[serde(default)]
     max_tiles_per_request: Option<usize>,
     #[serde(default)]
+    max_category_values: Option<usize>,
+    #[serde(default)]
     session_credential_file: Option<PathBuf>,
     #[serde(default)]
     session_credential_env: Option<String>,
@@ -726,6 +728,12 @@ pub struct Config {
     pub max_underlay_cells: usize,
     /// Availability bound on the base viewport path. See `EngineConfig::max_tiles_per_request`.
     pub max_tiles_per_request: usize,
+    /// The most values `/v1/categories/{column}` returns in one response — the page size ceiling,
+    /// and the default page size when a caller names none.
+    ///
+    /// **A performance knob, so it defaults** (SA §7). It bounds a response, not a disclosure:
+    /// what a principal may be *told* is `listing`'s question and is settled before paging starts.
+    pub max_category_values: usize,
     /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
     /// even true does nothing in a binary built without the `bench-timing` feature. The header
     /// carries only durations and row counts — no identifier, no per-principal label (SA §9) —
@@ -893,6 +901,15 @@ const DEFAULT_MAX_UNDERLAY_CELLS: usize = 8192;
 /// latency is the caller's own and now bounded. Refusing it would trade an availability fix for a
 /// functionality regression.
 const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
+
+/// One page of a category vocabulary.
+///
+/// Sized against the two vocabularies that exist: arXiv's `archive` has 8 values and
+/// `primary_category` 171, so a legend for either arrives in one request and the cursor is unused.
+/// It bounds the pathological case instead — a `u16` vocabulary that has minted its way to tens of
+/// thousands of values, where an unpaged response is megabytes against a measured 79 KB viewport
+/// response and, being per-principal, shares no cache with anyone.
+const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
 
 /// The compute pool should fill the machine. `available_parallelism` fails only when the OS
 /// genuinely cannot answer the question (SA has no fallback story for that host); treated as 1
@@ -2044,6 +2061,10 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_tiles_per_request
             .unwrap_or(DEFAULT_MAX_TILES_PER_REQUEST),
+        max_category_values: raw
+            .serve
+            .max_category_values
+            .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
         dev_cors_origins: raw.serve.dev_cors_origins.unwrap_or_default(),
         session_credential,
