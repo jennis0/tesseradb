@@ -1150,8 +1150,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // item's attributes, coherently and with no error anywhere. Caught at 2.4M against the source
     // corpus; the geometry pass three statements above resolves through the same two structures
     // for the same reason.
-    let attributes_by_entity =
-        read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal)?;
+    let attributes_by_entity = read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal)?;
 
     drop(source_ids);
     drop(entity_of_ordinal);
@@ -1316,20 +1315,25 @@ fn read_attributes_by_entity(
         .collect();
     let mut seen = 0u64;
     let mut unknown: Option<u64> = None;
-    input::scan_attributes(&args.points, &args.schema, args.limit, |source_id, values| {
-        // Binary search rather than `join_chunk`'s merge sweep: this pass is per-row work over a
-        // handful of narrow columns, not the corpus-scale join the geometry pass does, so the
-        // sweep's chunk machinery would cost more than the log n it saves.
-        let Ok(ordinal) = source_ids.binary_search(&source_id) else {
-            unknown.get_or_insert(source_id);
-            return;
-        };
-        let entity = entity_of_ordinal[ordinal] as usize;
-        seen += 1;
-        for (column, value) in by_entity.iter_mut().zip(values) {
-            column[entity] = value.clone();
-        }
-    })?;
+    input::scan_attributes(
+        &args.points,
+        &args.schema,
+        args.limit,
+        |source_id, values| {
+            // Binary search rather than `join_chunk`'s merge sweep: this pass is per-row work over a
+            // handful of narrow columns, not the corpus-scale join the geometry pass does, so the
+            // sweep's chunk machinery would cost more than the log n it saves.
+            let Ok(ordinal) = source_ids.binary_search(&source_id) else {
+                unknown.get_or_insert(source_id);
+                return;
+            };
+            let entity = entity_of_ordinal[ordinal] as usize;
+            seen += 1;
+            for (column, value) in by_entity.iter_mut().zip(values) {
+                column[entity] = value.clone();
+            }
+        },
+    )?;
     if let Some(source_id) = unknown {
         return Err(input_changed(&format!(
             "the points file's attribute pass names entity {source_id}, which its first pass did \
@@ -1361,9 +1365,7 @@ fn permute_attribute_tail(
         for &entity in entity_row {
             column
                 .push(values[entity as usize].clone(), &attribute.name)
-                .map_err(|e| {
-                    BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                })?;
+                .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))?;
         }
         out.push((attribute.name.clone(), column));
     }

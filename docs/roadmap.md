@@ -123,11 +123,12 @@ obligation. Two retirement rules retire two different ways
 no machinery ([decision 0048](decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)).
 Rule S is built. So what remained of [#4] was *deletions retire at the fold* — which is [#73], the
 compaction epic, designed against [`design/compaction.md`](design/compaction.md) and broken into
-eight tasks. **The fold is built and deletions retire at it.** What [#73] still owes is its
-operator surface: the three gauges, the automatic trigger and `POST /control/compact` (compaction
-§9). Until one of those lands nothing *schedules* a fold, so an overlay comes down when something
-asks for one — which constrains cadence rather than correctness, and is why the theme was safe to
-sequence late.
+eight tasks. **The fold is built, deletions retire at it, and it is scheduled** — a nightly gated
+window and two any-hour gauges ([decision 0056](decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md)),
+with `POST /control/compact` for an operator who wants one now. **All four of compaction §9's gauges
+are built**, the last two — dead bytes and the tombstoned-row fraction — on thresholds that are
+still judgements rather than measurements, which is what a deployment's own evidence would settle.
+What [#73] owes now is the review that promotes its design, not machinery.
 
 The theme's remaining difficulty is identity rather than throughput. Entity identifiers are
 append-only and assigned in signature order, and that ordering is scoped to whatever one commit

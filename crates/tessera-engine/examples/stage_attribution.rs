@@ -201,8 +201,8 @@ fn main() {
                 compute_threads,
                 flush_max_age_secs: 90,
                 max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                // Compaction §9's trigger is off unless a deployment configures one.
+                compaction: tessera_engine::CompactionSchedule::off(),
             },
         )
         .expect("engine should open the 2.4M bundle");
@@ -266,7 +266,10 @@ fn main() {
             "    generation_resolve_ns  {:>8}",
             avg(sums.generation_resolve_ns)
         );
-        println!("    stamp_compare_ns         {:>8}", avg(sums.stamp_compare_ns));
+        println!(
+            "    stamp_compare_ns         {:>8}",
+            avg(sums.stamp_compare_ns)
+        );
         println!(
             "    slice_lookup_ns        {:>8}",
             avg(sums.slice_lookup_ns)

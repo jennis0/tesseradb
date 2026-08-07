@@ -657,9 +657,7 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
     let code_idx = column_index(path, &schema, "code")?;
     let label_idx = schema.column_with_name("label").map(|(i, _)| i);
 
-    let reader = builder
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
+    let reader = builder.build().map_err(|e| BuildError::parquet(path, e))?;
 
     let mut set = crate::schema::ValueSet::default();
     for batch in reader {
@@ -762,8 +760,7 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
                 })?,
         );
     }
-    let projection =
-        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
     let reader = builder
         .with_projection(projection)
         .with_batch_size(65_536)
@@ -889,22 +886,24 @@ impl BatchColumn {
             // integer produces a *different* value (a `u8` given 300 stores 44), narrowing a float
             // produces the nearest value the declared width holds, which is what declaring `f32`
             // asks for. A caller who wants the precision declares `f64`.
-            ScalarType::F32 => BatchColumn::F32(if let Some(a) = any.downcast_ref::<Float32Array>()
-            {
-                a.values().to_vec()
-            } else if let Some(a) = any.downcast_ref::<Float64Array>() {
-                a.values().iter().map(|v| *v as f32).collect()
-            } else {
-                return Err(mismatch());
-            }),
-            ScalarType::F64 => BatchColumn::F64(if let Some(a) = any.downcast_ref::<Float64Array>()
-            {
-                a.values().to_vec()
-            } else if let Some(a) = any.downcast_ref::<Float32Array>() {
-                a.values().iter().map(|v| *v as f64).collect()
-            } else {
-                return Err(mismatch());
-            }),
+            ScalarType::F32 => {
+                BatchColumn::F32(if let Some(a) = any.downcast_ref::<Float32Array>() {
+                    a.values().to_vec()
+                } else if let Some(a) = any.downcast_ref::<Float64Array>() {
+                    a.values().iter().map(|v| *v as f32).collect()
+                } else {
+                    return Err(mismatch());
+                })
+            }
+            ScalarType::F64 => {
+                BatchColumn::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
+                    a.values().to_vec()
+                } else if let Some(a) = any.downcast_ref::<Float32Array>() {
+                    a.values().iter().map(|v| *v as f64).collect()
+                } else {
+                    return Err(mismatch());
+                })
+            }
             ScalarType::Utf8 => {
                 // Unreachable: `render` on `utf8` is refused at parse (§4.3). An error rather than
                 // an `unreachable!` so that lifting that refusal cannot land on a panic.
@@ -965,9 +964,7 @@ impl BatchColumn {
                     ScalarType::U16 => ScalarValue::U16(range(0, u16::MAX as i64)? as u16),
                     ScalarType::U32 => ScalarValue::U32(range(0, u32::MAX as i64)? as u32),
                     ScalarType::U64 => ScalarValue::U64(range(0, i64::MAX)? as u64),
-                    ScalarType::I8 => {
-                        ScalarValue::I8(range(i8::MIN as i64, i8::MAX as i64)? as i8)
-                    }
+                    ScalarType::I8 => ScalarValue::I8(range(i8::MIN as i64, i8::MAX as i64)? as i8),
                     ScalarType::I16 => {
                         ScalarValue::I16(range(i16::MIN as i64, i16::MAX as i64)? as i16)
                     }
@@ -1047,12 +1044,7 @@ fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
 /// **The refusal is the point.** A `u8` category column whose data carries 300 is a build that
 /// would otherwise write 44 — a different value, in a column whose width cannot be changed
 /// without rewriting the corpus, with nothing downstream able to notice.
-fn narrow(
-    value: i64,
-    min: i64,
-    max: i64,
-    attribute: &crate::schema::Attribute,
-) -> Result<i64> {
+fn narrow(value: i64, min: i64, max: i64, attribute: &crate::schema::Attribute) -> Result<i64> {
     if value < min || value > max {
         return Err(crate::schema::schema_error(format!(
             "attribute '{}': the points file carries {value}, which does not fit its declared \

@@ -111,9 +111,10 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
         .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
         .expect("the row is accepted");
     engine.request_flush();
-    wait_until("the buffered row is published by the requested flush", || {
-        engine.generation().segments_version > 0
-    });
+    wait_until(
+        "the buffered row is published by the requested flush",
+        || engine.generation().segments_version > 0,
+    );
 }
 
 /// **An accepted deny leaves `segments_version` unmoved** (§1.3's geometry/overlay split).
@@ -137,8 +138,7 @@ fn an_accepted_deny_moves_no_geometry() {
     let before = engine.generation();
     let entity = source_to_new_map(&root, &before.prefix)[&7];
     engine
-        .accept_change(EntityId::new(entity),
-            ChangeOp::Suppress)
+        .accept_change(EntityId::new(entity), ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
     let after = engine.generation();
@@ -190,10 +190,13 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
     // The tick fires within a second; growth (the ChangeByEntity record) triggers a rotation,
     // whose reclaim deletes the original member — the buffer is empty, so the whole durable
     // prefix below the snapshot is reclaimable.
-    wait_until("the original WAL member is reclaimed by a tick rotation", || {
-        let now = wal_members();
-        now != before && !now.is_empty()
-    });
+    wait_until(
+        "the original WAL member is reclaimed by a tick rotation",
+        || {
+            let now = wal_members();
+            now != before && !now.is_empty()
+        },
+    );
 
     // The suppression's only durable home is now the rotation snapshot. A restart must carry it.
     drop(engine);
@@ -205,8 +208,8 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config()
         },
     )

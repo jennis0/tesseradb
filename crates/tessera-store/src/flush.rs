@@ -291,18 +291,48 @@ pub(crate) fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn digest_of(path: &Path) -> Result<FileDigest> {
-    let bytes = fs::read(path).map_err(|source| StoreError::Io {
+/// How much of a file [`digest_of`] holds at once. One mapping-sized chunk: large enough that the
+/// syscall count is irrelevant beside the hash, small enough to be a constant.
+const DIGEST_CHUNK_BYTES: usize = 1 << 20;
+
+/// One file's size and hex SHA-256, **streamed in [`DIGEST_CHUNK_BYTES`] chunks**.
+///
+/// **The buffer is fixed and the file is not, and that is the whole point of this shape.** Every
+/// producer of a manifest digests what it just wrote, and for a flush or a merge the operand is
+/// bounded — a flush segment is one commit window's rows, a merge's output is capped by
+/// `max_merged_segment_bytes`. For a **compaction fold** it is not: pass 5 digests the fold's own
+/// `columns.arrow`, which is the whole corpus's columns, tens of GB at 10⁹. Reading that whole —
+/// which is what this did, as `fs::read` — puts a corpus-sized `Vec<u8>` in a serving process's
+/// heap and is exactly the construction compaction §3 forbids the fold to inherit. **Measured, not
+/// supposed**: probe P1 found the fold's peak resident set tracking its own output bytes almost
+/// exactly, peaking inside this call rather than in any of the four passes that do the work.
+///
+/// The size comes from the bytes actually read rather than from `metadata().len()`, so it stays the
+/// size of what was hashed even if the file changes underneath — a digest and a length describing
+/// different contents is worse than either being wrong.
+pub fn digest_of(path: &Path) -> Result<FileDigest> {
+    use std::fmt::Write as _;
+    use std::io::Read as _;
+
+    let io = |source| StoreError::Io {
         path: path.to_path_buf(),
         source,
-    })?;
-    let digest = Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
+    };
+    let mut file = File::open(path).map_err(io)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; DIGEST_CHUNK_BYTES];
+    let mut size = 0u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
     }
-    Ok(FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex,
-    })
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(FileDigest { size, sha256: hex })
 }

@@ -552,7 +552,9 @@ impl ColumnSpool {
         if bit_len > 0 {
             writer.write_all(&[bit_buf])?;
         }
-        let file = writer.into_inner().map_err(io::IntoInnerError::into_error)?;
+        let file = writer
+            .into_inner()
+            .map_err(io::IntoInnerError::into_error)?;
         // The bytes are about to be read back through a memory map; they must be durable and
         // visible before the map is taken. Same rule as `PostingsSpool::finish`.
         file.sync_all()?;
@@ -1023,8 +1025,10 @@ fn typed_column<T: ArrowNativeType>(
 /// is the entity occupying row `i`; its slot gets `i`. Every other slot (entity IDs never
 /// assigned a row in this segment) reads the row-absent sentinel `0xFFFF_FFFF`.
 ///
-/// Returns an error — never panics — if any entity ID is `>= bound` or `>= 2^32` (entity IDs
-/// are `u64` in general but must fit `u32` in `bundle_format = 1`, R1).
+/// Returns an error — never panics — if `bound` exceeds `2^32` (entity IDs are `u64` in general
+/// but must fit `u32` in `bundle_format = 1`, R1, so no larger bound is satisfiable) or if any
+/// entity ID is `>= bound`. The bound is checked before the slot array is allocated, so an
+/// unsatisfiable bound costs nothing; see [`PermutationWriter::create`].
 pub fn write_permutation(
     path: &Path,
     items_in_row_order: &[EntityId],
@@ -1133,6 +1137,11 @@ impl PermutationWriter {
 
     /// Record that `entity` occupies `row`. Every check [`write_permutation_iter`] made is made
     /// here, at the same cost — the duplicate test is a slot read the scatter was doing anyway.
+    ///
+    /// **R1's "entity ids fit `u32`" is enforced by the bound, not by a second test here.**
+    /// [`Self::create`] refuses any bound above `2^32`, so `raw < self.bound` already implies
+    /// `raw < 2^32` and a separate u32-fit check could never fire. Reinstating one would read as
+    /// live defence against a case the constructor has already made unreachable.
     pub fn set(&mut self, entity: EntityId, row: u32) -> io::Result<()> {
         let raw = entity.raw();
         if raw >= self.bound {
@@ -1141,14 +1150,6 @@ impl PermutationWriter {
                 format!(
                     "write_permutation: entity id {raw} is out of bound (bound = {})",
                     self.bound
-                ),
-            ));
-        }
-        if raw >= (1u64 << 32) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_permutation: entity id {raw} does not fit in u32 (bundle_format = 1)"
                 ),
             ));
         }

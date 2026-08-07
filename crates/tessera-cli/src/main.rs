@@ -507,11 +507,15 @@ fn resolve_identity(
 /// `--values KEY=PATH`. Split at the **first** `=` so a path may contain one.
 fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
     let (key, path) = raw.split_once('=').ok_or_else(|| {
-        format!("--values expects KEY=PATH, got '{raw}' (no '=' — the key is the schema's \
-                 `values_key`, the path is the vocabulary file)")
+        format!(
+            "--values expects KEY=PATH, got '{raw}' (no '=' — the key is the schema's \
+                 `values_key`, the path is the vocabulary file)"
+        )
     })?;
     if key.is_empty() || path.is_empty() {
-        return Err(format!("--values '{raw}': both the key and the path must be non-empty"));
+        return Err(format!(
+            "--values '{raw}': both the key and the path must be non-empty"
+        ));
     }
     Ok((key.to_string(), PathBuf::from(path)))
 }

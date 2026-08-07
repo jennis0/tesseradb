@@ -211,7 +211,10 @@ fn viewport_k(
         match engine.viewport(session, ViewportRequest::new("s0", zoom, bbox, k)) {
             Ok(out) => return out,
             Err(e) => {
-                assert!(Instant::now() < deadline, "timed out retrying a viewport: {e}");
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out retrying a viewport: {e}"
+                );
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
@@ -276,7 +279,13 @@ fn bundle_bytes(root: &std::path::Path) -> u64 {
 /// 250M run, and an "orphan ratio" of 1065×. The number was a missing addend, not a leak.
 fn live_bytes(engine: &Engine) -> u64 {
     let generation = engine.generation();
-    let build: u64 = generation.bundle.manifest.files.values().map(|d| d.size).sum();
+    let build: u64 = generation
+        .bundle
+        .manifest
+        .files
+        .values()
+        .map(|d| d.size)
+        .sum();
     let written: u64 = generation.bundle.partitions["default"]
         .manifest
         .files
@@ -401,7 +410,11 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
                 key
             })
             .expect("ingest is accepted");
-        assert_eq!(entities.len(), n, "every submitted row is allocated an entity");
+        assert_eq!(
+            entities.len(),
+            n,
+            "every submitted row is allocated an entity"
+        );
         for (entity, (external_id, x, y, i)) in entities.into_iter().zip(meta) {
             // Probes are the first few of each round — enough to pin position, few enough that the
             // narrow-bbox queries stay cheap.
@@ -439,17 +452,29 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
     });
     let publish = t_publish.elapsed();
     let t_refresh = Instant::now();
-    wait_until("the background refresh to replace the session's projection", || {
-        engine.refreshes() > refreshes
-    });
-    (probes, RoundTimings { ack, publish, refresh: t_refresh.elapsed() })
+    wait_until(
+        "the background refresh to replace the session's projection",
+        || engine.refreshes() > refreshes,
+    );
+    (
+        probes,
+        RoundTimings {
+            ack,
+            publish,
+            refresh: t_refresh.elapsed(),
+        },
+    )
 }
 
 /// The `(tessera_id, code)` of each probe, read from a narrow viewport around it.
 ///
 /// Narrow rather than whole-extent because the assertion is about *this row's* code: a
 /// whole-extent request at this size would serve millions of points to check four of them.
-fn probe_codes(engine: &Engine, session: &Session, probes: &[Planted]) -> BTreeMap<String, (TesseraId, u64)> {
+fn probe_codes(
+    engine: &Engine,
+    session: &Session,
+    probes: &[Planted],
+) -> BTreeMap<String, (TesseraId, u64)> {
     let mut out = BTreeMap::new();
     for probe in probes {
         let tessera_id = engine
@@ -522,7 +547,10 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let started = Instant::now();
-    let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
+    let (points, pairs) = (
+        tmp.path().join("points.parquet"),
+        tmp.path().join("pairs.parquet"),
+    );
     build_fixture_n(&root, &points, &pairs, base);
     // **Freed before the run, not with the tempdir.** At a 250M base the two inputs are ~5 GiB
     // beside a ~9 GiB bundle, and the build has already consumed them — holding them for the
@@ -869,7 +897,10 @@ fn the_flip_costs_what_the_resident_population_costs() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
+    let (points, pairs) = (
+        tmp.path().join("points.parquet"),
+        tmp.path().join("pairs.parquet"),
+    );
     build_fixture_n(&root, &points, &pairs, base);
     let _ = std::fs::remove_file(&points);
     let _ = std::fs::remove_file(&pairs);
@@ -929,9 +960,10 @@ fn the_flip_costs_what_the_resident_population_costs() {
                     let start = Instant::now();
                     let deadline = start + Duration::from_secs(600);
                     loop {
-                        match engine
-                            .viewport(session, ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], SWEEP_K))
-                        {
+                        match engine.viewport(
+                            session,
+                            ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], SWEEP_K),
+                        ) {
                             Ok(_) => return start.elapsed(),
                             Err(tessera_engine::EngineError::ProjectionBuilding)
                             | Err(tessera_engine::EngineError::FragmentBuilding) => {
@@ -1070,14 +1102,7 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
 /// nothing further and only lengthens the fold. Two rates sit between the unthrottled reading and
 /// the candidate so the *knee* is located rather than assumed: a rate chosen just under a cliff is
 /// a rate that moves when the device does.
-const P3_RATES: [Option<u64>; 6] = [
-    None,
-    Some(2048),
-    Some(1024),
-    Some(512),
-    Some(128),
-    Some(32),
-];
+const P3_RATES: [Option<u64>; 6] = [None, Some(2048), Some(1024), Some(512), Some(128), Some(32)];
 
 /// How much page cache this process can actually hold, and where the number came from.
 ///
@@ -1105,7 +1130,12 @@ fn page_cache_bound() -> (u64, &'static str) {
     let cgroup_max = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
         .and_then(|cgroup| {
-            let path = cgroup.lines().next()?.split(':').nth(2)?.trim_start_matches('/');
+            let path = cgroup
+                .lines()
+                .next()?
+                .split(':')
+                .nth(2)?
+                .trim_start_matches('/');
             std::fs::read_to_string(format!("/sys/fs/cgroup/{path}/memory.max")).ok()
         })
         .and_then(|max| max.trim().parse::<u64>().ok())
@@ -1182,9 +1212,7 @@ fn stream_bundle(
                 let allowed = started.elapsed().as_secs_f64() * (rate * (1 << 20)) as f64;
                 if read_total as f64 > allowed {
                     let over = read_total as f64 - allowed;
-                    std::thread::sleep(Duration::from_secs_f64(
-                        over / (rate * (1 << 20)) as f64,
-                    ));
+                    std::thread::sleep(Duration::from_secs_f64(over / (rate * (1 << 20)) as f64));
                 }
             }
         }
@@ -1230,7 +1258,10 @@ fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
+    let (points, pairs) = (
+        tmp.path().join("points.parquet"),
+        tmp.path().join("pairs.parquet"),
+    );
     build_fixture_n(&root, &points, &pairs, base);
     let _ = std::fs::remove_file(&points);
     let _ = std::fs::remove_file(&pairs);
@@ -1364,4 +1395,608 @@ fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
         total,
         "and the corpus is intact after all of it — a streaming reader must not disturb a mapping"
     );
+}
+
+// =============================================================================================
+// P1 — the fold's own peak memory and wall clock (compaction §14)
+// =============================================================================================
+
+/// The name this probe registers under, so [`p1_across_scales`] can re-invoke exactly it.
+const P1_TEST: &str = "a_fold_over_a_multi_segment_corpus_at_two_sizes";
+
+/// `/proc/self/status`'s three resident figures in bytes: total, anonymous, file-backed.
+///
+/// **The split is the measurement, not a decoration.** `compaction.md` §3's budget is three named
+/// terms, and two of them — `permutation.bin` and `ext-locator.u32` — are *written through a
+/// mapping*. §3's first draft called those page cache and therefore free; r1 corrected it, because
+/// a dirty shared file mapping is resident and cgroup-charged. Which of the two readings is right
+/// is visible only if the probe reports `RssFile` beside `RssAnon`: a fold whose growth is all
+/// anonymous has a streaming defect, and one whose growth is all file-backed is spending it exactly
+/// where the budget says it does.
+fn rss_split() -> (u64, u64, u64) {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| -> u64 {
+        status
+            .lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map(|kib| kib * 1024)
+            .unwrap_or(0)
+    };
+    (field("VmRSS:"), field("RssAnon:"), field("RssFile:"))
+}
+
+/// The kernel's own high-water mark for total RSS, in bytes.
+///
+/// **This is the authoritative peak and the sampler below is not.** A poll every
+/// [`P1_SAMPLE_MS`] can miss a spike between two samples; `VmHWM` cannot, because the kernel
+/// maintains it at every page fault. The sampler exists only for the anon/file split, which the
+/// kernel does not high-water separately.
+fn vm_hwm() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find(|line| line.starts_with("VmHWM:"))
+        .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|kib| kib * 1024)
+        .unwrap_or(0)
+}
+
+/// Reset `VmHWM` to the current `VmRSS` (`clear_refs` type 5, Linux ≥ 4.0), returning whether the
+/// kernel accepted it.
+///
+/// **Without this the figure is the fixture build's, not the fold's.** `build_fixture_n` runs
+/// in-process and is the largest allocation in the run, so a `VmHWM` read after it describes
+/// `tessera-build`. Resetting it just before the fold makes the mark mean "the highest this process
+/// reached *during the fold*", and the baseline is reported beside it so a reader can subtract.
+fn reset_peak_rss() -> bool {
+    std::fs::write("/proc/self/clear_refs", b"5\n").is_ok()
+}
+
+/// How often [`RssSampler`] reads `/proc/self/status`. Each read is tens of microseconds, so this
+/// is three orders of magnitude below its own cost of sampling.
+const P1_SAMPLE_MS: u64 = 10;
+
+/// Polls the anon/file split for the duration of a fold and keeps the maxima.
+///
+/// **The two maxima need not sum to the total peak, and one of them may exceed it.** Each is the
+/// high-water of its own series, and the series move in opposite directions when the kernel
+/// reclaims mapped pages under an anonymous allocation — so an `anon` delta larger than the
+/// `VmHWM` delta is a fold that grew its buffers while file pages were being dropped, not an
+/// arithmetic error. [`vm_hwm`] is the figure to quote; this split says where it went.
+struct RssSampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<(u64, u64, Duration)>,
+}
+
+impl RssSampler {
+    fn start() -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let (mut peak_anon, mut peak_file, mut peak_total) = (0u64, 0u64, 0u64);
+                let mut at = Duration::ZERO;
+                loop {
+                    let (total, anon, file) = rss_split();
+                    peak_anon = peak_anon.max(anon);
+                    peak_file = peak_file.max(file);
+                    // **When** the total peaked, which is what maps it onto the pass staircase.
+                    // A peak inside a pass is invisible to `compact::PassCost`'s boundary sampling,
+                    // so without this the probe can say how much and never which pass.
+                    if total > peak_total {
+                        peak_total = total;
+                        at = started.elapsed();
+                    }
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return (peak_anon, peak_file, at);
+                    }
+                    std::thread::sleep(Duration::from_millis(P1_SAMPLE_MS));
+                }
+            })
+        };
+        Self { stop, handle }
+    }
+
+    fn stop(self) -> (u64, u64, Duration) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.handle.join().unwrap()
+    }
+}
+
+/// **P1 — what a fold costs in memory and wall clock, at two corpus sizes.**
+///
+/// `compaction.md` §14 lists the fold's peak RSS as **modelled** and marks it *"the design's
+/// central claim and nothing measures it"*. §3 is the claim: a budget of three named terms —
+/// `PostingsSpool`'s offsets buffer (dictionary), `permutation.bin` and `ext-locator.u32` (entity
+/// space, both written through a mapping), plus the widest term's encode — summing to **~9–10 GB at
+/// 10⁹**, and explicitly *not* the merge's measured 4.4–4.9× of its inputs' bytes, which applied to
+/// a corpus would be 200+ GB on a 47 GB bundle. This probe measures the budget.
+///
+/// # Two sizes, in two processes, and both halves of that are load-bearing
+///
+/// **A single size measures a number; two measure a coefficient**, and only a coefficient
+/// extrapolates to 10⁹. So the default run folds twice, at `n` and `2n`, and reports peak RSS per
+/// input byte at each — the quantity that is 4.4–4.9 for a merge and must not be for a fold.
+///
+/// **Each size runs in a fresh child process**, which is not fastidiousness. glibc's allocator does
+/// not return arenas to the kernel, so a second fold in the same process peaks at whatever the
+/// first one reached whether or not it needed it — an artefact that reports *perfect* flatness for
+/// a fold with a corpus-sized `Vec` in it. The parent spawns [`P1_TEST`] once per size with
+/// `TESSERA_P1_SCALE` set, which is the arm each child takes; children write progress to stderr
+/// (inherited, so a long run is visible) and one `P1-RESULT` line to stdout, which the parent
+/// parses.
+///
+/// # What it asserts, which is not the figures
+///
+/// Absolute latency and absolute RSS bounds are flake generators on a developer machine (see this
+/// module's doc), and the memory figure's home is a memo. What is asserted is the property §3
+/// actually claims and a defect would actually break:
+///
+/// 1. **The fold published**, once, with no failures, and the corpus survives it minus exactly the
+///    deletions — a fold that OOM-avoided by doing nothing would otherwise report a wonderful peak.
+/// 2. **Peak RSS over the fold is below the input bytes it read**, at every size. A merge's
+///    construction here would read 4.4×.
+/// 3. **The peak per input byte does not rise with corpus size.** This is the scaling claim in the
+///    only form that survives a change of machine: a construction that decodes something
+///    corpus-sized has a coefficient that climbs, whatever the host.
+///
+/// ```text
+/// cargo test -p tessera-engine --release --test scale -- --ignored --nocapture \
+///     a_fold_over_a_multi_segment_corpus_at_two_sizes
+/// ```
+///
+/// | variable | default | what it is |
+/// |---|---|---|
+/// | `TESSERA_P1_SCALES` | `5000000,10000000` | the base sizes to fold, one child process each |
+/// | `TESSERA_P1_SCALE` | — | set by the parent; presence selects the single-size arm |
+/// | `TESSERA_P1_ROUNDS` | 4 | published ingest rounds before the fold, so it folds many segments |
+/// | `TESSERA_P1_BATCH` | base/20 | items per round |
+/// | `TESSERA_P1_DELETIONS` | 10,000 | entities deleted before the fold, so it has work to retire |
+#[test]
+#[ignore = "minutes, and wants a release build — see the module doc"]
+fn a_fold_over_a_multi_segment_corpus_at_two_sizes() {
+    match std::env::var("TESSERA_P1_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(base) => p1_one_scale(base),
+        None => p1_across_scales(),
+    }
+}
+
+/// One `P1-RESULT` line, parsed.
+struct P1Result {
+    base: u64,
+    fields: BTreeMap<String, u64>,
+}
+
+impl P1Result {
+    fn get(&self, key: &str) -> u64 {
+        *self
+            .fields
+            .get(key)
+            .unwrap_or_else(|| panic!("the child's P1-RESULT line has no `{key}`"))
+    }
+}
+
+/// The parent arm: one child process per size, then the coefficient across them.
+fn p1_across_scales() {
+    let scales: Vec<u64> = std::env::var("TESSERA_P1_SCALES")
+        .unwrap_or_else(|_| "5000000,10000000".to_string())
+        .split(',')
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+        .collect();
+    assert!(
+        !scales.is_empty(),
+        "TESSERA_P1_SCALES parsed to nothing — it is a comma-separated list of row counts"
+    );
+    let exe = std::env::current_exe().expect("the test binary knows its own path");
+    eprintln!(
+        "P1: {} size(s) {scales:?}, one child process each",
+        scales.len()
+    );
+
+    let results: Vec<P1Result> = scales
+        .iter()
+        .map(|&base| {
+            eprintln!("P1: ---- folding at base={base} (child process) ----");
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    P1_TEST,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("TESSERA_P1_SCALE", base.to_string())
+                // Inherited, so a fold that takes ten minutes says so as it goes; the result line
+                // is on stdout, which is piped.
+                .stderr(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped())
+                .output()
+                .expect("the child test binary runs");
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            assert!(
+                out.status.success(),
+                "the child at base={base} failed:\n{stdout}"
+            );
+            // `find`, not `starts_with`: libtest interleaves its own `test <name> ... ` progress
+            // on the same line as the first thing a `--nocapture` test prints to stdout, so the
+            // marker is mid-line in exactly the run this probe is meant for.
+            let line = stdout
+                .lines()
+                .find_map(|line| line.split_once("P1-RESULT ").map(|(_, rest)| rest))
+                .unwrap_or_else(|| {
+                    panic!("the child at base={base} printed no P1-RESULT line:\n{stdout}")
+                });
+            let fields = line
+                .split_whitespace()
+                .filter_map(|kv| {
+                    let (k, v) = kv.split_once('=')?;
+                    Some((k.to_string(), v.parse::<u64>().ok()?))
+                })
+                .collect();
+            P1Result { base, fields }
+        })
+        .collect();
+
+    // ---- the table, which is what a memo quotes ------------------------------------------------
+    eprintln!(
+        "\n  {:>12}  {:>10}  {:>10}  {:>9}  {:>9}  {:>8}  {:>8}  {:>9}  {:>9}",
+        "base",
+        "input GiB",
+        "peak GiB",
+        "passes Δ",
+        "publish Δ",
+        "peak/in",
+        "B/entity",
+        "passes",
+        "publish",
+    );
+    for r in &results {
+        let input = r.get("input_bytes") as f64;
+        let peak = r.get("peak_delta") as f64;
+        eprintln!(
+            "  {:>12}  {:>10.3}  {:>10.3}  {:>9.3}  {:>9.3}  {:>8.3}  {:>8.1}  {:>8.1?}  {:>8.1?}",
+            r.base,
+            input / (1u64 << 30) as f64,
+            peak / (1u64 << 30) as f64,
+            r.get("passes_delta") as f64 / (1u64 << 30) as f64,
+            r.get("publish_delta") as f64 / (1u64 << 30) as f64,
+            peak / input.max(1.0),
+            peak / r.get("entities").max(1) as f64,
+            Duration::from_millis(r.get("passes_ms")),
+            Duration::from_millis(r.get("publish_ms")),
+        );
+    }
+
+    // ---- the scaling argument to 10⁹ ------------------------------------------------------------
+    //
+    // §3's budget is dominated by two 4 B/entity mapped arrays plus a dictionary term, so the
+    // per-entity coefficient at the largest size measured is the term that extrapolates. Printed,
+    // never asserted: the dictionary term does not scale with entities at all, so this projection
+    // is the entity-space half of the budget and a memo must say so beside it.
+    let largest = results.last().expect("at least one size");
+    let per_entity = largest.get("peak_delta") as f64 / largest.get("entities").max(1) as f64;
+    let projected_at_1e9 = per_entity * 1e9;
+    let anon_per_entity = largest.get("anon_delta") as f64 / largest.get("entities").max(1) as f64;
+    eprintln!(
+        "\n  ⇒ {per_entity:.1} B/entity resident at base={}, of which {anon_per_entity:.1} B is \
+         anonymous. Projected to 10⁹ entities: {:.1} GB resident, {:.1} GB anonymous. **The two \
+         numbers answer different questions** — the first is what the node's RSS reads during a \
+         fold and is mostly reclaimable page cache from the mappings; the second is what it cannot \
+         give back under pressure, and is the one spec §3's ~9–10 GB budget is about.",
+        largest.base,
+        projected_at_1e9 / 1e9,
+        anon_per_entity * 1e9 / 1e9,
+    );
+
+    // **Two bounds, and the second is the one that would have caught the defect this probe found.**
+    // A merge's construction — decode the inputs, then write — costs a measured 4.4–4.9× its input
+    // bytes, and spec §3 forbids the fold to inherit it. But a total-RSS bound alone is a weak
+    // test, because a fold that maps everything correctly *still* reads near 1× as its inputs and
+    // outputs become resident page cache. What separates a streaming fold from a decoding one is
+    // the **anonymous** half: page cache is reclaimable and a `Vec` is not. Pass 3 held the whole
+    // corpus's external ids in the heap until `RunCursor` was made to map them, and the total
+    // barely moved (0.95× → 0.99×) while the anonymous term fell by two thirds.
+    for r in &results {
+        let input = r.get("input_bytes");
+        let (peak, anon) = (r.get("peak_delta"), r.get("anon_delta"));
+        assert!(
+            peak < input.saturating_mul(2),
+            "at base={}, the fold's peak RSS ({peak} B) reached twice its input bytes ({input} B) \
+             — a fold that decodes its input at once costs a measured 4.4–4.9×, which applied to a \
+             corpus is 200+ GB on a 47 GB bundle (spec §3)",
+            r.base
+        );
+        assert!(
+            anon * 3 < input,
+            "at base={}, the fold's anonymous RSS ({anon} B) passed a third of its input bytes \
+             ({input} B) — every input and output is supposed to be a mapping (spec §3, §10.3), so \
+             an anonymous term that tracks the corpus is a pass holding its data in the heap",
+            r.base
+        );
+    }
+
+    // **The scaling claim, in the only machine-independent form there is.** Absolute peaks move
+    // with the host; a coefficient that climbs between two sizes on the *same* host is a
+    // corpus-sized allocation and nothing else. The allowance is for the fixed terms — the
+    // dictionary spool and the cursor state do not shrink, so the coefficient at the smaller size
+    // is if anything the higher one — and for the sampler's own noise, which is why this is on the
+    // exact `VmHWM` figure rather than on the 10 ms-sampled anonymous one.
+    for pair in results.windows(2) {
+        let (small, large) = (&pair[0], &pair[1]);
+        let coeff = |r: &P1Result| r.get("peak_delta") as f64 / r.get("input_bytes").max(1) as f64;
+        assert!(
+            coeff(large) <= coeff(small) * 1.5,
+            "the fold's peak per input byte rose from {:.3} at base={} to {:.3} at base={} — \
+             spec §3's budget is terms that scale with the dictionary and entity space, so a \
+             coefficient that climbs with rows means a term nobody budgeted",
+            coeff(small),
+            small.base,
+            coeff(large),
+            large.base
+        );
+    }
+}
+
+/// The child arm: build a corpus, fold it, and print one machine-readable line.
+fn p1_one_scale(base: u64) {
+    let rounds = env_usize("TESSERA_P1_ROUNDS", 4);
+    let batch = env_usize("TESSERA_P1_BATCH", (base / 20).max(1) as usize);
+    let deletions = env_usize("TESSERA_P1_DELETIONS", 10_000);
+    // The deletion round is one more round on top, so its entity ids are known to this test.
+    let total = base + ((rounds + 1) * batch) as u64;
+    eprintln!("P1: base={base} rounds={rounds} batch={batch} deletions={deletions}");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (points, pairs) = (
+        tmp.path().join("points.parquet"),
+        tmp.path().join("pairs.parquet"),
+    );
+    let t_build = Instant::now();
+    build_fixture_n(&root, &points, &pairs, base);
+    let _ = std::fs::remove_file(&points);
+    let _ = std::fs::remove_file(&pairs);
+    eprintln!("  fixture built in {:.1?}", t_build.elapsed());
+
+    let engine = engine_at(tmp.path(), &root, total);
+    // **The background refresh is off, and that is what makes this the fold's figure.** A flip
+    // rebuilds every resident session's projection inline (decision 0053), which is P2's subject and
+    // measured there; leaving it on here would add a term proportional to the session population to
+    // a measurement whose whole point is that it is proportional to nothing of the sort.
+    engine.set_background_refresh_for_test(false);
+
+    for round in 0..rounds {
+        ingest_and_publish(&engine, round, batch);
+    }
+
+    // One more round, keeping the entity ids, so the fold has deletions to execute. A fold over a
+    // bundle with an empty `D₀` still rewrites every byte — but it retires nothing, and the
+    // tombstone test in pass 1 and the overlay prune in publication would both be untaken paths.
+    let doomed = ingest_returning_ids(&engine, rounds, batch, deletions.min(batch));
+    {
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the deletion round's flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    }
+    let pending: Vec<_> = doomed
+        .iter()
+        .map(|&entity| {
+            engine
+                .submit_change(entity, ChangeOp::Delete)
+                .expect("the deny lane accepts a delete")
+        })
+        .collect();
+    for change in pending {
+        change.wait().expect("the delete commits");
+    }
+    eprintln!("  {} deletions accepted", doomed.len());
+
+    let segments_before = engine.generation().bundle.partitions["default"].slices["s0"]
+        .segments
+        .len();
+    let on_disc_before = bundle_bytes(&root);
+    let live_before = live_bytes(&engine);
+    // **The entity-space bound, which is the axis §3's two mapped arrays scale on** — the highest
+    // entity id the bundle's row geometry covers, which is what `permutation.bin` and
+    // `ext-locator.u32` are sized by. Row count is the axis they explicitly do *not* scale on, and
+    // reporting both is how a reader tells the two apart when a corpus has one row per entity.
+    let entities = engine.generation().watermark;
+
+    // **The input the coefficient is against is the bytes the fold reads**, which is what the live
+    // manifests name — not everything on disc. A merge's consumed segments are still in the
+    // directory and a fold does not open them, so charging the fold for them would flatter it by
+    // exactly the orphan ratio.
+    let input_bytes = live_before;
+
+    // **Split at the fold's own seam, because the two halves are budgeted by different documents
+    // and only one of them is budgeted at all.** Spec §3's table is about the five passes; what
+    // happens after them is publication — opening the new prefix, pruning the live external-id map,
+    // rebasing, the flip — and it runs on the executor, not the fold thread. A single figure over
+    // both would attribute the publication's memory to the passes and quietly exonerate a table
+    // that never modelled it. `set_fold_paused_for_test` is the seam: the fold thread holds after
+    // pass 5 and before it submits, which is exactly the boundary.
+    engine.set_fold_paused_for_test(true);
+
+    let hwm_reset = reset_peak_rss();
+    let (baseline_rss, baseline_anon, baseline_file) = rss_split();
+    let sampler = RssSampler::start();
+
+    let before = engine.write_executor_stats();
+    let t_fold = Instant::now();
+    engine.request_fold();
+    wait_until("the fold's passes to finish", || {
+        engine.fold_is_holding_for_test()
+    });
+    let passes_wall = t_fold.elapsed();
+    let (passes_anon, passes_file, passes_peak_at) = sampler.stop();
+    let passes_peak = vm_hwm();
+
+    // The publication's own baseline is where the passes left the process, not where they started.
+    let publish_reset = reset_peak_rss();
+    let (publish_baseline, _, _) = rss_split();
+    let sampler = RssSampler::start();
+    let t_publish = Instant::now();
+    engine.set_fold_paused_for_test(false);
+    wait_until("the fold to publish", || {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published — its cost measures nothing"
+        );
+        now.folds > before.folds
+    });
+    let publish_wall = t_publish.elapsed();
+    let publish_peak = vm_hwm();
+    let fold_wall = passes_wall + publish_wall;
+
+    let (publish_anon, publish_file, _) = sampler.stop();
+    let (peak_anon, peak_file) = (publish_anon.max(passes_anon), publish_file.max(passes_file));
+    // **The whole operation's peak is the higher of the two halves' marks**, each of which the
+    // second `clear_refs` would otherwise have erased. The delta is against the *pre-fold*
+    // baseline throughout, so `peak_delta` stays the answer to "how much more memory did this
+    // node hold because a fold ran"; `passes_delta` and `publish_delta` split it.
+    let peak_rss = passes_peak.max(publish_peak);
+    let passes_delta = passes_peak.saturating_sub(baseline_rss);
+    let publish_delta = publish_peak.saturating_sub(publish_baseline);
+
+    let segments_after = engine.generation().bundle.partitions["default"].slices["s0"]
+        .segments
+        .len();
+    let live_after = live_bytes(&engine);
+
+    // Authorised after the flip, so it serves the new prefix without waiting on a refresh this
+    // probe has switched off.
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let surviving = masked_total(&engine, &full);
+
+    eprintln!(
+        "  fold: {fold_wall:.1?} | {segments_before} segments → {segments_after} | live {:.3} → \
+         {:.3} GiB | on disc before {:.3} GiB",
+        live_before as f64 / (1u64 << 30) as f64,
+        live_after as f64 / (1u64 << 30) as f64,
+        on_disc_before as f64 / (1u64 << 30) as f64,
+    );
+    // **The attribution, from the fold's own staircase** (`compact::PassCost`). The peak below says
+    // how much; this says which pass, which is the difference between a budget that can be
+    // corrected and one that can only be disbelieved.
+    for pass in engine.last_fold_passes() {
+        eprintln!(
+            "    pass {:<18} {:>8.1?}  rss {:>7.3} GiB  anon {:>7.3} GiB",
+            pass.pass,
+            pass.elapsed,
+            pass.rss as f64 / (1u64 << 30) as f64,
+            pass.anon as f64 / (1u64 << 30) as f64,
+        );
+    }
+    eprintln!(
+        "  five passes:  {passes_wall:>8.1?}  peak Δ {:>7.3} GiB at t={passes_peak_at:.1?}   \
+         (spec §3's budget covers this half)",
+        passes_delta as f64 / (1u64 << 30) as f64,
+    );
+    eprintln!(
+        "  publication:  {publish_wall:>8.1?}  peak Δ {:>7.3} GiB   (spec §4; no memory budget \
+         states this half)",
+        publish_delta as f64 / (1u64 << 30) as f64,
+    );
+    eprintln!(
+        "  peak RSS {:.3} GiB over a {:.3} GiB baseline ⇒ Δ {:.3} GiB ({}); anon Δ {:.3} GiB, \
+         file Δ {:.3} GiB",
+        peak_rss as f64 / (1u64 << 30) as f64,
+        baseline_rss as f64 / (1u64 << 30) as f64,
+        peak_rss.saturating_sub(baseline_rss) as f64 / (1u64 << 30) as f64,
+        if hwm_reset && publish_reset {
+            "VmHWM, reset before each half"
+        } else {
+            "clear_refs REFUSED — this figure is the whole process's, fixture build included"
+        },
+        peak_anon.saturating_sub(baseline_anon) as f64 / (1u64 << 30) as f64,
+        peak_file.saturating_sub(baseline_file) as f64 / (1u64 << 30) as f64,
+    );
+
+    assert!(
+        hwm_reset && publish_reset,
+        "clear_refs type 5 was refused, so VmHWM still describes the fixture build rather than \
+         the fold — every figure this probe reports would be that build's"
+    );
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        before.folds + 1,
+        "exactly one fold"
+    );
+    assert_eq!(
+        segments_after, 1,
+        "a fold leaves one base segment per partition-slice; anything else means it folded a \
+         subset and its cost is a subset's"
+    );
+    assert_eq!(
+        surviving,
+        total - doomed.len() as u64,
+        "and the corpus survives the fold minus exactly the deletions — a fold that failed early \
+         would report a very good peak"
+    );
+
+    // The parent parses this. Bytes throughout, so the formatting decisions all live in one place.
+    println!(
+        "P1-RESULT base={base} rows={total} entities={entities} deletions={} \
+         segments_before={segments_before} input_bytes={input_bytes} on_disc_before={on_disc_before} \
+         live_after={live_after} peak_rss={peak_rss} baseline_rss={baseline_rss} \
+         passes_delta={passes_delta} passes_ms={} publish_delta={publish_delta} publish_ms={} \
+         peak_delta={} anon_delta={} file_delta={} fold_ms={}",
+        doomed.len(),
+        passes_wall.as_millis(),
+        publish_wall.as_millis(),
+        peak_rss.saturating_sub(baseline_rss),
+        peak_anon.saturating_sub(baseline_anon),
+        peak_file.saturating_sub(baseline_file),
+        fold_wall.as_millis(),
+    );
+}
+
+/// [`ingest_rows`] for one round, returning the entity ids of the first `keep` rows.
+///
+/// The ids exist only after the executor closes the commit window this submission lands in, which
+/// is what `accept_ingest` returns — there is no way to know them in advance, and a fold's
+/// deletions have to name entities that exist.
+fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize) -> Vec<EntityId> {
+    let mut kept = Vec::with_capacity(keep);
+    let mut ingested = 0usize;
+    while ingested < batch {
+        let n = SUB_BATCH.min(batch - ingested);
+        let mut rows = Vec::with_capacity(n);
+        for k in 0..n {
+            let i = ingested + k;
+            let (x, y) = position_of(round, i);
+            let descriptors = vec![b"0".to_vec()];
+            rows.push(UnallocatedRow {
+                external_id: Some(format!("p{round}-i{i}").into_bytes()),
+                slice: "s0".to_string(),
+                x,
+                y,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+            });
+        }
+        let mut key = [0u8; 32];
+        key[0] = 0xB2;
+        key[1] = round as u8;
+        key[2..10].copy_from_slice(&(ingested as u64).to_le_bytes());
+        let ids = engine
+            .accept_ingest(rows, format!("p{round}-b{ingested}"), key)
+            .expect("ingest is accepted");
+        for id in ids {
+            if kept.len() < keep {
+                kept.push(id);
+            }
+        }
+        ingested += n;
+    }
+    kept
 }

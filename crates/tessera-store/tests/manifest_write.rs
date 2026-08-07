@@ -16,13 +16,13 @@ use sha2::{Digest, Sha256};
 
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, Bounds};
-use tessera_store::write_segments_manifest;
 use tessera_store::manifest::{
     IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
     SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::manifest_write::{write_current, write_manifest_json};
 use tessera_store::write::{write_permutation, write_segment};
+use tessera_store::write_segments_manifest;
 use tessera_store::{open_bundle, StoreError};
 use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
@@ -82,7 +82,8 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
-    write_permutation(&slice_dir.join("permutation.bin"), &entity_ids, n).expect("write_permutation");
+    write_permutation(&slice_dir.join("permutation.bin"), &entity_ids, n)
+        .expect("write_permutation");
 
     let file_digest = |path: &Path| {
         let bytes = fs::read(path).expect("read for digest");
@@ -206,7 +207,11 @@ fn write_manifest_json_returns_the_digest_of_the_exact_bytes_on_disc() {
     let digest = write_manifest_json(&prefix_dir, &manifest).expect("write_manifest_json");
 
     let on_disc = fs::read(prefix_dir.join("MANIFEST.json")).expect("read MANIFEST.json");
-    assert_eq!(digest, hex_sha256(&on_disc), "digest must match the bytes on disc");
+    assert_eq!(
+        digest,
+        hex_sha256(&on_disc),
+        "digest must match the bytes on disc"
+    );
 
     let pretty = serde_json::to_vec_pretty(&manifest).expect("independent serialisation");
     assert_eq!(
@@ -356,4 +361,3 @@ fn a_side_manifest_is_never_replaced() {
         "and the refused write left no temporary behind"
     );
 }
-

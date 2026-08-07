@@ -171,7 +171,11 @@ fn p1(dir: &std::path::Path, entities: u64, grant: f64) {
         rebased.remove_range(span_lo..span_hi);
         rebased.or_inplace(&space.project_extents_from(&fragment, 0));
         span_ns.push(t.elapsed().as_nanos() as u64);
-        assert_eq!(rebased.cardinality(), full.cardinality(), "span rebase is exact");
+        assert_eq!(
+            rebased.cardinality(),
+            full.cardinality(),
+            "span rebase is exact"
+        );
     }
     report("clone (patch's fixed cost)", &clone_ns);
     report("union over one new extent", &union_ns);
@@ -198,7 +202,10 @@ fn p2(dir: &std::path::Path, entities: u64, grant: f64) {
         }
         let t = Instant::now();
         tessera_authz::write_postings(&postings_path, &per_term, 32).expect("postings write");
-        println!("fixture: postings.arrow in {:.1}s", t.elapsed().as_secs_f64());
+        println!(
+            "fixture: postings.arrow in {:.1}s",
+            t.elapsed().as_secs_f64()
+        );
     }
     let postings = PostingsReader::open(&postings_path, true).expect("postings open");
     let terms: Vec<TermId> = (0..TERMS as u32).map(TermId::new).collect();
@@ -216,7 +223,9 @@ fn p2(dir: &std::path::Path, entities: u64, grant: f64) {
                     .map(|t| {
                         (
                             TermId::new(t),
-                            (0..16).map(|k| (entities as u32) + (i as u32 * 64) + k).collect(),
+                            (0..16)
+                                .map(|k| (entities as u32) + (i as u32 * 64) + k)
+                                .collect(),
                         )
                     })
                     .collect();

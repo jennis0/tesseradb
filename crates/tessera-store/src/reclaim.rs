@@ -143,14 +143,15 @@ pub fn hard_link_forward(from_prefix: &Path, to_prefix: &Path, rels: &[String]) 
 /// - [`StoreError::Io`] / [`StoreError::Json`] if `CURRENT` cannot be read or parsed.
 /// - [`StoreError::Io`] if the delete itself fails.
 pub fn reclaim_prefix(prefix_dir: &Path) -> Result<()> {
-    let prefix_name = prefix_dir.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
-        StoreError::MalformedBundle {
+    let prefix_name = prefix_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| StoreError::MalformedBundle {
             detail: format!(
                 "reclaim_prefix: {} has no prefix directory name to compare against CURRENT",
                 prefix_dir.display()
             ),
-        }
-    })?;
+        })?;
     let bundle_root = prefix_dir
         .parent()
         .ok_or_else(|| StoreError::MalformedBundle {

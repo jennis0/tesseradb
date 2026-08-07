@@ -666,8 +666,8 @@ fn concurrent_ingest_and_change_both_survive() {
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open");
@@ -689,8 +689,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let change_thread = std::thread::spawn(move || {
         barrier_a.wait();
         engine_a
-            .accept_change(suppress_entity,
-                tessera_lifecycle::ChangeOp::Suppress)
+            .accept_change(suppress_entity, tessera_lifecycle::ChangeOp::Suppress)
             .expect("change should be accepted");
     });
 
@@ -2104,6 +2103,87 @@ async fn control_flush_is_accepted_and_deferred() {
         .await
         .unwrap();
     assert_eq!(unauthenticated.status().as_u16(), 401);
+}
+
+/// `POST /control/compact` is **accepted at any time and dispatched at the next tick** (contracts
+/// §3.4), and its 202 stands for minutes to hours rather than for seconds.
+///
+/// The route exists so that the fold has an operator trigger at all. `Engine::request_fold` was
+/// built with it and reachable only from tests until this; a deployment whose segment count had
+/// climbed past what merge bounds could do nothing but wait for the nightly window.
+///
+/// **What is asserted here is acceptance, not completion**, and there is no way for this test to
+/// assert the fold itself: what happens next is a corpus rewrite on its own thread, whose
+/// observable is `/control/status`'s `compaction` block and whose end-to-end behaviour is
+/// `tessera-engine/tests/fold.rs`'s subject. What this covers is the seam — that the route is
+/// wired, is on the credentialled plane, and answers the code contracts §3.4 specifies.
+#[tokio::test]
+async fn control_compact_is_accepted_and_deferred() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let response = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 202);
+
+    // Idempotent for `control_flush_is_accepted_and_deferred`'s reason: the request is a flag, so
+    // two before one tick are satisfied by that tick together.
+    let again = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status().as_u16(), 202);
+
+    let unauthenticated = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status().as_u16(), 401);
+
+    // The block the trigger's observable lives in. Present from the first status read, not only
+    // after a fold has run — a counter that appears when it first moves is a counter an operator
+    // cannot alert on.
+    let status: serde_json::Value = server
+        .client
+        .get(server.control_url("/control/status"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Top level, beside `segments` and `overlay` — the two gauges that dispatch a fold — rather
+    // than inside `write_executor` beside `flush`. An operator reading a climbing segment count
+    // needs the fold's counters in the same glance.
+    let compaction = &status["compaction"];
+    assert_eq!(compaction["folds"], 0, "no fold has published: {status}");
+    assert_eq!(compaction["fold_failures"], 0, "and none has failed");
+    assert!(
+        compaction["last_rss_bytes"].is_u64() && compaction["passes"].is_array(),
+        "the memory gauges are present before the first fold: {compaction}"
+    );
 }
 
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
@@ -3618,7 +3698,10 @@ async fn control_status_publishes_the_live_segment_count_per_slice() {
     );
     assert_eq!(segments[0]["partition"], "default");
     assert_eq!(segments[0]["slice"], "s0");
-    assert_eq!(segments[0]["count"], 1, "one segment straight out of a build");
+    assert_eq!(
+        segments[0]["count"], 1,
+        "one segment straight out of a build"
+    );
 
     let body = build_ingest_batch(&[
         (N_ITEMS + 1, 10.0, 10.0, "0"),
@@ -3978,8 +4061,7 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
         let client = server.client.clone();
         let url = server.control_url("/control/ingest");
         let body = build_ingest_batch(
-            &ids
-                .into_iter()
+            &ids.into_iter()
                 .map(|id| (id, 10.0, 10.0, "0"))
                 .collect::<Vec<_>>(),
         );

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
 
-use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::fixed32;
+use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice};
 use tessera_store::write::write_segment;
 use tessera_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation};
@@ -90,7 +90,12 @@ fn read_input_rows(input: &FoldSegmentInput) -> Vec<(u64, u64, u32, u32)> {
         .map(|row| {
             let tessera_id = cols.tessera_id()[row];
             let (_, entity) = k.invert(tessera_types::TesseraId::new(tessera_id));
-            (entity.raw(), tessera_id, codes.u32()[row], cols.residual()[row])
+            (
+                entity.raw(),
+                tessera_id,
+                codes.u32()[row],
+                cols.residual()[row],
+            )
         })
         .collect()
 }
@@ -99,7 +104,13 @@ fn read_output_rows(output_dir: &Path) -> Vec<(u64, u32, u32)> {
     let codes = MortonSlice::load(&output_dir.join("morton.u32")).unwrap();
     let cols = ColumnsRef::load(&output_dir.join("columns.arrow")).unwrap();
     (0..codes.u32().len())
-        .map(|row| (cols.tessera_id()[row], codes.u32()[row], cols.residual()[row]))
+        .map(|row| {
+            (
+                cols.tessera_id()[row],
+                codes.u32()[row],
+                cols.residual()[row],
+            )
+        })
         .collect()
 }
 
@@ -125,7 +136,8 @@ fn fold_drops_tombstoned_rows_and_keeps_the_rest_in_morton_order() {
     let rows = read_output_rows(&output_dir);
     assert_eq!(rows.len(), out.row_count as usize);
     assert!(
-        rows.windows(2).all(|w| (w[0].1, w[0].0) <= (w[1].1, w[1].0)),
+        rows.windows(2)
+            .all(|w| (w[0].1, w[0].0) <= (w[1].1, w[1].0)),
         "output rows must be (morton, tessera_id) ascending"
     );
 
@@ -219,7 +231,9 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
             .position(|&(tid, _, _)| tid == tessera_id.raw())
             .unwrap_or_else(|| panic!("entity {e} must survive and appear in the output"));
         assert_eq!(
-            permutation.row_of(EntityId::new(e)).map(|r| r.raw() as usize),
+            permutation
+                .row_of(EntityId::new(e))
+                .map(|r| r.raw() as usize),
             Some(expected_row),
             "entity {e}'s permutation entry must match where it actually landed"
         );
@@ -242,7 +256,10 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
     let bytes = fs::read(&perm_path).expect("read permutation.bin");
     let at = 16 + 500 * 4;
     let slot = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-    assert_eq!(slot, 0xFFFF_FFFF, "an absent slot must hold the 0xFF sentinel, never zero");
+    assert_eq!(
+        slot, 0xFFFF_FFFF,
+        "an absent slot must hold the 0xFF sentinel, never zero"
+    );
 }
 
 /// **A tombstone naming an entity with no row anywhere in the live segments costs nothing.** Pass
@@ -258,7 +275,10 @@ fn a_tombstone_naming_an_entity_with_no_row_is_harmless() {
     let dead = tombstones(&[9_999]);
     let (out, output_dir, _) = fold(dir.path(), &[a], &dead, 20_000);
 
-    assert_eq!(out.row_count, 6, "no input row names the tombstoned entity, so none is dropped");
+    assert_eq!(
+        out.row_count, 6,
+        "no input row names the tombstoned entity, so none is dropped"
+    );
     let rows = read_output_rows(&output_dir);
     assert_eq!(rows.len(), 6);
 }

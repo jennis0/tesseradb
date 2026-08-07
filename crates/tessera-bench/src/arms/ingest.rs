@@ -496,8 +496,8 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                    // Compaction §9's trigger is off unless a deployment configures one.
+                    compaction: tessera_engine::CompactionSchedule::off(),
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -626,8 +626,8 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 compute_threads: tessera_engine::default_compute_threads(),
                 flush_max_age_secs: 90,
                 max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                // Compaction §9's trigger is off unless a deployment configures one.
+                compaction: tessera_engine::CompactionSchedule::off(),
             },
         )?;
         // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
@@ -867,8 +867,8 @@ pub fn run_concurrent(
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                    // Compaction §9's trigger is off unless a deployment configures one.
+                    compaction: tessera_engine::CompactionSchedule::off(),
                 },
             )?;
             // Generous, deliberately: this arm means to measure what a full window collects, never
@@ -1001,7 +1001,8 @@ fn stage_split(
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for stage in tessera_engine::WriteStage::ALL {
-        let ns = after.stage_nanos[stage as usize].saturating_sub(before.stage_nanos[stage as usize]);
+        let ns =
+            after.stage_nanos[stage as usize].saturating_sub(before.stage_nanos[stage as usize]);
         map.insert(
             stage.name().trim().to_string(),
             serde_json::json!(ns as f64 / 1e3 / rows.max(1) as f64),
@@ -1101,7 +1102,9 @@ fn drive_cycle(
                 engine
                     .accept_ingest(rows, batch_id, hash)
                     .expect("the batch is accepted");
-                acks.lock().unwrap().push((seq, t.elapsed().as_nanos() as u64));
+                acks.lock()
+                    .unwrap()
+                    .push((seq, t.elapsed().as_nanos() as u64));
             });
         }
     });
@@ -1209,8 +1212,8 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                             // rate rather than an axis.
                             flush_max_age_secs: 86_400,
                             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                            // Compaction §9's trigger is off unless a deployment configures one.
+                            compaction: tessera_engine::CompactionSchedule::off(),
                         },
                     )?;
                     // Generous: this arm never means to measure queue-full backpressure.
@@ -1247,8 +1250,7 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                     // Cycle 0: cold, and reported as such. It pays the page-cache warm-up, the
                     // allocator's first growth and the WAL's first extent.
                     let acks = Mutex::new(Vec::new());
-                    let cold_ns =
-                        drive_cycle(&engine, build_cycle(&mut next_id), effective, &acks);
+                    let cold_ns = drive_cycle(&engine, build_cycle(&mut next_id), effective, &acks);
                     let cold_flush_ns = flush_and_wait(&engine)?;
                     acks.lock().unwrap().clear();
 

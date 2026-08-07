@@ -95,7 +95,9 @@ fn main() {
         eprintln!("usage: category_membership <bundle root> [column]");
         std::process::exit(2);
     };
-    let column = args.next().unwrap_or_else(|| "primary_category".to_string());
+    let column = args
+        .next()
+        .unwrap_or_else(|| "primary_category".to_string());
 
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT")).unwrap();
@@ -112,12 +114,7 @@ fn main() {
         .find(|d| d.name == column)
         .and_then(|d| d.vocabulary.as_ref())
         .and_then(|name| manifest.vocabularies.iter().find(|v| &v.name == name))
-        .map(|v| {
-            v.values
-                .iter()
-                .map(|x| (x.code, x.key.clone()))
-                .collect()
-        })
+        .map(|v| v.values.iter().map(|x| (x.code, x.key.clone())).collect())
         .unwrap_or_default();
 
     let part_dir = prefix_dir.join("partitions/default");
@@ -152,10 +149,7 @@ fn main() {
         // Code 0 is the *absent* sentinel: a row carrying it is a member of nothing, not a member
         // of a value called zero.
         if code != 0 {
-            members
-                .entry(code)
-                .or_default()
-                .add(entity as u32);
+            members.entry(code).or_default().add(entity as u32);
             placed += 1;
         }
     }
@@ -214,7 +208,10 @@ fn main() {
     {
         println!(
             "| {} | {cardinality} | {container_count} | {:.0} | {bytes} |",
-            key_of.get(code).cloned().unwrap_or_else(|| code.to_string()),
+            key_of
+                .get(code)
+                .cloned()
+                .unwrap_or_else(|| code.to_string()),
             *cardinality as f64 / (*container_count).max(1) as f64
         );
     }

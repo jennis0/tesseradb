@@ -130,10 +130,7 @@ impl ScalarType {
             ScalarType::U8 | ScalarType::I8 => 8,
             ScalarType::U16 | ScalarType::I16 => 16,
             ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 32,
-            ScalarType::U64
-            | ScalarType::I64
-            | ScalarType::F64
-            | ScalarType::TimestampUs => 64,
+            ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 64,
             ScalarType::Utf8 => return None,
         })
     }
@@ -324,10 +321,7 @@ mod tests {
     fn returned_codes_are_u32_and_match_morton_of_on_the_source_coordinates() {
         let e = unit_extent();
         let coords = [(1u64, 0.75, 0.75), (2, 0.10, 0.10)];
-        let mut items: Vec<TilerItem> = coords
-            .iter()
-            .map(|&(id, x, y)| item(id, x, y))
-            .collect();
+        let mut items: Vec<TilerItem> = coords.iter().map(|&(id, x, y)| item(id, x, y)).collect();
         let mut entity_ids = vec![EntityId::new(1), EntityId::new(2)];
         let codes: Vec<u32> = sort_batch(&mut items, &mut entity_ids);
         assert_eq!(codes.len(), 2);

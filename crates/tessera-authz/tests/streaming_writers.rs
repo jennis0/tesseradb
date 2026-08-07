@@ -160,16 +160,16 @@ fn the_bitmap_and_slice_encoders_agree_byte_for_byte() {
     let cases: Vec<Vec<u32>> = vec![
         vec![],
         vec![7],
-        (0..THRESHOLD).collect(),                       // exactly at the threshold: tag 0
-        (0..THRESHOLD + 1).collect(),                   // one past it: tag 1
-        (0..5_000u32).collect(),                        // one long run
-        (0..5_000u32).map(|i| i * 977).collect(),       // scattered, no runs
-        vec![0, u32::MAX / 2, u32::MAX - 1],            // sparse across the whole space
+        (0..THRESHOLD).collect(),     // exactly at the threshold: tag 0
+        (0..THRESHOLD + 1).collect(), // one past it: tag 1
+        (0..5_000u32).collect(),      // one long run
+        (0..5_000u32).map(|i| i * 977).collect(), // scattered, no runs
+        vec![0, u32::MAX / 2, u32::MAX - 1], // sparse across the whole space
     ];
 
     for entities in cases {
-        let from_slice =
-            encode_posting(0, &entities, THRESHOLD).expect("the slice encoder accepts sorted input");
+        let from_slice = encode_posting(0, &entities, THRESHOLD)
+            .expect("the slice encoder accepts sorted input");
         let from_bitmap = encode_posting_bitmap(&Bitmap::of(&entities), THRESHOLD)
             .expect("the bitmap encoder accepts any bitmap");
         assert_eq!(

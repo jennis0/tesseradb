@@ -41,8 +41,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
-
 use rustc_hash::FxHashMap;
 use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use tessera_lifecycle::wal::WalScalar;
@@ -329,7 +327,10 @@ pub(crate) fn execute_flush(
     // restore never reads — the segment silently lost. And the deny fields must reflect the
     // overlay at *publication*, not at plan time, which is a thing only the executor holds.
     let mut files = out.files;
-    files.insert(tier_rel.clone(), digest_of(&tier_path).map_err(FlushFailed)?);
+    files.insert(
+        tier_rel.clone(),
+        digest_of(&tier_path).map_err(FlushFailed)?,
+    );
     let dict_extent = match promotion.extent {
         Some(extent) => {
             files.insert(
@@ -547,25 +548,33 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
             }
         };
     }
-    same!(Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs)
+    same!(
+        Bool,
+        U8,
+        U16,
+        U32,
+        U64,
+        I8,
+        I16,
+        I32,
+        I64,
+        F32,
+        F64,
+        TimestampUs
+    )
 }
 
-/// One file's size and hex SHA-256, by reading it back.
+/// One file's size and hex SHA-256, by reading it back — `tessera_store::digest_of` with this
+/// crate's error type.
 ///
-/// `pub(crate)` because compaction's pass 5 digests its own outputs the same way — see
-/// `crate::compact::execute`, which states why the digest is taken from a re-read rather than
-/// computed as the bytes are written.
+/// **One definition, in the crate that owns the manifest format.** Three copies of this existed,
+/// here, in `coalesce.rs` and in `tessera-store`, and all three read the whole file into memory;
+/// the fold's pass 5 is where that stopped being affordable (probe P1), and a fix applied to one
+/// copy would have left the other two. `pub(crate)` because compaction's pass 5 digests its own
+/// outputs the same way — see `crate::compact::execute`, which states why the digest is taken from
+/// a re-read rather than computed as the bytes are written.
 pub(crate) fn digest_of(path: &Path) -> Result<FileDigest, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("digest {}: {e}", path.display()))?;
-    let digest = Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    Ok(FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex,
-    })
+    tessera_store::digest_of(path).map_err(|e| format!("digest {}: {e}", path.display()))
 }
 
 /// Whether `entity` is deleted as of this overlay.
@@ -699,7 +708,6 @@ mod tests {
     fn plan(generation: &Generation) -> Result<FlushPlan, NoFlush> {
         plan_flush(generation, SLICE, false, false)
     }
-
 
     /// **A suppression never touches postings and retires only on unsuppress**, so a flush that
     /// skipped it would leave a later unsuppress with nothing to reveal: no row would exist, and

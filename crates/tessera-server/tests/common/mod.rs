@@ -15,7 +15,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float32Array, Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, BinaryArray, Float32Array, Float64Array, StringArray, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;

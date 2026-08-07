@@ -200,9 +200,8 @@ impl Schema {
     /// acquire it.
     pub fn parse(path: &Path, values: &HashMap<String, PathBuf>) -> Result<Schema> {
         let text = std::fs::read_to_string(path).map_err(|e| BuildError::io(path, e))?;
-        let file: SchemaFile = toml::from_str(&text).map_err(|e| {
-            schema_error(format!("{}: {e}", path.display()))
-        })?;
+        let file: SchemaFile =
+            toml::from_str(&text).map_err(|e| schema_error(format!("{}: {e}", path.display())))?;
 
         let mut attributes = Vec::new();
         let mut vocabularies: HashMap<String, Vocabulary> = HashMap::new();
@@ -262,8 +261,7 @@ impl Schema {
                         &vocabulary_of_attribute,
                         &settings_of_attribute,
                     )?;
-                    settings_of_attribute
-                        .insert(decl.name.clone(), (vocab.listing, ty));
+                    settings_of_attribute.insert(decl.name.clone(), (vocab.listing, ty));
                     vocabulary_of_attribute.insert(decl.name.clone(), vocab.name.clone());
                     let vocab_name = vocab.name.clone();
                     vocabularies.entry(vocab_name.clone()).or_insert(vocab);
@@ -586,10 +584,7 @@ fn compile_category(
         Vocabulary {
             // A vocabulary declared inline is named for its attribute; one from a file keeps the
             // logical key, so two attributes binding the same key share one compiled vocabulary.
-            name: decl
-                .values_key
-                .clone()
-                .unwrap_or_else(|| decl.name.clone()),
+            name: decl.values_key.clone().unwrap_or_else(|| decl.name.clone()),
             listing,
             codes,
             labels,
@@ -631,7 +626,8 @@ fn parse_inline_values(
             }
             continue;
         }
-        set.codes.insert(key.clone(), as_code(value, attribute, key)?);
+        set.codes
+            .insert(key.clone(), as_code(value, attribute, key)?);
     }
     Ok(set)
 }
@@ -855,7 +851,10 @@ listing = "public"
         let discovered = SEVERITY.replace("\"declared\"", "\"discovered\"");
         assert!(err(&discovered).contains("minted at random"));
 
-        let multi = SEVERITY.replace("used_for = [\"render\"]", "used_for = [\"render\"]\nmulti = true");
+        let multi = SEVERITY.replace(
+            "used_for = [\"render\"]",
+            "used_for = [\"render\"]\nmulti = true",
+        );
         assert!(err(&multi).contains("§3.7"), "{}", err(&multi));
     }
 
@@ -988,7 +987,11 @@ listing = "per_viewer"
             "  [attribute.values]",
             "values_key = \"sev\"\n  [attribute.values]",
         );
-        assert!(err(&both).contains("spellings of one thing"), "{}", err(&both));
+        assert!(
+            err(&both).contains("spellings of one thing"),
+            "{}",
+            err(&both)
+        );
 
         // A private directory, for `parse_str`'s reason — a fixed name in the shared temp dir is
         // the same collision one step less likely.
@@ -1009,6 +1012,9 @@ listing = "per_viewer"
     fn an_unknown_key_is_refused_rather_than_ignored() {
         let text = SEVERITY.replace("listing =", "listnig =");
         let message = err(&text);
-        assert!(message.contains("listnig") || message.contains("unknown"), "{message}");
+        assert!(
+            message.contains("listnig") || message.contains("unknown"),
+            "{message}"
+        );
     }
 }

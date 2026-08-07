@@ -141,6 +141,18 @@ fn write_and_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Ordering matters and is the caller's: this must complete **before** `CURRENT` names the prefix
 /// these files sit under. Afterwards is too late by exactly the window it exists to close.
 ///
+/// **Both callers are the fold's, and the second is the non-obvious one.** Pass 5 syncs the files
+/// the fold itself wrote; publication syncs the ones it *hard-linked* — where a link copies no
+/// bytes, so the directory entry is plainly new and the bytes look as though they must already be
+/// durable. They are not: no producer in this tree fsyncs a data file, which is sound everywhere
+/// else (a torn file is detectable through its digest and its rows are still in the WAL) and unsound
+/// for a fold, which deletes the other copy and rotates the WAL behind it.
+///
+/// ⊘ **Not covered by a test, and nothing here could cover it.** An `fsync` has no in-process
+/// observable — a caller that skipped it passes every assertion in this tree, because the page cache
+/// answers reads identically either way. What would cover it is crash injection below the
+/// filesystem, which nothing here has. The property is argued at the call sites instead.
+///
 /// Directories are deduplicated and synced after the files they hold, because a directory entry is
 /// not durable until its directory is and the entry must not outlive the data it names.
 pub fn fsync_written(paths: &[PathBuf]) -> Result<()> {
@@ -161,21 +173,6 @@ pub fn fsync_written(paths: &[PathBuf]) -> Result<()> {
         }
     }
     for dir in dirs {
-        fsync_dir(dir)?;
-    }
-    Ok(())
-}
-
-/// `fsync` each directory in `dirs`, deduplicated — the names half on its own, for a caller whose
-/// files were already durable before it linked them (compaction §8's carry-forwards: a hard link
-/// adds a directory entry and copies no bytes, so only the entry is new).
-pub fn fsync_dirs(dirs: &[PathBuf]) -> Result<()> {
-    let mut seen: Vec<&Path> = Vec::new();
-    for dir in dirs {
-        if seen.contains(&dir.as_path()) {
-            continue;
-        }
-        seen.push(dir);
         fsync_dir(dir)?;
     }
     Ok(())
@@ -230,8 +227,10 @@ pub fn write_segments_manifest(
 ) -> Result<()> {
     let dir = prefix_dir.join("partitions").join(partition);
     let path = dir.join(format!("SEGMENTS-{n}.json"));
-    let bytes = serde_json::to_vec_pretty(manifest)
-        .map_err(|source| StoreError::Json { path: path.clone(), source })?;
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| StoreError::Json {
+        path: path.clone(),
+        source,
+    })?;
     let io = |what: &str, source: std::io::Error| StoreError::Io {
         path: PathBuf::from(format!("{} ({what})", path.display())),
         source,

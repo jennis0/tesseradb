@@ -368,7 +368,9 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
     // A snapshot entity still resolves through pass 3's own output — the ordinary case this test
     // is not primarily about, but which the fixture must not accidentally have broken.
     assert_eq!(
-        sidecar.external_id_of_checked(EntityId::new(7), n + 3).unwrap(),
+        sidecar
+            .external_id_of_checked(EntityId::new(7), n + 3)
+            .unwrap(),
         Some(b"alpha".to_vec())
     );
 

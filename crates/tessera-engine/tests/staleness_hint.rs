@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use common::*;
 use tessera_authz::DictWriter;
-use tessera_engine::{Engine, Session, ViewportRequest};
 use tessera_engine::GeometryPublication;
+use tessera_engine::{Engine, Session, ViewportRequest};
 
 /// A descriptor no fixture dictionary carries, so it resolves to `None` at authorise.
 const NOVEL: &[u8] = b"dept:secret";

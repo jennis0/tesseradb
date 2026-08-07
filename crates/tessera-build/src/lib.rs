@@ -22,8 +22,8 @@
 pub mod error;
 pub mod input;
 pub mod observer;
-pub mod schema;
 mod pipeline;
+pub mod schema;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
@@ -478,12 +478,17 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .map(|(position, item)| (item.source_id, position))
             .collect();
         let mut seen = 0usize;
-        input::scan_attributes(&args.points, &args.schema, args.limit, |source_id, values| {
-            if let Some(&position) = position_of_source.get(&source_id) {
-                tiler_items[position].scalars = values.to_vec();
-                seen += 1;
-            }
-        })?;
+        input::scan_attributes(
+            &args.points,
+            &args.schema,
+            args.limit,
+            |source_id, values| {
+                if let Some(&position) = position_of_source.get(&source_id) {
+                    tiler_items[position].scalars = values.to_vec();
+                    seen += 1;
+                }
+            },
+        )?;
         if seen != staged.len() {
             return Err(BuildError::Invalid(format!(
                 "the attribute pass matched {seen} of {} staged items. The points file's two \
@@ -537,7 +542,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 /// One derivation, shared by both build implementations, so the two cannot come to disagree about
 /// a column's width — which would produce two bundles the byte-equality oracle calls different
 /// for a reason that is not the entity assignment it exists to check.
-fn scalar_schema_of(schema: &crate::schema::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+fn scalar_schema_of(
+    schema: &crate::schema::Schema,
+) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     schema
         .attributes
         .iter()

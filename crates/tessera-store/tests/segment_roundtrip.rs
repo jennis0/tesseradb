@@ -14,11 +14,11 @@ use arrow::record_batch::RecordBatch;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_spatial::split32;
+use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_store::manifest::Manifest;
-use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::read::ScalarSlice;
+use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{ColumnsRef, StoreError};
 use tessera_types::{EntityId, TesseraId};
 
@@ -464,7 +464,9 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         let tessera: Vec<u64> = (0..rows as u64)
             .map(|i| synthetic_tessera_id(i).raw())
             .collect();
-        let residual: Vec<u32> = (0..rows).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
+        let residual: Vec<u32> = (0..rows)
+            .map(|i| (i as u32).wrapping_mul(2_654_435_761))
+            .collect();
 
         let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
         // No scalar tail: this test is about the two *fixed*-column paths agreeing, and
@@ -528,13 +530,8 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
     let residual = Buffer::from_vec(vec![0u32; 4]);
 
     // Too short: 3 u64s cannot back 4 rows.
-    let err = write_columns_from_parts(
-        &path,
-        Buffer::from_vec(vec![0u64; 3]),
-        residual.clone(),
-        4,
-    )
-    .expect_err("a buffer shorter than `rows` values must be a typed error");
+    let err = write_columns_from_parts(&path, Buffer::from_vec(vec![0u64; 3]), residual.clone(), 4)
+        .expect_err("a buffer shorter than `rows` values must be a typed error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 
     // Misaligned: slicing a u64 buffer at byte 4 moves it off 8-byte alignment. Arrow's own
@@ -637,7 +634,9 @@ fn a_scattered_duplicate_entity_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
     let mut writer = PermutationWriter::create(&path, 16).expect("create");
-    writer.set(EntityId::new(4), 1).expect("the first set lands");
+    writer
+        .set(EntityId::new(4), 1)
+        .expect("the first set lands");
     let err = writer
         .set(EntityId::new(4), 2)
         .expect_err("a second row for one entity must be refused");
@@ -646,7 +645,6 @@ fn a_scattered_duplicate_entity_is_refused() {
         "the refusal must name the entity: {err}"
     );
 }
-
 
 /// **Every declarable width survives a write and a read, including the two that are not flat.**
 ///
@@ -723,7 +721,9 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
     // forward unpermuted.
     for (row, item) in items.iter().enumerate() {
         for ((name, ty), expected) in schema.iter().zip(&item.scalars) {
-            let slice = cols.scalar(name).unwrap_or_else(|| panic!("column '{name}'"));
+            let slice = cols
+                .scalar(name)
+                .unwrap_or_else(|| panic!("column '{name}'"));
             let got = match (slice, ty) {
                 (ScalarSlice::Bool(v), ScalarType::Bool) => ScalarValue::Bool(v.value(row)),
                 (ScalarSlice::U8(v), ScalarType::U8) => ScalarValue::U8(v[row]),
@@ -743,7 +743,10 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
                     ScalarValue::Utf8(v.value(row).to_string())
                 }
                 (other, ty) => {
-                    panic!("column '{name}' declared {ty:?} read back as {}", other.type_name())
+                    panic!(
+                        "column '{name}' declared {ty:?} read back as {}",
+                        other.type_name()
+                    )
                 }
             };
             assert_eq!(&got, expected, "column '{name}' at row {row}");

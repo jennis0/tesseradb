@@ -366,8 +366,8 @@ fn theta_does_not_move_when_the_viewport_pans() {
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
         },
     )
     .unwrap();
@@ -443,8 +443,8 @@ fn no_visible_tile_is_ever_served_empty() {
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
         },
     )
     .unwrap();
@@ -1177,8 +1177,8 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open the 2.4M bundle");

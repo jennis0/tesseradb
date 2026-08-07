@@ -800,11 +800,10 @@ either way.)*
 
 **Retirement now happens, and the fold is what performs it.** `Overlay::retire` is Rule F's route,
 the publication seam carries it, and the fold derives the executed set at its own publication from
-what it demonstrably removed (compaction §5). ⊘ What is still missing is a *schedule*:
-`overlay_soft_limit` (500,000) alarms on depth, and the lever its response should pull —
-compaction §9's automatic trigger, and the `POST /control/compact` contracts §3.4 reserves — is
-unbuilt, so a deployment's overlay comes down when something asks for a fold and not before.
-Fail-closed, and now a question of cadence rather than of mechanism.
+what it demonstrably removed (compaction §5). **The schedule exists too**: `overlay_soft_limit`
+(500,000) alarms on depth and now has the lever its alarm was always supposed to pull — compaction
+§9's automatic trigger keys its unwindowed route on exactly that threshold, and `POST
+/control/compact` is the operator's own door onto the same dispatch.
 
 ### 5.5 Durability failure: the apply-anyway fold
 

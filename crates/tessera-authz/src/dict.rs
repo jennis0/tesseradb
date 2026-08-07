@@ -195,7 +195,10 @@ pub fn coalesce_dict_extents(inputs: &[PathBuf], out: &Path) -> io::Result<u64> 
             if offset + 4 > data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("dictionary extent {}: incomplete length field", path.display()),
+                    format!(
+                        "dictionary extent {}: incomplete length field",
+                        path.display()
+                    ),
                 ));
             }
             let len = u32::from_le_bytes([
@@ -208,7 +211,10 @@ pub fn coalesce_dict_extents(inputs: &[PathBuf], out: &Path) -> io::Result<u64> 
             if offset + len > data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("dictionary extent {}: incomplete descriptor", path.display()),
+                    format!(
+                        "dictionary extent {}: incomplete descriptor",
+                        path.display()
+                    ),
                 ));
             }
             writer.write_all(&data[offset - 4..offset + len])?;

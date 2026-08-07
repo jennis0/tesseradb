@@ -243,6 +243,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
         .route("/control/flush", post(flush))
+        .route("/control/compact", post(compact))
         // **The whole plane's credential check, in one place** — see
         // [`require_operator_credential`]. `Router::layer` rather than a `route_layer` per route:
         // the point of this construction is that a route added below inherits the check without
@@ -356,6 +357,7 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/control/changes"),
     ("GET", "/control/status"),
     ("POST", "/control/flush"),
+    ("POST", "/control/compact"),
 ];
 
 /// `/control/changes`'s request-body limit.
@@ -872,9 +874,7 @@ fn run_ingest(
     let existing_ids: Vec<String> = resolved
         .iter()
         .zip(&supplied)
-        .filter(|(entity, _)| {
-            entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e))
-        })
+        .filter(|(entity, _)| entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e)))
         .map(|(_, (_, id))| base64::engine::general_purpose::STANDARD.encode(id))
         .collect();
     if !existing_ids.is_empty() {
@@ -1554,6 +1554,30 @@ async fn flush(State(state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::ACCEPTED
 }
 
+/// `POST /control/compact` (contracts §3.4): **accepted at any time, and then minutes to hours.**
+///
+/// The same shape as [`flush`] and through the same door — a flag the executor reads at its next
+/// tick, so a requested fold plans on the one thread that publishes and inherits everything a tick
+/// guarantees. What differs is only how long the 202 stands for: a flush's segment write is
+/// seconds, and a fold re-reads and rewrites the whole corpus (compaction §3).
+///
+/// **A request while a fold runs is refused, not queued, and this route cannot tell the caller
+/// which happened.** At most one fold is in flight (`Executor::dispatch_fold`), and what is
+/// recorded here is a flag rather than a count, so two requests before one tick are satisfied by
+/// that tick together and a request during a fold is consumed with a warning in the log. Answering
+/// 409 instead would mean this handler reading in-flight state and racing the tick that clears it —
+/// a lie half the time. `/control/status`'s `compaction` block is where a caller sees what actually
+/// happened: `fold_requested` while it waits, then `folds` or `fold_failures` moving.
+///
+/// **This is not the automatic trigger and does not go through it.** The schedule (compaction §9,
+/// decision 0056) consults its gauges directly at the tick; a request and a schedule are two routes
+/// into one dispatch, so an operator asking for a fold neither disturbs nor is disturbed by the
+/// window.
+async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.engine.request_fold();
+    StatusCode::ACCEPTED
+}
+
 /// **The precedent for [`require_operator_credential`], and the reason it is a layer.** R5 requires
 /// bearer auth on every plane, including this one; this handler nevertheless *shipped* returning
 /// `entity_id_high_water` — a global, unmasked corpus-size fact — to anyone who could reach the
@@ -1669,8 +1693,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // `compaction_max_segments` at any hour, or at `compaction_window_min_segments` inside the
         // nightly window (compaction §9, decision 0056). So this gauge now has a lever, and reading
         // it climbing past the ceiling means the fold is being *refused* rather than not
-        // scheduled — check the interval floor and the executor's gates. ⊘ `POST /control/compact`
-        // is still unbuilt, so there is no way to ask for one out of band.
+        // scheduled — check the interval floor, the executor's gates, and the `compaction` block
+        // below. `POST /control/compact` asks for one out of band.
         //
         // A list rather than a scalar because the trigger compaction §9 specifies is per
         // (partition, slice); this build emits one of each, so the list has one element and will not
@@ -1690,9 +1714,57 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // So `soft_limit_alarms` rising on a suppression-heavy deployment is a signal to look, not
         // a fold waiting to happen. `depth` is read off the live generation, so it cannot drift
         // from what a request composes against.
+        // `retirable` is the same difference made legible: a suppression-heavy deployment has a
+        // deep overlay and nothing for a fold to do, and only the pair says so.
         "overlay": {
             "depth": state.engine.overlay_depth(),
+            "retirable": state.engine.retirable_deletions(),
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
+        },
+        // **The most expensive operation in the system, and until this block its only surface was a
+        // log line.** A fold re-reads and rewrites the corpus, retires deletions, rotates the
+        // bundle identity and reclaims the superseded prefix; `folds` and `fold_failures` had been
+        // counted since it was built and published nowhere.
+        //
+        // `fold_failures` is the one to alarm on, and it is not the mirror of `folds`. Every
+        // failure leaves a complete prefix under a name `CURRENT` never took — a bundle-sized tree
+        // that nothing reclaims (compaction §7's startup sweep is ⊘) — so a fold that keeps
+        // discarding costs disc before it costs anything else, and several discard causes are
+        // *persistent*. Rising at all means read the log for the reason; rising repeatedly means
+        // the interval floor is the only thing between the deployment and a full device.
+        //
+        // `last_secs` and `last_rss_bytes` are the last fold's cost. **`last_rss_bytes` is a
+        // staircase maximum sampled at five pass boundaries, not a peak** — a spike inside a pass
+        // is invisible to it, and probe P1 is what says how far under the true peak it sits. It is
+        // published because compaction §3's memory budget is a *modelled* figure and this is the
+        // only number a deployment has to compare against it. `passes` is the same staircase
+        // unreduced: the gauges alarm, and the per-pass rows say which pass to look at.
+        // **`live_rows` is the denominator of compaction §9's tombstoned-row gauge**, and the only
+        // figure here that says how large the corpus is. The gauge itself is not published as a
+        // ratio: an operator with the numerator (`overlay.retirable`) and the denominator can form
+        // it, and a third derived number is a third thing to keep consistent.
+        //
+        // **The dead-bytes gauge is deliberately absent.** It is a walk of the live prefix, and the
+        // schedule pays for it at most once per tick and only when every cheaper route has
+        // declined; recomputing it on every `/control/status` poll would make an operator's
+        // dashboard the most expensive thing on the node. The trigger's own log line reports it
+        // when it fires.
+        "compaction": {
+            "live_rows": state.engine.live_rows(),
+            "folds": executor.folds,
+            "fold_failures": executor.fold_failures,
+            "fold_requested": executor.fold_requested,
+            "last_secs": executor.last_fold_secs,
+            "last_rss_bytes": executor.last_fold_rss,
+            "passes": state.engine.last_fold_passes()
+                .iter()
+                .map(|p| serde_json::json!({
+                    "pass": p.pass,
+                    "ms": p.elapsed.as_millis() as u64,
+                    "rss_bytes": p.rss,
+                    "anon_bytes": p.anon,
+                }))
+                .collect::<Vec<_>>(),
         },
         // Contracts §3.4's `fragmentation`. Design §11.1 assigns entity ids in term-signature order
         // within one allocation run and nothing repairs the ordering afterwards, so the posting

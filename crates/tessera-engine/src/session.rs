@@ -554,6 +554,8 @@ pub struct Engine {
     /// Whether a fold **holds** between finishing its passes and submitting the result — see
     /// [`Engine::set_fold_paused_for_test`]. Always `false` in a shipped build.
     pub(crate) fold_paused: Arc<AtomicBool>,
+    /// See [`Engine::set_fold_publication_paused_for_test`]. Always `false` in a shipped build.
+    pub(crate) fold_publication_paused: Arc<AtomicBool>,
     /// How many row projections were built from the whole fragment rather than derived from the
     /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
     ///
@@ -671,7 +673,8 @@ impl Engine {
         // the manifest names but no map covers would be served unverified.
         let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
         for rel in &partition.manifest.deltas {
-            if !partition.manifest.files.contains_key(rel) && !bundle.manifest.files.contains_key(rel)
+            if !partition.manifest.files.contains_key(rel)
+                && !bundle.manifest.files.contains_key(rel)
             {
                 return Err(EngineError::Malformed(format!(
                     "the side-manifest lists delta tier '{rel}' which no files map digests, so \
@@ -802,6 +805,7 @@ impl Engine {
         let coalesce_enabled = Arc::new(AtomicBool::new(true));
         let merge_enabled = Arc::new(AtomicBool::new(true));
         let fold_paused = Arc::new(AtomicBool::new(false));
+        let fold_publication_paused = Arc::new(AtomicBool::new(false));
 
         Ok(Engine {
             generation: Arc::clone(&generation),
@@ -825,6 +829,7 @@ impl Engine {
             coalesce_enabled: Arc::clone(&coalesce_enabled),
             merge_enabled: Arc::clone(&merge_enabled),
             fold_paused: Arc::clone(&fold_paused),
+            fold_publication_paused: Arc::clone(&fold_publication_paused),
             full_projection_builds: AtomicU64::new(0),
         })
     }
@@ -900,6 +905,20 @@ impl Engine {
     /// so is one the publication must carry forward — which is the same state this produces.
     pub fn set_fold_paused_for_test(&self, paused: bool) {
         self.fold_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Hold a **completed** fold in its channel, undrained, so a merge or coalesce can publish
+    /// under it — see [`crate::write::MaintenanceDeps::fold_publication_paused`] for which window
+    /// this is and why it is a real one.
+    ///
+    /// Unpausing wakes the executor, because the loop that would drain the fold may already have
+    /// parked: the pause makes `publish_completed_folds` report that nothing happened, which is
+    /// exactly what sends an otherwise-idle executor to `wait_for_work`.
+    pub fn set_fold_publication_paused_for_test(&self, paused: bool) {
+        self.fold_publication_paused.store(paused, Ordering::SeqCst);
+        if !paused {
+            self.write.wake();
+        }
     }
 
     /// Whether a fold has finished its passes and is holding at [`Self::set_fold_paused_for_test`].
@@ -1091,12 +1110,22 @@ impl Engine {
     /// bundle identity, the fragment cache and the external-id sidecar onto it, retire `retired`,
     /// and swap — steps 5 and 6 of compaction §4, as one call.
     ///
-    /// **The fold does not take this route** — it publishes from the executor thread, where a
-    /// submission to the executor would deadlock, so it calls [`open_rotation`] and publishes
-    /// inline (`crate::write::Executor::publish_fold`). What survives here is the same seam for a
-    /// caller *outside* the write path: an embedder that wrote a prefix by some other means, and
-    /// the prefix-rotation cases in `tests/prefix_rotation.rs`, which exercise the swap's half of
-    /// compaction §4 against a stand-in prefix rather than a whole fold.
+    /// # There is no production caller, and the name now says so
+    ///
+    /// **The fold does not take this route.** It publishes from the executor thread, where a
+    /// submission to the executor would deadlock, so it calls [`open_rotation`] — the seam both
+    /// share — and publishes inline (`crate::write::Executor::publish_fold`). Nothing else writes a
+    /// prefix. This entry point existed for "an embedder that wrote a prefix by some other means",
+    /// which is a caller that does not exist, and its only real users are the prefix-rotation cases
+    /// in `tests/prefix_rotation.rs`, which exercise the swap's half of compaction §4 against a
+    /// stand-in prefix rather than a whole fold.
+    ///
+    /// That mattered because of what it accepts. `retired` is Rule F's executed set and **this
+    /// function retires whatever it is handed** — the one place compaction §5's derivation is
+    /// enforced by documentation rather than by construction, since a caller could pass any bitmap
+    /// and make a deletion's tombstone leave `deleted` while its item is still visible. Keeping a
+    /// `pub` name that reads like the production route, in front of that, is an invitation. The
+    /// seam stays covered; what changes is that nobody reaches for this by accident.
     ///
     /// The refusals, the identity, and why the open skips verification are all [`open_rotation`]'s
     /// and documented there.
@@ -1119,7 +1148,7 @@ impl Engine {
     /// external-id run. See `tessera_lifecycle::Overlay::retire`, which states what retiring one
     /// entity too many costs. Empty is always safe: an un-retired tombstone is fail-closed, and
     /// the next fold takes it.
-    pub fn publish_rotated_prefix(
+    pub fn publish_rotated_prefix_for_test(
         &self,
         prefix: &str,
         segments_version: u64,
@@ -1214,7 +1243,10 @@ impl Engine {
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
-        self.generation.load().fragments.set_memory_bound(fragment_bytes);
+        self.generation
+            .load()
+            .fragments
+            .set_memory_bound(fragment_bytes);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`,
@@ -1274,6 +1306,30 @@ impl Engine {
         self.generation.load().overlay.len()
     }
 
+    /// Rows the bundle's segments hold, tombstoned ones included — compaction §9's denominator, and
+    /// the only figure on `/control/status` that says how large the corpus actually is.
+    pub fn live_rows(&self) -> u64 {
+        self.generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.segments.iter())
+            .map(|descriptor| u64::from(descriptor.row_count))
+            .sum()
+    }
+
+    /// Retirable deletions — `|deleted|`, never the union with `suppressed`.
+    ///
+    /// **Beside [`Engine::overlay_depth`] rather than instead of it, and the pair is the point.**
+    /// Depth is what an operator alarms on and what `overlay_soft_limit` bounds; this is what a fold
+    /// can actually *reduce*, since Rule S says a suppression never retires. A deployment holding
+    /// half a million standing suppressions has a deep overlay and nothing for a fold to do, and
+    /// only publishing both numbers makes that legible (compaction §9).
+    pub fn retirable_deletions(&self) -> u64 {
+        self.generation.load().overlay.deleted_len()
+    }
+
     /// Live segments per (partition, slice), read straight off the current generation — the gauge
     /// decision 0049 obliges and `/control/status` publishes as `segments`.
     ///
@@ -1301,11 +1357,13 @@ impl Engine {
             .partitions
             .iter()
             .flat_map(|(partition, data)| {
-                data.slices.iter().map(move |(slice, slice_data)| SliceSegments {
-                    partition: partition.clone(),
-                    slice: slice.clone(),
-                    segments: slice_data.segments.len(),
-                })
+                data.slices
+                    .iter()
+                    .map(move |(slice, slice_data)| SliceSegments {
+                        partition: partition.clone(),
+                        slice: slice.clone(),
+                        segments: slice_data.segments.len(),
+                    })
             })
             .collect();
         counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
@@ -1707,6 +1765,7 @@ impl Engine {
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
+                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
                     pool: Arc::clone(&self.pool),
@@ -1760,6 +1819,7 @@ impl Engine {
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
+                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
                     pool: Arc::clone(&self.pool),
@@ -1802,6 +1862,12 @@ impl Engine {
     /// unauthenticated surface).
     pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
         self.write.health().stats()
+    }
+
+    /// The last compaction fold's per-pass wall clock and resident set — empty before the first
+    /// fold. Operator plane only, beside [`Engine::write_executor_stats`].
+    pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {
+        self.write.health().last_fold_passes()
     }
 
     /// Items in the ingest buffer as of the executor's last apply — what `/control/ingest`'s
@@ -1932,7 +1998,7 @@ impl Engine {
 /// [`PrefixRotation`](crate::geometry::PrefixRotation) that must ride the swap with it.
 ///
 /// **Two callers, one on each side of the executor queue**, which is why this is a free function
-/// rather than an `Engine` method. [`Engine::publish_rotated_prefix`] calls it and then *submits*
+/// rather than an `Engine` method. [`Engine::publish_rotated_prefix_for_test`] calls it and then *submits*
 /// the publication; the fold's own publication (`crate::write::Executor::publish_fold`) calls it on
 /// the executor thread and publishes inline, because a submission from the executor to itself is a
 /// deadlock. A second copy of this sequence is how the two would come to rotate different subsets

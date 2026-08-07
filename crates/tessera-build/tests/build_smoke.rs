@@ -155,7 +155,11 @@ fn read_arrow_ipc(path: &Path) -> Vec<RecordBatch> {
 fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
     use tessera_authz::{PostingRef, PostingsReader};
     let reader = PostingsReader::open(path, false).unwrap();
-    let out = match reader.posting(term).unwrap().expect("the term is present in this file") {
+    let out = match reader
+        .posting(term)
+        .unwrap()
+        .expect("the term is present in this file")
+    {
         PostingRef::Array(bytes) => bytes
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
@@ -878,7 +882,10 @@ fn morton_plus_residual_recovers_sub_cell_position() {
             Arc::new(UInt64Array::from((0..4u64).collect::<Vec<_>>())),
             Arc::new(UInt64Array::from(vec![cell; 4])),
             Arc::new(UInt64Array::from(
-                corners.iter().map(|(a, b)| residual_of(*a, *b)).collect::<Vec<_>>(),
+                corners
+                    .iter()
+                    .map(|(a, b)| residual_of(*a, *b))
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
@@ -920,7 +927,15 @@ fn bare_morton_widens_with_a_zero_residual() {
     let rows = read_points(&points, &IDENTITY_EXTENT, None).unwrap();
     assert!(!rows.is_empty());
     for row in &rows {
-        assert_eq!(row.qx & 0xFFFF, 0, "a bare morton column has no sub-cell part");
-        assert_eq!(row.qy & 0xFFFF, 0, "a bare morton column has no sub-cell part");
+        assert_eq!(
+            row.qx & 0xFFFF,
+            0,
+            "a bare morton column has no sub-cell part"
+        );
+        assert_eq!(
+            row.qy & 0xFFFF,
+            0,
+            "a bare morton column has no sub-cell part"
+        );
     }
 }

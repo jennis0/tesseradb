@@ -2356,6 +2356,7 @@ dependencies = [
  "arrow",
  "criterion",
  "croaring",
+ "libc",
  "parquet",
  "rand 0.8.7",
  "rayon",

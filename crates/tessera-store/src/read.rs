@@ -221,7 +221,11 @@ impl Bundle {
     /// rewrites `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`, every
     /// one of which addresses entity space. A caller that needed row space to move would be using
     /// one of the two above, and the type is what keeps the two apart.
-    pub fn with_manifest(&self, partition: &str, published: PublishedManifest) -> Result<Arc<Bundle>> {
+    pub fn with_manifest(
+        &self,
+        partition: &str,
+        published: PublishedManifest,
+    ) -> Result<Arc<Bundle>> {
         let slice = self
             .partitions
             .get(partition)
@@ -1021,6 +1025,30 @@ impl MortonSlice {
         self.mmap.len() as u64
     }
 
+    /// `madvise(MADV_SEQUENTIAL)` on this mapping — compaction §6.1's mitigation, decision 0052.
+    ///
+    /// **Called by the streaming passes and never by the request path**, which is the whole of what
+    /// makes it safe: `madvise` applies to the *mapping*, so advising one a viewport also holds
+    /// would disable its random-access read-ahead for the life of that mapping. A fold and a merge
+    /// each `load` their own, through [`crate::segment_cursor::SegmentCursor`]; a viewport's is a
+    /// different mapping of the same file and is untouched.
+    ///
+    /// What it buys is reclaim order. Without it the fold's pages are the most recently touched in
+    /// the whole machine and therefore look hottest, so the kernel evicts a viewport's genuinely hot
+    /// tiles to make room for bytes nothing will read again — a measured 2.03× on a concurrent
+    /// viewport (P3). This states what is true: streamed once, freeable after.
+    ///
+    /// **A hint, so a refusal is not a failure.** `madvise` failing leaves a correct mapping that
+    /// is merely no gentler than before, and turning that into a failed segment open would trade
+    /// the whole operation for an optimisation.
+    ///
+    /// ⊘ **Unmeasured.** P3 must be re-run with this applied, over a sweep long enough to displace
+    /// a real fraction of the bundle; `MADV_COLD` behind the cursor is the escalation if it proves
+    /// insufficient (compaction §6.1).
+    pub fn advise_sequential(&self) {
+        let _ = self.mmap.advise(memmap2::Advice::Sequential);
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -1130,6 +1158,10 @@ impl ScalarSlice<'_> {
 pub struct ColumnsRef {
     batch: RecordBatch,
     scalar_index: HashMap<String, usize>,
+    /// The mapping `batch`'s buffers point into, kept only so [`ColumnsRef::advise_sequential`] has
+    /// something to advise: the `Arc` is already captured as each `Buffer`'s allocation, and there
+    /// is no way back to it from a `RecordBatch`. A second reference count, no second mapping.
+    mapping: Arc<Mmap>,
 }
 
 const FIXED_COLUMNS: [(&str, DataType); 2] = [
@@ -1160,7 +1192,11 @@ impl ColumnsRef {
         let arc: Arc<Mmap> = Arc::new(mapping);
         let ptr = NonNull::new(arc.as_ptr() as *mut u8)
             .expect("memmap2::Mmap never returns a null base pointer");
-        let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
+        // Cloned rather than moved: the buffer's allocation and `ColumnsRef::mapping` are two
+        // references to one mapping, which is what lets the latter exist at all (a `RecordBatch`
+        // offers no way back to the allocation its buffers hold).
+        let allocation: Arc<Mmap> = Arc::clone(&arc);
+        let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, allocation) };
 
         let batch = decode_single_batch(&buffer, path)?;
         validate_schema(&batch, path)?;
@@ -1177,7 +1213,14 @@ impl ColumnsRef {
         Ok(ColumnsRef {
             batch,
             scalar_index,
+            mapping: arc,
         })
+    }
+
+    /// `madvise(MADV_SEQUENTIAL)` on this mapping — see [`MortonSlice::advise_sequential`], which
+    /// states why this is the streaming passes' call and not the request path's.
+    pub fn advise_sequential(&self) {
+        let _ = self.mapping.advise(memmap2::Advice::Sequential);
     }
 
     pub fn row_count(&self) -> u32 {
@@ -1251,7 +1294,6 @@ impl ColumnsRef {
                 (TimestampUs, TimestampMicrosecondArray),
         })
     }
-
 }
 
 /// Downcast column `idx` of `batch` to `T` (one of the fixed-column array types), panicking on

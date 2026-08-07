@@ -206,8 +206,8 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                    // Compaction §9's trigger is off unless a deployment configures one.
+                    compaction: tessera_engine::CompactionSchedule::off(),
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -460,8 +460,8 @@ pub fn run_deny_ack(
                         compute_threads: tessera_engine::default_compute_threads(),
                         flush_max_age_secs: 90,
                         max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+                        // Compaction §9's trigger is off unless a deployment configures one.
+                        compaction: tessera_engine::CompactionSchedule::off(),
                     },
                 )?;
                 // Small on purpose, unlike the other arms' generous 1024: the never-shed phase
@@ -475,12 +475,8 @@ pub fn run_deny_ack(
                 let mut filled = 0u64;
                 while filled < depth {
                     let n = ingest_batch.min((depth - filled) as usize);
-                    let rows = crate::arms::ingest::synth_rows(
-                        n,
-                        next_id,
-                        &fill_terms,
-                        &fill_descriptors,
-                    );
+                    let rows =
+                        crate::arms::ingest::synth_rows(n, next_id, &fill_terms, &fill_descriptors);
                     next_id += n as u64;
                     engine.accept_ingest(rows, format!("fill-{next_id}"), [0u8; 32])?;
                     filled += n as u64;

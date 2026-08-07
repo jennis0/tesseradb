@@ -189,9 +189,8 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
                 .join(&segment.slice)
                 .join("segments")
                 .join(&segment.seg_id);
-            let columns = ColumnsRef::load(&dir.join("columns.arrow")).unwrap_or_else(|e| {
-                panic!("segment {} must open: {e}", segment.seg_id)
-            });
+            let columns = ColumnsRef::load(&dir.join("columns.arrow"))
+                .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
             let ids = columns.tessera_id();
             let band = match columns.scalar("band") {
                 Some(ScalarSlice::U8(v)) => v,
@@ -244,7 +243,10 @@ fn flush(engine: &Engine) {
     engine.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while engine.write_executor_stats().flushes == before {
-        assert!(std::time::Instant::now() < deadline, "the flush never published");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never published"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -262,7 +264,10 @@ fn fold(engine: &Engine) {
         if now.folds > before.folds {
             return;
         }
-        assert!(std::time::Instant::now() < deadline, "the fold never published");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -328,7 +333,9 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     let key = test_key();
     for source in 0..N_ITEMS {
         let entity = entity_of_source[&source];
-        let id = key.forward(0, tessera_types::EntityId::new(entity)).unwrap();
+        let id = key
+            .forward(0, tessera_types::EntityId::new(entity))
+            .unwrap();
         let (band, stamp, score) = tail[&id.raw()];
         assert_eq!(band, band_code(source), "source {source}'s band code");
         assert_eq!(stamp, ingested_at_of(source), "source {source}'s timestamp");
@@ -518,7 +525,9 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
     let key = test_key();
     for source in [0u64, 1, 2, N_ITEMS - 1] {
         let entity = entity_of_source[&source];
-        let id = key.forward(0, tessera_types::EntityId::new(entity)).unwrap();
+        let id = key
+            .forward(0, tessera_types::EntityId::new(entity))
+            .unwrap();
         assert_eq!(
             tail[&id.raw()],
             (band_code(source), ingested_at_of(source), score_of(source))

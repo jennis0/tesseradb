@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use common::*;
 use tessera_authz::{Dict, DictWriter};
-use tessera_types::TermId;
 use tessera_engine::GeometryPublication;
+use tessera_types::TermId;
 
 /// Ordinals are stable across an extension: a term that resolved to 3 before still does, or
 /// every session authorised before the flush is now evaluating against a different term.

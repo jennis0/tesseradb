@@ -141,7 +141,7 @@ impl GeometryPublication {
     }
 
     /// Carry a [`PrefixRotation`] — what a fold's publication makes, and nothing else. Assembled
-    /// by [`crate::session::Engine::publish_rotated_prefix`], which is the only producer.
+    /// by [`crate::session::Engine::publish_rotated_prefix_for_test`], which is the only producer.
     pub(crate) fn rotating(mut self, rotation: PrefixRotation) -> Self {
         self.rotation = Some(rotation);
         self
@@ -189,7 +189,12 @@ pub struct GeometryRefused {
 }
 
 impl GeometryRefused {
-    fn new(live: &Generation, prefix: &str, segments_version: u64, reason: GeometryRefusedReason) -> Self {
+    fn new(
+        live: &Generation,
+        prefix: &str,
+        segments_version: u64,
+        reason: GeometryRefusedReason,
+    ) -> Self {
         GeometryRefused {
             live_prefix: live.prefix.clone(),
             live_segments_version: live.segments_version,
@@ -335,7 +340,10 @@ mod tests {
     fn a_publication_must_strictly_increase_the_segments_version() {
         let live = generation_at("p-1", 7, 100);
         assert!(check_publishable(&live, "p-1", 8, 100).is_ok());
-        assert!(check_publishable(&live, "p-2", 8, 100).is_ok(), "a new prefix");
+        assert!(
+            check_publishable(&live, "p-2", 8, 100).is_ok(),
+            "a new prefix"
+        );
 
         for offered in [7u64, 6, 0] {
             let refused = check_publishable(&live, "p-1", offered, 100)
@@ -362,8 +370,14 @@ mod tests {
     fn a_publication_may_not_lower_the_watermark() {
         let live = generation_at("p-1", 7, 100);
 
-        assert!(check_publishable(&live, "p-1", 8, 100).is_ok(), "a merge or a fold passes it through");
-        assert!(check_publishable(&live, "p-1", 8, 101).is_ok(), "a flush raises it");
+        assert!(
+            check_publishable(&live, "p-1", 8, 100).is_ok(),
+            "a merge or a fold passes it through"
+        );
+        assert!(
+            check_publishable(&live, "p-1", 8, 101).is_ok(),
+            "a flush raises it"
+        );
 
         let refused = check_publishable(&live, "p-2", 8, 99)
             .expect_err("a watermark behind the live one is refused");

@@ -70,10 +70,10 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `architecture.md` | Normative — r35 | 20 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `compaction.md` | Provisional — under review | 14 |
+| `compaction.md` | Normative — r11 | 10 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
 | `conformance.md` | Normative — r8 | 15 |
-| `contracts.md` | Normative — r23 | 16 |
+| `contracts.md` | Normative — r23 | 15 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
@@ -84,4 +84,4 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
 | `system-architecture.md` | Normative — r14 | 24 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `write-path.md` | Normative for the write path. Owner sign | 23 |
+| `write-path.md` | Normative for the write path. Owner sign | 22 |

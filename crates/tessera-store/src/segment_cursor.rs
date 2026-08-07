@@ -37,6 +37,15 @@ impl SegmentCursor {
     pub(crate) fn open(dir: &Path, seg_id: String, op: &str) -> Result<Self> {
         let morton = MortonSlice::load(&dir.join("morton.u32"))?;
         let columns = ColumnsRef::load(&dir.join("columns.arrow"))?;
+        // **Both of this cursor's callers stream, and neither shares these mappings with a
+        // request** (compaction §6.1, decision 0052). A fold reads every segment once and a merge
+        // reads its selected ones once; a viewport reads a few tile ranges out of each, through
+        // mappings of its own. So the reclaim bias `MADV_SEQUENTIAL` asks for is exactly right here
+        // and would be exactly wrong on the request path's mapping of the same file — which is the
+        // distinction that decides where the hint may go, since `madvise` applies to the mapping
+        // and not to the file.
+        morton.advise_sequential();
+        columns.advise_sequential();
         let rows = morton.len();
         if rows != columns.tessera_id().len() || rows != columns.residual().len() {
             return Err(StoreError::MalformedBundle {
@@ -61,8 +70,12 @@ impl SegmentCursor {
     /// non-decreasing and the heap's output is sorted — the property
     /// [`crate::write::SegmentWriter::append`] asserts and `tile_ranges`' binary search needs.
     pub(crate) fn key(&self) -> Option<(u32, u64)> {
-        (self.row < self.rows)
-            .then(|| (self.morton.u32()[self.row], self.columns.tessera_id()[self.row]))
+        (self.row < self.rows).then(|| {
+            (
+                self.morton.u32()[self.row],
+                self.columns.tessera_id()[self.row],
+            )
+        })
     }
 }
 

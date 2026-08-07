@@ -184,9 +184,12 @@ pub(crate) fn executed(d0: &Bitmap, carried: &CarriedForward) -> Bitmap {
 /// Retirable depth has one threshold and no window at all, because the cost it measures is
 /// unbounded rather than merely growing: the overlay grows monotonically under deletion churn,
 /// every deny acceptance clones it, and depth is a term in I1's composition cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `PartialEq` without `Eq`: two of the thresholds are ratios, and `f64` has no total equality.
+// Nothing compares two schedules for identity — the derive exists so a test can assert what a
+// config file parsed to.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSchedule {
-    /// The floor under both routes — compaction §9's `compaction_min_interval_secs`. A fold within
+    /// The floor under every route — compaction §9's `compaction_min_interval_secs`. A fold within
     /// this of the last completed one is never dispatched, whatever a gauge says.
     pub min_interval_secs: u64,
     /// Seconds past **UTC** midnight at which the daily window opens; `None` switches the windowed
@@ -224,6 +227,35 @@ pub struct CompactionSchedule {
     /// unwindowed route off. Defaults to `overlay_soft_limit`, which is the action compaction §9
     /// says that alarm was always supposed to prompt.
     pub after_deletions: Option<u64>,
+    /// Tombstoned rows as a fraction of the bundle's live rows, at or above which a fold is
+    /// dispatched at any hour; `None` switches the route off.
+    ///
+    /// **A different question from [`Self::after_deletions`], over the same numerator.** That one
+    /// is an absolute: an overlay of half a million entries costs every composition, whatever the
+    /// corpus size. This is a ratio, and it is what a *viewport* pays — rows that exist, are
+    /// scanned, and no viewer may see. A 50,000-row deployment with 10,000 deletions is 20% dead
+    /// and nowhere near the absolute threshold; a 10⁹-row one crosses the absolute long before the
+    /// ratio moves. Neither subsumes the other, which is why compaction §9 makes them separate
+    /// gauges rather than one blended score.
+    pub tombstoned_rows_fraction: Option<f64>,
+    /// **Dead** bytes over named bytes — `(on_disc − named) / named` under the live prefix — at or
+    /// above which a fold is dispatched at any hour; `None` switches the route off.
+    ///
+    /// **A ratio of dead to live, not of total to live**, which is what compaction §9's default of
+    /// 1.0 means: *paying double for storage*, i.e. `on_disc = 2 × named`. Written as
+    /// `on_disc / named` instead, a threshold of 1.0 is satisfied by every bundle ever built — on
+    /// disc always exceeds named, if only by the manifests' own bytes, which nothing can name.
+    ///
+    /// **The only route that covers compaction §0's *reclamation* obligation.** A deployment with
+    /// heavy merge churn and few deletions accumulates consumed segments and superseded tiers that
+    /// no gauge above can see: its segment count is bounded (merge is doing its job), its overlay
+    /// is shallow, and it is paying for two or three copies of its corpus. The measured
+    /// no-compaction steady state is 2.0–2.6× (`docs/evidence/memos/2026-08-05-write-path-at-scale.md`).
+    ///
+    /// **This is the expensive gauge**, and the only one that is not a field read: it needs a walk
+    /// of the live prefix. [`due`] therefore takes it as a closure and calls it last, after every
+    /// cheaper route has declined.
+    pub dead_bytes_ratio: Option<f64>,
 }
 
 impl CompactionSchedule {
@@ -242,6 +274,8 @@ impl CompactionSchedule {
             window_min_segments: 0,
             max_segments: None,
             after_deletions: None,
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: None,
         }
     }
 }
@@ -257,6 +291,33 @@ pub(crate) enum FoldTrigger {
     SegmentCount,
     /// `|deleted|` reached `after_deletions`, at whatever hour.
     RetirableDepth,
+    /// Tombstoned rows passed `tombstoned_rows_fraction` of the bundle's live rows.
+    TombstonedRows,
+    /// On-disc bytes passed `dead_bytes_ratio` × the bytes the manifests name.
+    DeadBytes,
+}
+
+/// What the schedule reads at the tick that reads it — the three cheap gauges.
+///
+/// A struct rather than three more positional parameters, because [`due`] is the one place the
+/// whole rule is stated and a seven-argument call site is a place to get an argument order wrong.
+/// The fourth gauge is not here: it is a directory walk, and it arrives as a closure.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Gauges {
+    /// The largest live segment count across the partition's slices.
+    pub(crate) live_segments: usize,
+    /// `|deleted|` — deletions alone, never the union with `suppressed` (see [`due`]).
+    pub(crate) retirable_deletions: u64,
+    /// Rows the bundle's segments hold, tombstoned ones included.
+    pub(crate) live_rows: u64,
+}
+
+/// The dead-bytes gauge's two operands: what is on disc under the live prefix, and what its
+/// manifests still name.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeadBytes {
+    pub(crate) on_disc: u64,
+    pub(crate) named: u64,
 }
 
 /// Whether the schedule calls for a fold now.
@@ -287,10 +348,10 @@ pub(crate) fn due(
     schedule: &CompactionSchedule,
     now_unix: u64,
     last_fold_unix: Option<u64>,
-    live_segments: usize,
-    retirable_deletions: u64,
+    gauges: Gauges,
+    dead_bytes: impl FnOnce() -> Option<DeadBytes>,
 ) -> Option<FoldTrigger> {
-    // The floor, under both routes. `saturating_sub` rather than a comparison because a clock that
+    // The floor, under every route. `saturating_sub` rather than a comparison because a clock that
     // steps backwards must read as "not yet", never as a very large elapsed time.
     if let Some(last) = last_fold_unix {
         if now_unix.saturating_sub(last) < schedule.min_interval_secs {
@@ -302,21 +363,43 @@ pub(crate) fn due(
     // them *inside* its own window should log the reason that will still be true tomorrow, not the
     // hour it happened to be.
     if let Some(threshold) = schedule.after_deletions {
-        if retirable_deletions >= threshold {
+        if gauges.retirable_deletions >= threshold {
             return Some(FoldTrigger::RetirableDepth);
         }
     }
     if let Some(threshold) = schedule.max_segments {
-        if live_segments >= threshold {
+        if gauges.live_segments >= threshold {
             return Some(FoldTrigger::SegmentCount);
         }
     }
-
-    let start = schedule.window_start_secs?;
-    if live_segments < schedule.window_min_segments || schedule.window_min_segments == 0 {
-        return None;
+    // **A ratio needs a denominator**: a bundle with no rows has no fraction, and reading one as
+    // "infinitely dead" would dispatch a fold at every tick over an empty corpus.
+    if let Some(threshold) = schedule.tombstoned_rows_fraction {
+        if gauges.live_rows > 0
+            && gauges.retirable_deletions as f64 / gauges.live_rows as f64 >= threshold
+        {
+            return Some(FoldTrigger::TombstonedRows);
+        }
     }
-    in_window(now_unix, start, schedule.window_secs).then_some(FoldTrigger::Window)
+
+    // The window, which is the only route that has one.
+    if let Some(start) = schedule.window_start_secs {
+        if gauges.live_segments >= schedule.window_min_segments
+            && schedule.window_min_segments > 0
+            && in_window(now_unix, start, schedule.window_secs)
+        {
+            return Some(FoldTrigger::Window);
+        }
+    }
+
+    // **Last, and the closure is why.** Every gauge above is a field read; this one is a walk of
+    // the live prefix, so a tick pays for it only when nothing cheaper has already decided. A
+    // deployment with the route switched off never calls it at all.
+    let threshold = schedule.dead_bytes_ratio?;
+    let measured = dead_bytes()?;
+    let dead = measured.on_disc.saturating_sub(measured.named);
+    (measured.named > 0 && dead as f64 / measured.named as f64 >= threshold)
+        .then_some(FoldTrigger::DeadBytes)
 }
 
 /// Whether `now_unix` falls in the daily window `[start, start + width)` past UTC midnight.
@@ -423,16 +506,108 @@ pub(crate) enum NoFold {
     /// The bundle declares a scalar column this build cannot write, so pass 1 would emit a segment
     /// the reader refuses. The same fail-closed answer a flush gives.
     UnwritableScalarSchema,
+    /// **The estimated peak memory is above what the host has available** (compaction §3). Both
+    /// figures in bytes.
+    InsufficientMemory { need: u64, available: u64 },
+    /// **The estimated output is above the free space on the device** (compaction §8). Both figures
+    /// in bytes.
+    InsufficientDisc { need: u64, free: u64 },
+}
+
+/// What the fold's two pre-flight refusals compare against.
+///
+/// **Measured by the caller, so [`plan_fold`] stays pure.** Free space and available memory are
+/// syscalls against the host, not properties of the generation, and folding them into the planner
+/// would make every selection test need a filesystem. `None` means *unknowable* — on a host whose
+/// procfs or `statvfs` does not answer, the corresponding pre-flight simply does not run.
+///
+/// **Not refusing on an unknown is deliberate**, and it is `tessera-build`'s precedent
+/// (`available_disk`: *"the disk pre-flight then simply does not run, rather than refusing builds
+/// on a guess"*). A refusal derived from a figure nobody could read is a deployment that silently
+/// never compacts, which is a slower version of the failure these checks exist to prevent.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FoldResources {
+    pub(crate) available_memory: Option<u64>,
+    pub(crate) free_disc: Option<u64>,
+}
+
+/// The multiplier on [`memory_estimate`]'s computable terms, standing in for the one term of
+/// compaction §3's budget that cannot be computed without reading the postings.
+///
+/// §3's table has four terms. Three are exact functions of quantities the plan already holds — two
+/// 4 B/entity mapped arrays and an 8 B/ordinal spool offsets buffer — and the fourth, *the widest
+/// term's encode*, is `corpus × that term's coverage`, which needs a postings scan the planner has
+/// no reason to do. Its measured magnitude is what makes a factor defensible rather than arbitrary:
+/// 125.12 MB per 25% grant (`probes/results.md` §4.2), which §3 extrapolates to ~375–500 MB at
+/// 10⁹ — against an 8 GB entity-space term at that size. Doubling the computable terms leaves an
+/// ~8 GB allowance for a ~0.5 GB unknown.
+///
+/// **Assumed, not measured**, and probe P1 is what would calibrate it: P1 measures the whole peak
+/// against a fixture whose dictionary is two terms, so it constrains the entity-space terms and
+/// says nothing about this one.
+const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
+
+/// The fold's peak **un-reclaimable** memory in bytes, from quantities the plan already knows.
+///
+/// **Un-reclaimable is the whole of what this estimates, and it is not what a fold's RSS reads.**
+/// Probe P1 measured peak resident at 0.93–0.99× the bundle's live bytes, ~92% of it file-backed:
+/// a fold maps its inputs and its outputs, so nearly all of that is page cache the kernel drops the
+/// moment anything wants the memory. `MemAvailable` already counts reclaimable cache as available,
+/// so charging the fold for it would refuse every fold on a host whose bundle exceeds RAM — which
+/// is every host this design is for. What cannot be given back is the anonymous half plus the dirty
+/// pages of the two arrays the fold *writes* through a mapping, and those are the terms here.
+///
+/// | term | basis |
+/// |---|---|
+/// | 4 B × permutation bound | `permutation.bin`, written through a mapping (§3 pass 1) |
+/// | 4 B × entity bound | `ext-locator.u32`, same (§3 pass 3) |
+/// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
+///
+/// The permutation term is the **maximum** across slices rather than their sum: pass 1 folds one
+/// slice at a time and drops each slice's writer before the next, so the peak is one of them.
+///
+/// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
+/// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
+/// here on r1's reading, which is also the conservative one.)*
+pub(crate) fn memory_estimate(permutation_bound: u64, entity_bound: u64, dict_len: u64) -> u64 {
+    let terms = 4u64
+        .saturating_mul(permutation_bound)
+        .saturating_add(4u64.saturating_mul(entity_bound))
+        .saturating_add(8u64.saturating_mul(dict_len));
+    terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
+}
+
+/// The free space a fold needs, as a percentage of the bytes its inputs' manifests name.
+///
+/// **150%, and the 50% is the margin compaction §8 asks for rather than a second estimate.** The
+/// fold's own output is at most the live bytes and usually less — it drops every folded deletion
+/// and coalesces every axis — and the carried-forward files are hard links, which cost directory
+/// entries and no bytes. What the margin covers is what lands *beside* the new prefix during a
+/// flight of minutes to hours: the flushes that keep publishing into the old prefix (§7), the WAL
+/// they append to, and the fragment cache.
+///
+/// **Assumed.** The output-size half is bounded by construction; the margin is a judgement, and
+/// what would calibrate it is a fold run against a deployment's own ingest rate — the product of a
+/// rate and a duration, neither of which the planner knows.
+const FOLD_DISC_PERCENT: u64 = 150;
+
+/// The free bytes a fold needs before it starts, from the bytes its inputs' manifests name.
+pub(crate) fn disc_estimate(live_bytes: u64) -> u64 {
+    live_bytes
+        .saturating_mul(FOLD_DISC_PERCENT)
+        .saturating_div(100)
 }
 
 /// Plan a fold of `generation`'s single partition.
 ///
-/// Pure, so the selection is testable without an executor: it reads the generation and the two
-/// executor-health flags and nothing else.
+/// Pure, so the selection is testable without an executor: it reads the generation, the two
+/// executor-health flags and the host figures its caller measured, and nothing else. See
+/// [`FoldResources`] for why the last of those is a parameter rather than two syscalls here.
 pub(crate) fn plan_fold(
     generation: &Generation,
     wal_poisoned: bool,
     overlay_diverged: bool,
+    resources: FoldResources,
 ) -> Result<FoldPlan, NoFold> {
     if wal_poisoned {
         return Err(NoFold::WalPoisoned);
@@ -505,6 +680,50 @@ pub(crate) fn plan_fold(
         .max()
         .unwrap_or(0);
 
+    // ---- the two pre-flight refusals (compaction §3, §8) ---------------------------------------
+    //
+    // **Last, because both need the plan's own quantities**, and cheap enough that planning first
+    // and refusing costs nothing: everything above is a clone of manifest lists.
+    //
+    // **What they protect against is not a slow fold but a dead node.** `tessera-build` exists
+    // because the in-memory build was OOM-killed at 10⁹ on a 47 GiB box, and the fold puts the same
+    // shape of work inside the *serving* binary — so an unchecked fold on a loaded host takes the
+    // node with it, and a fold that fills the device takes the write path down behind a 500
+    // (write-path §1.3). Neither failure is recoverable by the thing that caused it.
+    let dict_len = generation.dict.len();
+    if let Some(available) = resources.available_memory {
+        let need = memory_estimate(
+            slices
+                .iter()
+                .map(|slice| slice.permutation_bound)
+                .max()
+                .unwrap_or(0),
+            entity_bound,
+            u64::from(dict_len),
+        );
+        if need > available {
+            return Err(NoFold::InsufficientMemory { need, available });
+        }
+    }
+    if let Some(free) = resources.free_disc {
+        // The bytes the fold reads, which is also the ceiling on the bytes it writes. **Two maps,
+        // and taking only one is the mistake that reads as a catastrophe**: the build's artefacts
+        // are digested in the bundle `MANIFEST.json` and everything the write path produced is in
+        // the partition's side-manifest, so a sum over one of them alone is short by the other.
+        let live_bytes: u64 = generation
+            .bundle
+            .manifest
+            .files
+            .values()
+            .map(|d| d.size)
+            .chain(manifest.files.values().map(|d| d.size))
+            .sum();
+        let need = disc_estimate(live_bytes);
+        if need > free {
+            return Err(NoFold::InsufficientDisc { need, free });
+        }
+    }
+
     let mut tombstones = Bitmap::new();
     for entity in generation.overlay.deleted_entities() {
         // `deleted` is already a `u32`-domain Roaring bitmap on the overlay; the round trip through
@@ -524,7 +743,7 @@ pub(crate) fn plan_fold(
             .collect(),
         tombstones,
         entity_bound,
-        dict_len: generation.dict.len(),
+        dict_len,
         small_term_threshold: generation.bundle.manifest.small_term_threshold,
         prefix: generation.prefix.clone(),
     })
@@ -557,6 +776,47 @@ pub(crate) struct FoldContext {
     pub(crate) tiers: Vec<Arc<DeltaTier>>,
 }
 
+/// The process's resident set as `/proc/self/status` reports it, in bytes: total, anonymous,
+/// file-backed. Zero for a field procfs does not offer, which is also what a non-Linux host gets.
+///
+/// **Three numbers rather than one, because §3's budget is a claim about which of them grows.**
+/// Two of the budget's terms — `permutation.bin` and `ext-locator.u32` — are written *through a
+/// mapping*, so they land in `RssFile` and are reclaimable under pressure once written back; the
+/// spool buffers and the term encodes are `RssAnon` and are not. A fold whose total climbs because
+/// its inputs became resident is behaving as designed. One whose *anonymous* half climbs with the
+/// corpus has a term nobody budgeted, and only the split tells the two apart.
+fn resident_set() -> (u64, u64, u64) {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return (0, 0, 0);
+    };
+    let field = |name: &str| -> u64 {
+        status
+            .lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map(|kib| kib * 1024)
+            .unwrap_or(0)
+    };
+    (field("VmRSS:"), field("RssAnon:"), field("RssFile:"))
+}
+
+/// What one pass cost: its wall clock, and the process's resident set at the moment it ended.
+///
+/// **A staircase sampled at pass boundaries, and deliberately not a peak.** A true peak needs
+/// either a sampling thread or a `clear_refs` reset of the process's `VmHWM`, and a serving binary
+/// may do neither: the first spends a thread for the fold's whole duration, and the second silently
+/// clobbers a process-wide statistic anything else might be reading. What this gives instead is
+/// *attribution* — which pass the resident set climbed during — which is the question a memory
+/// budget is calibrated by. Probe **P1** takes the true peak, from outside, with the reset.
+#[derive(Debug, Clone, Copy)]
+pub struct PassCost {
+    pub pass: &'static str,
+    pub elapsed: std::time::Duration,
+    /// Total and anonymous resident bytes at the end of the pass.
+    pub rss: u64,
+    pub anon: u64,
+}
+
 /// A fold whose files are durable under a prefix nothing yet names.
 pub(crate) struct CompletedFold {
     pub(crate) plan: FoldPlan,
@@ -572,6 +832,9 @@ pub(crate) struct CompletedFold {
     /// The largest new base segment's `columns.arrow + morton.u32` bytes — compaction §4 step 3's
     /// operand, computed here because these are the files that were just written.
     pub(crate) base_segment_bytes: u64,
+    /// One [`PassCost`] per pass, in execution order — the fold's own account of what it spent,
+    /// logged at publication and reduced to two gauges on `/control/status`.
+    pub(crate) cost: Vec<PassCost>,
 }
 
 /// Why a fold produced nothing. **Every failure discards the fold** (compaction §3, pass 5): its
@@ -604,10 +867,7 @@ impl std::fmt::Display for FoldFailed {
 pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold, FoldFailed> {
     let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
 
-    let partition_dir = ctx
-        .to_prefix_dir
-        .join("partitions")
-        .join(&plan.partition);
+    let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
     for dir in [&terms_dir, &entities_dir] {
@@ -619,6 +879,23 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // `MANIFEST.json` does not name and `ensure_verified` refuses at the first read.
     let mut written: Vec<(String, PathBuf)> = Vec::new();
 
+    // The staircase — see [`PassCost`]. `entry` is the zero every later reading is read against,
+    // and it is taken here rather than by the caller so that what it excludes is exactly the
+    // dispatch work (the plan, the tombstone clone) and nothing else.
+    let mut cost: Vec<PassCost> = Vec::with_capacity(6);
+    let mut mark = std::time::Instant::now();
+    let record = |pass: &'static str, cost: &mut Vec<PassCost>, mark: &mut std::time::Instant| {
+        let (rss, anon, _) = resident_set();
+        cost.push(PassCost {
+            pass,
+            elapsed: mark.elapsed(),
+            rss,
+            anon,
+        });
+        *mark = std::time::Instant::now();
+    };
+    record("entry", &mut cost, &mut mark);
+
     // ---- pass 1 — row space -------------------------------------------------------------------
     //
     // One new segment per (partition, slice), and one `permutation.bin` beside it. Rows whose
@@ -627,10 +904,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.slices.len());
     let mut base_segment_bytes = 0u64;
     for slice in &plan.slices {
-        let slice_rel = format!(
-            "partitions/{}/slices/{}",
-            plan.partition, slice.slice
-        );
+        let slice_rel = format!("partitions/{}/slices/{}", plan.partition, slice.slice);
         let slice_dir = ctx.to_prefix_dir.join(&slice_rel);
         std::fs::create_dir_all(&slice_dir).map_err(|e| failed("creating the slice", &e))?;
         let segment_rel = format!("{slice_rel}/segments/{}", ctx.seg_id);
@@ -684,6 +958,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         });
     }
 
+    record("1 row space", &mut cost, &mut mark);
+
     // ---- pass 2 — postings, and `pairs.parquet` as a side output ------------------------------
     //
     // A fold rewrites postings by subtraction only (decision 0048 deleted the evaluate arm), so
@@ -734,6 +1010,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     }
     written.push((postings_rel, postings_path));
     written.push((pairs_rel, pairs_path));
+    record("2 postings", &mut cost, &mut mark);
 
     // ---- pass 3 — external ids ----------------------------------------------------------------
     //
@@ -771,6 +1048,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         Some(run_rel)
     };
 
+    record("3 external ids", &mut cost, &mut mark);
+
     // ---- pass 4 — the dictionary ---------------------------------------------------------------
     //
     // Carried forward verbatim, hard-linked, never renumbered and never shrunk — and the linking
@@ -794,10 +1073,10 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // is a property nobody observes. The carried-forward links are the executor's half, and they
     // need only their directory entries synced — a link copies no bytes.
     //
-    // ⊘ **This makes the fold's own output durable and does not make the corpus so.** A
-    // carried-forward file was written by a flush that did not sync it either, and linking it does
-    // not change that; closing it properly is a ruling about the segment writers, which serve three
-    // producers and are outside this pass.
+    // **This makes the fold's own output durable; publication does the same for what it links.** A
+    // carried-forward file was written by a flush that did not sync it either — no producer here
+    // syncs a data file — and a hard link copies no bytes, so `publish_fold` syncs the carry-forward
+    // set before the flip for exactly the reason this pass syncs its own (compaction §8).
     let mut files = BTreeMap::new();
     for (rel, path) in &written {
         files.insert(
@@ -807,6 +1086,9 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     }
     let paths: Vec<PathBuf> = written.iter().map(|(_, path)| path.clone()).collect();
     tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
+    // Pass 4 is not marked because it does nothing: the dictionary is carried forward by a link at
+    // publication, and a zero-cost row in the staircase would read as an unmeasured one.
+    record("5 digests + fsync", &mut cost, &mut mark);
 
     Ok(CompletedFold {
         plan,
@@ -815,6 +1097,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         files,
         external_id_run,
         base_segment_bytes,
+        cost,
     })
 }
 
@@ -1056,7 +1339,35 @@ mod tests {
             window_min_segments: 8,
             max_segments: Some(64),
             after_deletions: Some(500_000),
+            // The two ratio gauges are off in this helper: every case below is about the counts and
+            // the window, and a live ratio would give some of them a second reason to fire that the
+            // assertion could not tell apart. `the_two_ratio_gauges_*` arm them deliberately.
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: None,
         }
+    }
+
+    /// [`due`] with the row count zero and the dead-bytes walk absent — the shape every case but
+    /// the ratio ones wants. A zero row count is what switches the tombstoned fraction off (a ratio
+    /// has no denominator), and `|| None` is a walk that could not be performed.
+    fn due_at(
+        s: &CompactionSchedule,
+        now: u64,
+        last: Option<u64>,
+        live_segments: usize,
+        retirable_deletions: u64,
+    ) -> Option<FoldTrigger> {
+        due(
+            s,
+            now,
+            last,
+            Gauges {
+                live_segments,
+                retirable_deletions,
+                live_rows: 0,
+            },
+            || None,
+        )
     }
 
     /// Seconds since the epoch at `day` days past it, `hour`:00 UTC.
@@ -1075,12 +1386,12 @@ mod tests {
     fn the_windowed_route_fires_only_inside_the_window_and_only_with_work() {
         let s = schedule();
         assert_eq!(
-            due(&s, at(10, 1), None, 8, 0),
+            due_at(&s, at(10, 1), None, 8, 0),
             Some(FoldTrigger::Window),
             "01:00 with eight segments is the case the window exists for"
         );
         assert_eq!(
-            due(&s, at(10, 9), None, 63, 0),
+            due_at(&s, at(10, 9), None, 63, 0),
             None,
             "09:00 is outside the window at any count below the ceiling — a start time that fires \
              at breakfast after a restart is not a start time. (63 rather than an arbitrarily \
@@ -1088,7 +1399,7 @@ mod tests {
              would stop being about the window at all.)"
         );
         assert_eq!(
-            due(&s, at(10, 1), None, 7, 0),
+            due_at(&s, at(10, 1), None, 7, 0),
             None,
             "and inside it, below the threshold, there is nothing worth folding"
         );
@@ -1105,18 +1416,26 @@ mod tests {
     fn the_unwindowed_routes_are_not_windowed() {
         let s = schedule();
         assert_eq!(
-            due(&s, at(10, 14), None, 1, 500_000),
+            due_at(&s, at(10, 14), None, 1, 500_000),
             Some(FoldTrigger::RetirableDepth),
             "14:00, one segment, at the deletion limit"
         );
-        assert_eq!(due(&s, at(10, 14), None, 1, 499_999), None, "and not below it");
+        assert_eq!(
+            due_at(&s, at(10, 14), None, 1, 499_999),
+            None,
+            "and not below it"
+        );
 
         assert_eq!(
-            due(&s, at(10, 14), None, 64, 0),
+            due_at(&s, at(10, 14), None, 64, 0),
             Some(FoldTrigger::SegmentCount),
             "14:00, no deletions at all, at the segment ceiling"
         );
-        assert_eq!(due(&s, at(10, 14), None, 63, 0), None, "and not below it");
+        assert_eq!(
+            due_at(&s, at(10, 14), None, 63, 0),
+            None,
+            "and not below it"
+        );
     }
 
     /// **The two segment thresholds are a floor and a ceiling over one gauge**, and the window is
@@ -1130,14 +1449,14 @@ mod tests {
     #[test]
     fn the_segment_gauge_has_a_window_floor_and_an_any_hour_ceiling() {
         let s = schedule();
-        assert_eq!(due(&s, at(10, 14), None, 8, 0), None, "8 at 14:00 waits");
+        assert_eq!(due_at(&s, at(10, 14), None, 8, 0), None, "8 at 14:00 waits");
         assert_eq!(
-            due(&s, at(10, 1), None, 8, 0),
+            due_at(&s, at(10, 1), None, 8, 0),
             Some(FoldTrigger::Window),
             "8 inside the window folds, and is reported as the window"
         );
         assert_eq!(
-            due(&s, at(10, 1), None, 64, 0),
+            due_at(&s, at(10, 1), None, 64, 0),
             Some(FoldTrigger::SegmentCount),
             "64 inside the window folds too — and is reported as the ceiling, because that is \
              the reason that will still be true tomorrow"
@@ -1155,17 +1474,17 @@ mod tests {
         let s = schedule();
         let last = at(10, 1);
         assert_eq!(
-            due(&s, at(10, 2), Some(last), 64, 999_999),
+            due_at(&s, at(10, 2), Some(last), 64, 999_999),
             None,
             "one hour later, with every gauge over its threshold — the floor is under all three"
         );
         assert_eq!(
-            due(&s, at(11, 1), Some(last), 8, 0),
+            due_at(&s, at(11, 1), Some(last), 8, 0),
             Some(FoldTrigger::Window),
             "and the next night's window is exactly a day past it"
         );
         assert_eq!(
-            due(&s, at(9, 1), Some(last), 64, 999_999),
+            due_at(&s, at(9, 1), Some(last), 64, 999_999),
             None,
             "a clock that stepped backwards reads as 'not yet', never as a huge elapsed time"
         );
@@ -1180,13 +1499,20 @@ mod tests {
             window_secs: 4 * 3_600,
             ..schedule()
         };
-        assert_eq!(due(&s, at(10, 23), None, 8, 0), Some(FoldTrigger::Window));
         assert_eq!(
-            due(&s, at(11, 1), None, 8, 0),
+            due_at(&s, at(10, 23), None, 8, 0),
+            Some(FoldTrigger::Window)
+        );
+        assert_eq!(
+            due_at(&s, at(11, 1), None, 8, 0),
             Some(FoldTrigger::Window),
             "01:00 is two hours into a window that opened at 23:00"
         );
-        assert_eq!(due(&s, at(11, 4), None, 8, 0), None, "and 04:00 is past its end");
+        assert_eq!(
+            due_at(&s, at(11, 4), None, 8, 0),
+            None,
+            "and 04:00 is past its end"
+        );
     }
 
     /// **Either route switches off on its own**, which is what `spec §9`'s "a deployment may switch
@@ -1199,17 +1525,17 @@ mod tests {
             ..schedule()
         };
         assert_eq!(
-            due(&no_window, at(10, 1), None, 8, 0),
+            due_at(&no_window, at(10, 1), None, 8, 0),
             None,
             "a count that only clears the window's floor has no route left"
         );
         assert_eq!(
-            due(&no_window, at(10, 1), None, 8, 500_000),
+            due_at(&no_window, at(10, 1), None, 8, 500_000),
             Some(FoldTrigger::RetirableDepth),
             "and the unwindowed routes are untouched by it"
         );
         assert_eq!(
-            due(&no_window, at(10, 1), None, 64, 0),
+            due_at(&no_window, at(10, 1), None, 64, 0),
             Some(FoldTrigger::SegmentCount),
             "including the segment ceiling, which is where a window-less deployment's segment \
              growth is bounded"
@@ -1220,20 +1546,20 @@ mod tests {
             max_segments: None,
             ..schedule()
         };
-        assert_eq!(due(&no_depth, at(10, 14), None, 1_000, u64::MAX), None);
+        assert_eq!(due_at(&no_depth, at(10, 14), None, 1_000, u64::MAX), None);
 
         let no_ceiling = CompactionSchedule {
             max_segments: None,
             ..schedule()
         };
         assert_eq!(
-            due(&no_ceiling, at(10, 14), None, 100_000, 0),
+            due_at(&no_ceiling, at(10, 14), None, 100_000, 0),
             None,
             "with the ceiling off, segment growth waits for the window however far it goes"
         );
 
         assert_eq!(
-            due(&CompactionSchedule::off(), at(10, 1), None, 1_000, u64::MAX),
+            due_at(&CompactionSchedule::off(), at(10, 1), None, 1_000, u64::MAX),
             None,
             "off is off at every hour, every segment count and every depth"
         );
@@ -1245,7 +1571,256 @@ mod tests {
     fn a_zero_width_window_never_opens_and_a_day_wide_one_never_closes() {
         for hour in [0u64, 1, 12, 23] {
             assert!(!in_window(at(10, hour), 0, 0), "zero width at {hour}:00");
-            assert!(in_window(at(10, hour), 0, 86_400), "a day wide at {hour}:00");
+            assert!(
+                in_window(at(10, hour), 0, 86_400),
+                "a day wide at {hour}:00"
+            );
         }
+    }
+
+    /// **The two ratio gauges fire at any hour, and each catches what no count above can.**
+    ///
+    /// The tombstoned fraction is a different question from `after_deletions` over the same
+    /// numerator: 10,000 deletions in a 50,000-row bundle is a fifth of every viewport's scanned
+    /// rows wasted and nowhere near the absolute threshold. The byte ratio is the only route that
+    /// covers reclamation at all — this deployment's segments and overlay are both healthy.
+    ///
+    /// Kills: dropping either route; windowing either of them (both are asserted at 14:00).
+    #[test]
+    fn the_two_ratio_gauges_fire_at_any_hour_on_bundles_no_count_gauge_would_fold() {
+        let s = CompactionSchedule {
+            tombstoned_rows_fraction: Some(0.2),
+            dead_bytes_ratio: Some(1.0),
+            ..schedule()
+        };
+        let healthy = |deletions: u64, rows: u64| Gauges {
+            live_segments: 1,
+            retirable_deletions: deletions,
+            live_rows: rows,
+        };
+
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(10_000, 50_000), || None),
+            Some(FoldTrigger::TombstonedRows),
+            "a fifth of the rows are tombstoned, outside the window, with one segment and an \
+             overlay two orders of magnitude below `after_deletions`"
+        );
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(9_999, 50_000), || None),
+            None,
+            "and just under the fraction, nothing fires"
+        );
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(
+                DeadBytes {
+                    on_disc: 200,
+                    named: 100
+                }
+            )),
+            Some(FoldTrigger::DeadBytes),
+            "paying double for storage with nothing deleted and one segment — the reclamation \
+             obligation, which no other gauge sees"
+        );
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(
+                DeadBytes {
+                    on_disc: 199,
+                    named: 100
+                }
+            )),
+            None,
+            "and just under the ratio, nothing fires"
+        );
+        // **The ratio is dead-to-live, not total-to-live**, and at 1.0 the difference is every
+        // bundle ever built: on disc always exceeds named, if only by the manifests' own bytes.
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(
+                DeadBytes {
+                    on_disc: 101,
+                    named: 100
+                }
+            )),
+            None,
+            "a bundle with 1% dead is not a bundle paying double"
+        );
+    }
+
+    /// **The dead-bytes walk is not performed unless it decides something**, which is the whole
+    /// reason it is a closure: it is the one gauge that is not a field read.
+    ///
+    /// Kills: calling it eagerly; ordering it before any cheaper route; consulting it with the
+    /// route switched off.
+    #[test]
+    fn the_dead_bytes_walk_runs_only_when_every_cheaper_route_has_declined() {
+        let s = CompactionSchedule {
+            dead_bytes_ratio: Some(1.0),
+            ..schedule()
+        };
+        let walked = std::cell::Cell::new(0u32);
+        let walk = || {
+            walked.set(walked.get() + 1);
+            Some(DeadBytes {
+                on_disc: 200,
+                named: 100,
+            })
+        };
+
+        // The interval floor declines before anything is read at all.
+        assert_eq!(
+            due(
+                &s,
+                at(10, 14),
+                Some(at(10, 13)),
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
+            None
+        );
+        assert_eq!(walked.get(), 0, "a floored tick walks nothing");
+
+        // A cheaper route firing decides it.
+        assert_eq!(
+            due(
+                &s,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 64,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
+            Some(FoldTrigger::SegmentCount)
+        );
+        assert_eq!(
+            walked.get(),
+            0,
+            "the segment ceiling decided it, so nothing walked"
+        );
+
+        // Nothing cheaper fires: now it walks.
+        assert_eq!(
+            due(
+                &s,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
+            Some(FoldTrigger::DeadBytes)
+        );
+        assert_eq!(walked.get(), 1, "and exactly once");
+
+        // Switched off, it is never consulted.
+        let off = CompactionSchedule {
+            dead_bytes_ratio: None,
+            ..s
+        };
+        assert_eq!(
+            due(
+                &off,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
+            None
+        );
+        assert_eq!(walked.get(), 1, "an off route reads nothing");
+    }
+
+    /// A ratio with no denominator is not "infinitely dead". Both guards are the same shape and both
+    /// are reachable: an empty bundle has no rows, and a bundle whose manifests name nothing has no
+    /// named bytes — a fold at every tick over a corpus it cannot reduce.
+    #[test]
+    fn a_ratio_with_a_zero_denominator_never_fires() {
+        let s = CompactionSchedule {
+            tombstoned_rows_fraction: Some(0.2),
+            dead_bytes_ratio: Some(1.0),
+            ..schedule()
+        };
+        assert_eq!(
+            due(
+                &s,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 500,
+                    live_rows: 0
+                },
+                || Some(DeadBytes {
+                    on_disc: 1_000,
+                    named: 0
+                })
+            ),
+            None,
+            "no rows and no named bytes: neither ratio is defined, and neither may fire"
+        );
+    }
+
+    /// **The memory estimate is spec §3's table, and the figure it produces at 10⁹ is the one that
+    /// document states.** §3 budgets ~9–10 GB at 10⁹ entities over 1.17×10⁸ terms; this asserts the
+    /// estimate lands in that band, which is what makes the pre-flight a check against the design
+    /// rather than against a number invented at the call site.
+    ///
+    /// Kills the mutation that drops either 4 B array — either one alone gives ~5.9 GB and the
+    /// assertion fails low, which is r4's original error (`permutation.bin` omitted) reintroduced.
+    #[test]
+    fn the_memory_estimate_is_section_3s_budget_at_ten_to_the_nine() {
+        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000);
+        let gb = need as f64 / 1e9;
+        assert!(
+            (17.0..=19.0).contains(&gb),
+            "the estimate is {gb:.1} GB; spec §3 budgets ~9–10 GB and this carries \
+             FOLD_MEMORY_SAFETY_FACTOR on top, so ~17.9 GB is the figure"
+        );
+    }
+
+    /// The permutation term is the **largest** slice's, not every slice's — pass 1 folds one slice
+    /// at a time and drops each writer before the next, so a sum would refuse folds a host could
+    /// comfortably run. Asserted through the estimate's own arithmetic, since that is where a
+    /// reader would look for the rule.
+    #[test]
+    fn the_estimate_charges_one_permutation_and_one_locator() {
+        // 4 B + 4 B per entity, doubled by the safety factor, and no dictionary term.
+        assert_eq!(
+            memory_estimate(1_000, 1_000, 0),
+            (4 * 1_000 + 4 * 1_000) * 2
+        );
+        // The dictionary term is 8 B per ordinal and independent of entity space.
+        assert_eq!(memory_estimate(0, 0, 1_000), 8 * 1_000 * 2);
+    }
+
+    /// **The disc estimate is above the live bytes, not equal to them**, which is the margin spec
+    /// §8 asks for. An estimate of exactly the output leaves a device that fills at the last
+    /// carried-forward link, and the write path goes down behind it (write-path §1.3).
+    ///
+    /// Kills the mutation that makes `FOLD_DISC_PERCENT` 100.
+    #[test]
+    fn the_disc_estimate_carries_a_margin_over_the_bytes_it_would_write() {
+        let live = 47u64 << 30;
+        let need = disc_estimate(live);
+        assert!(
+            need > live,
+            "an estimate of {need} for {live} live bytes has no margin at all"
+        );
+        assert_eq!(need, live + live / 2, "150% of live bytes");
+        // Saturating rather than wrapping: an absurd manifest must refuse the fold, never wrap to
+        // a small number and admit it.
+        assert_eq!(disc_estimate(u64::MAX), u64::MAX / 100);
     }
 }

@@ -46,8 +46,8 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
         EngineConfig {
             flush_max_age_secs: tick_secs,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -270,7 +270,10 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
 /// A viewport, retried past the bounded `ProjectionBuilding` a refresh window can answer with.
 /// Decision 0044 permits exactly this residual, and a test that did not retry would be asserting
 /// that the residual does not exist.
-fn wait_for_viewport(engine: &Engine, session: &tessera_engine::Session) -> tessera_engine::viewport::ViewportOut {
+fn wait_for_viewport(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+) -> tessera_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match engine.viewport(session, whole_extent()) {

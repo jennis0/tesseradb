@@ -34,6 +34,9 @@ rustc-hash = "1"
 arrow = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# `statvfs` for compaction §8's free-space pre-flight. No std API exposes it; `tessera-build`
+# reaches for the same call for the same reason.
+libc = "0.2"
 rand = { workspace = true }
 # `overlay_soft_limit` alarms. The counter is the operator's durable signal, but a
 # counter nobody is told about is not an alarm, and the executor thread is the one place the

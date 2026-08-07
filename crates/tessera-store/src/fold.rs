@@ -239,9 +239,11 @@ pub fn fold_row_space(
             })
             .map_err(columns_io)?;
         permutation.set(entity, row_count).map_err(perm_io)?;
-        row_count = row_count.checked_add(1).ok_or_else(|| StoreError::MalformedBundle {
-            detail: "fold_row_space: row count exceeds u32::MAX".to_string(),
-        })?;
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: "fold_row_space: row count exceeds u32::MAX".to_string(),
+            })?;
     }
 
     let rows = writer.finish().map_err(columns_io)?;
