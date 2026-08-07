@@ -5,7 +5,9 @@ use std::collections::HashSet;
 
 use proptest::prelude::*;
 
-use tessera_lifecycle::alloc::{assign_sorted, high_water_from, Allocator, PendingItem};
+use tessera_lifecycle::alloc::{
+    allocator_floor, assign_sorted, high_water_from, Allocator, PendingItem,
+};
 use tessera_lifecycle::wal::{WalRecord, WalRow};
 use tessera_types::{EntityId, TermId};
 
@@ -78,6 +80,81 @@ proptest! {
             }
             // `alloc` is dropped here — the simulated crash. `wal_records` persists, standing in
             // for durable, already-fsynced WAL content survived from disk.
+        }
+    }
+
+    /// **No entity id is reissued after a fold** (I9; compaction §12's obligation 10), across
+    /// fuzzed interleavings of ingest, flush, fold and crash.
+    ///
+    /// A fold is the one operation that makes the two durable high-water marks disagree *on
+    /// purpose*. `publish_fold` writes the **snapshot's** entity bound into `MANIFEST.json`,
+    /// because that field's other reader is the base locator's declared length and a live value
+    /// there would claim every post-snapshot entity; it writes the **live** value into
+    /// `SEGMENTS-<n>.json`. The rotation that follows then reclaims the WAL records the ids were
+    /// really derived from. So after a fold every one of the three homes is individually wrong —
+    /// the bundle manifest was lowered, the WAL was reclaimed — and only
+    /// `alloc::allocator_floor`'s `max` recovers the floor.
+    ///
+    /// **What this covers, and what it does not.** Like
+    /// `no_reuse_across_simulated_crashes` beside it, this is a model: it simulates the crash
+    /// rather than crashing a process, and it exercises the composition rule at its real function
+    /// rather than re-deriving it. The fold's *own* write — that `SEGMENTS-<n>.json` gets the live
+    /// value and `MANIFEST.json` the snapshot's — is a fact about IO and is pinned end to end by
+    /// `tessera-engine`'s `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot`
+    /// and `the_folded_manifests_high_water_is_the_snapshots_entity_space`. Obligation 10 needs
+    /// both; neither alone establishes it.
+    #[test]
+    fn no_reuse_across_a_fold_that_lowers_the_bundles_high_water(
+        rounds in prop::collection::vec((1u64..32, any::<bool>(), any::<bool>()), 1..14),
+    ) {
+        // The three durable homes, none of which is sufficient alone.
+        let mut bundle_high_water = 0u64;       // MANIFEST.json
+        let mut side_high_water = 0u64;         // SEGMENTS-<n>.json
+        let mut wal: Vec<WalRecord> = Vec::new();
+        let mut used: HashSet<u64> = HashSet::new();
+
+        for (n, flush, fold) in rounds {
+            // ---- restart, seeded exactly as `Engine::open` does ----------------------------
+            let seed = allocator_floor(bundle_high_water, &[side_high_water])
+                .max(high_water_from(&wal));
+            let mut alloc = Allocator::new(seed);
+            // A fold plans against the generation it opened on, so its snapshot bound is the
+            // entity space as of *now* — before this round's ingests, which is what makes the
+            // value it writes to `MANIFEST.json` strictly lower than the live one.
+            let planned_bound = seed;
+
+            for id in alloc.allocate(n).unwrap() {
+                prop_assert!(!used.contains(&id), "entity id {} reissued", id);
+                used.insert(id);
+                wal.push(WalRecord::IngestBatch {
+                    batch_id: format!("batch-{id}"),
+                    body_hash: [0u8; 32],
+                    rows: vec![WalRow {
+                        external_id: Some(id.to_le_bytes().to_vec()),
+                        entity_id: EntityId::new(id),
+                        slice: "default".to_string(),
+                        descriptors: Vec::new(),
+                        x: 0.0,
+                        y: 0.0,
+                        scalars: Vec::new(),
+                    }],
+                });
+            }
+
+            if flush {
+                // A flush publication raises the side-manifest past the ids it consumed.
+                side_high_water = alloc.high_water();
+            }
+            if fold {
+                bundle_high_water = planned_bound;
+                side_high_water = alloc.high_water();
+                // The rotation behind the fold reclaims the log. Faithful precisely *because*
+                // the line above took the live value: it is what makes the reclaimed records
+                // redundant, and a fold that wrote the snapshot's bound here instead would
+                // reclaim ids nothing else records.
+                wal.clear();
+            }
+            // `alloc` is dropped here — the crash.
         }
     }
 

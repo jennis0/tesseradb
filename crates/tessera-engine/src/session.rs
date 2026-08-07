@@ -741,23 +741,24 @@ impl Engine {
         let mut vocabularies = initial_vocabularies_of(&bundle)?;
         // **The allocator floor comes from the side-manifest, never from the build manifest
         // alone.** Every flush raises `SegmentsManifest::entity_id_high_water` past the ids it
-        // consumed, while `MANIFEST.json`'s value is frozen at build. Seeding from the build value
-        // is safe only for as long as the WAL still carries the `Lease` and `IngestBatch` records
-        // `high_water_from` derives the rest from — and rotation deletes exactly those. Taking the
-        // max of the two makes the floor survive reclamation, which is what I9 requires: an id
-        // handed out twice grants the new item every access the old one had.
-        let side_manifest_high_water = bundle
+        // consumed, while `MANIFEST.json`'s value is frozen at build — and a fold *lowers* it, to
+        // the snapshot's bound, for a different reader. Seeding from the build value is safe only
+        // for as long as the WAL still carries the `Lease` and `IngestBatch` records
+        // `high_water_from` derives the rest from — and rotation deletes exactly those. The rule
+        // is `alloc::allocator_floor`, named rather than spelled out here so the property test
+        // can exercise it instead of restating it: an id handed out twice grants the new item
+        // every access the old one had.
+        let side_manifest_high_waters: Vec<u64> = bundle
             .partitions
             .values()
             .map(|partition| partition.manifest.entity_id_high_water)
-            .max()
-            .unwrap_or(0);
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
-            bundle
-                .manifest
-                .entity_id_high_water
-                .max(side_manifest_high_water),
+            tessera_lifecycle::alloc::allocator_floor(
+                bundle.manifest.entity_id_high_water,
+                &side_manifest_high_waters,
+            ),
             &dict,
             &initial_deny,
             &mut vocabularies,
