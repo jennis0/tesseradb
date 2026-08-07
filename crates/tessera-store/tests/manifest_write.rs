@@ -122,6 +122,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],
+        vocabulary_extensions: vec![],
         files: segments_files,
     };
     fs::write(
@@ -136,6 +137,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         data_plugin_hash: "builtin:passthrough:1".to_string(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
+        vocabularies: vec![],
         small_term_threshold: 32,
         quantisation: Quantisation {
             x_min: extent.x_min,
@@ -301,6 +303,7 @@ fn manifest_fixture() -> SegmentsManifest {
         locator_extents: Vec::new(),
         tombstones: Vec::new(),
         deny: Vec::new(),
+        vocabulary_extensions: vec![],
         files: BTreeMap::new(),
     }
 }

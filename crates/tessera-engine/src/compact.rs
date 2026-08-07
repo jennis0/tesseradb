@@ -503,9 +503,6 @@ pub(crate) enum NoFold {
     SteppedDown,
     /// No partition, or a partition with no slice holding a segment. Nothing to fold.
     NothingToFold,
-    /// The bundle declares a scalar column this build cannot write, so pass 1 would emit a segment
-    /// the reader refuses. The same fail-closed answer a flush gives.
-    UnwritableScalarSchema,
     /// **The estimated peak memory is above what the host has available** (compaction §3). Both
     /// figures in bytes.
     InsufficientMemory { need: u64, available: u64 },
@@ -623,10 +620,6 @@ pub(crate) fn plan_fold(
     {
         return Err(NoFold::SteppedDown);
     }
-    if crate::write::scalar_schema_of(&generation.bundle.manifest).is_none() {
-        return Err(NoFold::UnwritableScalarSchema);
-    }
-
     let (partition, partition_data) = generation
         .bundle
         .partitions

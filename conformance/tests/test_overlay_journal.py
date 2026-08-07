@@ -541,7 +541,13 @@ def ingest_server(tmp_path_factory, catalogue_bundle_root):
 
 
 def _ingest_batch(rows: int, access: str) -> bytes:
-    """A minimal `/control/ingest` body: `(external_id, x, y, access)`, Arrow IPC stream."""
+    """A minimal `/control/ingest` body: `(external_id, x, y, access, fx_key)`, Arrow IPC stream.
+
+    `fx_key` is present because the catalogue declares it, and a declared column must be in every
+    batch (contracts §2.2): the scalar tail is read back positionally, so an omitted column shifts
+    every later scalar rather than defaulting to absent. The values come from the fixture, which
+    owns the join key.
+    """
     import io  # noqa: PLC0415
 
     import pyarrow as pa  # noqa: PLC0415
@@ -553,6 +559,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.utf8()),
+            pa.field("fx_key", pa.uint64()),
         ]
     )
     batch = pa.record_batch(
@@ -561,6 +568,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.array([1000.0 + i for i in range(rows)], pa.float32()),
             pa.array([2000.0 + i for i in range(rows)], pa.float32()),
             pa.array([access] * rows, pa.utf8()),
+            pa.array(cat.ingest_fx_keys(rows), pa.uint64()),
         ],
         schema=schema,
     )

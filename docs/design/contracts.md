@@ -1,6 +1,6 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r21 — r20 (decision 0048: the evaluate machinery is deleted, not carried) plus one narrowing: §2.1's "exactly one segment per partition-slice" becomes "one **base** segment, plus a compaction's in-flight extents", because a fold that never blocks flush cannot emit one. Neither revision adds, removes or retypes a field (Appendix R)
+**Status:** Draft r24 — a category arrives as its *key* (r24): `/control/ingest` takes category columns as `utf8` value keys rather than codes at the declared width, which is what makes an unknown value refusable at all, and §2.3 gains `vocabulary_extensions` for bindings minted between builds. The per-item column tail became real (r22) and complete (r23): §2.2's `declared_scalars` gains `vocabulary` and a required `vocabularies` table, and §2.6's tail admits the full core type set — boolean, the four unsigned and four signed integer widths, both floats, microsecond timestamps and utf8. **Both revisions add fields** (Appendix R), unlike r20 and r21, which added none
 **Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r30); `SA §n` to the system architecture (r10). **Precedence:** the design is the specification and this document defers to it; the eleven recorded deviations in §0.3 govern where this document and the *system architecture* differ, and are proposed back to it. Deviations 6 and 8 have a design companion already applied at the design's r21, so they record an alignment rather than an outstanding proposal.
 
 ---
@@ -134,7 +134,8 @@ reconstructing canonically is the combination that hides it.
 | `created_at` | RFC 3339 | provenance |
 | `data_plugin_hash` | hex | hash of the **data module** (4.1); serving refuses on mismatch |
 | `declared_bounds` | object | plugin bounds, verbatim (§6.1) |
-| `declared_scalars` | array | `[{name, arrow_type}]` — the caller's per-item columns; ingest validates against this before any segment exists. **⊘ Partially implemented.** The build writes an empty array unconditionally and no build path emits a scalar column, so the points-batch schema's declared-scalar tail (§3.2) has never been non-empty. Ingest **does** validate against it: a batch column this array does not declare, a declared column the batch omits, and a declared column at the wrong arrow type are each `422` naming the column, and the scalar tail is built in declared order — refusals rather than the silent drop that shifted every later scalar by one. That validation has therefore only ever run against an empty declaration. The read path also honours the field — it widens the points schema from it — so a hand-written manifest declaring a scalar the columns do not carry is unguarded |
+| `declared_scalars` | array | `[{name, arrow_type, vocabulary?}]` — the caller's per-item columns, compiled from the build's `schema.toml` *(r22)*. **Order is significant and is the schema's declaration order**: the tail is stored and read back positionally, so reordering this array reorders the columns of every segment built after it. `arrow_type` is one of `bool`, `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `timestamp_us`, `utf8` *(r23)*; `timestamp_us` stores as an `i64` of microseconds since the epoch and exists so the unit is a fact a reader can check rather than a convention; `vocabulary` names a `vocabularies` entry for a category column and is absent for a plain one. Ingest validates against it — a batch column this array does not declare, a declared column the batch omits, and a declared column at the wrong **expected** type are each `422` naming the column, refusals rather than the silent drop that shifted every later scalar by one — and the read path widens the points schema from it. **Expected is a function of the declaration, and for a category it is not the storage type**: the column arrives as `utf8` value keys and stores codes at `arrow_type` *(r24, §3.4)*. `arrow_type` is the enumerated set above and nothing else — a spelling this build cannot store refuses the whole manifest at the parse, not the one field, so no reader has to carry an arm for a column it cannot write. A hand-written manifest declaring a scalar the columns do not carry remains unguarded |
+| `vocabularies` | array | `[{name, listing, values: [{key, code, label?}], reserved: [int]}]` — the value sets `declared_scalars`' category columns draw their codes from *(r22)*. **Required**, empty when no category is declared; a manifest omitting it is malformed rather than category-free, and the case that matters — rows carrying codes whose bindings went missing — would otherwise open and serve marks that decode to nothing. **This is the durable mapping, and nothing re-derives it**: `columns.arrow` stores the code, not the key, so a build that re-derived codes from a re-supplied vocabulary file would recolour the whole corpus with no error and no digest mismatch. Code `0` is the reserved *absent* sentinel and is never assigned. `reserved` holds retired codes, never reassigned. `listing` is `per_viewer` or `public`; **⊘ recorded, not enforced** — no endpoint publishes a vocabulary, so it currently gates nothing |
 | `small_term_threshold` | int | cardinality at or below which a posting is stored as a sorted array rather than Roaring (2.4); default 32 pending Phase 1 calibration |
 | `quantisation` | object | `{x_min, x_max, y_min, y_max}` (f64) — see 2.5 |
 | `entity_id_high_water` | u64 | first unallocated entity ID at build; seeds the allocator. A JSON counter value, not an entity-space array, so §1's `u32` narrowing does not apply to its declared width; the allocator nonetheless refuses a seed at or above `u32::MAX` (§2.6) |
@@ -161,6 +162,7 @@ Each is **complete** for its partition — full current state, not a diff — so
 | `dict_extents` | array | `[{path, records}]` — the bundle-level dictionary extents this partition's term IDs require, ordinal order. Extents are immutable and shared: several partitions listing the same extent carry identical digests, so verification never conflicts. **Positional, in listed order, and never reordered**: a term's ordinal is its position in the concatenation of these files, so the list is append-only and a contiguous run may be coalesced in place but never permuted. **No descriptor may appear twice across the list** — a repeat shifts every ordinal after it, and a reader is entitled to skip it, so the two readings of the same bundle would disagree about what a posting means. Both are format rules, not implementation details; `flush::promote` resolves against the live dictionary before interning to keep the first, and `Dict::load` skips a repeat to keep the second |
 | `external_id_runs` | array | run paths, oldest first. Each run is internally sorted; runs are **not** ordered against one another *by key* (§2.4). **List position is recency, and that is load-bearing**: §2.4 resolves newest-run-first, so a merge or a coalesce replacing several runs with one must take a **contiguous** window and land the replacement in the window's own position — a run at a recency position it did not earn answers a stale binding |
 | `tombstones` | array | deleted entity IDs, ascending (this partition's only — isolation holds; folded away at compaction, **⊘ unbuilt — today the list only grows**) |
+| `vocabulary_extensions` | array | `[{name, values: [{key, code}]}]` — the category bindings minted since the build or fold that wrote `MANIFEST.vocabularies` *(r24)*. **Carried forward and appended to, never restated**, which is the opposite discipline to `deny` and `tombstones` below and for a reason that decides it: `deny` is re-derived at every write *because it must be able to shrink* — an unsuppress has to reach disc — and a binding must never shrink. Restate-fresh is the one shape that can silently drop one, and a dropped binding leaves every row carrying its code with no key to explain it. The loader seeds the live bindings from `MANIFEST.vocabularies` plus this, before WAL replay, which is what keeps a minted code out of the next draw. The fold folds these into the next prefix's `MANIFEST.vocabularies` **verbatim** and writes an empty set. **⊘ Written by nobody yet** ([#82](https://github.com/jennis0/tessera-index/issues/82)): nothing mints between builds until the commit window does |
 | `deny` | array | `[{entity_id, cause: "suppress"}]` — the current suppression set. **Publication rule:** any accepted deny-disposition change (delete, suppress, unsuppress) triggers publication of a new side-manifest at the close of the deny drain — never deferred to the next flush, with a liveness floor under sustained arrival — because a syncing replica must never reconstruct a state in which a suppressed item is visible (SA §6.2's fail-open, at the interchange layer). `unsuppress` removes the entry in the manifest its own drain publishes |
 | `files` | object | path → `{size, sha256}` for files added since MANIFEST |
 
@@ -249,7 +251,7 @@ Interleaving the two 32-bit axes gives a 64-bit **position code**, of which the 
 |---|---|---|
 | `tessera_id` | uint64 | the row→wire-identity direction (deviations 2, 6) |
 | `residual` | uint32 | the **low half of this row's 64-bit position code** (§2.5); the high half is the row's entry in `morton.u32`. **Not a sort key** — it varies arbitrarily within a cell |
-| *declared scalars* | per MANIFEST | |
+| *declared scalars* | per MANIFEST | the tail, in `MANIFEST.declared_scalars` order — `boolean`, `uint8`, `uint16`, `uint32`, `uint64`, `int8`, `int16`, `int32`, `int64`, `float32`, `float64`, `timestamp[us]` or `utf8` *(r23)*. `boolean` is Arrow's bit-packed form, one bit per row, so it is the one column whose buffer is not `row_count` elements wide. Non-nullable like every column here (R4): a category's *absent* is code `0`, not a null, which is what lets the reader hand back flat slices with no validity bitmap. A column the manifest does not declare, or at a type it does not declare, is a typed error at open |
 
 There is **no `priority` column** *(r16; decision 0046 — cut, having been written and unread at
 query time since r7)*. The quantity survives as the high 16 bits of `tessera_id`, derived at one
@@ -396,7 +398,7 @@ If `idset` is supplied and differs from `identity.idset` (§2.2), the response i
 
 | Endpoint | Essentials |
 |---|---|
-| `POST /control/ingest` | **Arrow**: `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, …declared scalars)` + headers `x-tessera-batch-id`, `x-tessera-slice` (optional when the bundle has one slice; `422` if ambiguous). 200 after WAL fsync: `{accepted, over_bound, over_bound_ids: [first 100…]}` — over-bound items are **indexed regardless** (bounds warn, never exclude — §6.2 r16); identity is what makes the warn a usable data-quality signal, so the ids are **base64**, as every external ID on this plane is (§1: they are arbitrary bytes and JSON has no binary type). An item with no external id is counted in `over_bound` and named in no list. Idempotency: the batch id maps to the SHA-256 of the raw request body; a retry must resend identical bytes (Arrow serialisation is not canonical, so re-serialising is the client's bug to avoid). *(r6; scoped at r17)* Duplicate detection is on the caller's `external_id` where one is supplied, against both the in-flight batch and the bundle's external-ID sidecar: duplicates are `409 conflict` with the offending IDs in `detail`, and **the batch has no effect**. **A holder that is *deleted* does not collide** (decision 0047 — edit is delete + re-ingest, and the service's retention of a dead binding never refuses a write); a **suppressed** holder still does, suppression being temporary hiding. Re-ingest re-binds the id: resolution is newest-binding-first everywhere. `external_id` is optional; an item without one is addressable only by its `tessera_id`, which the response returns per accepted row |
+| `POST /control/ingest` | **Arrow**: `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, …declared scalars)` + headers `x-tessera-batch-id`, `x-tessera-slice` (optional when the bundle has one slice; `422` if ambiguous). 200 after WAL fsync: `{accepted, over_bound, over_bound_ids: [first 100…]}` — over-bound items are **indexed regardless** (bounds warn, never exclude — §6.2 r16); identity is what makes the warn a usable data-quality signal, so the ids are **base64**, as every external ID on this plane is (§1: they are arbitrary bytes and JSON has no binary type). An item with no external id is counted in `over_bound` and named in no list. Idempotency: the batch id maps to the SHA-256 of the raw request body; a retry must resend identical bytes (Arrow serialisation is not canonical, so re-serialising is the client's bug to avoid). *(r6; scoped at r17)* Duplicate detection is on the caller's `external_id` where one is supplied, against both the in-flight batch and the bundle's external-ID sidecar: duplicates are `409 conflict` with the offending IDs in `detail`, and **the batch has no effect**. **A holder that is *deleted* does not collide** (decision 0047 — edit is delete + re-ingest, and the service's retention of a dead binding never refuses a write); a **suppressed** holder still does, suppression being temporary hiding. Re-ingest re-binds the id: resolution is newest-binding-first everywhere. `external_id` is optional; an item without one is addressable only by its `tessera_id`, which the response returns per accepted row. **A category column carries `utf8` value keys, never codes** *(r24)* — for declared and discovered vocabularies alike. Codes are the server's to assign (per-point-attributes §3.1, §3.4): a caller supplying one would be the minting authority, and the server could then guarantee neither the scatter nor the never-reuse the scattered code exists for. It is also what makes the value checkable — a code can only be range-checked, so a `u16` column accepted any `u16` and stored an unassigned code, a `reserved` code or a typo unremarked, leaving the row carrying a code no key explains. A key is membership-checked: an unknown key under `vocabulary = "declared"` is `422` naming the column and the key, **whole batch without effect** (declare-then-use). A **null** is *absent*, stored as the reserved code `0`; the **empty string** is `422`, being what an unset field and a client bug both produce, so folding it into absence would accept the same defect silently. A plain integer column and a category of the same width are now distinguishable on the wire, so a client that disagrees with the schema about which a column is gets a `422` naming it rather than plausible integers stored as codes |
 | `POST /control/changes` | JSON `[{external_id \| (tessera_id, idset), op: "delete"\|"suppress"\|"unsuppress"}]`. **The `predicate` op is withdrawn** *(r17; decision 0047 — edit is delete + re-ingest)*: naming it is a 422 whose detail says so, and the `access` field went with it. Its machinery is **deleted** *(r20; decision 0048)* — no deployment exists, so no WAL carries an evaluate record to replay. 200 after WAL fsync; never 429; deny ops trigger immediate side-manifest publication (2.3). **Exactly one address form per element**, both or neither is `422`. `tessera_id` is **string-encoded** — a bare JSON number silently loses `u64`s past 2⁵³ in most clients, and a mis-parsed identifier denies the wrong entity — and must carry the `idset` it was minted under (`/v1/meta`), which is `409` if stale, decided **before any inversion**. An identifier that inverts outside this deployment's shard or past its allocator high-water is `404` and the **whole batch applies nothing**: the permutation is total, so the range check is the entire misdirection guard. The second form exists because §3.4 r6 makes `external_id` optional at ingest, and an item that arrived without one is otherwise addressable by nothing here. **Neither form reaches the WAL**: the entity is resolved once, at admission, and persisted, so replay is identical under a rotated key |
 | `POST /control/labels` *(Ph 3)* | text, tier, node ID, generating set as external IDs |
 | `GET /control/labels/invalidated?cursor=` *(Ph 3)* | `{items: [{label_id, cause}], next_cursor}` |
@@ -470,6 +472,76 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 - **The reader must refuse a non-canonical `SEGMENTS-<n>.json` name** (§2.1). The grammar is ruled — unpadded — and the writer already conforms; the reader still parses a padded name leniently and then fails to open it, which is the silent path the ruling exists to close.
 
 ## Appendix R — Review record
+
+**r24** makes a category's *value* checkable (2026-08-07). r22 and r23 built the column; this
+revision fixes what arrives in it.
+
+`/control/ingest` takes category columns as `utf8` value keys rather than codes at the declared
+width. The residual r22 recorded — "a category column is validated at its width, so an unassigned
+or `reserved` code is an ordinary integer and is stored unremarked" — is closed, and closed in the
+only way it could be: a code carries no membership, so range-checking is the most any validator can
+do to one, while a key can be checked against the vocabulary. Declare-then-use is therefore
+enforceable at the boundary, and a typo can no longer put a colour into the corpus that no key
+explains.
+
+**This breaks the admin plane's batch schema for category columns**, which decision 0048 licenses:
+no deployment, bundle or client exists outside this repository, so the artifacts are recreated
+rather than migrated. The declared width is unchanged as the *storage* type — the row, the WAL
+scalar, the segment column and the viewer wire all still carry the code — so only the wire moves.
+
+§2.3 gains `vocabulary_extensions`, the between-builds home for bindings minted after a build. Its
+discipline is deliberately the opposite of `deny`'s and the asymmetry is the argument: state that
+must be able to **shrink** is restated in full at every write, and state that must **never** shrink
+is carried forward and appended to. Restating a binding set is the one shape that can silently drop
+a binding, and a dropped binding is a corpus-wide recolour with no error and no digest mismatch.
+The field is honoured by the loader and written by nobody until the commit window mints
+([#82](https://github.com/jennis0/tessera-index/issues/82)).
+
+`arrow_type` is now a closed set at the parse rather than a string checked at each use: a manifest
+naming a type this build cannot store is refused whole, which replaces four separate refusals for
+one state no loaded bundle could be in.
+
+**r23** completes the tail's type set (2026-08-07), r22 having shipped seven of them. Added:
+`bool`, the three narrow signed widths (`i8`, `i16`, `i32`), `f64`, and `timestamp_us`.
+
+Each closes a gap that made a declaration lie about its cost or its meaning. A signed value in
+−128..127 had to be declared `i64` — eight bytes where one would do, which undercuts the residency
+argument the narrow widths exist for. `f64` did not exist at all, so a caller with a value an
+`f32` cannot hold had no way to say so, and — most parquet writers emitting `double` by default —
+was rounded without being told. And a time was an `i64` whose unit lived in a convention between
+the schema author and their client; `timestamp_us` puts it in the manifest. **Microseconds are the
+only admitted unit**, in the type and at the reader: nothing records a unit per column beyond the
+type name, so admitting milliseconds too would let two builds store incomparable numbers under one
+declaration.
+
+`bool` is Arrow's bit-packed form — one bit per row, eight times cheaper than the `u8` a flag
+otherwise costs — and is the one column whose buffer is not `row_count` elements wide. That is
+`columns.arrow`'s first non-flat fixed-width column, so a reader indexing the tail by element
+width must special-case it; `ScalarSlice::Bool` carries the array rather than a slice for exactly
+that reason.
+
+No `bundle_format` bump, under decision 0048: the fields are added and the artifacts recreated.
+
+**r22** makes the per-item column tail real (2026-08-07). §2.2's `declared_scalars` is no longer
+marked ⊘: the build compiles it from a `schema.toml`, both build implementations emit the columns,
+and flush, merge and the fold carry them — so the entry that said *"the build writes an empty array
+unconditionally… that validation has therefore only ever run against an empty declaration"* was
+describing a system that no longer exists. **Two fields are added**: `declared_scalars` entries gain
+an optional `vocabulary`, and a required `vocabularies` table carries the value sets category codes
+index. §2.6 states the tail's accepted types and its non-nullability.
+
+The correction is not only a marking. The old entry's implicit reassurance — that a declared
+scalar is validated end to end — is **narrowed** at the claim: ingest checks a category column's
+*width*, not its meaning, so an unassigned or `reserved` code is stored unremarked and the row
+carries a code no key explains. Checking meaning needs the key rather than the code, which is
+[#82](https://github.com/jennis0/tessera-index/issues/82). `listing` is likewise recorded and
+enforced by nothing, there being no endpoint that publishes a vocabulary.
+
+**No `bundle_format` bump** — and under decision 0048 that is not a compatibility statement but the
+absence of one: no bundle exists outside this repository, so the fields are simply added and the
+artifacts recreated. The §6 amendments per-point-attributes lists for §2.4, §3.2 and §3.4 are
+**not** in this revision: they describe the attribute dictionary, `/v1/categories` and the ingest
+key form, none of which is built.
 
 **r21** narrows one sentence in §2.1 and changes nothing on disc (2026-08-06, owner ruling;
 decision 0051). *"Every compaction emit[s] exactly one segment per partition-slice"* becomes *one
@@ -586,7 +658,7 @@ The exception, recorded here because r12's first draft claimed otherwise and an 
 
 The other three kinds of edit:
 
-*Marked as specified-not-implemented, at the claim.* §2.3's `readyz` **freshness gate** — step-down is built, including the deny/delta disposition split, but its time bound is not, so a stepped-down replica serves its older manifest indefinitely; §2.3's `deltas`, `tombstones` and `deny`, parsed and acted on by nothing; §2.2's `declared_scalars`, always written empty, so the points batch's declared-scalar tail has never been exercised; §2.4's dictionary **extents**, of which exactly one has ever existed and whose per-extent `records` field is written as the corpus total — correct only while the vector has length 1; §3.1's `x-tessera-api` header, which nothing emits and nothing validates; §3.4's `fragmentation`, emitted over commit-window allocation rather than over base plus delta tiers; and §3.4's per-partition status block, which is not emitted.
+*Marked as specified-not-implemented, at the claim.* §2.3's `readyz` **freshness gate** — step-down is built, including the deny/delta disposition split, but its time bound is not, so a stepped-down replica serves its older manifest indefinitely; §2.3's `deltas`, `tombstones` and `deny`, parsed and acted on by nothing; §2.2's `declared_scalars`, always written empty, so the points batch's declared-scalar tail has never been exercised *(no longer true — superseded at r22, annotated here 2026-08-07 because a reader meeting this entry first would take a stale one)*; §2.4's dictionary **extents**, of which exactly one has ever existed and whose per-extent `records` field is written as the corpus total — correct only while the vector has length 1; §3.1's `x-tessera-api` header, which nothing emits and nothing validates; §3.4's `fragmentation`, emitted over commit-window allocation rather than over base plus delta tiers; and §3.4's per-partition status block, which is not emitted.
 
 *Corrected, because a conforming client fails on the old text.* Arrow bodies are sent as `application/octet-stream`, not `application/vnd.apache.arrow.stream`. `/v1/meta`'s `selection` block has **six** keys: `max_tiles_per_request` joins it, having been emitted by the server and consumed by the shipped client while this document named five — **the r9 `max_k` defect recurring exactly**, an unspecified field with a second reader already depending on it, which is why §3.2 now says so rather than adding the key quietly. §2.2's `identity.key` validation is scoped to the reader that performs it: the engine's open and `tessera build`'s verify parse the key, and the **store's** `open_bundle` — the entry point §2.3's protocol names — does not, so an uppercase or degenerate key opens through it. And §2.6's key-encoding sentence, which said "most-significant byte first" one clause before saying the decoded bytes are read little-endian, now says **byte 0 first**, matching the construction memo; nothing else in that block changes and the known-answer vectors are unaffected.
 

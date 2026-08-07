@@ -85,6 +85,7 @@ fn ensure_bundle() -> PathBuf {
             batch_items: None,
             memory_budget: None,
             band_rows: None,
+            schema: Default::default(),
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

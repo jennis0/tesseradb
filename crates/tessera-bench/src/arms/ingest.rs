@@ -250,6 +250,7 @@ pub fn run_build(
                 batch_items: None,
                 memory_budget: None,
                 band_rows: None,
+                schema: Default::default(),
             };
 
             eprintln!("ingest_build: scale={scale} set={label_set} (one repetition — a build is minutes, not microseconds)");

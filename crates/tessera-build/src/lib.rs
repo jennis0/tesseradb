@@ -23,10 +23,11 @@ pub mod error;
 pub mod input;
 pub mod observer;
 mod pipeline;
+pub mod schema;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,8 +43,9 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::{
-    identity_key_fingerprint, CurrentPointer, DictExtent, FileDigest, IdentityDescriptor, Manifest,
-    PartitionDescriptor, Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
+    IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
@@ -133,6 +135,15 @@ pub struct BuildArgs {
     /// alone); band boundaries never affect output bytes, only transient memory. `None`
     /// derives from the budget.
     pub band_rows: Option<u64>,
+    /// The compiled `schema.toml`: the per-item columns this build writes into `columns.arrow`'s
+    /// tail, in declared order (`--schema`, bound values via `--values`).
+    ///
+    /// **Default-empty, and that case must stay byte-identical.** Every bundle built before
+    /// `--schema` existed declared no scalar, and an empty schema must go on producing exactly the
+    /// bytes it did — `tessera-cli`'s identity test asserts a byte-identical `columns.arrow`
+    /// across rebuilds carrying one key, and a schema that widened the fixed table by default
+    /// would break it for reasons unrelated to identity.
+    pub schema: crate::schema::Schema,
 }
 
 /// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
@@ -450,9 +461,56 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         });
     }
 
+    // ---- 6b. the declared attribute tail ---------------------------------------------
+    // A second pass over the points file, joined to the staged items **by source id**, because
+    // `scan_attributes` visits rows in file order and staging is in entity order. Skipped
+    // entirely when the schema is empty, which is what keeps a schema-less build's `columns.arrow`
+    // byte-identical to the one it wrote before this existed.
+    //
+    // Every staged item must receive a value. A row the attribute pass never visits would keep an
+    // empty `scalars` vector, and the segment writer refuses that by name rather than padding it
+    // — padding would put every later row's value under the wrong identity in a column whose
+    // width says nothing is wrong.
+    //
+    // `minters` seeds one live `VocabularyMinter` per discovered vocabulary from whatever the
+    // schema already pins, and the scan mints into it for every novel key the corpus supplies.
+    // Its final state — carried past this block — is what `write_manifests` records into
+    // `MANIFEST.vocabularies` below, so a rebuild and the serving path see exactly what this
+    // build minted.
+    let mut minters = args.schema.discovered_minters();
+    if !args.schema.is_empty() {
+        let position_of_source: HashMap<u64, usize> = staged
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.source_id, position))
+            .collect();
+        let mut seen = 0usize;
+        input::scan_attributes(
+            &args.points,
+            &args.schema,
+            &mut minters,
+            args.limit,
+            |source_id, values| {
+                if let Some(&position) = position_of_source.get(&source_id) {
+                    tiler_items[position].scalars = values.to_vec();
+                    seen += 1;
+                }
+            },
+        )?;
+        if seen != staged.len() {
+            return Err(BuildError::Invalid(format!(
+                "the attribute pass matched {seen} of {} staged items. The points file's two \
+                 passes disagree about which entities it holds, so some row would be written \
+                 with another row's attribute values",
+                staged.len()
+            )));
+        }
+    }
+
     // ---- 7. tiler and segment ---------------------------------------------------------
+    let scalar_schema = scalar_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
-    write_segment(&segment_dir, &tiler_items, &codes, &[])
+    write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema)
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     fsync_file(&segment_dir.join("columns.arrow"))?;
     fsync_file(&segment_dir.join("morton.u32"))?;
@@ -484,7 +542,23 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         term_count,
         pair_count,
         args.batch_items.filter(|&b| b < n),
+        &minters,
     )
+}
+
+/// The schema as the segment writer wants it: `(name, type)` in declared order.
+///
+/// One derivation, shared by both build implementations, so the two cannot come to disagree about
+/// a column's width — which would produce two bundles the byte-equality oracle calls different
+/// for a reason that is not the entity assignment it exists to check.
+fn scalar_schema_of(
+    schema: &crate::schema::Schema,
+) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+    schema
+        .attributes
+        .iter()
+        .map(|a| (a.name.clone(), a.ty))
+        .collect()
 }
 
 /// Every file a build wrote, split by the role it plays in the manifests.
@@ -498,6 +572,7 @@ struct BundleFiles {
 /// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
 /// Shared by both build implementations so the two cannot drift in the one place where a
 /// difference would be invisible until a digest failed.
+#[allow(clippy::too_many_arguments)]
 fn write_manifests(
     args: &BuildArgs,
     files: &BundleFiles,
@@ -506,6 +581,7 @@ fn write_manifests(
     term_count: u64,
     pair_count: u64,
     batch_items_recorded: Option<u64>,
+    minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -563,6 +639,7 @@ fn write_manifests(
         tombstones: Vec::new(),
         deny: Vec::new(),
         // Nothing has been added since MANIFEST.json — see the note above.
+        vocabulary_extensions: Vec::new(),
         files: BTreeMap::new(),
     };
     let segments_path = partition_dir.join("SEGMENTS-0.json");
@@ -577,7 +654,76 @@ fn write_manifests(
             "max_terms_per_item": bounds.max_terms_per_item,
             "max_terms_per_token": bounds.max_terms_per_token,
         }),
-        declared_scalars: Vec::new(),
+        // The schema, compiled. `MANIFEST.declared_scalars` is the *only* thing downstream reads:
+        // `columns.arrow`'s tail is written in this order, `/control/ingest` builds each row's
+        // scalar vector in this order, and flush, merge and the fold all take their writer schema
+        // from it. Reordering the schema file therefore reorders every segment built after it,
+        // which is why the compilation preserves declaration order rather than sorting by name.
+        declared_scalars: args
+            .schema
+            .attributes
+            .iter()
+            .map(|a| DeclaredScalar {
+                name: a.name.clone(),
+                arrow_type: a.ty,
+                vocabulary: a.vocabulary.clone(),
+            })
+            .collect(),
+        // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
+        // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
+        // — which are under a digest.
+        //
+        // A **declared** vocabulary's values are exactly what the schema pinned (`v.codes`,
+        // unchanged). A **discovered** one's values come from `minters[&v.name]` instead — the
+        // schema's pinned seed *plus* every code this build minted for a key the seed lacked —
+        // because `v.codes` alone would silently omit everything minted during the scan. Either
+        // way the values are read back sorted by key ([`tessera_store::vocabulary::values_of`]),
+        // so the bytes here do not depend on a `BTreeMap`'s or a minter's internal order.
+        vocabularies: {
+            let mut compiled: Vec<ManifestVocabulary> = args
+                .schema
+                .vocabularies
+                .values()
+                .map(|v| {
+                    let values = match minters.get(&v.name) {
+                        Some(minter) => tessera_store::vocabulary::values_of(minter)
+                            .into_iter()
+                            .map(|value| ManifestVocabularyValue {
+                                label: v.labels.get(&value.key).cloned(),
+                                ..value
+                            })
+                            .collect(),
+                        None => v
+                            .codes
+                            .iter()
+                            .map(|(key, &code)| ManifestVocabularyValue {
+                                key: key.clone(),
+                                code,
+                                label: v.labels.get(key).cloned(),
+                            })
+                            .collect(),
+                    };
+                    ManifestVocabulary {
+                        name: v.name.clone(),
+                        // The schema's kind, carried verbatim: it is what ingest consults to
+                        // decide whether a key nothing has bound is a typo or a new value.
+                        kind: match v.kind {
+                            crate::schema::VocabularyKind::Declared => {
+                                tessera_store::manifest::VocabularyKind::Declared
+                            }
+                            crate::schema::VocabularyKind::Discovered => {
+                                tessera_store::manifest::VocabularyKind::Discovered
+                            }
+                        },
+                        listing: v.listing.as_str().to_string(),
+                        values,
+                        reserved: v.reserved.clone(),
+                    }
+                })
+                .collect();
+            compiled.sort_by(|a, b| a.name.cmp(&b.name));
+            compiled
+        },
         small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
         quantisation: Quantisation {
             x_min: args.extent.x_min,
@@ -1030,6 +1176,7 @@ mod tests {
             batch_items: None,
             memory_budget: None,
             band_rows: None,
+            schema: Default::default(),
         };
         let printed = format!("{args:?}");
         assert!(

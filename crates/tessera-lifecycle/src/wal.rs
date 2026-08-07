@@ -102,12 +102,31 @@ use tessera_types::EntityId;
 /// `crc32fast` alone (no `tessera-spatial`), so the WAL carries its own copy of the tiny, stable
 /// shape. Keep the two enums in lockstep if either changes.
 ///
-/// On-disk format: variant order is frozen and append-only (postcard encodes enum variants by
-/// declaration index) — never reorder or remove a variant, only append new ones at the end.
+/// On-disk format: postcard encodes enum variants by declaration index, so reordering this enum
+/// changes what every stored record means. That is a `WAL_VERSION` bump and a recreated log, not
+/// a reason to keep a bad order: no deployment holds a WAL (decision 0048), so the order is chosen
+/// for the reader and the version check turns a stale local log into a refusal.
+///
+/// **In width order, matching `tessera_spatial::ScalarValue` variant for variant.** An earlier
+/// revision appended the four narrow widths after `Utf8` to preserve the existing discriminants —
+/// a compatibility cost paid to nobody, which left the two mirrored enums agreeing on the set and
+/// disagreeing on the order, and a `to_scalar_value` whose correctness depended on a reader
+/// noticing that.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalScalar {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
     U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
     F32(f32),
+    F64(f64),
+    /// Microseconds since the Unix epoch — an `i64` whose unit the declaration fixes.
+    TimestampUs(i64),
     Utf8(String),
 }
 
@@ -184,9 +203,38 @@ pub struct OverlaySnapshotEntry {
 
 /// One framed WAL record.
 ///
-/// On-disk format: variant order is frozen and append-only — see [`WalScalar`]'s note.
+/// On-disk format: postcard encodes variants by declaration index, so reordering this enum changes
+/// what every stored record means. That is a `WAL_VERSION` bump and a recreated log — see
+/// [`WalScalar`]'s note — not a reason to keep a bad order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalRecord {
+    /// A category value key acquiring its code (per-point-attributes §3.4).
+    ///
+    /// **First, because replay must meet a binding before any row that uses it.** The window close
+    /// appends its mints ahead of the batches they serve, inside one fsync, so a code is durable in
+    /// the same commit as the rows it colours: either both survive a crash or neither does.
+    ///
+    /// **The row carries the code, and this record is why it may.** [`WalRow::descriptors`] carries
+    /// raw descriptor bytes rather than `TermId`s because a term coined between builds has no
+    /// durable ordinal yet — the hazard is an id that is not durable at append time. A code is made
+    /// durable by *this record*, in that same append, so the structurally identical question gets
+    /// the opposite answer.
+    ///
+    /// **Determinism by recording, not by reproducibility.** The code is drawn from OS entropy at
+    /// the window close and persisted; replay applies what was decided rather than re-deriving it,
+    /// which a random draw is precisely the thing replay cannot do. The alternative — a keyed
+    /// permutation over a dense mint counter, deterministic and replayable — was declined by §3.4
+    /// itself: the vocabulary table exists anyway, so recording buys the property with no key to
+    /// manage.
+    ///
+    /// Replay skips a binding identical to one already held, and **refuses** a contradicting one:
+    /// every row written under either is of unknowable colour, so that is corruption of acked
+    /// state, not a race to resolve.
+    VocabularyMint {
+        vocabulary: String,
+        key: String,
+        code: u32,
+    },
     /// An accepted `/control/ingest` batch. `body_hash` is the SHA-256 of the raw request body
     /// (idempotency key material — a retried `batch_id` must match it, or the request is a
     /// contract violation, never a silent overwrite).
@@ -304,8 +352,12 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// (decision 0048): `Change` was written by nothing — every accepted change is admitted against an
 /// entity — and the descriptors had no consumer once the evaluate store went. That shifts a variant
 /// index, drops an enum discriminant and drops a struct field, each of which postcard would decode
-/// as whatever bytes follow it.
-const WAL_VERSION: u16 = 5;
+/// as whatever bytes follow it. Version 6 gave [`WalScalar`] the four narrow widths and put the
+/// enum in width order, which renumbers `F32` and `Utf8`; appending them instead would have kept
+/// the discriminants stable for a reader that does not exist (decision 0048), at the price of two
+/// mirrored enums whose orders disagree. Version 7 completed the set — `bool`, the three narrow
+/// signed widths, `f64` and `timestamp_us` — renumbering it again, for the same reason.
+const WAL_VERSION: u16 = 8;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1453,6 +1505,54 @@ mod tests {
             entity_id: EntityId::new(tag as u64),
             op: ChangeOp::Delete,
         }
+    }
+
+    /// **A mint survives the log, and it precedes the batch it serves.**
+    ///
+    /// The ordering is the point, not the encoding: replay must meet a binding before any row that
+    /// carries its code, and both records land inside one window close under one fsync — so either
+    /// the code and the rows it colours are both durable, or neither is. A row whose code has no
+    /// binding anywhere is the silent-recolour hazard, and this is the append order that makes it
+    /// unreachable.
+    #[test]
+    fn a_mint_round_trips_and_lands_before_the_batch_it_serves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+
+        let mint = WalRecord::VocabularyMint {
+            vocabulary: "departments".to_string(),
+            key: "k9-unit".to_string(),
+            code: 31_337,
+        };
+        let batch = WalRecord::IngestBatch {
+            batch_id: "b1".to_string(),
+            body_hash: [7u8; 32],
+            rows: vec![WalRow {
+                external_id: None,
+                entity_id: EntityId::new(1),
+                slice: "s0".to_string(),
+                descriptors: Vec::new(),
+                x: 0.5,
+                y: 0.5,
+                // The row carries the **code**, resolved once at the close and persisted — a
+                // random draw is precisely what replay cannot re-derive.
+                scalars: vec![WalScalar::U32(31_337)],
+            }],
+        };
+
+        let (mut wal, replayed) = Wal::open(&path).unwrap();
+        assert!(replayed.is_empty());
+        wal.append(&mint).unwrap();
+        wal.append(&batch).unwrap();
+        wal.fsync().unwrap();
+        drop(wal);
+
+        let (_wal, replayed) = Wal::open(&path).unwrap();
+        assert_eq!(
+            replayed,
+            vec![mint, batch],
+            "the mint replays before the batch, and both survive verbatim"
+        );
     }
 
     /// Overwrite `[from, to)` with zeroes through a second handle, standing in for pages a failed

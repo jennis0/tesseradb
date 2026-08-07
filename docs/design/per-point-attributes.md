@@ -1,9 +1,13 @@
 # Per-point attributes and categories — design
 
 **Date:** 2026-08-02
-**Status:** **Provisional — reviewed, no open decisions.** To become normative: the §6 amendments
-folded into `architecture.md` and `contracts.md`, and an owner ruling on whether Appendix A gains a
-residency *ceiling* (§2.3 — the plan step reports against it either way).
+**Status:** **Provisional — reviewed, no open decisions.** The `render` placement is **built**
+(2026-08-07): a `schema.toml` compiles into the manifest, both build implementations emit the
+columns, and flush, merge and the fold carry them. To become normative: the §6 amendments folded
+into `architecture.md` and `contracts.md` — **read §6 as a status list**, since building the render
+half settled questions this document was written before, and three of its amendments would now
+deliver something decided against. Appendix A's residency *ceiling* is **ruled: there is none**
+(owner, 2026-08-07); §2.3's "it reports; it cannot refuse" therefore stands unqualified.
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
 Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
 §5.4; `slices-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
@@ -24,14 +28,31 @@ space for filtering and vocabulary visibility, and a vocabulary table carrying p
 are **scattered, not dense** (§3.4), so a visible code is not a lower bound on how many values a
 principal cannot see.
 
-> **⊘ Specified, not implemented.** *The streaming half:* the substrate now exists — a flush gives
-> buffered rows a row in `columns.arrow`, and promotes a descriptor novel at ingest to a durable
-> dictionary ordinal in its own extent ([write-path](write-path.md) §4.3) — but that is the *auth*
-> dictionary. §3.5's separate attribute dictionary and postings file, which is where a category
-> value minted at ingest would land, does not exist, so nothing here is exercisable on the read
-> path. *`inspect`:* §8.3's vector sidecar and §10.3's per-interaction row are one slot whose first
-> occupant, the external-ID store, is explicitly transitional — `inspect` is declarable and
-> **refused at parse** until that slot is filled. *Multi-valued attributes* (§3.7), likewise refused.
+> **The `render` placement is built** (2026-08-07). A `schema.toml` declares columns, the build
+> compiles them into `MANIFEST.declared_scalars` and a `vocabularies` table and emits the tail, and
+> flush, merge and the compaction fold carry it — each taking its writer schema from the manifest
+> rather than from the segment it rewrites. Declared vocabularies work end to end.
+>
+> **Discovered vocabularies are built too** ([#82], 2026-08-07). A value the corpus supplies and no
+> author declared acquires a scattered code — drawn from the declared width's unused space, recorded
+> beside its key and pinned — at the build that reads it or at the commit window that ingests it,
+> through one mint routine so exhaustion is one predicate. The binding is durable in the same fsync
+> as the rows it colours, lives in `MANIFEST.vocabularies` and `SEGMENTS-<n>.json`'s
+> `vocabulary_extensions` between builds, and folds back verbatim. It is recorded **in the
+> vocabulary table, not in an attribute dictionary**: the vocabulary already enumerates every value
+> and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard
+> does not arise for a category. Ingest carries **keys**, so declare-then-use is enforceable and a
+> code no key explains can no longer be stored.
+>
+> **⊘ Specified, not implemented.** *Vocabulary visibility:* `listing` is recorded and enforced by
+> nothing, there being no endpoint that publishes a vocabulary and no membership sets to derive
+> visibility from — §3.3's rule is designed and unbuilt, and holds structurally today only because
+> the one channel is a code attached to a point the mask already admitted. Its two missing pieces
+> are named in §6: the per-value member sets (a postings-shaped artifact keyed by `(column, code)`,
+> measured at 0.31–1.01× the column it indexes) and `/v1/categories` itself. *`filter`:* §8.3's
+> postings; *`inspect`:* §10.3's cold sidecar, whose slot's first occupant — the external-ID store —
+> is explicitly transitional; and *multi-valued attributes* (§3.7): each declarable and each
+> **refused at parse**.
 
 ---
 
@@ -295,13 +316,14 @@ Two independent axes:
 - **`listing = per_viewer | public`** — a disclosure control. Is the *existence* of a value
   sensitive? Governs whether `/v1/categories` is filtered per principal.
 
-All four combinations are coherent except one, and the exception is a rule. **`listing = "public"`
-requires `vocabulary = "declared"`:** a discovered vocabulary's values are inferred from whatever is
-in the corpus, so publishing them discloses data-derived names on nobody's authority — C11 with no
-accountable party. `declared` therefore means *the value set comes from an authored artifact* —
-inline in the schema, or a vocabulary file bound at build — so a 400-value published vocabulary stays
-practical. `declared` + `per_viewer` is the combination that matters: a known schema whose value
-names are themselves sensitive.
+All four combinations are permitted, and one is **warned about rather than refused** (owner ruling,
+2026-08-07). `listing = "public"` with `vocabulary = "discovered"` publishes value names inferred
+from whatever is in the corpus, which discloses data-derived names on nobody's authority — C11 with
+no accountable party. That is a real hazard and the build says so at parse; it is not a refusal,
+because the operator may have an accountable reason and is the party entitled to decide. `declared`
+means *the value set comes from an authored artifact* — inline in the schema, or a vocabulary file
+bound at build — so a 400-value published vocabulary stays practical. `declared` + `per_viewer` is
+the combination that matters: a known schema whose value names are themselves sensitive.
 
 **Where a `per_viewer` gate comes from.** Membership-derivation (§3.3) is the gate everywhere: a
 value inherits its members' labels. A **declared** vocabulary may additionally carry an explicit gate
@@ -489,35 +511,77 @@ which — and seeded-but-open is still open, so §3.8's rule still forbids `publ
 for a declared vocabulary come from the schema or the file; for a discovered one they are minted by
 random assignment (§3.4) and recorded in the manifest.
 
-**Streaming ingest.** `/control/ingest`'s scalar-tail validation already exists and is strict — a
-column the manifest does not declare, a declared column the batch omits, and a declared column at the
-wrong type are each a `422` naming the column, with the tail built in declared order. It extends to
-attributes unchanged, having only ever run against an empty declaration.
+**Streaming ingest.** `/control/ingest`'s scalar-tail validation is strict — a column the manifest
+does not declare, a declared column the batch omits, and a declared column at the wrong **expected**
+type are each a `422` naming the column, with the tail built in declared order. It extends to plain
+scalars unchanged; for a category the *expected type is not the storage type*.
+
+**A category column carries `utf8` value keys, never codes at the declared width**, for declared and
+discovered vocabularies alike. Three arguments, any one sufficient. §3.1's table already rules it:
+the code is *derived*, the key is *supplied*. Declare-then-use below needs the key — a code can only
+be range-checked, and the membership check is the rule. And §3.6's exhaustion-at-ingest is only
+reachable if ingest allocates. A caller supplying codes for a discovered vocabulary would be the
+minting authority, and the server could then guarantee neither the scatter nor the never-reuse §3.4
+exists for.
+
+The declared width remains the **storage** type: the row, the WAL scalar, the segment column and the
+viewer wire all carry the code. Only the wire form changes. A **null** key is *absent*, stored as the
+reserved code 0; the **empty string** is refused, being what an unset field and a client bug both
+produce — folding it into absence would accept the same defect silently, and minting for it would
+make a typo a category.
+
+The positional-safety argument is untouched, because it never rested on wire equalling storage: every
+column must arrive at its **expected** type, where expected is a function of the manifest declaration
+alone. That function has one definition, reached from every layer that needs it — two copies is how a
+`u16` category comes to be validated as a plain `u16`, which accepts raw codes and reopens the hole
+keys close.
 
 **Runtime vocabulary amendment** is a control-plane operation: properties are upserted without a
 rebuild, so recolouring a legend never touches the build path.
 
 **Declare-then-use.** An ingest row naming an undeclared value under `vocabulary = "declared"` is a
-`422`, following slices §80 — *"no same-batch creation, no auto-create on first reference"* — for the
-same reason: a category carries properties and, through its postings, a visibility consequence, so a
-typo must not create one.
+`422` naming the column and the key, the whole batch without effect, following slices §80 — *"no
+same-batch creation, no auto-create on first reference"* — for the same reason: a category carries
+properties and, through its postings, a visibility consequence, so a typo must not create one. A
+retired key is an unknown key: retirement removes it from `values` and moves its code to `reserved`,
+so no separate rule is needed.
+
+**Minting happens on the write executor, at the commit-window close, and nowhere else.** A request
+handler resolves keys the generation already binds and forwards novel ones as keys; two handlers
+racing one novel key would each draw, and that key would end up with two codes and its rows split
+between them, whichever binding survived recolouring the other's. Windows close serially, so the
+second close consults the live bindings, finds the key bound, and reuses the code — the view-first
+rule. The assignment becomes durable in the same fsync as the batch that caused it, so a code and
+the rows it colours are both durable or neither is.
 
 ---
 
 ## 6. Amendments
 
-- **contracts §2.2** — `declared_scalars` becomes the compiled per-placement attribute record.
-- **contracts §2.4** — the attribute dictionary namespace and its postings file (§3.5), and the
-  per-partition manifest's attribute `dict_extents` counterpart.
-- **contracts §2.6** — attribute columns and their widths, per slice.
-- **contracts §3.2** — `/v1/categories` and its relationship to `/v1/meta`'s vocabulary field; the
-  empty-operand rule for filters naming invisible values.
-- **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories`.
-- **architecture §5.3** — the hot-column list. **§8.2** — category filter operands.
-- **architecture Appendix A** — attribute columns join the sizing tables; a residency *ceiling* is an
-  owner decision (§2.3).
-- **architecture Appendix C** — C8 and C11 annotated for category counts and vocabulary listing; a
-  new entry for §3.8's explicit gate label making a value's name more visible than its members.
+**Read this as a status list, not a work list.** The `render` placement is built, and discovered
+vocabularies mint at build and at ingest ([#82], 2026-08-07) — so several of these amendments would
+now deliver something that has been decided against, and several have had their content changed by
+an owner ruling. Executing the original list would put per-slice hot columns and an attribute
+dictionary into the contract, neither of which is wanted.
+
+What remains owed is owed for one of two reasons, and the distinction is the whole point of keeping
+the table: an amendment is either **waiting on a decision** or **waiting on the machinery it would
+describe**. Nothing here is waiting on someone to type it out.
+
+| Amendment | Status |
+|---|---|
+| **contracts §2.2** — `declared_scalars` becomes the compiled per-placement attribute record | **Delivered, narrower** (contracts r22). There is no *per-placement* record: `filter` and `inspect` are refused at parse, so the compiled form is the hot-column list plus a `vocabularies` table. It regains a placement dimension only when a second placement exists |
+| **contracts §2.4** — the attribute dictionary namespace and its postings file, and an attribute `dict_extents` counterpart | **Changed, and mostly not needed.** A *category* needs no attribute dictionary: the vocabulary already enumerates every value and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard — an attribute descriptor byte-equal to a satisfied auth descriptor — cannot arise. What §3.3's visibility wants is a postings file keyed by `(column, code)`, sized at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`). A dictionary is for attribute terms that are *not* categories, which nothing declares |
+| **contracts §2.6** — attribute columns and their widths, **per slice** | **Delivered without the per-slice half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-slice declaration would put the column in every slice anyway, silently. Per-slice enumeration belongs with the slices epic, which the roadmap already pairs it with |
+| **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Owed, content changed.** The legend is **global and served as metadata**, not per viewport; visibility is membership-derived (§3.3) with authored per-value gates (§3.8) as an override; `listing = "public"` on a discovered vocabulary is permitted with a warning rather than refused (owner, 2026-08-07 — §3.8's rule relaxes). The empty-operand rule is unchanged and still owed |
+| **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Delivered for the wire and the rule** (contracts r24, [#82]): a category column carries `utf8` value keys, an unknown key under `vocabulary = "declared"` is a 422 naming column and key, null is *absent* and the empty string is refused. §5 is amended with it, so its first paragraph no longer claims the scalar-tail validation extends to categories unchanged. `/control/categories` is **still owed** and needs no new decision — runtime vocabulary amendment (§5) has no endpoint |
+| **architecture §5.3** — the hot-column list | **Owed**, and unchanged by anything since |
+| **architecture §8.2** — category filter operands | **Owed**, unchanged, and belongs with [#43] rather than here |
+| **architecture Appendix A** — attribute columns join the sizing tables; a residency *ceiling* is an owner decision | **Owed; the ceiling is ruled — there is none** (owner, 2026-08-07). The figure was modelled and never measured, and a threshold nobody has measured is a number invented to look careful. The plan step reports and cannot refuse, as §2.3 already says. Measured figures now exist to put in the table |
+| **architecture Appendix C** — C8 and C11 annotated; a new entry for §3.8's gate | **Owed, content changed.** Vocabulary **cardinality is not a threat** (owner, 2026-08-07): an ordinal leaking set size is accepted, so §3.4's dense-code disclosure needs recording as accepted rather than closed. What must be registered is what the rulings *did* keep — that a principal may see a value only if it belongs to data they can see, that aggregates over categories are masked (C8's existing `and_cardinality` shape), and that an authored gate can make a value's name more visible than any of its members |
+
+[#82]: https://github.com/jennis0/tessera-index/issues/82
+[#43]: https://github.com/jennis0/tessera-index/issues/43
 
 ---
 
@@ -551,6 +615,38 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-07 — corrected against the built `render` placement, and against five owner rulings.**
+No rule of this design changed; what changed is which of its claims are still true.
+
+§1's marker no longer says the design is unexercisable — the render half runs end to end — and it
+no longer names §3.5's attribute dictionary as where a minted category value would land. That was
+the day's sharpest correction: a **category needs no attribute dictionary**, because the vocabulary
+already enumerates its values and the code is the identifier, so nothing caller-supplied is
+interned and §3.5's authorisation-bypass hazard cannot arise for one. §3.5's separation still
+governs attribute *terms*; it was over-applied to categories here.
+
+§6 becomes a **status list**, because executing it as written would now deliver two things decided
+against — per-slice hot columns (`render_in` is refused; the flat `declared_scalars` cannot express
+them) and an attribute dictionary for categories — and three whose content the rulings changed.
+
+The rulings, none of which alters a rule above: **cardinality is not a threat** (an ordinal leaking
+set size is accepted, so §3.4's dense-code guidance is a preference rather than a control, and what
+must be enforced is that a principal sees a value only if it belongs to data they can see);
+**aggregates over categories are masked**, C8's existing `and_cardinality` shape; **no residency
+ceiling** (Appendix A gains none; §2.3's report-never-refuse stands unqualified); **`listing =
+"public"` on a discovered vocabulary is permitted with a warning** rather than refused — §3.8's
+prohibition relaxes, an operator may have reason to publish; and the **legend is global, served as
+metadata**, with per-viewport counts deferred to the filter contract.
+
+One measurement now exists where the design had a prediction. §3.3's membership sets were sized at
+**0.31–1.01× the render column they index**, across two label sets chosen to bracket entity-space
+contiguity, with a full 171-value legend evaluating in 0.013–1.10 ms
+(`probes/2026-08-07-category-membership/`). §3.3's expectation that sparse principals are cheapest
+is **supported, not confirmed** — it held on one corpus and was untested on the other. The probe
+also found the cost model's own asymmetry in a new place: many narrow grants cost more than a few
+wide ones at a fifteenth of the mask cardinality, so the expensive principal is term count, not
+coverage.
 
 **2026-08-04 — corrected against the built write path.** Flush and descriptor promotion exist, so
 §1's streaming marker names what is actually missing (§3.5's attribute dictionary) rather than flush;

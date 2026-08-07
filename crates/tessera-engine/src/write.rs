@@ -73,7 +73,7 @@ use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::overlay::replay;
-use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord};
+use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 
@@ -84,6 +84,7 @@ use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
+use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
@@ -1694,9 +1695,40 @@ impl WritePath {
         manifest_high_water: u64,
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
+        vocabularies: &mut Vocabularies,
         has_row: impl Fn(EntityId) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
+
+        // **Mints apply over the manifest seed, in log order** — the same seed-before-replay rule
+        // the deny state follows below, and for the same reason: every WAL record postdates the
+        // manifests. The caller has already seeded from `MANIFEST.vocabularies` and the served
+        // side-manifests' `vocabulary_extensions`, so what remains is what was minted after the
+        // last manifest write.
+        //
+        // Bindings are append-only and never rebound, so this is order-insensitive except for
+        // conflicts — and a conflict inside the durable prefix is corruption of acked state, never
+        // a race: every row written under either binding is of unknowable colour. Refusing to open
+        // is the only answer that does not silently recolour one of them.
+        for record in &records {
+            if let WalRecord::VocabularyMint {
+                vocabulary,
+                key,
+                code,
+            } = record
+            {
+                let minter = vocabularies.get_mut(vocabulary).ok_or_else(|| {
+                    EngineError::Malformed(format!(
+                        "the WAL mints into vocabulary '{vocabulary}', which this bundle does not \
+                         declare. Every row that carries one of its codes would be of unknowable \
+                         colour, so this node does not open"
+                    ))
+                })?;
+                minter
+                    .seed_value(key, *code)
+                    .map_err(|e| EngineError::Malformed(e.to_string()))?;
+            }
+        }
 
         let high_water = manifest_high_water.max(high_water_from(&records));
         // `try_new`, not `new`: the seed comes from durable state this process did not write in
@@ -2735,26 +2767,34 @@ pub(crate) struct MaintenanceDeps {
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
 ///
-/// `None` if the manifest declares a type this build cannot write. A flush must **not** proceed
-/// then: `columns.arrow`'s schema is the fixed columns plus this tail, so a dropped column would
-/// produce a segment the reader refuses — and refusing to flush is the fail-closed answer, where
-/// writing a short segment is a bundle that no longer opens.
+/// **Infallible, because an unwritable declaration cannot reach an open bundle.**
+/// `DeclaredScalar::arrow_type` is a `ScalarType`, so a manifest naming a type this build cannot
+/// store fails to deserialise and the bundle never opens (`manifest::scalar_type_name`). This
+/// returned `None` while the field was a string, and a flush, an ingest and a fold each carried an
+/// arm for that case — three guards against a state no loaded generation can be in.
 pub(crate) fn scalar_schema_of(
     manifest: &tessera_store::manifest::Manifest,
-) -> Option<Vec<(String, ScalarType)>> {
+) -> Vec<(String, ScalarType)> {
     manifest
         .declared_scalars
         .iter()
-        .map(|d| {
-            let ty = match d.arrow_type.as_str() {
-                "u64" => ScalarType::U64,
-                "f32" => ScalarType::F32,
-                "utf8" => ScalarType::Utf8,
-                _ => return None,
-            };
-            Some((d.name.clone(), ty))
-        })
+        .map(|d| (d.name.clone(), d.arrow_type))
         .collect()
+}
+
+/// A vocabulary code, at its column's declared width. Mirrors `tessera-server`'s own `category_code`
+/// helper of the same shape, which cannot be reused here: that one lives on the other side of the
+/// ingest boundary and returns an `ApiError`, where a mint failure here is `Executor`-internal and
+/// has already been dispositioned by the time a code is being written.
+///
+/// `is_category_width` (checked at schema parse) admits `u8`/`u16`/`u32` only, so the fallthrough is
+/// `u32` — the widest, which cannot truncate a code the other two could hold.
+fn code_at_declared_width(width: ScalarType, code: u32) -> WalScalar {
+    match width {
+        ScalarType::U8 => WalScalar::U8(code as u8),
+        ScalarType::U16 => WalScalar::U16(code as u16),
+        _ => WalScalar::U32(code),
+    }
 }
 
 /// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
@@ -2781,6 +2821,164 @@ fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overlay) {
         })
         .collect();
     manifest.tombstones = overlay.deleted_entities();
+}
+
+/// Carry the live vocabulary bindings into a manifest's `vocabulary_extensions` — `write_deny_state`'s
+/// sibling, called beside it at every publication site except the fold's.
+///
+/// **Union, never restate.** `manifest` here is always `partition_data.manifest.clone()`, so it
+/// already carries every extension a previous publication wrote; `extensions_beyond` gives only
+/// what `MANIFEST.vocabularies` (the *build*, not this side-manifest) does not already carry, and
+/// this appends that into what is already held rather than replacing it. That asymmetry with
+/// [`write_deny_state`] is deliberate and is [`tessera_store::manifest::VocabularyExtension`]'s own
+/// documented rule: `deny` must be able to shrink on an unsuppress, so it is restated fresh every
+/// time; a binding must never shrink, so restating it fresh is exactly the shape that could
+/// silently drop one. On the executor as it stands today `vocabularies` is always the same live
+/// generation the manifest was cloned from, so `extensions_beyond` happens to recompute a superset
+/// of whatever is already held — but that is a fact about today's single-threaded caller, not a
+/// property of this function, and this function must hold even if that caller ever changes. The
+/// unit test beside it proves the union rather than trusting the coincidence.
+///
+/// The fold does not call this: it folds every served `vocabulary_extensions` directly into the new
+/// prefix's `MANIFEST.vocabularies` and writes an empty extension set on purpose (see
+/// `publish_fold`) — restating the same bindings here as well would bind each key twice, once in
+/// each home.
+fn write_vocabulary_extensions(
+    manifest: &mut SegmentsManifest,
+    vocabularies: &Vocabularies,
+    bundle_vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) {
+    for extension in vocabularies.extensions_beyond(bundle_vocabularies) {
+        match manifest
+            .vocabulary_extensions
+            .iter_mut()
+            .find(|held| held.name == extension.name)
+        {
+            Some(held) => {
+                for value in extension.values {
+                    if !held.values.iter().any(|v| v.key == value.key) {
+                        held.values.push(value);
+                    }
+                }
+            }
+            None => manifest.vocabulary_extensions.push(extension),
+        }
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_extensions_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use tessera_store::manifest::{
+        ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension, VocabularyKind,
+    };
+
+    fn empty_manifest() -> SegmentsManifest {
+        SegmentsManifest {
+            watermark: 0,
+            entity_id_high_water: 0,
+            segments: Vec::new(),
+            deltas: Vec::new(),
+            dict_extents: Vec::new(),
+            external_id_runs: Vec::new(),
+            locator_extents: Vec::new(),
+            tombstones: Vec::new(),
+            deny: Vec::new(),
+            vocabulary_extensions: Vec::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
+    fn empty_vocabulary(name: &str) -> ManifestVocabulary {
+        ManifestVocabulary {
+            name: name.to_string(),
+            kind: VocabularyKind::Discovered,
+            listing: "per_viewer".to_string(),
+            values: Vec::new(),
+            reserved: Vec::new(),
+        }
+    }
+
+    /// **A carried binding must survive even when the live view has nothing to say about it.**
+    /// `extensions_beyond` only emits an entry for a vocabulary its own `by_name` tracks
+    /// (`vocabulary.rs`'s doc on the type), so a manifest that already carries an extension for one
+    /// the live view does not — here, `vocabularies` tracks only `"department"`, with no bindings of
+    /// its own, so `extensions_beyond` returns nothing at all — must not have that carried entry
+    /// erased by a write that touches an unrelated vocabulary.
+    ///
+    /// **Mutation:** replace the union body with
+    /// `manifest.vocabulary_extensions = vocabularies.extensions_beyond(bundle_vocabularies);` and
+    /// this fails — the carried `"legacy"` binding is wiped by a write that had nothing new to say.
+    #[test]
+    fn a_carried_extension_survives_a_write_the_live_view_recomputes_nothing_for() {
+        let mut manifest = empty_manifest();
+        manifest.vocabulary_extensions.push(VocabularyExtension {
+            name: "legacy".to_string(),
+            values: vec![ManifestVocabularyValue {
+                key: "held".to_string(),
+                code: 7,
+                label: None,
+            }],
+        });
+
+        let vocabularies = Vocabularies::seed(&[empty_vocabulary("department")], &[], &[]).unwrap();
+
+        write_vocabulary_extensions(&mut manifest, &vocabularies, &[]);
+
+        let legacy = manifest
+            .vocabulary_extensions
+            .iter()
+            .find(|e| e.name == "legacy")
+            .expect("a binding this manifest already carried must not be dropped");
+        assert_eq!(legacy.values.len(), 1);
+        assert_eq!(legacy.values[0].key, "held");
+        assert_eq!(legacy.values[0].code, 7);
+    }
+
+    /// The ordinary case beside it: a fresh mint is appended beside what is already carried, and a
+    /// binding restated identically is not duplicated.
+    #[test]
+    fn a_fresh_binding_is_appended_beside_what_is_already_carried_and_not_duplicated() {
+        let mut manifest = empty_manifest();
+        manifest.vocabulary_extensions.push(VocabularyExtension {
+            name: "department".to_string(),
+            values: vec![ManifestVocabularyValue {
+                key: "eng".to_string(),
+                code: 4,
+                label: None,
+            }],
+        });
+
+        let mut vocabularies =
+            Vocabularies::seed(&[empty_vocabulary("department")], &[], &[]).unwrap();
+        // Restates the binding the manifest already holds, plus one genuinely new one.
+        vocabularies
+            .get_mut("department")
+            .unwrap()
+            .seed_value("eng", 4)
+            .unwrap();
+        vocabularies
+            .get_mut("department")
+            .unwrap()
+            .mint("finance")
+            .unwrap();
+
+        write_vocabulary_extensions(&mut manifest, &vocabularies, &[]);
+
+        let department = manifest
+            .vocabulary_extensions
+            .iter()
+            .find(|e| e.name == "department")
+            .unwrap();
+        let mut keys: Vec<&str> = department.values.iter().map(|v| v.key.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["eng", "finance"],
+            "the carried key and the fresh one both survive, each exactly once"
+        );
+    }
 }
 
 /// The one plan a dispatch sends, chosen by **oldest unflushed row**.
@@ -3596,9 +3794,7 @@ impl Executor {
             return;
         };
         let manifest = &generation.bundle.manifest;
-        let Some(scalar_schema) = scalar_schema_of(manifest) else {
-            return;
-        };
+        let scalar_schema = scalar_schema_of(manifest);
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -3695,6 +3891,11 @@ impl Executor {
             return;
         }
         write_deny_state(&mut manifest, &live.overlay);
+        write_vocabulary_extensions(
+            &mut manifest,
+            &live.vocabularies,
+            &live.bundle.manifest.vocabularies,
+        );
 
         let manifest_n = self.allocate_manifest_n();
         if let Err(e) = tessera_store::write_segments_manifest(
@@ -3747,6 +3948,7 @@ impl Executor {
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
             segments_version,
             // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
             watermark: live.watermark,
@@ -3922,11 +4124,7 @@ impl Executor {
         };
 
         let manifest = &generation.bundle.manifest;
-        // `plan_fold` already refused an unwritable declaration; this is the call that produces the
-        // value rather than a second judgement about it.
-        let Some(scalar_schema) = scalar_schema_of(manifest) else {
-            return;
-        };
+        let scalar_schema = scalar_schema_of(manifest);
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -4317,6 +4515,11 @@ impl Executor {
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
             deny: Vec::new(),
+            // **Empty, because the fold has just folded them in.** Every binding these carried is
+            // now a value of the new prefix's `MANIFEST.vocabularies`, so restating them here
+            // would bind each key twice — once in each home — and a later reader would have to
+            // decide which won.
+            vocabulary_extensions: Vec::new(),
             // Every digest goes in `MANIFEST.json` instead — see below.
             files: BTreeMap::new(),
         };
@@ -4343,6 +4546,30 @@ impl Executor {
         let mut bundle_manifest = live.bundle.manifest.clone();
         bundle_manifest.entity_id_high_water = plan.entity_bound;
         bundle_manifest.files = completed.files.clone();
+        // **The extensions fold in verbatim, and verbatim is the whole rule** (§3.3). Every binding
+        // the served side-manifests carried becomes a value of the new prefix's
+        // `MANIFEST.vocabularies`, keys and codes byte-identical, and the new prefix's first
+        // `SEGMENTS-<n>.json` restates an empty extension set — which is what the `Vec::new()`
+        // above is.
+        //
+        // A fold that re-derived, re-sorted or re-numbered here would recolour the whole corpus
+        // with no error and no digest mismatch, because `columns.arrow` stores the code and nothing
+        // else records what it meant. Appending the carried values is therefore the entire
+        // operation: no compilation, no normalisation, no pass through the schema compiler.
+        //
+        // Decision 0050 touches none of this. Codes are not ordinals, index nothing positional, and
+        // no cached artefact is keyed by them, so the fold's postings rewrite and fragment
+        // invalidation pass over the vocabulary table without reading it.
+        let carried_bindings: Vec<_> = live
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
+            .collect();
+        tessera_store::vocabulary::fold_extensions_into(
+            &mut bundle_manifest.vocabularies,
+            &carried_bindings,
+        );
 
         // Exactly the files the new manifest names, deduplicated: a carried segment's run and
         // locator are already in the run and locator lists, and linking one path twice is what
@@ -4759,6 +4986,11 @@ impl Executor {
         // Complete current state, serialised fresh from the overlay this publication carries —
         // the same rule every other manifest write follows (contracts §2.3).
         write_deny_state(&mut manifest, &live.overlay);
+        write_vocabulary_extensions(
+            &mut manifest,
+            &live.vocabularies,
+            &live.bundle.manifest.vocabularies,
+        );
 
         let manifest_n = self.allocate_manifest_n();
         if let Err(e) = tessera_store::write_segments_manifest(
@@ -4852,6 +5084,7 @@ impl Executor {
 
         let next = Generation {
             prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
             // **Unchanged, and this is the whole of D2.** Row space did not move, so no
             // projection is stale and no cache key may rotate.
             segments_version: live.segments_version,
@@ -4926,14 +5159,7 @@ impl Executor {
             return;
         };
         let manifest = &generation.bundle.manifest;
-        let Some(scalar_schema) = scalar_schema_of(manifest) else {
-            tracing::error!(
-                "ALARM: this bundle declares a scalar type this build cannot write, so no flush \
-                 can produce a segment whose columns.arrow matches its schema. Ingest stays \
-                 durable and invisible until the binary understands it"
-            );
-            return;
-        };
+        let scalar_schema = scalar_schema_of(manifest);
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
         // path and only one could commit. Dispatching one makes that structurally unreachable and
@@ -5955,21 +6181,109 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::Allocate, mark);
 
+        // **Mint every novel discovered-vocabulary key this window's rows carry, in place, before
+        // anything is appended.** A discovered vocabulary's key travels as `WalScalar::Utf8` from
+        // the ingest boundary (`tessera-server`'s `category_code`, which must not mint itself: two
+        // requests racing one novel key would each draw and split the key across two codes). The
+        // commit-window close is where minting *may* happen — the live view is authoritative and
+        // serial here, exactly as `VocabularyMinter::mint`'s own doc requires — so it happens once,
+        // against a mutable copy of the published bindings that becomes the next generation's if
+        // the window survives, and is discarded untouched if it does not.
+        //
+        // One `Vocabularies` copy for the whole window, not one per row: `mint` is view-first, so a
+        // second row naming an already-minted-this-window key sees the first row's binding and
+        // returns `Existing` rather than drawing again — which is what keeps two rows sharing one
+        // novel key inside a window down to one `VocabularyMint` record.
+        let generation = self.generation.load_full();
+        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+        let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
+        let mut closed = closed;
+        let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
+        let mut mint_failed: Option<MintError> = None;
+        'minting: for entry in closed.iter_mut() {
+            for row in entry.rows_mut() {
+                for (index, declared) in declared_scalars.iter().enumerate() {
+                    let Some(vocabulary) = declared.vocabulary.as_deref() else {
+                        // A plain scalar, or a category column already at its bound width — either
+                        // way, nothing for this site to resolve.
+                        continue;
+                    };
+                    let WalScalar::Utf8(key) = &row.scalars[index] else {
+                        // Already a code: either a declared vocabulary (the handler resolved it) or
+                        // a discovered one this row's earlier pass through this same loop resolved.
+                        continue;
+                    };
+                    let key = key.clone();
+                    let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
+                        // `Vocabularies::seed` refuses to open a bundle whose `declared_scalars`
+                        // names a vocabulary `MANIFEST.vocabularies` does not carry, so a live
+                        // generation cannot disagree with its own declaration. Reaching this is a
+                        // defect in that invariant, not reachable input.
+                        panic!(
+                            "column '{}' names vocabulary '{vocabulary}', which the live bindings \
+                             do not carry",
+                            declared.name
+                        )
+                    });
+                    match minter.mint(&key) {
+                        Ok(Minted::Fresh(code)) => {
+                            fresh_bindings.push((vocabulary.to_string(), key, code));
+                            row.scalars[index] = code_at_declared_width(declared.arrow_type, code);
+                        }
+                        Ok(Minted::Existing(code)) => {
+                            row.scalars[index] = code_at_declared_width(declared.arrow_type, code);
+                        }
+                        Err(e) => {
+                            mint_failed = Some(e);
+                            break 'minting;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(e) = mint_failed {
+            // Nothing has been appended yet, so — exactly as a failed allocation — the window has
+            // no effect: the mutated `vocabularies` copy is dropped with it, and every waiter gets
+            // the same refusal.
+            self.fail_window_mint(closed, e, entries, started);
+            return;
+        }
+
         // One record per entry — batch identity is preserved through the window, which is what a
         // joined retry is answered off — appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
+
+        // **Mint records land first, ahead of every batch record, inside the one fsync below** —
+        // `WalRecord::VocabularyMint`'s own doc states this ordering is why a mint is durable in
+        // the same commit as the rows it colours. Not tracked in `positions`: that vector is
+        // rotation's per-*batch-entry* index, and a mint record belongs to no entry.
+        for (vocabulary, key, code) in &fresh_bindings {
+            if let Err(e) = self.wal.append(&WalRecord::VocabularyMint {
+                vocabulary: vocabulary.clone(),
+                key: key.clone(),
+                code: *code,
+            }) {
+                // No entry has been attempted yet, so there is no "the entry whose append failed"
+                // to single out — the same arbitrary choice the fsync failure below makes.
+                failed_at = Some((0, e));
+                break;
+            }
+        }
+
         // The position **before** each append is where that record lands, and it is the only moment
         // it can be read: afterwards the log has moved on, and after the window it is one number for
         // several records. A row's position is what a rotation reclaims below, so an entry whose
         // append failed contributes none — the loop breaks before pushing.
         let mut positions: Vec<u64> = Vec::with_capacity(closed.len());
-        for (i, entry) in closed.iter().enumerate() {
-            let at = self.wal.position();
-            if let Err(e) = self.wal.append(&entry.record) {
-                failed_at = Some((i, e));
-                break;
+        if failed_at.is_none() {
+            for (i, entry) in closed.iter().enumerate() {
+                let at = self.wal.position();
+                if let Err(e) = self.wal.append(&entry.record) {
+                    failed_at = Some((i, e));
+                    break;
+                }
+                positions.push(at);
             }
-            positions.push(at);
         }
         mark = self.health.lap(WriteStage::WalAppend, mark);
         // **One fsync for the whole window.** This is the amortisation half of group commit; the
@@ -5992,9 +6306,10 @@ impl Executor {
 
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
-        // One buffer clone, one generation, **one swap** for every entry in the window.
-        let mut closed = closed;
-        let published = self.apply_window(&mut closed, &positions);
+        // One buffer clone, one generation, **one swap** for every entry in the window — carrying
+        // the mutated `vocabularies`, so the next generation publishes this window's mints and not
+        // merely its rows.
+        let published = self.apply_window(&mut closed, &positions, vocabularies);
 
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
@@ -6085,6 +6400,42 @@ impl Executor {
             .record_window_service(entries, started.elapsed().as_nanos() as u64);
     }
 
+    /// A category key could not acquire a code: **nothing was appended, nothing applied**, exactly
+    /// as a failed allocation — the mutated `vocabularies` copy is dropped with `closed`, and the
+    /// live bindings are untouched. Unlike a WAL failure, the refusal is uniform: no waiter's own
+    /// append was closer to the fault than any other's, so every one gets the same error.
+    ///
+    /// ## Why the detail is rendered here
+    ///
+    /// `MintError` lives in `tessera_store::vocabulary` and `ExecError` in `tessera-lifecycle`,
+    /// which deliberately carries no `tessera-store` dependency, so the error cannot cross as
+    /// itself. It is rendered to text on this thread and travels in
+    /// [`ExecError::VocabularyRefused`], which `map_accept_error` answers as the `422` §3.6
+    /// requires — naming the vocabulary and its width, both the deployment's own schema. Mapping it
+    /// to a WAL or allocator failure instead would answer a bodyless 500 for a refusal the caller
+    /// can act on, and would tell an operator the log was at fault when it was not.
+    fn fail_window_mint(
+        &self,
+        closed: Vec<ClosedEntry<Responder>>,
+        error: MintError,
+        entries: u64,
+        started: std::time::Instant,
+    ) {
+        let detail = error.to_string();
+        for entry in closed {
+            for waiter in entry.waiters {
+                self.ack_failed(
+                    &waiter,
+                    ExecError::VocabularyRefused {
+                        detail: detail.clone(),
+                    },
+                );
+            }
+        }
+        self.health
+            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+    }
+
     fn execute(&mut self, job: Job) {
         let Job { command, respond } = job;
         match command {
@@ -6153,7 +6504,18 @@ impl Executor {
     /// one thread every write is serialised through — measured at +14% on the
     /// 10 000-row arm. `&mut` is what buys it; an entry's `terms` is empty after this and nothing
     /// downstream reads it — the ack needs `entity_ids`, not terms.
-    fn apply_window(&self, closed: &mut [ClosedEntry<Responder>], positions: &[u64]) -> Published {
+    ///
+    /// `vocabularies` is `close_window`'s locally mutated copy — the live bindings plus this
+    /// window's mints — and is published verbatim rather than `Arc::clone(&generation.vocabularies)`
+    /// as every other unmoved field is: the whole reason minting happens on the executor is that the
+    /// mutation must reach the *next* generation, and cloning the *old* `Arc` here would silently
+    /// discard every code this window just drew.
+    fn apply_window(
+        &self,
+        closed: &mut [ClosedEntry<Responder>],
+        positions: &[u64],
+        vocabularies: Vocabularies,
+    ) -> Published {
         let started = std::time::Instant::now();
         let mut mark = StageMark::now();
         let generation = self.generation.load_full();
@@ -6203,6 +6565,7 @@ impl Executor {
             overlay_version: generation.overlay_version + 1,
             buffer: Arc::new(buffer),
             prefix: generation.prefix.clone(),
+            vocabularies: Arc::new(vocabularies),
             segments_version: generation.segments_version,
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
@@ -6345,6 +6708,7 @@ impl Executor {
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
             prefix: generation.prefix.clone(),
+            vocabularies: Arc::clone(&generation.vocabularies),
             segments_version: generation.segments_version,
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
@@ -6395,6 +6759,11 @@ impl Executor {
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
+            write_vocabulary_extensions(
+                &mut manifest,
+                &live.vocabularies,
+                &live.bundle.manifest.vocabularies,
+            );
             let n = self.allocate_manifest_n();
             if let Err(e) = tessera_store::write_segments_manifest(
                 &self.prefix_dir(&live),
@@ -6498,6 +6867,11 @@ impl Executor {
             manifest.dict_extents.push(extent);
         }
         write_deny_state(&mut manifest, &live.overlay);
+        write_vocabulary_extensions(
+            &mut manifest,
+            &live.vocabularies,
+            &live.bundle.manifest.vocabularies,
+        );
 
         // **The commit point, and it is still the manifest** — only the thread moved. A failure
         // here discards the flush: its files become orphans nothing references, the buffer is
@@ -6562,6 +6936,7 @@ impl Executor {
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
             segments_version,
             watermark,
             bundle: next_bundle,
@@ -6786,6 +7161,7 @@ impl Executor {
 
         let next = Generation {
             prefix,
+            vocabularies: Arc::clone(&previous.vocabularies),
             segments_version,
             watermark,
             bundle,

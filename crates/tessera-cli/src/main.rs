@@ -40,6 +40,21 @@ enum Command {
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
+        /// `schema.toml`: the per-item columns to carry alongside the point
+        /// (per-point-attributes §4.2). Each declares what it is *for* and the placement follows;
+        /// `used_for = ["render"]` puts it in `columns.arrow`. Omit for a bundle with no
+        /// per-item columns, which is what every build wrote before this flag existed.
+        ///
+        /// **A build input, never server configuration** (§4.1). It compiles into MANIFEST.json
+        /// and the server reads the compiled form, so a server cannot be restarted against a
+        /// bundle whose columns disagree with a schema it holds.
+        #[arg(long, value_name = "PATH")]
+        schema: Option<PathBuf>,
+        /// Bind a schema's `values_key` to a vocabulary file: `--values KEY=PATH`, repeatable.
+        /// The schema names a logical key and the command line binds it to a path, as
+        /// `--id-key-file` already does — so no environment-specific path appears in the schema.
+        #[arg(long, value_name = "KEY=PATH", value_parser = parse_values_binding)]
+        values: Vec<(String, PathBuf)>,
         /// Mint an external ID for every item from its source entity id, and write the
         /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
         /// manufacturing an external ID for an item whose caller supplied none, and this
@@ -489,6 +504,72 @@ fn resolve_identity(
     })
 }
 
+/// `--values KEY=PATH`. Split at the **first** `=` so a path may contain one.
+fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
+    let (key, path) = raw.split_once('=').ok_or_else(|| {
+        format!(
+            "--values expects KEY=PATH, got '{raw}' (no '=' — the key is the schema's \
+                 `values_key`, the path is the vocabulary file)"
+        )
+    })?;
+    if key.is_empty() || path.is_empty() {
+        return Err(format!(
+            "--values '{raw}': both the key and the path must be non-empty"
+        ));
+    }
+    Ok((key.to_string(), PathBuf::from(path)))
+}
+
+/// Print the schema's residency cost against the corpus about to be built (§2.3).
+///
+/// **Totalled, not per column.** Several categories are what makes the cost bite, and a
+/// per-attribute table lets each one look affordable on its own. §10.5 prices a hot column at
+/// 0.93 GiB per byte per row per 10⁹ items, which is what the projection below reproduces.
+///
+/// Warns on what §2.3 names as breaking in practice — which is now one thing, not three.
+///
+/// `discovered` + `u8` is unreachable while discovered vocabularies are refused at parse, and
+/// `render_in` is refused outright, so its every-slice consequence is stated once rather than per
+/// column.
+///
+/// **Dense codes under `listing = "per_viewer"` is deliberately not warned about** (owner ruling,
+/// 2026-08-07), and this is worth recording because §2.3 asks for the warning and a reader will
+/// otherwise add it. That warning guards vocabulary *cardinality* — a visible code being a lower
+/// bound on how many values exist. The owner does not hold cardinality as a threat. What must be
+/// enforced is the other half: **a principal may see a category value only if it belongs to data
+/// they can see** — §3.3's membership-derived visibility, which is a property of the read path,
+/// not of how an author numbered their codes. A cardinality warning here would be mechanism that
+/// looks like access control and is not.
+fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) {
+    let columns = schema.attributes.len();
+    match schema.row_bits() {
+        Some(per_row_bits) => {
+            // Reported in bytes because that is the unit §10.5 prices a column in, but computed
+            // from bits and shown to two places: a schema of `bool`s costs a real fraction of a
+            // byte per row, and rounding it to zero would report the cheap case as free.
+            let per_row = per_row_bits as f64 / 8.0;
+            eprintln!(
+                "schema: {columns} column(s), {per_row:.2} B/row against the 12 B fixed row \
+                 (+{:.0}%)",
+                per_row / 12.0 * 100.0
+            );
+            if let Some(rows) = limit {
+                let gib = per_row * rows as f64 / (1024.0 * 1024.0 * 1024.0);
+                eprintln!("        {gib:.2} GiB resident at {rows} items");
+            }
+            eprintln!(
+                "        {:.2} GiB per 10^9 items — unalterable without rewriting the corpus",
+                per_row * 0.93
+            );
+        }
+        None => eprintln!("schema: {columns} column(s), variable width per row"),
+    }
+    eprintln!(
+        "        every column materialises in EVERY slice — including ones whose items carry no \
+         value for it (§3.9). Per-slice columns need contracts §2.6's per-slice enumeration"
+    );
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -499,6 +580,8 @@ fn main() -> ExitCode {
             extent,
             slice_id,
             limit,
+            schema,
+            values,
             mint_external_ids,
             no_oracle_pairs,
             batch_items,
@@ -535,6 +618,42 @@ fn main() -> ExitCode {
                      --id-key-file's deployment config) so future rebuilds can carry it forward.",
                     identity.hex
                 );
+            }
+
+            // Parsed and refused before any work, for the identity key's reason: a schema refusal
+            // is an operator's typo in a declaration, and discovering it after a multi-minute
+            // build has written a bundle prefix costs the whole build. Every rule in
+            // `tessera_build::schema` fires here, against no data at all.
+            let schema = match &schema {
+                Some(path) => {
+                    let bindings: std::collections::HashMap<String, PathBuf> =
+                        values.into_iter().collect();
+                    match tessera_build::schema::Schema::parse(path, &bindings) {
+                        Ok(schema) => schema,
+                        Err(e) => {
+                            eprintln!("build refused: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None if !values.is_empty() => {
+                    eprintln!(
+                        "build refused: --values was given without --schema. A binding names a \
+                         `values_key` that only a schema can declare, so there is nothing for it \
+                         to bind to"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                None => tessera_build::schema::Schema::default(),
+            };
+            // §2.3: the cost is reported, never hidden — a hot column is baked into every row and
+            // is unalterable without rewriting the corpus, so the operator sees the per-row and
+            // total figures at the moment they can still change the declaration. Reported and
+            // **never refused**: Appendix A is a sizing table with no deployment ceiling, and
+            // giving this a refusal means giving Appendix A a ceiling first, which is an owner
+            // decision rather than a derivable number.
+            if !schema.is_empty() {
+                report_residency(&schema, limit);
             }
 
             // The carried bundle's recorded batch size is identity-bearing exactly like its
@@ -588,6 +707,7 @@ fn main() -> ExitCode {
                 batch_items,
                 memory_budget,
                 band_rows: None,
+                schema,
             };
             match tessera_build::build(&args) {
                 Ok(report) => {

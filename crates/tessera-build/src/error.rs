@@ -24,6 +24,11 @@ pub enum BuildError {
         path: PathBuf,
         detail: String,
     },
+    /// A refusal from `schema.toml` or a vocabulary file bound to it — a *declaration* the design
+    /// forbids, rather than a malformed file. Carries no path because the message names the
+    /// attribute and the rule, which is what an operator acts on; most of these are refusals
+    /// whose whole content is the reason (see [`crate::schema`]'s module doc).
+    Declaration(String),
     Plugin(String),
     /// The input violates an invariant the bundle format depends on.
     Invalid(String),
@@ -74,6 +79,7 @@ impl std::fmt::Display for BuildError {
             BuildError::Schema { path, detail } => {
                 write!(f, "{}: unusable schema: {detail}", path.display())
             }
+            BuildError::Declaration(detail) => write!(f, "schema: {detail}"),
             BuildError::Plugin(detail) => write!(f, "plugin error: {detail}"),
             BuildError::Invalid(detail) => write!(f, "invalid input: {detail}"),
             BuildError::Store(e) => write!(f, "store error: {e}"),

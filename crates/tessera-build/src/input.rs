@@ -23,12 +23,14 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
+use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds};
+use tessera_store::vocabulary::VocabularyMinter;
 
 use crate::error::{BuildError, Result};
 
@@ -623,6 +625,530 @@ fn read_f32_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
             detail: format!("column '{name}' has unsupported type {other:?}"),
         }),
     }
+}
+
+/// Read a vocabulary file: `(key, code)` plus an optional `label` (§4.4).
+///
+/// **Parquet, like every other build input**, so a 400-value published vocabulary is the same
+/// kind of artifact as the points and pairs files and needs no second reader.
+///
+/// A `gate` column is **refused rather than ignored** (⊘, §3.8): an explicit gate label replaces
+/// membership-derivation for its value, which is an authorisation statement, and a build that
+/// silently dropped it would produce a bundle whose vocabulary is more visible than its author
+/// declared. There is no vocabulary-visibility evaluation yet to honour it, so refusing is the
+/// only answer that does not manufacture an assurance.
+pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schema::ValueSet> {
+    use arrow::array::StringArray;
+
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    if schema.column_with_name("gate").is_some() {
+        return Err(crate::schema::schema_error(format!(
+            "attribute '{attribute}': the vocabulary at {} carries a `gate` column, which is \
+             specified and not built (per-point-attributes §3.8). An explicit gate label replaces \
+             membership-derivation for its value — an authorisation statement — and nothing \
+             evaluates one yet. Refused rather than dropped: a dropped gate is a value more \
+             visible than its author declared",
+            path.display()
+        )));
+    }
+    let key_idx = column_index(path, &schema, "key")?;
+    let code_idx = column_index(path, &schema, "code")?;
+    let label_idx = schema.column_with_name("label").map(|(i, _)| i);
+
+    let reader = builder.build().map_err(|e| BuildError::parquet(path, e))?;
+
+    let mut set = crate::schema::ValueSet::default();
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let keys = batch
+            .column(key_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: "vocabulary column 'key' must be utf8".into(),
+            })?;
+        let code_values = read_u64_column(path, &batch, code_idx, "code")?;
+        let label_values = match label_idx {
+            Some(idx) => Some(
+                batch
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: "vocabulary column 'label' must be utf8".into(),
+                    })?
+                    .clone(),
+            ),
+            None => None,
+        };
+        for (row, raw) in code_values.iter().enumerate() {
+            let key = keys.value(row).to_string();
+            let code = u32::try_from(*raw).map_err(|_| {
+                crate::schema::schema_error(format!(
+                    "attribute '{attribute}': value '{key}' has code {raw}, which is not a u32"
+                ))
+            })?;
+            // A duplicate key here is a duplicate *code assignment*, which the caller's file
+            // decides silently by row order unless it is refused. `check_codes` catches two keys
+            // at one code; this catches one key at two.
+            if let Some(previous) = set.codes.insert(key.clone(), code) {
+                return Err(crate::schema::schema_error(format!(
+                    "attribute '{attribute}': the vocabulary at {} lists key '{key}' twice, at \
+                     codes {previous} and {code}. Which one every row carrying '{key}' would \
+                     mean is decided by row order, so it is refused",
+                    path.display()
+                )));
+            }
+            if let Some(values) = &label_values {
+                set.labels.insert(key, values.value(row).to_string());
+            }
+        }
+    }
+    // `reserved` has no file spelling: a tombstone belongs in the reviewed schema artifact rather
+    // than in a regenerable data file, on §3.4's argument that a re-sorted or regenerated
+    // vocabulary file must not be able to change what a stored code means.
+    Ok(set)
+}
+
+/// Stream the declared attribute columns, calling `visit(entity_id, values)` once per selected
+/// row with the values in **declared order** — the order `columns.arrow`'s tail is written and
+/// read back in.
+///
+/// **A second pass over the points file rather than a widening of [`scan_points`].** [`PointRow`]
+/// is a 16-byte `Copy` struct held one per entity by both builds, and its doc argues that width;
+/// a variable-length attribute tail hung off it would make the build's one per-entity structure
+/// grow with the schema. The two passes are independent, and this one is single-threaded because
+/// an attribute column is 1–8 bytes against geometry's decode cost — the parallel decode
+/// [`scan_points`] needs buys nothing here.
+///
+/// Category keys are mapped to codes against `schema_decl`'s compiled vocabularies. Under a
+/// **declared** vocabulary an unknown key is a **build failure** naming the column and the key,
+/// per §5's declare-then-use rule. Under a **discovered** one, `minters` supplies a live
+/// [`VocabularyMinter`] per vocabulary — seeded from whatever the schema already pins — and this
+/// function mints a code for every key the batch introduces that the minter does not yet carry
+/// (§3.4). Minting is a **batch-level pre-pass, not per row**: [`BatchColumn::decode`] collects
+/// the distinct keys of one Arrow batch, mints any novel ones once each, and only then maps every
+/// row through the now-complete lookup — never once per row, which is both the performance point
+/// and the reason [`BatchColumn::value`] stays a pure positional lookup over already-resolved
+/// data. A row whose category column is null carries [`crate::schema::ABSENT_CODE`], for either
+/// kind.
+///
+/// `minters` is threaded through rather than owned here so the caller can hand its final state —
+/// every binding this scan minted, on top of whatever the schema seeded it with — to the manifest
+/// writer once the whole scan (there is exactly one, per build) has completed.
+pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
+    path: &Path,
+    schema_decl: &crate::schema::Schema,
+    minters: &mut HashMap<String, VocabularyMinter>,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
+    if schema_decl.is_empty() {
+        return Ok(());
+    }
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let file_schema = builder.schema().clone();
+
+    let mut roots = vec![column_index(path, &file_schema, "entity_id")?];
+    for attribute in &schema_decl.attributes {
+        roots.push(
+            file_schema
+                .column_with_name(&attribute.name)
+                .map(|(i, _)| i)
+                .ok_or_else(|| BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "the schema declares attribute '{}', which this points file has no \
+                         column for. A declared column the data lacks would otherwise be written \
+                         as the absent sentinel for every row — a column that cost its width to \
+                         say nothing",
+                        attribute.name
+                    ),
+                })?,
+        );
+    }
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
+    let reader = builder
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let id_idx = column_index(path, &projected, "entity_id")?;
+    let attribute_idx: Vec<usize> = schema_decl
+        .attributes
+        .iter()
+        .map(|a| column_index(path, &projected, &a.name))
+        .collect::<Result<_>>()?;
+
+    let mut row_values: Vec<ScalarValue> = Vec::with_capacity(schema_decl.attributes.len());
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+
+        // **Decoded once per batch, not once per row.** An earlier revision called a
+        // whole-column converter from inside the row loop, so a 65,536-row batch decoded its
+        // integer columns 65,536 times — quadratic in the batch size, and invisible at the scale
+        // a test uses. A discovered category's mint pre-pass rides the same discipline: minting
+        // is per distinct key in the batch, decided here, not per row.
+        let mut decoded: Vec<BatchColumn> = Vec::with_capacity(schema_decl.attributes.len());
+        for (attribute, &idx) in schema_decl.attributes.iter().zip(&attribute_idx) {
+            decoded.push(BatchColumn::decode(
+                path,
+                batch.column(idx),
+                attribute,
+                minters,
+            )?);
+        }
+
+        for (row, &entity_id) in ids.iter().enumerate() {
+            if limit.is_some_and(|l| entity_id >= l) {
+                continue;
+            }
+            row_values.clear();
+            for (attribute, column) in schema_decl.attributes.iter().zip(&decoded) {
+                row_values.push(column.value(row, attribute, schema_decl)?);
+            }
+            visit(entity_id, &row_values);
+        }
+    }
+    Ok(())
+}
+
+/// One batch's worth of a declared column, decoded to the shape the row loop indexes.
+///
+/// The variants are the *source* shapes, not the declared types: several declarations read from
+/// one shape (every integer width from `Ints`), and the declaration decides what a row's value
+/// becomes, not what the file holds.
+enum BatchColumn {
+    /// Category keys under a **declared** vocabulary, resolved per row: `value` looks each key up
+    /// against `schema_decl` and refuses an unknown one (§5's declare-then-use).
+    Keys(arrow::array::StringArray),
+    /// Category codes under a **discovered** vocabulary, already resolved by the batch-level mint
+    /// pre-pass in `decode` — every key this batch carries was minted or found bound before this
+    /// variant exists, so `value` is a pure index, exactly as every other variant's is.
+    Discovered(Vec<u32>),
+    Bool(arrow::array::BooleanArray),
+    /// Every integer column, widened to `i64` once. `narrow` puts each value back inside its
+    /// declared width, refusing rather than truncating.
+    Ints(Vec<i64>),
+    /// A `u64` column read from a `u64` source, kept unwidened.
+    ///
+    /// **The one integer that cannot go through `Ints`.** Widening to `i64` is lossless for every
+    /// other width, but a `u64` above `i64::MAX` — an ordinary hash, which is what a stable
+    /// per-item identifier usually is — reads as negative and is then refused as out of range.
+    /// Caught by the packed fixture on its first build, where `id_hash` is a blake2b digest and
+    /// half of them have the high bit set.
+    U64(Vec<u64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl BatchColumn {
+    fn decode(
+        path: &Path,
+        column: &arrow::array::ArrayRef,
+        attribute: &crate::schema::Attribute,
+        minters: &mut HashMap<String, VocabularyMinter>,
+    ) -> Result<Self> {
+        let mismatch = || BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "attribute '{}' is declared '{}', but the points file holds {:?}. The width is \
+                 baked into every row and changing it rewrites the corpus (per-point-attributes \
+                 §2.2), so it is taken from the declaration and the data must match it.{}",
+                attribute.name,
+                attribute.ty.arrow_type_name(),
+                column.data_type(),
+                match column.data_type() {
+                    // The one mismatch a caller is likely to hit while doing everything right: a
+                    // timestamp column is an `i64` and reads as one, but only in microseconds.
+                    DataType::Timestamp(unit, _) if *unit != TimeUnit::Microsecond => format!(
+                        " This is a timestamp in {unit:?}, and only microseconds are accepted: \
+                         nothing records a unit, so accepting two would store incomparable \
+                         numbers under one declaration. Cast the column to timestamp[us] (or to \
+                         a plain i64 of whatever unit you mean) before building"
+                    ),
+                    _ => String::new(),
+                }
+            ),
+        };
+        let any = column.as_any();
+        if let Some(vocabulary) = &attribute.vocabulary {
+            // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
+            // the display name, and the code is assigned once and pinned, so a data file
+            // supplying codes directly would be a second place codes are decided.
+            let keys = any
+                .downcast_ref::<arrow::array::StringArray>()
+                .ok_or_else(|| BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "attribute '{}' is a category, so its column must hold value keys (utf8); \
+                         this file holds {:?}. A category's code is assigned once from the \
+                         vocabulary and never re-derived from the data (per-point-attributes §3.4)",
+                        attribute.name,
+                        column.data_type()
+                    ),
+                })?;
+            return match attribute.vocabulary_kind {
+                Some(crate::schema::VocabularyKind::Discovered) => {
+                    let minter = minters.get_mut(vocabulary).unwrap_or_else(|| {
+                        panic!(
+                            "'{vocabulary}' is discovered, so `Schema::discovered_minters` must \
+                             have seeded it before this scan began"
+                        )
+                    });
+                    Ok(BatchColumn::Discovered(mint_batch(
+                        keys, minter, attribute,
+                    )?))
+                }
+                // Declared (or a `values_of` share of one): resolved per row in `value`,
+                // unchanged from the declare-then-use rule.
+                _ => Ok(BatchColumn::Keys(keys.clone())),
+            };
+        }
+        Ok(match attribute.ty {
+            ScalarType::Bool => BatchColumn::Bool(
+                any.downcast_ref::<arrow::array::BooleanArray>()
+                    .ok_or_else(mismatch)?
+                    .clone(),
+            ),
+            // **`f32` accepts `f64` and rounds; `f64` accepts `f32` and widens.** Neither is the
+            // refusal an out-of-range integer gets, and the asymmetry is deliberate: narrowing an
+            // integer produces a *different* value (a `u8` given 300 stores 44), narrowing a float
+            // produces the nearest value the declared width holds, which is what declaring `f32`
+            // asks for. A caller who wants the precision declares `f64`.
+            ScalarType::F32 => {
+                BatchColumn::F32(if let Some(a) = any.downcast_ref::<Float32Array>() {
+                    a.values().to_vec()
+                } else if let Some(a) = any.downcast_ref::<Float64Array>() {
+                    a.values().iter().map(|v| *v as f32).collect()
+                } else {
+                    return Err(mismatch());
+                })
+            }
+            ScalarType::F64 => {
+                BatchColumn::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
+                    a.values().to_vec()
+                } else if let Some(a) = any.downcast_ref::<Float32Array>() {
+                    a.values().iter().map(|v| *v as f64).collect()
+                } else {
+                    return Err(mismatch());
+                })
+            }
+            ScalarType::Utf8 => {
+                // Unreachable: `render` on `utf8` is refused at parse (§4.3). An error rather than
+                // an `unreachable!` so that lifting that refusal cannot land on a panic.
+                return Err(mismatch());
+            }
+            // A `u64` declaration over a `u64` source keeps the full range; every other
+            // combination widens, which is lossless for it.
+            ScalarType::U64 if any.is::<UInt64Array>() => BatchColumn::U64(
+                any.downcast_ref::<UInt64Array>()
+                    .expect("checked by is::<>")
+                    .values()
+                    .to_vec(),
+            ),
+            _ => BatchColumn::Ints(read_integer(any, column.data_type()).ok_or_else(mismatch)?),
+        })
+    }
+
+    fn value(
+        &self,
+        row: usize,
+        attribute: &crate::schema::Attribute,
+        schema_decl: &crate::schema::Schema,
+    ) -> Result<ScalarValue> {
+        Ok(match self {
+            BatchColumn::Keys(keys) => {
+                let code = if keys.is_null(row) {
+                    crate::schema::ABSENT_CODE
+                } else {
+                    let key = keys.value(row);
+                    let vocabulary = attribute
+                        .vocabulary
+                        .as_ref()
+                        .expect("a Keys column belongs to a category");
+                    schema_decl.vocabularies[vocabulary]
+                        .code_of(key)
+                        .ok_or_else(|| {
+                            crate::schema::schema_error(format!(
+                                "attribute '{}': the points file carries value '{key}', which the \
+                                 declared vocabulary does not list. Under \
+                                 `vocabulary = \"declared\"` there is no auto-mint: a category \
+                                 carries properties and a visibility consequence, so a typo must \
+                                 not create one (per-point-attributes §5)",
+                                attribute.name
+                            ))
+                        })?
+                };
+                code_as(attribute.ty, code)
+            }
+            // Already resolved by `decode`'s mint pre-pass — a pure index, like every other
+            // variant here, and no lookup against `schema_decl` at all.
+            BatchColumn::Discovered(codes) => code_as(attribute.ty, codes[row]),
+            BatchColumn::Bool(values) => ScalarValue::Bool(values.value(row)),
+            BatchColumn::U64(values) => ScalarValue::U64(values[row]),
+            BatchColumn::F32(values) => ScalarValue::F32(values[row]),
+            BatchColumn::F64(values) => ScalarValue::F64(values[row]),
+            BatchColumn::Ints(values) => {
+                let v = values[row];
+                let range = |min: i64, max: i64| narrow(v, min, max, attribute);
+                match attribute.ty {
+                    ScalarType::U8 => ScalarValue::U8(range(0, u8::MAX as i64)? as u8),
+                    ScalarType::U16 => ScalarValue::U16(range(0, u16::MAX as i64)? as u16),
+                    ScalarType::U32 => ScalarValue::U32(range(0, u32::MAX as i64)? as u32),
+                    ScalarType::U64 => ScalarValue::U64(range(0, i64::MAX)? as u64),
+                    ScalarType::I8 => ScalarValue::I8(range(i8::MIN as i64, i8::MAX as i64)? as i8),
+                    ScalarType::I16 => {
+                        ScalarValue::I16(range(i16::MIN as i64, i16::MAX as i64)? as i16)
+                    }
+                    ScalarType::I32 => {
+                        ScalarValue::I32(range(i32::MIN as i64, i32::MAX as i64)? as i32)
+                    }
+                    ScalarType::I64 => ScalarValue::I64(v),
+                    ScalarType::TimestampUs => ScalarValue::TimestampUs(v),
+                    other => {
+                        return Err(BuildError::Invalid(format!(
+                            "attribute '{}': '{}' is not an integer declaration",
+                            attribute.name,
+                            other.arrow_type_name()
+                        )))
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// A vocabulary code at the column's declared width. A declared vocabulary's codes were checked
+/// against [`ScalarType::max_code`] at parse; a discovered one's are drawn by
+/// [`VocabularyMinter::mint`] from that same width's usable space (`vocabulary::usable_max` in
+/// `tessera-store`) and so are in range by construction. Either way the narrowing here cannot
+/// lose a value.
+fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
+    match ty {
+        ScalarType::U8 => ScalarValue::U8(code as u8),
+        ScalarType::U16 => ScalarValue::U16(code as u16),
+        // `is_category_width` admits only these three, so the fallthrough is `u32` rather than a
+        // silent home for a width that should never have reached here.
+        _ => ScalarValue::U32(code),
+    }
+}
+
+/// The batch-level mint pre-pass for a discovered vocabulary (§3.4): collect the distinct,
+/// non-null keys this Arrow batch introduces, mint each **once**, then map every row through the
+/// now-complete lookup.
+///
+/// Not once per row: `VocabularyMinter::mint` is view-first (a bound key returns its pinned code
+/// without a draw), so calling it per row would still be *correct*, but it would also be the
+/// literal per-row mutation this module's callers are built to avoid, and it is what would make
+/// [`BatchColumn::value`] need mutable access to a minter — which it must never have, being the
+/// one place every other variant's resolution is a pure index. Collecting first and minting the
+/// distinct set keeps the mutation entirely inside `decode`, before any row is read back.
+///
+/// An empty key is refused, never minted as [`crate::schema::ABSENT_CODE`] — the same typo trap
+/// [`VocabularyMinter::mint`] itself enforces for a declared vocabulary's row-time lookup.
+fn mint_batch(
+    keys: &arrow::array::StringArray,
+    minter: &mut VocabularyMinter,
+    attribute: &crate::schema::Attribute,
+) -> Result<Vec<u32>> {
+    use std::collections::BTreeSet;
+
+    let mut novel: BTreeSet<&str> = BTreeSet::new();
+    for i in 0..keys.len() {
+        if keys.is_null(i) {
+            continue;
+        }
+        let key = keys.value(i);
+        if minter.code_of(key).is_none() {
+            novel.insert(key);
+        }
+    }
+    for key in novel {
+        minter.mint(key).map_err(|e| {
+            crate::schema::schema_error(format!("attribute '{}': {e}", attribute.name))
+        })?;
+    }
+
+    Ok((0..keys.len())
+        .map(|i| {
+            if keys.is_null(i) {
+                crate::schema::ABSENT_CODE
+            } else {
+                minter
+                    .code_of(keys.value(i))
+                    .expect("every key in this batch was just minted or was already bound")
+            }
+        })
+        .collect())
+}
+
+/// Any integer parquet column as `i64` — one conversion per batch, never per row.
+fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
+    use arrow::array::{
+        Int16Array, Int32Array, Int64Array, Int8Array, TimestampMicrosecondArray, UInt16Array,
+        UInt32Array, UInt64Array, UInt8Array,
+    };
+    macro_rules! widen {
+        ($($dt:pat => $arr:ident),* $(,)?) => {
+            match ty {
+                $($dt => any
+                    .downcast_ref::<$arr>()?
+                    .values()
+                    .iter()
+                    .map(|v| *v as i64)
+                    .collect(),)*
+                // **Microseconds only, and the other units are refused.** Nothing records a unit:
+                // `MANIFEST.declared_scalars` says `i64` (or `timestamp_us`, which fixes it). So a
+                // build that silently took milliseconds from one source and microseconds from
+                // another would store two incomparable numbers under one declaration, and the
+                // difference would surface as dates a thousandfold wrong rather than as an error.
+                // Normalising here was the alternative and is worse: it rewrites the caller's
+                // values on a rule they never stated.
+                DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                    any.downcast_ref::<TimestampMicrosecondArray>()?.values().to_vec()
+                }
+                _ => return None,
+            }
+        };
+    }
+    Some(widen! {
+        DataType::UInt8 => UInt8Array,
+        DataType::UInt16 => UInt16Array,
+        DataType::UInt32 => UInt32Array,
+        DataType::UInt64 => UInt64Array,
+        DataType::Int8 => Int8Array,
+        DataType::Int16 => Int16Array,
+        DataType::Int32 => Int32Array,
+        DataType::Int64 => Int64Array,
+    })
+}
+
+/// A value that must fit the declared width, refused rather than truncated.
+///
+/// **The refusal is the point.** A `u8` category column whose data carries 300 is a build that
+/// would otherwise write 44 — a different value, in a column whose width cannot be changed
+/// without rewriting the corpus, with nothing downstream able to notice.
+fn narrow(value: i64, min: i64, max: i64, attribute: &crate::schema::Attribute) -> Result<i64> {
+    if value < min || value > max {
+        return Err(crate::schema::schema_error(format!(
+            "attribute '{}': the points file carries {value}, which does not fit its declared \
+             '{}' ({min}..={max}). Refused rather than truncated — the width is baked into every \
+             row and the remedy is a rebuild at a wider declaration (per-point-attributes §3.6)",
+            attribute.name,
+            attribute.ty.arrow_type_name()
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

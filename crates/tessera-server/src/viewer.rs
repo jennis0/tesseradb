@@ -144,7 +144,7 @@ async fn meta(
             "y_min": meta.quantisation.y_min,
             "y_max": meta.quantisation.y_max,
         },
-        "declared_scalars": meta.declared_scalars.iter().map(|s| serde_json::json!({"name": s.name, "arrow_type": s.arrow_type})).collect::<Vec<_>>(),
+        "declared_scalars": meta.declared_scalars.iter().map(|s| serde_json::json!({"name": s.name, "arrow_type": s.arrow_type.arrow_type_name()})).collect::<Vec<_>>(),
         // Reference Sheet R5: the filter operand names a client may use.
         // ⊘ Specified, not implemented: no filter contract exists yet, so this is always `[]` and a
         // client must not read an empty list as "this deployment declined to expose its filters".
@@ -496,18 +496,43 @@ fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> 
 
 /// A same-typed column of scalar values, owned so it outlives the borrow `viewport_ipc` needs.
 enum ColumnBuf {
+    Bool(Vec<bool>),
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
     U64(Vec<u64>),
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
     F32(Vec<f32>),
+    F64(Vec<f64>),
+    TimestampUs(Vec<i64>),
     Utf8(Vec<String>),
+}
+
+/// The scalar families, once, for the three places this module walks them: the owned buffer's
+/// borrow, the row-to-column transpose, and the drill-down's JSON. Three separate matches over
+/// thirteen variants is three chances for a type to appear in two of them.
+macro_rules! scalar_families {
+    ($mac:ident) => {
+        $mac! {
+            Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs,
+        }
+    };
 }
 
 impl ColumnBuf {
     fn as_ref(&self) -> ScalarColumn<'_> {
-        match self {
-            ColumnBuf::U64(v) => ScalarColumn::U64(v),
-            ColumnBuf::F32(v) => ScalarColumn::F32(v),
-            ColumnBuf::Utf8(v) => ScalarColumn::Utf8(v),
+        macro_rules! arms {
+            ($($v:ident),* $(,)?) => {
+                match self {
+                    $(ColumnBuf::$v(x) => ScalarColumn::$v(x),)*
+                    ColumnBuf::Utf8(x) => ScalarColumn::Utf8(x),
+                }
+            };
         }
+        scalar_families!(arms)
     }
 }
 
@@ -530,34 +555,40 @@ fn build_scalar_columns(
             .get(i)
             .cloned()
             .unwrap_or_else(|| format!("scalar_{i}"));
+        // One arm per type, generated: the hand-written form was three near-identical blocks and
+        // is thirteen now, which is the shape a type added to twelve of them hides in.
+        //
+        // The `_ => default` fallback is unreachable — a column is one type for every row, the
+        // segment schema having fixed it — and stays a default rather than a panic because a
+        // response is not the place to discover a bundle defect, and nothing here is
+        // authorisation-relevant: the mask admitted the row before its scalars were read.
+        macro_rules! column_of {
+            ($variant:ident, $default:expr) => {
+                ColumnBuf::$variant(
+                    points
+                        .iter()
+                        .map(|p| match &p.scalars[i] {
+                            tessera_engine::ScalarOut::$variant(v) => v.clone(),
+                            _ => $default,
+                        })
+                        .collect(),
+                )
+            };
+        }
         let buf = match &first.scalars[i] {
-            tessera_engine::ScalarOut::U64(_) => ColumnBuf::U64(
-                points
-                    .iter()
-                    .map(|p| match p.scalars[i] {
-                        tessera_engine::ScalarOut::U64(v) => v,
-                        _ => 0,
-                    })
-                    .collect(),
-            ),
-            tessera_engine::ScalarOut::F32(_) => ColumnBuf::F32(
-                points
-                    .iter()
-                    .map(|p| match p.scalars[i] {
-                        tessera_engine::ScalarOut::F32(v) => v,
-                        _ => 0.0,
-                    })
-                    .collect(),
-            ),
-            tessera_engine::ScalarOut::Utf8(_) => ColumnBuf::Utf8(
-                points
-                    .iter()
-                    .map(|p| match &p.scalars[i] {
-                        tessera_engine::ScalarOut::Utf8(v) => v.clone(),
-                        _ => String::new(),
-                    })
-                    .collect(),
-            ),
+            tessera_engine::ScalarOut::Bool(_) => column_of!(Bool, false),
+            tessera_engine::ScalarOut::U8(_) => column_of!(U8, 0),
+            tessera_engine::ScalarOut::U16(_) => column_of!(U16, 0),
+            tessera_engine::ScalarOut::U32(_) => column_of!(U32, 0),
+            tessera_engine::ScalarOut::U64(_) => column_of!(U64, 0),
+            tessera_engine::ScalarOut::I8(_) => column_of!(I8, 0),
+            tessera_engine::ScalarOut::I16(_) => column_of!(I16, 0),
+            tessera_engine::ScalarOut::I32(_) => column_of!(I32, 0),
+            tessera_engine::ScalarOut::I64(_) => column_of!(I64, 0),
+            tessera_engine::ScalarOut::F32(_) => column_of!(F32, 0.0),
+            tessera_engine::ScalarOut::F64(_) => column_of!(F64, 0.0),
+            tessera_engine::ScalarOut::TimestampUs(_) => column_of!(TimestampUs, 0),
+            tessera_engine::ScalarOut::Utf8(_) => column_of!(Utf8, String::new()),
         };
         columns.push((name, buf));
     }
@@ -639,10 +670,20 @@ fn run_item(
     let scalars = item
         .scalars
         .into_iter()
-        .map(|s| match s {
-            tessera_engine::ScalarOut::U64(v) => serde_json::json!(v),
-            tessera_engine::ScalarOut::F32(v) => serde_json::json!(v),
-            tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
+        // Every width lands on a JSON number; the drill-down response is a presentation of the
+        // value, not of its storage width, and a client reading `severity: 3` should not have to
+        // know the column is a `u8`. The width is a residency decision (per-point-attributes
+        // §3.6), and `/v1/meta` publishes it for a client that does care.
+        .map(|s| {
+            macro_rules! arms {
+                ($($v:ident),* $(,)?) => {
+                    match s {
+                        $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
+                        tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
+                    }
+                };
+            }
+            scalar_families!(arms)
         })
         .collect();
 

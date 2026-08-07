@@ -536,12 +536,32 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
         .join(&ctx.seg_id)
 }
 
+/// The WAL's scalar shape into the segment writer's — the same set in the same order, so this is
+/// a variant-for-variant transcription and a missing arm is a compile error rather than a value
+/// silently taking another type's place.
 fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
-    match scalar {
-        WalScalar::U64(v) => ScalarValue::U64(*v),
-        WalScalar::F32(v) => ScalarValue::F32(*v),
-        WalScalar::Utf8(v) => ScalarValue::Utf8(v.clone()),
+    macro_rules! same {
+        ($($v:ident),* $(,)?) => {
+            match scalar {
+                $(WalScalar::$v(x) => ScalarValue::$v(*x),)*
+                WalScalar::Utf8(x) => ScalarValue::Utf8(x.clone()),
+            }
+        };
     }
+    same!(
+        Bool,
+        U8,
+        U16,
+        U32,
+        U64,
+        I8,
+        I16,
+        I32,
+        I64,
+        F32,
+        F64,
+        TimestampUs
+    )
 }
 
 /// One file's size and hex SHA-256, by reading it back — `tessera_store::digest_of` with this
@@ -637,6 +657,7 @@ mod tests {
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
+            vocabularies: vec![],
             small_term_threshold: 32,
             quantisation: Quantisation {
                 x_min: 0.0,
@@ -663,6 +684,7 @@ mod tests {
         let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: "v00000".to_string(),
+            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
             segments_version: 0,
             watermark: 0,
             bundle: Arc::new(Bundle {

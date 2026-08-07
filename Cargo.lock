@@ -2325,6 +2325,7 @@ dependencies = [
  "tessera-spatial",
  "tessera-store",
  "tessera-types",
+ "toml 0.8.23",
 ]
 
 [[package]]

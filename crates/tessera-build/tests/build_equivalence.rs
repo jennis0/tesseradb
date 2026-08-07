@@ -153,6 +153,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     }
 }
 
@@ -632,6 +633,7 @@ fn reference_build_at_scale() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .unwrap();
     assert_eq!(report.items, limit);

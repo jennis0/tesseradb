@@ -67,6 +67,13 @@ pub use viewport::{
 // type needs to be nameable from the crate that reads it. `/v1/meta` gets away without naming it
 // only because it reads the two fields straight into JSON.
 pub use tessera_store::manifest::DeclaredScalar;
+// The ingest handler resolves category keys to codes and must name the reserved *absent* code and
+// the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
+pub use tessera_store::manifest::{ManifestVocabulary, ManifestVocabularyValue, VocabularyKind};
+pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
+// `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
+// its column's storage width, and reaches it here rather than transcribing the table again.
+pub use tessera_spatial::tiler::ScalarType;
 // `EngineMeta::quantisation`'s type, re-exported for the same layering reason `DeclaredScalar` is:
 // `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), and `/control/ingest`
 // validates an ingested coordinate against this declaration (§6), so the type needs to be nameable
@@ -171,6 +178,21 @@ pub struct Generation {
     pub overlay_version: u64,
     pub overlay: Arc<Overlay>,
     pub buffer: Arc<IngestBuffer>,
+    /// The live category bindings: key → code per vocabulary, plus the assigned-code set that makes
+    /// never-reuse hold (per-point-attributes §3.4).
+    ///
+    /// **On the generation, because a mint publishes.** A novel key acquires its code at a commit
+    /// window's close and becomes durable in the same fsync as the rows that use it, so the
+    /// bindings grow exactly when the buffer does and have to be republished alongside it — the
+    /// same reason `dict` lives here. A request that loads one generation pointer gets the buffer,
+    /// the geometry and the bindings that agree.
+    ///
+    /// **Read-only here; the executor owns the authoritative copy.** Minting is serial by
+    /// construction (write-path §1.1) and this is a published snapshot of it, exactly as `overlay`
+    /// is of the live overlay. A handler resolving a key through this may find it bound or not; it
+    /// must never mint, because two handlers racing one novel key would draw two codes for it and
+    /// split its rows between them.
+    pub vocabularies: Arc<Vocabularies>,
     /// **The deny mask**: per slice, the row-space image of `deleted ∪ suppressed`, subtracted
     /// from every composed mask (I1).
     ///
@@ -227,6 +249,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         locator_extents: Vec::new(),
         tombstones: Vec::new(),
         deny: Vec::new(),
+        vocabulary_extensions: Vec::new(),
         files: std::collections::BTreeMap::new(),
     };
     let bundle_manifest = tessera_store::manifest::Manifest {
@@ -235,6 +258,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         data_plugin_hash: String::new(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
+        vocabularies: vec![],
         small_term_threshold: 32,
         quantisation: Quantisation {
             x_min: 0.0,

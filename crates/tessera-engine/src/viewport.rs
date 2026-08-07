@@ -46,6 +46,7 @@ use tessera_authz::FrozenFragment;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
+use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, GenerationStamp, TesseraId, API_VERSION};
 
@@ -57,12 +58,23 @@ use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
 
-/// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
-/// three kinds, but on the *output* side — read from `ColumnsRef`, not staged for write).
+/// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`,
+/// but on the *output* side — read from `ColumnsRef`, not staged for write).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarOut {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
     U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
     F32(f32),
+    F64(f64),
+    /// Microseconds since the Unix epoch.
+    TimestampUs(i64),
     Utf8(String),
 }
 
@@ -281,6 +293,13 @@ pub struct EngineMeta {
     pub slices: Vec<(String, String)>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// The live category bindings, from the same generation as `declared_scalars`.
+    ///
+    /// **Ingest resolves keys through this, and never mints.** A declared vocabulary is immutable
+    /// between builds, so a handler's snapshot cannot be stale for one; a discovered vocabulary's
+    /// novel keys travel to the write executor as keys, because two handlers racing one novel key
+    /// would draw two codes for it and split its rows between them.
+    pub vocabularies: Arc<Vocabularies>,
     /// The idset (contracts §2.2/§2.6 r6). `GET /v1/meta` reports this
     /// verbatim as `idset`; `POST /v1/items/{tessera_id}` compares an optional
     /// caller-supplied `idset` against it. Never the identity **key** — that never leaves the
@@ -304,6 +323,7 @@ impl Engine {
                 .collect(),
             quantisation: manifest.quantisation,
             declared_scalars: manifest.declared_scalars.clone(),
+            vocabularies: Arc::clone(&generation.vocabularies),
             idset: manifest.identity.idset,
         }
     }
@@ -1437,15 +1457,35 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
 
     let mut scalars = Vec::with_capacity(declared.len());
     for declared_scalar in declared {
-        // A declared scalar absent from this segment's schema (shouldn't happen once the build
-        // pipeline writes declared columns, which it does not yet) is skipped rather
-        // than treated as an error — nothing here is authorisation-relevant.
+        // A declared scalar absent from this segment's schema is skipped rather than treated as
+        // an error — nothing here is authorisation-relevant, and the fail-closed check is at the
+        // write end: `gather_scalars` refuses a segment missing a declared column, so a merge or
+        // fold cannot propagate one. What reaches here is a read of a segment already published.
         if let Some(value) = cols.scalar(&declared_scalar.name) {
-            scalars.push(match value {
-                ScalarSlice::U64(s) => ScalarOut::U64(s[idx]),
-                ScalarSlice::F32(s) => ScalarOut::F32(s[idx]),
-                ScalarSlice::Utf8(arr) => ScalarOut::Utf8(arr.value(idx).to_string()),
-            });
+            // Generated for the flat members; `Bool` and `Utf8` read through their arrays
+            // because neither is stored as a flat slice of itself.
+            macro_rules! out {
+                ($($v:ident),* $(,)?) => {
+                    match value {
+                        $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
+                        ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
+                        ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
+                    }
+                };
+            }
+            scalars.push(out!(
+                U8,
+                U16,
+                U32,
+                U64,
+                I8,
+                I16,
+                I32,
+                I64,
+                F32,
+                F64,
+                TimestampUs
+            ));
         }
     }
 

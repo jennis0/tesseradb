@@ -505,6 +505,7 @@ mod tests {
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
             deny: Vec::new(),
+            vocabulary_extensions: Vec::new(),
             files: BTreeMap::new(),
         };
         for i in 0..flushes {

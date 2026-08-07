@@ -172,8 +172,13 @@ or refreshes credentials, and retrieving a visible set by reference is literally
 
 An item becomes more than a coordinate. [#42] lets a deployment declare per-item columns at build
 time and serves them; [#43] makes them filterable, and needs [#42] first because the service
-advertises an empty operand list until something populates one. The build currently always writes
-an empty column list, so the schema's attribute tail has never been non-empty in practice.
+advertises an empty operand list until something populates one.
+
+**[#42]'s `render` placement is built** — a `schema.toml` compiles into the manifest, both build
+implementations emit the columns, and flush, merge and the fold carry them. What remains of it is
+[#82], which lets a vocabulary be *discovered* rather than authored up front, and the two obligations
+[#42] sets for itself: a differential oracle exercising a non-empty column set, and the disclosure
+consequences in the leak register. Those constrain nothing else's order and can land beside [#43].
 
 The shape is deliberate and worth preserving under pressure: filters are order-independent set
 producers composed by intersection. The leak register can be exhaustive because there are about
@@ -389,3 +394,4 @@ and has no single position. Every downstream property rests on it. No design exi
 [#54]: https://github.com/jennis0/tessera-index/issues/54
 [#55]: https://github.com/jennis0/tessera-index/issues/55
 [#56]: https://github.com/jennis0/tessera-index/issues/56
+[#82]: https://github.com/jennis0/tessera-index/issues/82

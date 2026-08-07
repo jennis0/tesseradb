@@ -316,6 +316,7 @@ mod tests {
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
+            vocabularies: vec![],
             small_term_threshold: 32,
             quantisation: Quantisation {
                 x_min: 0.0,
@@ -339,6 +340,7 @@ mod tests {
         let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: prefix.to_string(),
+            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
             segments_version,
             watermark: 0,
             bundle: Arc::new(Bundle {

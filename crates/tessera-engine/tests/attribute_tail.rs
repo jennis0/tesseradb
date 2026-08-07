@@ -1,0 +1,628 @@
+//! **The declared attribute tail survives every producer of `columns.arrow`.**
+//!
+//! Per-point-attributes §2's `render` placement puts a value in the hot row. Four things then write
+//! that row — the batch build, a flush, a merge, and the compaction fold — and each takes its
+//! writer schema from `MANIFEST.declared_scalars` rather than from the segment it is rewriting.
+//! That indirection is what these cases exist for: a producer that read its schema from anywhere
+//! else, or that dropped the tail because it had no opinion about it, would emit a segment whose
+//! columns are *shorter* than the manifest declares — and the failure would not surface at the
+//! write. It surfaces as every later row's value read under the wrong identity, or as a reader
+//! refusing a bundle hours afterwards.
+//!
+//! **The assertion is always by `tessera_id`, never by row.** Every one of these producers
+//! legitimately reorders rows: a merge interleaves two segments in `(morton, tessera_id)` order, a
+//! fold rewrites the whole permutation. A row-indexed assertion would pass on a producer that
+//! carried the values forward *unpermuted* — values present, every one against the wrong item —
+//! which is precisely the defect that has no other symptom.
+//!
+//! What is **not** covered here, stated so its absence is not read as coverage: nothing asserts a
+//! category *key* survives ingest, because ingest carries codes rather than keys (see
+//! `an_ingested_row_carries_the_declared_tail_through_a_flush`).
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::Path;
+use std::sync::Arc;
+
+use arrow::array::{Float64Array, StringArray, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+
+use common::*;
+use tessera_build::schema::Schema;
+use tessera_build::{build, BuildArgs};
+use tessera_engine::{Engine, EngineConfig};
+use tessera_lifecycle::command::UnallocatedRow;
+use tessera_lifecycle::wal::WalScalar;
+use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
+
+/// The fixture's schema: a `u8` category, a plain `i64` and a plain `f32`.
+///
+/// **Three widths, not one.** The tail is written and read back *positionally*, so a bug that
+/// mixes up two columns is invisible in a schema whose columns are the same width — every value
+/// lands somewhere legal. Different widths make a positional slip a type mismatch the readers
+/// refuse, and make the `columns.arrow` byte size a check in its own right.
+const SCHEMA_TOML: &str = r#"
+[[attribute]]
+name       = "band"
+type       = "category"
+width      = "u8"
+used_for   = ["render"]
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  low = 1
+  mid = 2
+  high = 3
+
+[[attribute]]
+name     = "ingested_at"
+type     = "i64"
+used_for = ["render"]
+
+[[attribute]]
+name     = "score"
+type     = "f32"
+used_for = ["render"]
+"#;
+
+/// The band key an entity carries in the fixture — three-way, so every declared code is exercised
+/// and no code is the only one present.
+fn band_of(entity: u64) -> &'static str {
+    match entity % 3 {
+        0 => "low",
+        1 => "mid",
+        _ => "high",
+    }
+}
+
+fn band_code(entity: u64) -> u8 {
+    match entity % 3 {
+        0 => 1,
+        1 => 2,
+        _ => 3,
+    }
+}
+
+fn ingested_at_of(entity: u64) -> i64 {
+    1_700_000_000_000_000i64 + entity as i64
+}
+
+fn score_of(entity: u64) -> f32 {
+    (entity % 97) as f32 * 0.5
+}
+
+/// The fixture's points file, plus the three attribute columns keyed to `entity_id`.
+///
+/// The category arrives as its **key**, never as a code (§3.1): the code is assigned once, in the
+/// schema, and a data file supplying codes directly would be a second place codes are decided.
+fn write_points_with_attributes(path: &Path, n: u64) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("band", DataType::Utf8, false),
+        Field::new("ingested_at", DataType::Int64, false),
+        Field::new("score", DataType::Float32, false),
+    ]));
+    let ids: Vec<u64> = (0..n).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let bands: Vec<&str> = ids.iter().map(|e| band_of(*e)).collect();
+    let stamps: Vec<i64> = ids.iter().map(|e| ingested_at_of(*e)).collect();
+    let scores: Vec<f32> = ids.iter().map(|e| score_of(*e)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(bands)),
+            Arc::new(arrow::array::Int64Array::from(stamps)),
+            Arc::new(arrow::array::Float32Array::from(scores)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn parse_schema(tmp: &Path) -> Schema {
+    let path = tmp.join("schema.toml");
+    std::fs::write(&path, SCHEMA_TOML).unwrap();
+    Schema::parse(&path, &std::collections::HashMap::new()).expect("the fixture schema parses")
+}
+
+/// Build a fixture bundle carrying the attribute tail.
+fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
+    let points = tmp.join("points.parquet");
+    let pairs = tmp.join("pairs.parquet");
+    write_points_with_attributes(&points, n);
+    write_pairs_n(&pairs, n);
+    let args = BuildArgs {
+        points,
+        pairs,
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: parse_schema(tmp),
+    };
+    build(&args).expect("a build with a declared schema should succeed");
+}
+
+/// Every `(tessera_id, band, ingested_at, score)` in every live segment of the bundle at `root`.
+///
+/// **Read through `ColumnsRef` by name**, which is how the serving path reads it — so a segment
+/// whose tail is present but misnamed, mistyped or short fails here exactly as it would in a
+/// request. Keyed by `tessera_id` because every producer may reorder rows (see the module doc).
+fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
+    let bundle = open_bundle(root).expect("the bundle opens");
+    // The prefix is read from `CURRENT` rather than assumed, because a fold publishes into a new
+    // one — a hard-coded `v00000` would silently read the *pre-fold* segments and let the fold
+    // case pass without the fold's output ever being looked at.
+    let current: tessera_store::manifest::CurrentPointer =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
+            .expect("CURRENT parses");
+    let prefix = &current.prefix;
+    let mut out = BTreeMap::new();
+    for (phash, partition) in &bundle.partitions {
+        for segment in &partition.manifest.segments {
+            let dir = root
+                .join(prefix)
+                .join("partitions")
+                .join(phash)
+                .join("slices")
+                .join(&segment.slice)
+                .join("segments")
+                .join(&segment.seg_id);
+            let columns = ColumnsRef::load(&dir.join("columns.arrow"))
+                .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
+            let ids = columns.tessera_id();
+            let band = match columns.scalar("band") {
+                Some(ScalarSlice::U8(v)) => v,
+                other => panic!(
+                    "segment {} must carry 'band' as u8, found {other:?}",
+                    segment.seg_id
+                ),
+            };
+            let stamp = match columns.scalar("ingested_at") {
+                Some(ScalarSlice::I64(v)) => v,
+                other => panic!(
+                    "segment {} must carry 'ingested_at' as i64, found {other:?}",
+                    segment.seg_id
+                ),
+            };
+            let score = match columns.scalar("score") {
+                Some(ScalarSlice::F32(v)) => v,
+                other => panic!(
+                    "segment {} must carry 'score' as f32, found {other:?}",
+                    segment.seg_id
+                ),
+            };
+            assert_eq!(ids.len(), band.len(), "every column is one per row");
+            assert_eq!(ids.len(), stamp.len());
+            assert_eq!(ids.len(), score.len());
+            for row in 0..ids.len() {
+                out.insert(ids[row], (band[row], stamp[row], score[row]));
+            }
+        }
+    }
+    out
+}
+
+fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config,
+    )
+    .expect("the engine opens against a bundle carrying a declared tail");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    engine
+}
+
+fn flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().flushes == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn fold(engine: &Engine) {
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// **The build writes the tail, and the manifest describes it.**
+///
+/// The floor everything else stands on: before this, `declared_scalars` was written empty
+/// unconditionally and no build path emitted a column, so the whole tail — the ingest validation,
+/// the flush schema, the reader's widening — had never run against a non-empty declaration.
+#[test]
+fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+
+    let bundle = open_bundle(&root).expect("the bundle opens");
+    let declared = &bundle.manifest.declared_scalars;
+    assert_eq!(
+        declared.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        vec!["band", "ingested_at", "score"],
+        "declaration order is the column order and must survive compilation verbatim"
+    );
+    assert_eq!(
+        declared
+            .iter()
+            .map(|d| d.arrow_type.arrow_type_name())
+            .collect::<Vec<_>>(),
+        vec!["u8", "i64", "f32"]
+    );
+    // The category names its vocabulary; the two plain scalars name none.
+    assert_eq!(declared[0].vocabulary.as_deref(), Some("band"));
+    assert!(declared[1].vocabulary.is_none());
+    assert!(declared[2].vocabulary.is_none());
+
+    let vocabulary = bundle
+        .manifest
+        .vocabularies
+        .iter()
+        .find(|v| v.name == "band")
+        .expect("the declared vocabulary reaches the manifest");
+    assert_eq!(vocabulary.listing, "public");
+    let codes: BTreeMap<&str, u32> = vocabulary
+        .values
+        .iter()
+        .map(|v| (v.key.as_str(), v.code))
+        .collect();
+    assert_eq!(codes, BTreeMap::from([("low", 1), ("mid", 2), ("high", 3)]));
+
+    // And the values are at the rows, joined **source id → entity → tessera_id**.
+    //
+    // **The source id is not the entity id, and asserting as if it were is how this case passed
+    // against a build that gave every item another item's attributes.** Entity ids are assigned
+    // in signature-sorted order (§11.1), so the map is a permutation with no fixed points to
+    // speak of — but a fixture whose items all carry one signature has an *identity* permutation,
+    // which is what let the wrong assertion look right. It is read from the external-id sidecar,
+    // which is the bundle's own record of the assignment rather than a second guess at it.
+    let tail = tail_by_identity(&root);
+    assert_eq!(tail.len(), N_ITEMS as usize);
+    let entity_of_source = source_to_new_map(&root, "v00000");
+    assert_eq!(entity_of_source.len(), N_ITEMS as usize);
+    let key = test_key();
+    for source in 0..N_ITEMS {
+        let entity = entity_of_source[&source];
+        let id = key
+            .forward(0, tessera_types::EntityId::new(entity))
+            .unwrap();
+        let (band, stamp, score) = tail[&id.raw()];
+        assert_eq!(band, band_code(source), "source {source}'s band code");
+        assert_eq!(stamp, ingested_at_of(source), "source {source}'s timestamp");
+        assert_eq!(score, score_of(source), "source {source}'s score");
+    }
+}
+
+/// **The two build implementations agree about the tail, byte for byte.**
+///
+/// `build_in_memory` is the oracle the streaming pipeline is tested against precisely because the
+/// entity assignment it encodes is permanent (I9). The pipeline resolves a source id to an entity
+/// through `source_ids` and `entity_of_ordinal`; the in-memory build resolves it through the
+/// staged items' own order. Those are two independent implementations of one mapping, and this is
+/// what stops them drifting — the defect the wrong version of the case above could not see.
+#[test]
+fn both_build_implementations_write_the_same_tail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    write_points_with_attributes(&points, 2_000);
+    write_pairs_n(&pairs, 2_000);
+    let args_for = |out: &Path| BuildArgs {
+        points: points.clone(),
+        pairs: pairs.clone(),
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: parse_schema(tmp.path()),
+    };
+
+    let streamed = tmp.path().join("streamed");
+    let linear = tmp.path().join("linear");
+    build(&args_for(&streamed)).expect("the streaming build succeeds");
+    tessera_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
+
+    let a = std::fs::read(
+        streamed.join("v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+    )
+    .unwrap();
+    let b = std::fs::read(
+        linear.join("v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+    )
+    .unwrap();
+    assert_eq!(
+        a, b,
+        "the two builds' columns.arrow must be byte-identical, tail included"
+    );
+}
+
+/// **A flush writes the same tail the build did**, taking its schema from the manifest.
+///
+/// ⊘ **Ingest carries codes, not keys.** §5's declare-then-use rule is about a *key* arriving at
+/// ingest and being refused if the vocabulary does not declare it; that mapping does not exist —
+/// the batch's scalar tail is validated against the declared *arrow type*, so a `u8` category
+/// column carries the code. What this case pins is the placement, not the key mapping.
+#[test]
+fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    let entity = engine
+        .accept_ingest(
+            vec![UnallocatedRow {
+                external_id: Some(b"ingested-1".to_vec()),
+                slice: "s0".to_string(),
+                descriptors: vec![b"0".to_vec()],
+                x: 5.0,
+                y: 5.0,
+                // Positional, in the manifest's declared order — the order the whole path reads
+                // it back in.
+                scalars: vec![
+                    WalScalar::U8(3),
+                    WalScalar::I64(1_800_000_000_000_000),
+                    WalScalar::F32(12.5),
+                ],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+            }],
+            "batch-1".to_string(),
+            [0u8; 32],
+        )
+        .expect("an ingest carrying the declared tail is accepted")[0];
+
+    flush(&engine);
+    drop(engine);
+
+    let tail = tail_by_identity(&root);
+    assert_eq!(
+        tail.len(),
+        N_ITEMS as usize + 1,
+        "the flushed row joins the base segment's rows"
+    );
+    let id = test_key().forward(0, entity).unwrap();
+    assert_eq!(
+        tail[&id.raw()],
+        (3u8, 1_800_000_000_000_000i64, 12.5f32),
+        "the flushed row's tail is what was ingested"
+    );
+}
+
+/// **A merge carries every input segment's tail forward, permuted with its rows.**
+///
+/// A merge is the producer with the most opportunity to lose the tail quietly: it reads *k* mapped
+/// segments and interleaves them, so a value carried forward at the wrong index lands on a real
+/// row of a real item. Several flushes are merged here rather than one, because a single-input
+/// merge cannot interleave and so cannot show the defect.
+#[test]
+fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+    // A merge cap low enough that the flushes below select one, and a base segment far above it.
+    let engine = engine_over(
+        tmp.path(),
+        &root,
+        EngineConfig {
+            max_merged_segment_bytes: Some(64 * 1024),
+            ..config()
+        },
+    );
+
+    let mut expected = BTreeMap::new();
+    for batch in 0..6u64 {
+        let entity = engine
+            .accept_ingest(
+                vec![UnallocatedRow {
+                    external_id: Some(format!("merged-{batch}").into_bytes()),
+                    slice: "s0".to_string(),
+                    descriptors: vec![b"0".to_vec()],
+                    // Spread across the extent so the merge genuinely interleaves in Morton order
+                    // rather than appending one segment after another.
+                    x: (batch * 149 % 1000) as f32,
+                    y: (batch * 271 % 1000) as f32,
+                    scalars: vec![
+                        WalScalar::U8((batch % 3) as u8 + 1),
+                        WalScalar::I64(1_900_000_000_000_000 + batch as i64),
+                        WalScalar::F32(batch as f32 * 3.25),
+                    ],
+                    terms: engine.resolve_terms(&[b"0".to_vec()]),
+                }],
+                format!("batch-{batch}"),
+                [batch as u8; 32],
+            )
+            .expect("accepted")[0];
+        flush(&engine);
+        let id = test_key().forward(0, entity).unwrap();
+        expected.insert(
+            id.raw(),
+            (
+                (batch % 3) as u8 + 1,
+                1_900_000_000_000_000 + batch as i64,
+                batch as f32 * 3.25,
+            ),
+        );
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().merges == 0 {
+        assert!(std::time::Instant::now() < deadline, "no merge ran");
+        engine.request_flush();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(engine);
+
+    let tail = tail_by_identity(&root);
+    for (id, want) in &expected {
+        assert_eq!(
+            tail.get(id),
+            Some(want),
+            "a merged row's tail must follow its identity, not its old row index"
+        );
+    }
+    // And the base segment's rows are untouched by a merge that did not include it — joined
+    // through the sidecar, for the reason the build case states.
+    let entity_of_source = source_to_new_map(&root, "v00000");
+    let key = test_key();
+    for source in [0u64, 1, 2, N_ITEMS - 1] {
+        let entity = entity_of_source[&source];
+        let id = key
+            .forward(0, tessera_types::EntityId::new(entity))
+            .unwrap();
+        assert_eq!(
+            tail[&id.raw()],
+            (band_code(source), ingested_at_of(source), score_of(source))
+        );
+    }
+}
+
+/// **The fold rewrites every row of the corpus and must rewrite every column of it.**
+///
+/// Compaction's pass 1 re-emits the whole segment into a new prefix under a new permutation, so
+/// this is the one producer that touches every row the build wrote. A fold that took its writer
+/// schema from anywhere but the manifest would publish a base segment shorter than the manifest
+/// declares — and `compact::execute` refuses to start when `scalar_schema_of` returns `None`,
+/// which is the fail-closed half this case's sibling covers.
+#[test]
+fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    let before = tail_by_identity(&root);
+    assert_eq!(before.len(), N_ITEMS as usize);
+
+    // An ingest and a flush first, so the fold has a delta to fold in as well as a base to rewrite
+    // — a fold over the base alone would not exercise the k-way path the tail travels through.
+    let ingested = engine
+        .accept_ingest(
+            vec![UnallocatedRow {
+                external_id: Some(b"folded-1".to_vec()),
+                slice: "s0".to_string(),
+                descriptors: vec![b"0".to_vec()],
+                x: 500.0,
+                y: 500.0,
+                scalars: vec![
+                    WalScalar::U8(2),
+                    WalScalar::I64(2_000_000_000_000_000),
+                    WalScalar::F32(99.75),
+                ],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+            }],
+            "pre-fold".to_string(),
+            [7u8; 32],
+        )
+        .expect("accepted")[0];
+    flush(&engine);
+    fold(&engine);
+    drop(engine);
+
+    let after = tail_by_identity(&root);
+    assert_eq!(
+        after.len(),
+        N_ITEMS as usize + 1,
+        "a fold reclaims nothing here, so every row must survive it"
+    );
+    for (id, want) in &before {
+        assert_eq!(
+            after.get(id),
+            Some(want),
+            "identity {id}'s tail changed across a fold that folded nothing away"
+        );
+    }
+    let id = test_key().forward(0, ingested).unwrap();
+    assert_eq!(
+        after[&id.raw()],
+        (2u8, 2_000_000_000_000_000i64, 99.75f32),
+        "the flushed row's tail survives being folded into the new base"
+    );
+
+    // **And the vocabulary survives the fold.** A code is meaningless without its binding: a fold
+    // that rewrote every row correctly and dropped `MANIFEST.vocabularies` would leave a corpus
+    // whose marks all decode to nothing, and nothing in the row data would be wrong. The fold
+    // writes its manifest by cloning the live one and amending two fields, so bindings are
+    // carried forward rather than re-derived — this is what stops that becoming a restatement
+    // somebody has to keep complete.
+    let folded = open_bundle(&root).expect("the folded bundle opens");
+    let vocabulary = folded
+        .manifest
+        .vocabularies
+        .iter()
+        .find(|v| v.name == "band")
+        .expect("the vocabulary survives the fold");
+    assert_eq!(
+        vocabulary.values.len(),
+        3,
+        "every binding survives, not merely the ones a surviving row happens to use"
+    );
+    assert_eq!(
+        folded
+            .manifest
+            .declared_scalars
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["band", "ingested_at", "score"],
+        "the tail's declared order survives the fold — it is what every reader reads by position"
+    );
+}

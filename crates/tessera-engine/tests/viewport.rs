@@ -786,6 +786,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     };
     build(&args).expect("no-mint build should succeed");
 
@@ -1147,6 +1148,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             batch_items: None,
             memory_budget: None,
             band_rows: None,
+            schema: Default::default(),
         };
         build(&args).expect("2.4M fixture build should succeed");
     }
