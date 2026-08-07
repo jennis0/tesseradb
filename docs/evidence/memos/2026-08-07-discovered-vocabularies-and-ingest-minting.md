@@ -11,6 +11,45 @@ attributes §3.1–§3.6, §3.8, §4.4, §5; write-path §1.2, §2.3, §4.3–§
 
 ---
 
+## Rulings applied, 2026-08-07
+
+The memo was reviewed against the code and put to the owner the same day. Five of its proposals do
+not survive; the reasoning that produced them is left in place below, with each superseded claim
+marked at the point it is made. **Where this section and a later one disagree, this section
+governs.**
+
+| Ruled | Consequence |
+|---|---|
+| **A code mapping is metadata, maintained like any other.** Losing it is an operator's problem; the system must simply never delete it itself | Owner decision 1 and risk 1 are void. No `--carry-vocabulary-from`, no lineage concept, no refusal. A rebuild is handed the live mapping through §4.4's existing **seeding** of a discovered vocabulary, which the memo overlooked |
+| **Carry-forward-and-append, not full restatement** | §3.2's central recommendation is reversed — see the note there. The fold already writes `live.bundle.manifest.clone()` amending two fields, so bindings survive because nobody re-derives them |
+| **No cardinality ceiling** | Owner decision 3 is void. The figure was modelled, never measured; a threshold nobody has measured is a number invented to look careful |
+| **Keys only on the wire** (owner decision 2, as recommended) | One wire form for every category column, declared and discovered alike |
+| **Minted keys in manifests are inside the trusted-bundle-holder boundary** (owner decision 5) | No separate manifest-side handling |
+| **Null on the wire means absent, stored as code 0** (owner decision 4) | One `is_null` check; no new concept |
+
+**Zero cost is accepted for backwards compatibility** ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
+now also in `CLAUDE.md`). This voids most of §7: "no `bundle_format` bump", "`#[serde(default)]` so
+every existing bundle opens" and "the downgrade direction fails closed" are all reasoning about
+readers that do not exist. A format may be changed freely provided the artifacts are recreated, so
+`WalRecord::VocabularyMint` should be placed where it reads best rather than appended to preserve
+discriminants. The real costs are the manifest-write size and the ingest wire break.
+
+**Two claims the audit confirmed**, recorded because the first contradicted the reviewer's own
+instinct: appending a WAL *variant* is free where adding a *field* to an existing record is not
+(`WAL_VERSION` 2 was spent adding `WalRow::slice`; postcard encodes struct fields positionally) —
+so the separate record was right, though under decision 0048 the argument no longer decides it.
+And **nothing currently validates a category code against its vocabulary** (§2.1): a declared
+`u16` column accepts any `u16` today. The keys-on-the-wire resolution closes it.
+
+**Adjacent, and not in this memo's scope:** vocabulary *visibility* — which values a principal may
+see — was settled separately on the same day as membership-derived visibility (attributes §3.3)
+with authored per-value gates (§3.8) as an override, against a **global** legend served as
+metadata. Per-viewport category counts and breakdowns are deferred to the filter contract (§8.2,
+issue #43). That work needs per-value member sets in entity space; this memo needs none of it, and
+the two meet only at the vocabulary table.
+
+---
+
 ## 0. The result first
 
 **A minted category code is not a dictionary ordinal, and nothing that assigns positions is reused
@@ -33,10 +72,11 @@ the row. Once that is accepted, most of the apparent design collapses:
    the close and persisted — the `ChangeByEntity` precedent, not the `WalRow.descriptors` one,
    because a code (unlike a term ordinal) is durable and bundle-independent from the moment it is
    minted (§3.1).
-4. **The durable home between builds is a `vocabulary_extensions` field in `SEGMENTS-<n>.json`,
-   restated in full at every manifest write** — the deny-fields precedent, not the `dict_extents`
-   one. No extent files, no positional list, no coalesce, no moved-under guard. The compaction fold
+4. **The durable home between builds is a `vocabulary_extensions` field in `SEGMENTS-<n>.json`**;
+   no extent files, no positional list, no coalesce, no moved-under guard. The compaction fold
    folds it verbatim into the new `MANIFEST.vocabularies` and empties it (§3.2, §3.3).
+   *(**Superseded in part:** the field is carried forward and appended to, not restated in full —
+   see the ruling above and the note in §3.2.)*
 5. **Declare-then-use for `vocabulary = "declared"`**: an unknown key is a 422 naming the column
    and the key, whole batch without effect, checked in the ingest handler against the manifest's
    compiled vocabulary (§2.3).
@@ -226,7 +266,24 @@ policy — mechanism, for a quantity bounded by the code space of a declared wid
 
 **Recommended: a `vocabulary_extensions` field, restated in full at every manifest write**, the
 way `deny` and `tombstones` are "serialised from the live overlay at **every** manifest write …
-and never carried forward from the manifest being extended" (contracts §2.3). Shape:
+and never carried forward from the manifest being extended" (contracts §2.3).
+
+> **⚠ Superseded (owner ruling, 2026-08-07): carry forward and append, do not restate.** The deny
+> precedent is the wrong one, and the reason also removes work. `deny` is restated *because it
+> must be able to shrink* — an unsuppress has to reach disc. A binding must never shrink, and
+> restate-fresh is the one shape that can drop one: every write re-derives the whole set from the
+> live view, so any gap in that derivation silently deletes bindings. Carry-forward cannot,
+> because the previous manifest's bindings are present by construction.
+>
+> This also shrinks risk 2 below. Under restatement, an incomplete live view causes *both* a bad
+> code draw *and* bindings dropped from the manifest; under carry-forward it causes only the
+> first. And it is what the fold already does — `live.bundle.manifest.clone()`, amending
+> `entity_id_high_water` and `files` — so the discipline exists rather than needing to be built.
+>
+> Everything else in this section stands: the field, its shape, the `dict_extents` rejection, the
+> `HONOURED_STATE` placement, and the seed-before-replay order.
+
+Shape:
 
 ```json
 "vocabulary_extensions": [
@@ -399,6 +456,15 @@ declare-then-use check.
 
 ## 7. What this costs
 
+> **⚠ Partly void (decision 0048, ruled explicit 2026-08-07).** Every clause below that reasons
+> about *existing* readers — "no `bundle_format` bump", "`#[serde(default)]` so every existing
+> bundle opens", "the downgrade direction fails closed on the unknown discriminant", "appending
+> shifts no discriminants" — is priced against a reader that does not exist. Zero cost is accepted
+> for backwards compatibility: a format may change freely provided the artifacts are recreated, so
+> the new WAL record and manifest field go wherever they read best, and version numbers move when
+> discriminants shift only as a fail-closed guard against a stale *local* artifact. **The costs
+> that survive are the manifest-write size and the ingest wire break.**
+
 - **WAL:** one appended `WalRecord` variant (`VocabularyMint`). No `WAL_VERSION` bump — appending
   shifts no discriminants; the downgrade direction fails closed on the unknown discriminant. No
   `WalScalar` change. The window close gains a mint step, and mint appends precede batch appends.
@@ -421,14 +487,15 @@ declare-then-use check.
 
 ## 8. Risk register — silent failures first
 
-1. **Rebuild recolour (silent, corpus-wide).** A full `tessera build` re-run against
-   `schema.toml` has no source for previously minted codes — the schema pins nothing for a
-   discovered vocabulary — so a rebuild mints fresh random codes, and every consumer holding the
-   old legend, and every expectation formed against the old bundle, silently recolours. Inside
-   one bundle nothing is wrong, which is what makes it silent. This is the identity-key lineage
-   problem again (`--carry-id-key-from`), and it needs the same shape of answer — owner decision
-   1. Until ruled, a build declaring a discovered vocabulary without a lineage source should
-   refuse, exactly as a build without an id-key source refuses.
+1. ~~**Rebuild recolour (silent, corpus-wide).**~~ **Void (owner ruling, 2026-08-07.)** The
+   premise was that "the schema pins nothing for a discovered vocabulary". It does: attributes
+   §4.4 permits `values_key` on a discovered vocabulary, "where it **seeds** keys and properties
+   rather than closing the set", so a rebuild is handed the live mapping as its seed and mints
+   only for keys the seed does not carry. Seeded codes are pinned exactly as declared ones are.
+   The mapping is metadata the operator maintains; losing it is a metadata problem, and no
+   lineage flag, refusal or `--carry-vocabulary-from` is wanted. **The obligation this leaves is
+   the inverse and it is real: the system must never drop a binding itself** — which is what the
+   carry-forward ruling in §3.2 is for.
 2. **Incomplete assigned-set reconstruction re-mints a live code (silent recolour of old rows).**
    Never-reuse is enforced by the in-memory assigned set; if the seed misses a source —
    `MANIFEST.vocabularies` but not `vocabulary_extensions`, or extensions but not replayed mints,
@@ -473,7 +540,19 @@ declare-then-use check.
 
 ## 9. Decisions the owner must make
 
-Each phrased to be rulable without reading the code:
+**All five were ruled on 2026-08-07 — see the rulings section at the head of this memo. None is
+outstanding.** They are kept below as asked rather than as open questions, each with its answer:
+
+1. **Rebuild lineage** → *no lineage mechanism.* The mapping is metadata; §4.4's seeding supplies
+   it to a rebuild. Void.
+2. **One wire form, or two** → *keys only*, as recommended, for declared and discovered alike.
+3. **A discovered-cardinality ceiling** → *none.* Modelled, never measured; measure if a
+   deployment approaches it.
+4. **The wire spelling of absence** → *null means absent*, stored as code 0.
+5. **Minted-key exposure** → *covered by the trusted-bundle-holder boundary* (decision 0014); no
+   separate handling.
+
+The original phrasings follow.
 
 1. **Rebuild lineage for minted codes.** When the corpus is rebuilt from source and the schema
    declares a discovered vocabulary, where do the previously minted codes come from — a
