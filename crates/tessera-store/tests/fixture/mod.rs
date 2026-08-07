@@ -113,6 +113,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],
+        vocabulary_extensions: vec![],
         files,
     };
     fs::write(

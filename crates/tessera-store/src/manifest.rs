@@ -32,11 +32,10 @@ pub struct FileDigest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclaredScalar {
     pub name: String,
-    /// One of [`ScalarType::arrow_type_name`]'s spellings. A `String` rather than the enum
-    /// because the manifest must survive being read by a build that does not know a type a later
-    /// one wrote — the reader then refuses by name, which is the fail-closed answer, rather than
-    /// failing to deserialise the whole manifest and taking every other field with it.
-    pub arrow_type: String,
+    /// The column's storage type. See [`scalar_type_name`] for the JSON spelling, and for why an
+    /// unknown one refuses the whole manifest rather than this one field.
+    #[serde(with = "scalar_type_name")]
+    pub arrow_type: ScalarType,
     /// For a category column, the [`ManifestVocabulary::name`] its codes index; `None` for a
     /// plain numeric column.
     ///
@@ -47,16 +46,59 @@ pub struct DeclaredScalar {
 }
 
 impl DeclaredScalar {
-    /// This column's type, or `None` if the manifest names one this build cannot handle.
+    /// The arrow type an ingest batch must present this column at: `utf8` for a category — whatever
+    /// its code width — and the storage type for everything else.
     ///
-    /// **The one parser, reachable from every layer that needs it.** `tessera-server` may not
-    /// depend on `tessera-spatial` (SA §3, enforced by `check-layers.sh`), so ingest validation
-    /// used to carry a second copy of this mapping — and the copies disagreed, one spelling
-    /// `uint64` where the other spelt `u64`. Neither had ever run against a non-empty
-    /// declaration, so nothing caught it. The server reaches this through the engine's
-    /// re-export instead of transcribing the table again.
-    pub fn scalar_type(&self) -> Option<ScalarType> {
-        ScalarType::parse(&self.arrow_type)
+    /// **The one place the wire/storage split is decided, and it is a function of the declaration
+    /// alone.** A category's codes are minted by the server and never supplied
+    /// (per-point-attributes §3.1, §5), so its wire form is the value *key*; the declared width
+    /// remains the storage type for the row, the WAL scalar and the segment column. The
+    /// positional-safety argument in `parse_ingest_batch` rests on "every column at its
+    /// **expected** type, where expected is a function of the manifest declaration alone" — never
+    /// on wire equalling storage — so the split leaves it intact.
+    ///
+    /// **Here rather than transcribed at the caller.** `tessera-server` sees engine API types only
+    /// (SA §3, enforced by `check-layers.sh`), so ingest validation once carried a second copy of
+    /// the type table — and the copies disagreed, one spelling `uint64` where the other spelt
+    /// `u64`. Neither had run against a non-empty declaration, so nothing caught it. A second copy
+    /// of *this* rule would be worse than that: it would let a `u16` category be validated as a
+    /// plain `u16`, which accepts raw codes and silently reopens the hole keys-on-the-wire closes.
+    pub fn wire_type(&self) -> ScalarType {
+        match self.vocabulary {
+            Some(_) => ScalarType::Utf8,
+            None => self.arrow_type,
+        }
+    }
+}
+
+/// `arrow_type`'s JSON spelling: [`ScalarType::arrow_type_name`] out, [`ScalarType::parse`] in.
+///
+/// **A `serde(with)` module rather than a derive, because the spelling is not serde's to choose.**
+/// It belongs to `ScalarType`, whose crate carries no serde dependency and needs none for this.
+///
+/// **An unknown spelling refuses the whole manifest.** The field was a `String` so that a build
+/// meeting a type a later one wrote could refuse it by name rather than fail to deserialise — a
+/// tolerance priced against the mixed-version deployment decision 0048 says does not exist, and
+/// paid for at four use sites: a fallible parse here, a refusal in `parse_ingest_batch`, a `None`
+/// arm in `scalar_schema_of` and a `NoFold` variant, four spellings of one unreachable case.
+/// Refusing at the parse is fail-closed in the same direction and costs none of them.
+mod scalar_type_name {
+    use super::ScalarType;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(ty: &ScalarType, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(ty.arrow_type_name())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<ScalarType, D::Error> {
+        let name = String::deserialize(d)?;
+        ScalarType::parse(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "'{name}' is not a scalar type this build can store (contracts §2.2)"
+            ))
+        })
     }
 }
 
@@ -303,6 +345,41 @@ pub struct DenyEntry {
     pub cause: String,
 }
 
+/// One entry of `vocabulary_extensions`: the bindings one named vocabulary has acquired since the
+/// build or fold that wrote `MANIFEST.vocabularies`.
+///
+/// **Carried forward and appended to, never restated fresh** — the opposite discipline to `deny`,
+/// and the difference is what each field must be able to do. `deny` is re-derived from the live
+/// overlay at every write *because it must be able to shrink*: an unsuppress has to reach disc. A
+/// binding must never shrink, and restate-fresh is the one shape that can silently drop one — every
+/// write re-derives the whole set, so any gap in that derivation deletes bindings with no error and
+/// no digest mismatch, and every row carrying a dropped code becomes a code no key explains.
+/// Carry-forward cannot do that, because the previous manifest's bindings are present by
+/// construction.
+///
+/// **Not a `dict_extents` counterpart.** Everything that makes `dict_extents` subtle — the
+/// append-only list order, the no-repeat rule (decision 0042), `coalesce_dict_extents`' contiguous
+/// window, the moved-under discard — exists to protect *positions*. A binding carries its code
+/// explicitly, so none of that machinery has anything to protect here; adopting the shape would
+/// import the obligations without the need, and add files, digests and a coalesce policy for a
+/// quantity bounded by the code space of a declared width.
+///
+/// The fold folds these verbatim into the new prefix's `MANIFEST.vocabularies` and writes an empty
+/// set (§3.3) — verbatim being the whole rule, since a fold that re-derived, re-sorted or
+/// re-numbered would recolour the corpus with nothing to notice.
+///
+/// **⊘ Defined and not yet written or honoured** ([#82](https://github.com/jennis0/tessera-index/issues/82)).
+/// Nothing mints between builds yet, so every manifest carries this empty and no reader needs to
+/// act on it. The name joins [`HONOURED_STATE`] in the same change as the loader that seeds
+/// [`crate::vocabulary::VocabularyMinter`] from it — naming it earlier would make every manifest
+/// carrying a binding unready, and naming it later would serve rows whose codes have no key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VocabularyExtension {
+    /// The [`ManifestVocabulary::name`] these values extend.
+    pub name: String,
+    pub values: Vec<ManifestVocabularyValue>,
+}
+
 /// One entry of `dict_extents`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictExtent {
@@ -379,6 +456,10 @@ pub struct SegmentsManifest {
     pub tombstones: Vec<u64>,
     #[serde(default)]
     pub deny: Vec<DenyEntry>,
+    /// Category bindings minted since the last build or fold — see [`VocabularyExtension`]. Empty
+    /// in a bundle straight out of `tessera build`, and emptied again by every fold.
+    #[serde(default)]
+    pub vocabulary_extensions: Vec<VocabularyExtension>,
     pub files: BTreeMap<String, FileDigest>,
 }
 
@@ -530,6 +611,62 @@ mod tests {
         }
     }
 
+    /// **A declared type this build cannot store refuses the manifest**, rather than deserialising
+    /// into a column the flush path then has to guard against.
+    ///
+    /// The direction is what matters. A flush that dropped the unknown column would write a
+    /// `columns.arrow` shorter than its schema — a bundle that no longer opens — so the answer was
+    /// always refusal; the only question was where. Refusing at the parse makes it one refusal
+    /// instead of the four the fallible spelling needed, and makes the *whole* manifest
+    /// unavailable rather than one field, which is what makes a caller's refusal total.
+    #[test]
+    fn an_unknown_arrow_type_refuses_the_declaration() {
+        let good: DeclaredScalar =
+            serde_json::from_str(r#"{"name": "score", "arrow_type": "f32"}"#).expect("f32 parses");
+        assert_eq!(good.arrow_type, ScalarType::F32);
+        assert_eq!(
+            serde_json::to_value(&good).unwrap()["arrow_type"],
+            serde_json::json!("f32"),
+            "the spelling round-trips through ScalarType::arrow_type_name"
+        );
+
+        let err = serde_json::from_str::<DeclaredScalar>(
+            r#"{"name": "decimal128", "arrow_type": "d128"}"#,
+        )
+        .expect_err("a type this build cannot store is refused");
+        assert!(
+            err.to_string().contains("d128"),
+            "the refusal names the spelling it could not parse, got: {err}"
+        );
+    }
+
+    /// A category's wire type is its key, never its code — the one place that split is decided.
+    ///
+    /// A second copy of this rule would let a `u16` category be validated as a plain `u16`, which
+    /// accepts raw codes and reopens the hole keys-on-the-wire closes.
+    #[test]
+    fn a_category_declares_utf8_on_the_wire_and_its_width_in_storage() {
+        let category = DeclaredScalar {
+            name: "department".to_string(),
+            arrow_type: ScalarType::U16,
+            vocabulary: Some("departments".to_string()),
+        };
+        assert_eq!(category.wire_type(), ScalarType::Utf8);
+        assert_eq!(category.arrow_type, ScalarType::U16);
+
+        let plain = DeclaredScalar {
+            name: "score".to_string(),
+            arrow_type: ScalarType::U16,
+            vocabulary: None,
+        };
+        assert_eq!(
+            plain.wire_type(),
+            ScalarType::U16,
+            "a plain scalar of the same width is unchanged, and is distinguishable on the wire \
+             from the category above"
+        );
+    }
+
     /// `IdentityKey`'s `Debug` is redacted, but the key's plaintext hex is deliberately carried
     /// beside it, and `IdentityDescriptor` is reachable from `Manifest` and `Bundle` — both
     /// `Debug`. One `tracing::error!("{bundle:?}")` would otherwise print the deployment key.
@@ -568,6 +705,7 @@ mod tests {
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
             deny: Vec::new(),
+            vocabulary_extensions: Vec::new(),
             files: BTreeMap::new(),
         }
     }

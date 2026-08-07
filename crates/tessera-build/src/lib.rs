@@ -628,6 +628,7 @@ fn write_manifests(
         tombstones: Vec::new(),
         deny: Vec::new(),
         // Nothing has been added since MANIFEST.json — see the note above.
+        vocabulary_extensions: Vec::new(),
         files: BTreeMap::new(),
     };
     let segments_path = partition_dir.join("SEGMENTS-0.json");
@@ -653,7 +654,7 @@ fn write_manifests(
             .iter()
             .map(|a| DeclaredScalar {
                 name: a.name.clone(),
-                arrow_type: a.ty.arrow_type_name().to_string(),
+                arrow_type: a.ty,
                 vocabulary: a.vocabulary.clone(),
             })
             .collect(),

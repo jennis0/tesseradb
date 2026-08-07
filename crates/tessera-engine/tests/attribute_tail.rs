@@ -295,7 +295,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     assert_eq!(
         declared
             .iter()
-            .map(|d| d.arrow_type.as_str())
+            .map(|d| d.arrow_type.arrow_type_name())
             .collect::<Vec<_>>(),
         vec!["u8", "i64", "f32"]
     );
@@ -624,47 +624,5 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             .collect::<Vec<_>>(),
         vec!["band", "ingested_at", "score"],
         "the tail's declared order survives the fold — it is what every reader reads by position"
-    );
-}
-
-/// **A bundle declaring a type this build cannot write refuses to flush, rather than writing a
-/// segment the reader will refuse.**
-///
-/// `scalar_schema_of` returning `None` is the fail-closed signal, and the direction matters: a
-/// flush that dropped the unknown column would produce a `columns.arrow` shorter than the schema,
-/// which is a bundle that no longer opens — a much worse outcome than a flush that does not
-/// happen. This is asserted at the pure function rather than by corrupting a live bundle, because
-/// the condition is a manifest a *later* build wrote and this one cannot express.
-#[test]
-fn a_manifest_declaring_an_unwritable_type_yields_no_writer_schema() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture_with_attributes(&root, tmp.path(), 128);
-    let bundle = open_bundle(&root).expect("the bundle opens");
-
-    // Every type the fixture declares is writable, so the live manifest yields a schema.
-    let live: Option<Vec<_>> = bundle
-        .manifest
-        .declared_scalars
-        .iter()
-        .map(|d| d.scalar_type())
-        .collect();
-    assert!(
-        live.is_some(),
-        "a manifest this build wrote must be one it can write against"
-    );
-
-    // A type from a hypothetical later format yields `None` — for the whole schema, not just for
-    // its own column, which is what makes the caller's refusal total rather than partial.
-    let mut declared = bundle.manifest.declared_scalars.clone();
-    declared.push(tessera_store::manifest::DeclaredScalar {
-        name: "decimal128".to_string(),
-        arrow_type: "d128".to_string(),
-        vocabulary: None,
-    });
-    let mixed: Option<Vec<_>> = declared.iter().map(|d| d.scalar_type()).collect();
-    assert!(
-        mixed.is_none(),
-        "one unwritable column must make the whole writer schema unavailable"
     );
 }

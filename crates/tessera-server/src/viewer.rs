@@ -144,7 +144,7 @@ async fn meta(
             "y_min": meta.quantisation.y_min,
             "y_max": meta.quantisation.y_max,
         },
-        "declared_scalars": meta.declared_scalars.iter().map(|s| serde_json::json!({"name": s.name, "arrow_type": s.arrow_type})).collect::<Vec<_>>(),
+        "declared_scalars": meta.declared_scalars.iter().map(|s| serde_json::json!({"name": s.name, "arrow_type": s.arrow_type.arrow_type_name()})).collect::<Vec<_>>(),
         // Reference Sheet R5: the filter operand names a client may use.
         // ⊘ Specified, not implemented: no filter contract exists yet, so this is always `[]` and a
         // client must not read an empty list as "this deployment declined to expose its filters".

@@ -16,6 +16,7 @@ pub mod read;
 pub mod reclaim;
 mod segment_cursor;
 mod sidecar;
+pub mod vocabulary;
 pub mod write;
 
 pub use coalesce::coalesce_external_id_runs;

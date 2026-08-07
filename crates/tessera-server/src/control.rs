@@ -524,29 +524,17 @@ fn parse_ingest_batch(
                     d.name
                 )));
             };
-            // A declaration this build cannot parse is refused before the column is examined, and
-            // refused even for an empty batch. Leaving it to the comparison below would report it
-            // as a column/manifest *mismatch*, pointing an operator at the batch when the defect
-            // is in the bundle — and would let a zero-row batch through against a declaration no
-            // flush could ever write (`scalar_schema_of` returns `None`, and the flush refuses).
-            if d.scalar_type().is_none() {
-                return Err(ApiError::Contract(format!(
-                    "MANIFEST.declared_scalars declares column '{}' as '{}', which this build \
-                     cannot store; no flush could write the resulting segment, so the batch is \
-                     refused rather than buffered against a bundle that cannot receive it",
-                    d.name, d.arrow_type
-                )));
-            }
             // One row's worth is enough to identify the column's type, and a batch with no rows has
             // no scalar to mistype.
+            let expected = d.arrow_type.arrow_type_name();
             if batch.num_rows() > 0 {
                 match scalar_of(col.as_ref(), 0) {
-                    Some((_, actual)) if actual == d.arrow_type => {}
+                    Some((_, actual)) if actual == expected => {}
                     Some((_, actual)) => {
                         return Err(ApiError::Contract(format!(
                             "ingest body: column '{}' is {actual}, but MANIFEST.declared_scalars \
-                             declares it {}",
-                            d.name, d.arrow_type
+                             declares it {expected}",
+                            d.name
                         )));
                     }
                     None => {

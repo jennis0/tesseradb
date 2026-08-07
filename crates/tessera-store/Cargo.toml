@@ -12,6 +12,9 @@ arrow = { workspace = true }
 parquet = { workspace = true }
 croaring = { workspace = true }
 memmap2 = { workspace = true }
+# Category codes are drawn from OS entropy at every mint (`src/vocabulary.rs`): a code that is a
+# position discloses vocabulary cardinality to anyone who can see one.
+rand = { workspace = true }
 rayon = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }

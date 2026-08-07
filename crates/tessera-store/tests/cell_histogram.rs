@@ -120,6 +120,7 @@ fn build_bundle(root: &Path) {
         locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],
+        vocabulary_extensions: Vec::new(),
         files: segments_files,
     };
     let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");

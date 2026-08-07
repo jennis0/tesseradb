@@ -227,6 +227,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         locator_extents: Vec::new(),
         tombstones: Vec::new(),
         deny: Vec::new(),
+        vocabulary_extensions: Vec::new(),
         files: std::collections::BTreeMap::new(),
     };
     let bundle_manifest = tessera_store::manifest::Manifest {

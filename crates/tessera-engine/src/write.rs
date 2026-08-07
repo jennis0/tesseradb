@@ -2735,17 +2735,18 @@ pub(crate) struct MaintenanceDeps {
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
 ///
-/// `None` if the manifest declares a type this build cannot write. A flush must **not** proceed
-/// then: `columns.arrow`'s schema is the fixed columns plus this tail, so a dropped column would
-/// produce a segment the reader refuses — and refusing to flush is the fail-closed answer, where
-/// writing a short segment is a bundle that no longer opens.
+/// **Infallible, because an unwritable declaration cannot reach an open bundle.**
+/// `DeclaredScalar::arrow_type` is a `ScalarType`, so a manifest naming a type this build cannot
+/// store fails to deserialise and the bundle never opens (`manifest::scalar_type_name`). This
+/// returned `None` while the field was a string, and a flush, an ingest and a fold each carried an
+/// arm for that case — three guards against a state no loaded generation can be in.
 pub(crate) fn scalar_schema_of(
     manifest: &tessera_store::manifest::Manifest,
-) -> Option<Vec<(String, ScalarType)>> {
+) -> Vec<(String, ScalarType)> {
     manifest
         .declared_scalars
         .iter()
-        .map(|d| Some((d.name.clone(), ScalarType::parse(&d.arrow_type)?)))
+        .map(|d| (d.name.clone(), d.arrow_type))
         .collect()
 }
 
@@ -3588,9 +3589,7 @@ impl Executor {
             return;
         };
         let manifest = &generation.bundle.manifest;
-        let Some(scalar_schema) = scalar_schema_of(manifest) else {
-            return;
-        };
+        let scalar_schema = scalar_schema_of(manifest);
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -3914,11 +3913,7 @@ impl Executor {
         };
 
         let manifest = &generation.bundle.manifest;
-        // `plan_fold` already refused an unwritable declaration; this is the call that produces the
-        // value rather than a second judgement about it.
-        let Some(scalar_schema) = scalar_schema_of(manifest) else {
-            return;
-        };
+        let scalar_schema = scalar_schema_of(manifest);
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -4309,6 +4304,11 @@ impl Executor {
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
             deny: Vec::new(),
+            // **Empty, because the fold has just folded them in.** Every binding these carried is
+            // now a value of the new prefix's `MANIFEST.vocabularies`, so restating them here
+            // would bind each key twice — once in each home — and a later reader would have to
+            // decide which won.
+            vocabulary_extensions: Vec::new(),
             // Every digest goes in `MANIFEST.json` instead — see below.
             files: BTreeMap::new(),
         };
@@ -4918,14 +4918,7 @@ impl Executor {
             return;
         };
         let manifest = &generation.bundle.manifest;
-        let Some(scalar_schema) = scalar_schema_of(manifest) else {
-            tracing::error!(
-                "ALARM: this bundle declares a scalar type this build cannot write, so no flush \
-                 can produce a segment whose columns.arrow matches its schema. Ingest stays \
-                 durable and invisible until the binary understands it"
-            );
-            return;
-        };
+        let scalar_schema = scalar_schema_of(manifest);
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
         // path and only one could commit. Dispatching one makes that structurally unreachable and
