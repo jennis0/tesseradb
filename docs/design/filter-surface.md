@@ -367,24 +367,33 @@ from a version bump, and the engine's projection cache already carries both. The
 
 **Above composition, per range — never inside it, and never folded into its base.** The composed mask is a
 base projection plus two row-space diffs, with the deny state folded into them; its counts are range
-cardinalities over that structure. A filter is a fourth operand, applied to the *result*:
+cardinalities over that structure. A filter is a fourth operand, applied to the *result*, by whichever of
+§4's two routes the result's size selects:
 
 ```
-matched_in_range(r) = rows_in_range(r) ∧ filter_proj
+matched_in_range(r) = rows_in_range(r) ∧ filter_proj          # narrow result: project once, intersect
+matched_in_range(r) = |{ row ∈ r : entity_of(row) ∈ M_sel }|  # broad result: test per tile, project nothing
 ```
 
 The construction the alternative invites — folding `filter ∧ base` in as a new base — breaks the
-structural invariants the diffs are asserted against, breaks the unfiltered total that θ must anchor on
-(§5.2), and re-opens the suppressed-row question this section exists to close.
+structural invariants the diffs are asserted against, and breaks the unfiltered total that θ must anchor on
+(§5.2).
 
-**That last point is the load-bearing one.** The shared operand projection is *unmasked*, so it contains
-rows for suppressed and deleted-but-unfolded entities — index §6.1 explains why the postings still hold
-them. Only the composed mask's deny fold removes them. So a filter intersected against the **composed**
-result cannot resurrect a suppressed entity, and a filter intersected against a raw fragment or a bare base
-projection silently does.
+**The candidate a filter scans under must be the composed verdict, not a raw fragment**, and this is the
+sentence the section exists for. A fragment contains suppressed and deleted-but-unfolded entities — a
+suppression never touches the artefact at all (write-path §5.4, Rule S; index §6.1). The scan returns
+whatever its candidate contained, so a scan under a fragment silently resurrects a suppressed entity, and
+one under the composed verdict cannot.
 
-The residual per-request cost is one intersection per viewport range, O(containers in range) — the term
-§4's amortisation argument does not cover, and the one §9's viewport delta measures.
+An earlier revision reached the same conclusion by a different route: the operand was evaluated *unmasked*,
+so the composition had to come afterwards. Masked evaluation moves the obligation **earlier** rather than
+removing it — from "compose the result" to "compose the candidate" — which is a simpler rule and a stricter
+one, since a result that was never scanned cannot be forgotten to be composed.
+
+The residual per-request cost is one intersection per viewport range on the narrow route, O(containers in
+range); on the broad route it is the per-tile membership test, *measured* at ~6–22 ns per viewport row and
+independent of how much the filter matched. Either way it is bounded by the viewport rather than by the
+result, which is the property §4's rule exists to preserve and the one §9's viewport delta measures.
 
 It lands on the per-tile half of the request, which is where a warm request's time already is. *Measured*
 on the 2.4×10⁶ demo bundle at depth 7, k=500, a lean five-column schema and a **warm row-projection
@@ -561,10 +570,12 @@ currently classified as outside the compute-admission gate because its work is a
 in-memory map with no mask composition, no projection and no file IO. The gate above needs the session's
 fragment and a bitmap intersection per value, so the classification flips — an amendment owed on promotion.
 
-> **⊘ Specified, not implemented.** No member sets exist, so the predicate cannot be evaluated and
-> `/v1/categories` **refuses** a `per_viewer` column rather than filtering it — serving it empty would be
-> indistinguishable from a correctly-computed empty answer. `listing = "public"` publishes normally. So the
-> disclosure control is enforced today, but only in the fail-closed direction.
+> **⊘ The member sets now exist; the predicate does not.** The batch build emits per-value postings for
+> every `per_viewer` category, so the input this gate was waiting on is present. Nothing evaluates the
+> predicate yet, so `/v1/categories` still **refuses** a `per_viewer` column rather than filtering it —
+> serving it empty would be indistinguishable from a correctly-computed empty answer. `listing = "public"`
+> publishes normally. So the disclosure control is enforced today, but only in the fail-closed direction,
+> and what remains is engine work rather than an absent artefact.
 
 ---
 
@@ -577,10 +588,10 @@ which is the class a mechanism-focused review misses.
 |---|---|---|
 | Facet or legend with counts | Counts computed before masking, or against a fragment, are counts over unauthorised or suppressed records | **C8** and Rule S. One `and_cardinality` per value against the **composed verdict** (§5.3) |
 | A category's value list | Offering a value reveals that something carries it — possibly only items the principal cannot see | **C11**, closed by §7's membership-derived gate. Categories alone: no other family enumerates its values (index §2.3) |
-| Range bounds and histogram | A slider's extrema and its bucket counts are corpus-wide aggregates that read as layout | **New entry.** Masked, or fixed and data-independent (§5.3) |
+| Range bounds and histogram | A slider's extrema and its bucket counts are corpus-wide aggregates that read as layout | **New entry.** Masked, or fixed and data-independent (§5.3). Cheap to honour now that a range is a masked scan: the extrema come from inside the candidate for free, and no precomputed unmasked structure exists to be tempted by — which is why index §3 declines zone maps rather than deferring them |
 | "N results" before intersection | Pre-intersection cardinality | **C8**, structurally unreachable per §8.2 |
-| Operand latency over a gated value | The cold cost of a shared-mode operand encodes its corpus-wide membership count | **New entry — accepted, not mitigated** (owner ruling, 2026-08-08). Yields an approximate count, never membership; measurable at first use and at any attacker-influenced eviction; narrowed incidentally by §4.2's admission rule (§3.2) |
-| Shared-cache eviction cadence | A principal's entries going cold discloses aggregate cross-principal filter volume | **New entry — accepted.** Activity, not content; introduced by the shared cache and recorded so the register stays exhaustive (§4.4) |
+| Operand latency over a gated value | The cold cost of an *unmasked* operand would encode its corpus-wide membership count | **Withdrawn, not accepted** — the channel it named no longer exists. A masked scan's work is a function of `(candidate, column)` and never of the value (index §2.2); *measured*, a value with no members and a hidden value with 250M members both intersect a category's derived posting in 0.000 ms. The row is kept as the record of a control that was accepted by ruling and then removed by construction (§3.2) |
+| Shared-cache eviction cadence | A principal's entries going cold would disclose aggregate cross-principal filter volume | **Withdrawn** with the shared cache that introduced it (§4). Nothing principal-independent is cached, so there is no cross-principal cadence to observe |
 | Empty-result disclosure | "No matches" over a masked set is safe; over an unmasked set then gated, it is not | The decision must be a function of data on the principal's own side (§2.1) |
 
 ---
@@ -629,6 +640,24 @@ needs and the arm as declared does not carry:
 ---
 
 ## Appendix R — review trail
+
+**2026-08-08 (r3, third pass) — §5–§8 re-read against the artefact, and two registered channels
+withdrawn.** §5.1's *rule* survives — a filter is applied above composition, per range, never folded into
+the base — but both its mechanism and its central argument moved. The mechanism gains §4's two routes, so
+a broad result is tested per tile rather than projected. The argument is the more important change: it had
+run "the operand is evaluated unmasked, so compose the result afterwards"; masked evaluation moves the
+obligation **earlier**, to "the candidate a filter scans under must be the composed verdict, not a raw
+fragment". That is simpler and stricter, because a result that was never scanned cannot be forgotten to be
+composed. §5.2 and §5.3 are untouched: `M_auth` anchoring, the frontier direction and containment binding
+are properties of the mask, not of how a value is stored. §6 likewise — it describes served sets.
+
+Two leak-register rows are **withdrawn rather than accepted**, and kept in the table as the record of
+controls that were ruled on and then removed by construction: operand latency over a gated value, which a
+masked scan makes value-independent (*measured*: 0.000 ms for both a valueless and a 250M-member hidden
+value); and shared-cache eviction cadence, which goes with the shared cache. A third row gains a note
+rather than changing: masked range bounds and histograms are cheap to honour now that a range is a scan,
+which is also why index §3 declines zone maps outright rather than deferring them — a precomputed unmasked
+structure is exactly the thing that would put the channel back.
 
 **2026-08-08 (r3, second pass) — §4's cache is superseded by a measured rule, not merely suspended.**
 With the filter-latency budget ruled at 0.5–1 s (`filter-index.md` §2.2), the binding term moved from
