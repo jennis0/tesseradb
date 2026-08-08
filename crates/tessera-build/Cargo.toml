@@ -12,6 +12,14 @@ tessera-plugin = { path = "../tessera-plugin" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-store = { path = "../tessera-store" }
 tessera-authz = { path = "../tessera-authz" }
+# The build writes the filter artefact through the crate that reads it, exactly as it writes
+# authorisation postings through `tessera-authz` — the format's owner owns both halves, so the
+# writer and the reader cannot drift. An earlier revision kept this test-only on the grounds that a
+# build-time dependency on a read crate inverts the layering; that stopped being true when the build
+# began emitting the value column rather than only its accelerator.
+tessera-filter = { path = "../tessera-filter" }
+# Non-test: the presence bitmap the value column is addressed by (filter-index §2.1).
+croaring = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 sha2 = { workspace = true }
@@ -23,12 +31,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
-# Test-only: `tests/term_sweep_pairs.rs` drives `tessera_authz::term_sweep::sweep_term_postings`
-# end to end, which takes the fold's tombstone set as a `croaring::Bitmap` (compaction §3). Not a
-# [dependencies] entry — no non-test code in this crate names the type.
-croaring = { workspace = true }
-# Test-only: `tests/filter_postings.rs` reads the filter postings this build writes through the
-# reader that will serve them, so the writer and the reader cannot drift on the record format.
-# The build side names only `tessera_authz::write_delta_tier_at`, so this stays out of
-# [dependencies] — a build-time dependency on the read crate would invert the layering.
-tessera-filter = { path = "../tessera-filter" }
+

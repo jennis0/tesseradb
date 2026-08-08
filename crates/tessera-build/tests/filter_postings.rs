@@ -18,7 +18,7 @@ use parquet::arrow::ArrowWriter;
 
 use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
-use tessera_filter::ColumnPostings;
+use tessera_filter::{ColumnPostings, ValueColumn};
 use tessera_spatial::Bounds;
 use tessera_store::open_bundle;
 use tessera_types::{AttrLocalId, IdentityKey};
@@ -60,6 +60,36 @@ fn write_points(path: &Path) {
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let departments: Vec<Option<String>> = ids.iter().map(|&e| department_of(e)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(departments)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Every item carries a value — the universal-presence case.
+fn write_points_dense(path: &Path) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("department", DataType::Utf8, true),
+    ]));
+    let ids: Vec<u64> = (0..N).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let departments: Vec<Option<String>> = ids
+        .iter()
+        .map(|&e| Some(["alpha", "beta", "gamma"][(e % 3) as usize].to_string()))
+        .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -175,6 +205,16 @@ fn codes_of(out: &Path, column: &str) -> HashMap<String, u32> {
         .iter()
         .map(|v| (v.key.clone(), v.code))
         .collect()
+}
+
+fn column_dir(out: &Path, column: &str) -> PathBuf {
+    let bundle = open_bundle(out).unwrap();
+    let phash = bundle.partitions.keys().next().unwrap().clone();
+    out.join(current_prefix(out))
+        .join("partitions")
+        .join(phash)
+        .join("attrs")
+        .join(column)
 }
 
 fn postings_path(out: &Path, column: &str) -> PathBuf {
@@ -334,4 +374,81 @@ fn a_public_render_only_column_emits_no_postings() {
     let dir = build_with(PUBLIC_RENDER_ONLY_SCHEMA);
     let out = dir.path().join("bundle");
     assert!(!postings_path(&out, "department").exists());
+}
+
+/// **The value column is the record and the postings are derived from it**, so the two must agree
+/// exactly. This is the property that lets a deployment build the accelerator or not and answer
+/// identically (filter-index §2.3) — and the one a future change to either writer would break
+/// silently, since both files would still open and still answer.
+#[test]
+fn the_derived_postings_agree_with_the_value_column() {
+    let dir = build_with(FILTER_SCHEMA);
+    let out = dir.path().join("bundle");
+    let cdir = column_dir(&out, "department");
+    let column = ValueColumn::open(&cdir.join("values.arrow"), Some(&cdir.join("presence.roaring")))
+        .unwrap();
+    let postings = ColumnPostings::open_keyed(&postings_path(&out, "department")).unwrap();
+
+    // Every entity, so the scan's candidate excludes nothing.
+    let mut all = croaring::Bitmap::new();
+    all.add_range(0u32..N as u32);
+
+    for (_key, code) in codes_of(&out, "department") {
+        let scanned = column.scan_eq(&all, AttrLocalId::new(code));
+        let indexed = postings.entities(AttrLocalId::new(code)).unwrap();
+        assert_eq!(
+            scanned.iter().collect::<Vec<_>>(),
+            indexed.iter().collect::<Vec<_>>(),
+            "column and postings disagree for code {code}"
+        );
+    }
+}
+
+/// `entity → value` is the direction an inverted index cannot answer. Having it is why the
+/// conformance oracle can read the artefact under test rather than a parallel relation, and why
+/// substring matching needs no trigram index to verify against (filter-index §9, §1.1).
+#[test]
+fn the_column_answers_entity_to_value() {
+    let dir = build_with(FILTER_SCHEMA);
+    let out = dir.path().join("bundle");
+    let entity_of = source_to_entity(&out);
+    let codes = codes_of(&out, "department");
+    let cdir = column_dir(&out, "department");
+    let column = ValueColumn::open(&cdir.join("values.arrow"), Some(&cdir.join("presence.roaring")))
+        .unwrap();
+
+    for source in 0..N {
+        let entity = entity_of[&source];
+        match department_of(source) {
+            Some(key) => assert_eq!(
+                column.value_of(entity),
+                Some(AttrLocalId::new(codes[&key])),
+                "source {source}"
+            ),
+            None => assert_eq!(column.value_of(entity), None, "source {source} carries none"),
+        }
+    }
+}
+
+/// A column every entity carries a value in writes **no** presence bitmap: the entity id is then
+/// the array index, which is the scan's fast path (measured 28.7 ms against 1,078 ms at 10⁹).
+#[test]
+fn a_universal_column_writes_no_presence_bitmap() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    // Every item carries a department: no absent code anywhere.
+    write_points_dense(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(&points, &pairs, out.clone(), parse_schema(FILTER_SCHEMA))).unwrap();
+
+    let cdir = column_dir(&out, "department");
+    assert!(cdir.join("values.arrow").exists());
+    assert!(
+        !cdir.join("presence.roaring").exists(),
+        "a universal column must not write a presence bitmap"
+    );
+    let column = ValueColumn::open(&cdir.join("values.arrow"), None).unwrap();
+    assert_eq!(column.present().cardinality(), N);
 }

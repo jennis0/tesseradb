@@ -1,7 +1,8 @@
 # The filter index — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r4, rewritten on measurement and owner rulings.** The organising rule
+**Status:** **Provisional — r4, rewritten on measurement and owner rulings.** The category case is
+built to this design; see the ⊘ notes for exactly what. The organising rule
 changed: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
 width other than `u32` and on a string column, and a ruling on surface §4's measured
@@ -50,10 +51,11 @@ visibility, so building it closes the `listing = "per_viewer"` refusal rather th
 is **entity-space, so it is slice-invariant**: a slice attaches, populates or drops without touching any
 of it (§7).
 
-> **⊘ Built: categories only.** The crate and its keyed reader, the `filter` placement in schema and
-> manifest, and the batch build's per-column posting emit for category columns exist. **Everything
-> else here is specified and unbuilt** — the flat value column itself, every family but categories,
-> ingest, deletion and the fold — and is marked at each claim. Present behaviour is fail-closed
+> **⊘ Built: categories only.** For a category column the value column, its presence bitmap, the
+> masked scan (equality and set membership), `entity → value`, and the derived per-value postings all
+> exist, in both build implementations and under the manifest digest. **Everything else here is
+> specified and unbuilt** — every other family, ingest, deletion and the fold — and is marked at each
+> claim. Present behaviour is fail-closed
 > throughout: a filter that cannot be expressed narrows nothing, and a value set that cannot be gated
 > is withheld entirely.
 
@@ -319,11 +321,12 @@ where presence is partial (§2.1); and, for a category, the derived postings (§
 registered in `MANIFEST.files` and digested, so the artefact is under the same digest-or-refuse rule as
 everything else in a bundle.
 
-> **⊘ Built: the category postings only.** Both build implementations emit them, byte-identically —
-> the streaming build reading its attribute values column-major, the reference transposing them out of
-> the staged items, with the equivalence test comparing the results. **The value column itself is not
-> built**, so today a category's postings are the record rather than a derivative, which is the one
-> place the implementation and this document deliberately disagree until the column lands.
+> **⊘ Built: the category case.** Both build implementations emit the value column, its presence
+> bitmap where presence is partial, and the derived postings — byte-identically, the streaming build
+> reading its attribute values column-major and the reference transposing them out of the staged
+> items, with the equivalence test comparing the results. A test asserts the postings agree with the
+> column value for value, which is what makes one a derivative of the other rather than two writers
+> that happen to agree today.
 
 The current emit groups the entity-major values the attribute pass already materialises, which holds a
 `u32` per non-absent entity per column on top of the attribute tail. That is a scale ceiling rather than

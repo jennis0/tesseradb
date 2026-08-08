@@ -11,6 +11,11 @@ tessera-types = { path = "../tessera-types" }
 # than the other way round.
 tessera-authz = { path = "../tessera-authz" }
 croaring.workspace = true
+# The value column is an Arrow IPC file, as every other columnar artefact in the bundle is
+# (contracts §2.1). Reading it here rather than through `tessera-store` is what keeps the layer
+# rule intact: `check-layers.sh` denies filter → store, so this crate stays entity-space and never
+# meets `RowId`.
+arrow.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

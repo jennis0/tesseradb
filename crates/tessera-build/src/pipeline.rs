@@ -128,9 +128,10 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use tessera_authz::{encode_posting, write_delta_tier_at};
+use tessera_filter::{write_value_column, Codes};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
-use tessera_spatial::tiler::ScalarValue;
+use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::write::{
     write_columns, write_morton_codes, write_permutation_iter, ScalarColumnData,
 };
@@ -1452,6 +1453,20 @@ pub(crate) fn write_filter_postings(
 
         let column_dir = partition_dir.join("attrs").join(&attribute.name);
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+
+        // The value column is the artefact of record (filter-index §2.1); the postings below are
+        // derived from it. Written first so that a build interrupted between the two leaves the
+        // record without its accelerator rather than an accelerator with no record.
+        let values_path = column_dir.join("values.arrow");
+        let presence_path = column_dir.join("presence.roaring");
+        let presence = write_column_values(&values_path, &presence_path, attribute, values)?;
+        fsync_file(&values_path)?;
+        paths.push(values_path);
+        if presence {
+            fsync_file(&presence_path)?;
+            paths.push(presence_path);
+        }
+
         let path = column_dir.join("postings.arrow");
         write_delta_tier_at(&path, &entries, SMALL_TERM_THRESHOLD_DEFAULT)
             .map_err(|e| BuildError::io(&path, e))?;
@@ -1459,6 +1474,50 @@ pub(crate) fn write_filter_postings(
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// Write one column's values in entity order, and its presence bitmap where presence is partial.
+///
+/// Returns whether a presence bitmap was written. **A column every entity carries a value in gets
+/// none**, and that is the fast path rather than an omission: the entity id is then the array index,
+/// which measured 28.7 ms against a presence-addressed 1,078 ms at 10⁹
+/// (`probes/2026-08-08-filter-layout/`). Writing an all-ones bitmap would be correct and would cost
+/// the scan that path, so the distinction lives in the file set rather than in the bitmap's contents.
+///
+/// The reserved absent code is what "carries no value" means for a category, so it decides presence
+/// here — the same code the entity-major buffer is initialised to, which is safe only because the
+/// attribute reader's count check proves every entity was visited.
+fn write_column_values(
+    values_path: &Path,
+    presence_path: &Path,
+    attribute: &crate::schema::Attribute,
+    values: &[ScalarValue],
+) -> Result<bool> {
+    let mut present = croaring::Bitmap::new();
+    let mut held: Vec<u32> = Vec::new();
+    let mut universal = true;
+    for (entity, value) in values.iter().enumerate() {
+        let code = category_code(value, &attribute.name)?;
+        if code == tessera_store::vocabulary::ABSENT_CODE {
+            universal = false;
+            continue;
+        }
+        present.add(entity as u32);
+        held.push(code);
+    }
+
+    // The declared width is the storage width. Narrowing here rather than storing `u32` throughout
+    // is worth a match arm: the column is priced at 1 GB per byte of width per 10⁹ items
+    // (Appendix A), so a `u8` category stored as `u32` would cost 3 GB it does not need.
+    let codes = match attribute.ty {
+        ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect()),
+        ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect()),
+        _ => Codes::U32(held),
+    };
+    let presence = (!universal).then_some(&present);
+    write_value_column(values_path, presence_path, &codes, presence)
+        .map_err(|e| BuildError::io(values_path, e))?;
+    Ok(!universal)
 }
 
 /// Does this column owe a postings file?

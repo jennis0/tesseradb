@@ -43,5 +43,7 @@
 //! members — leak-register row C11, reachable by ordinary operation (filter-index §2.2).
 
 mod column;
+mod values;
 
 pub use column::{resolve_union, ColumnPostings};
+pub use values::{write_value_column, Codes, ValueColumn};
