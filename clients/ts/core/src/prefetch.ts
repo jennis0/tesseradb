@@ -112,10 +112,12 @@ export function plan(inputs: PlannerInputs): Plan {
   //
   // **It is not free, and measurement says so.** Most of the ring is already held — 46,070 of
   // 46,410 tiles on the demo corpus — but the remainder is speculative work for tiles the user may
-  // never look at, and a ring request covers `RING_MARGIN²/MARGIN²` ≈ 2.9× the foreground's area,
-  // so it costs about three times as much. Measured over six pans: 43% fewer requests, but 81%
-  // more server CPU and 2.3× the bytes. Look-ahead buys latency with server work; it does not
-  // avoid work.
+  // never look at. Measured (`probes/2026-08-08-lookahead-contention/`): the fraction of pans
+  // needing no request at all roughly doubles, for roughly half again the server CPU per pan.
+  //
+  // The bias is the part whose value is unmeasured. A symmetric ring fetches ahead in every
+  // direction at once and so costs the same whether the guess was right or not; shifting it is
+  // what would make the cost depend on predicting correctly.
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
   const ring = tilesOfBbox(worldBbox(viewport, RING_MARGIN, shift), choice.depth);
   if (ring.length <= maxTiles) {

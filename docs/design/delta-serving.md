@@ -386,24 +386,35 @@ is a superset and nothing pops when the user arrives. It is never retried and ne
 a foreground request, because anticipation that queues ahead of what the user is waiting for is the
 reason a view is slow rather than the cure.
 
-**It buys latency with server work, and does not avoid work.** Measured on the 2.4M corpus, six
-consecutive same-direction pans at depth 10:
+**It buys latency with server work, and does not avoid work.** Measured on the 2.4M corpus
+(`probes/2026-08-08-lookahead-contention/`), pans needing no request at all against server CPU per
+pan:
 
-| | requests | server CPU | wire | pans needing none | tiles from cache |
-|---|---|---|---|---|---|
-| look-ahead off | 7 | 26.4 ms | 3.51 MB | 0 of 6 | 14,382 of 16,524 |
-| look-ahead on | 4 | **47.8 ms** | **8.02 MB** | 3 of 6 | 16,524 of 16,524 |
+| clients | pans free, off | pans free, on | CPU/pan off | CPU/pan on |
+|---|---|---|---|---|
+| 1 | 5 / 12 | 11 / 12 | 1.61 ms | 1.73 ms |
+| 4 | 25 / 48 | 44 / 48 | 1.37 ms | 2.67 ms |
+| 16 | 98 / 192 | 176 / 192 | 2.13 ms | 2.58 ms |
 
-Most of the ring is already held — 46,070 of 46,410 tiles — so the *held* part is genuinely free.
-The remainder is not: it is speculative work for tiles the user may never visit, and a ring covers
-`RING_MARGIN²/MARGIN²` ≈ 2.9× the foreground's area, so each ring request costs about three times a
-foreground one. Fewer, larger, partly-wasted requests is the trade.
+Server-side per-request latency is flat in both the arm and the client count — p50 1–7 ms, p95
+≤ 27 ms, nothing shed — so anticipation does not make the engine the bottleneck at this scale. What
+it costs is CPU: roughly half again per pan, for roughly double the fraction of pans that need
+nothing.
 
-Whether it is the right trade is a **deployment** question, not a client one. For a single
-principal on a dedicated box it plainly is. Against `caching.md` §4's ceiling of roughly 5–40
-concurrently active broad principals, an 81% CPU increase reduces that ceiling in proportion — so a
-deployment sized against active visible mass must count anticipation as load, and the switch to
-turn it off has to exist. It does, separately from the cache's own.
+**The premium grows with repetitive movement, which inverts the obvious expectation.** At a 0%,
+25% and 50% chance of reversing direction per pan, the premium runs +48%, +64%, +71% — because the
+replica already makes a revisit free without any anticipation, so turning is exactly where the
+*off* arm gets cheap, while a symmetric ring fetches ahead in every direction at once and so costs
+the same whether the guess was right or not. Biasing the ring downwind is what would make its cost
+depend on prediction; the viewer does that and the measurement does not model it, so that bias's
+value is **unmeasured**.
+
+**What look-ahead is for is fast movement, and what bounds it is the pause.** A slow drag outlives
+the debounce and is answered *during* the movement, so it never needed anticipation: measured, a
+420 px pan at 300 px/s waits for nothing either way, while at 1000 and 2500 px/s the unanticipated
+client waits 1.0 s and 2.1 s and the anticipating one waits not at all. But the ring is bought only
+after the view has been still, so a continuous drag never triggers one — the binding constraint is
+whether a ring fetch fits in the user's pause, not whether the ring is geometrically large enough.
 
 **Anticipation needs its own idempotence guard, and neither equality nor containment provides one.**
 A renderer re-emits view-state events continuously — on every property update, and while a drag's

@@ -238,10 +238,13 @@ export class ViewportController {
    *
    * **This buys latency with server work; it does not avoid work.** Most of the ring is already
    * held, so the request is far smaller than a second viewport — but the remainder is speculative,
-   * for tiles the user may never visit, and the ring covers ~2.9× the foreground's area so each
-   * such request costs about three times as much. Measured over six pans on the demo corpus: 43%
-   * fewer requests, 81% more server CPU, 2.3× the bytes, and half the pans answered with no
-   * request at all. Whether that is the right trade depends on how many principals share the box.
+   * for tiles the user may never visit. Measured (`probes/2026-08-08-lookahead-contention/`): the
+   * share of pans needing no request at all roughly doubles — 42–51% to ~92% — for roughly half
+   * again the server CPU per pan, with per-request server latency flat up to sixteen clients.
+   *
+   * The premium *grows* the more a user revisits ground, because the replica already makes a
+   * revisit free without any anticipation. And what this helps is fast movement: a slow drag
+   * outlives the debounce and is answered during the movement, so it never needed anticipating.
    *
    * Never retried and never allowed to delay the foreground: a shed background request costs the
    * user nothing but a round trip they were going to pay anyway, and retrying into a saturated

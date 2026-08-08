@@ -20,6 +20,9 @@ import {
 } from './viewportLayer.js';
 
 const config = readConfig();
+// Counted here rather than in the controller: a driver needs to attribute a paint to whether it
+// cost a request, and the two are updated from different places.
+let requestCount = 0;
 const client = new TesseraClient({
   viewerUrl: config.viewerUrl,
   sessionUrl: config.sessionUrl,
@@ -280,9 +283,29 @@ function render() {
 }
 
 const rerender = coalesce(render);
+/**
+ * The measurement surface: when marks last reached the screen, and what they cost to get there.
+ *
+ * A driver cannot time pan-to-paint from outside — the interesting case is a pan answered entirely
+ * from held bands, which produces no network activity at all and so is invisible to anything
+ * watching requests. Exposed rather than inferred, and read by `smoke-latency.mjs`.
+ */
+declare global {
+  interface Window {
+    __tesseraProbe?: {paints: number; at: number; marks: number; requests: number};
+  }
+}
+let paints = 0;
 store.subscribe(
   coalesce(() => {
     deck.setProps({layers: buildViewportLayers(store)});
+    paints += 1;
+    window.__tesseraProbe = {
+      paints,
+      at: performance.now(),
+      marks: store.state.assembled?.ids.length ?? 0,
+      requests: requestCount
+    };
   })
 );
 store.subscribe(rerender);
@@ -313,8 +336,10 @@ async function start() {
     s.mTarget = meta.selection.thetaTargetMarks;
   });
   replica = new Replica(
-    (req, signal) =>
-      client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal),
+    (req, signal) => {
+      requestCount += 1;
+      return client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal);
+    },
     {slice: meta.slices[0]!.id}
   );
   // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement
