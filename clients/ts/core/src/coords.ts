@@ -22,6 +22,55 @@ export const CELLS_PER_WORLD_UNIT = CELL_GRID / WORLD_SIZE; // 128
 export type TileIndex = {x: number; y: number; z: number};
 export type CellBox = {cx0: number; cy0: number; cx1: number; cy1: number};
 
+/**
+ * The depth-`z` tile containing a point, from its 64-bit position code.
+ *
+ * **The shift is 64 − 2z, not 32 − 2z.** A tile prefix is defined over the 32-bit Morton *cell*
+ * (contracts §2.5, `tessera_spatial::morton`), and the cell is the code's high half — so the
+ * conversion carries the 32-bit extraction and the prefix shift together. Doing only the prefix
+ * shift returns the whole code at depth 16 rather than the cell, which buckets every point into a
+ * distinct tile and looks like a corpus with no structure rather than like a bug.
+ *
+ * Returns 0 at `z = 0`, where one tile covers the world.
+ */
+export function tileOfCode(code: bigint, z: number): bigint {
+  return code >> BigInt(64 - 2 * z);
+}
+
+/**
+ * Whether a depth-`za` tile contains a depth-`zb` one. Containment is prefix containment, which is
+ * the property that makes a parent's declaration answer for its children.
+ */
+export function tileContains(a: bigint, za: number, b: bigint, zb: number): boolean {
+  return zb >= za && b >> BigInt(2 * (zb - za)) === a;
+}
+
+/**
+ * A tile's Morton prefix from its `(x, y)` index at a depth.
+ *
+ * x occupies the even bits and y the odd, which is the interleave `decode.ts` compacts positions
+ * under — so this and {@link tileXY} are inverses, and both agree with the server's own tiling.
+ */
+export function mortonOfTile(x: number, y: number, depth: number): bigint {
+  let prefix = 0n;
+  for (let bit = 0; bit < depth; bit++) {
+    prefix |= BigInt((x >> bit) & 1) << BigInt(2 * bit);
+    prefix |= BigInt((y >> bit) & 1) << BigInt(2 * bit + 1);
+  }
+  return prefix;
+}
+
+/** The `(x, y)` index of a tile from its Morton prefix — the inverse of {@link mortonOfTile}. */
+export function tileXY(prefix: bigint, depth: number): {x: number; y: number} {
+  let x = 0;
+  let y = 0;
+  for (let bit = 0; bit < depth; bit++) {
+    x |= Number((prefix >> BigInt(2 * bit)) & 1n) << bit;
+    y |= Number((prefix >> BigInt(2 * bit + 1)) & 1n) << bit;
+  }
+  return {x, y};
+}
+
 /** The half-open cell block `[cx0, cx1) x [cy0, cy1)` a tile index covers. */
 export function tileToCellBox({x, y, z}: TileIndex): CellBox {
   const span = CELL_GRID / 2 ** z;

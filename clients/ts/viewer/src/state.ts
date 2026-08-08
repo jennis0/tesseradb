@@ -1,20 +1,6 @@
-import type {
-  CategoryValue,
-  DepthChoice,
-  Meta,
-  Session,
-  TileCounts,
-  Timings,
-  ViewportResult
-} from '@tessera/client';
+import type {CategoryValue, DepthChoice, Meta, Session, Timings} from '@tessera/client';
+import type {Assembled} from './assemble.js';
 import type {Domain, Ranks} from './colour.js';
-
-/** What one loaded tile contributes. Counts come from the server; nothing here is derived. */
-export type LoadedTile = {
-  z: number;
-  counts: TileCounts[];
-  pointCount: number;
-};
 
 /**
  * The display states, kept distinct because collapsing them is how a fail-closed server becomes a
@@ -36,9 +22,14 @@ export type AppState = {
   /** Undefined means "do not send k", so the deployment's own ceiling applies (contracts §3.2). */
   k: number | undefined;
   underlayOffset: number;
-  /** The whole current view's response — one request, not one per tile. */
-  result: ViewportResult | null;
-  worldPositions: Float32Array | null;
+  /**
+   * The current view, assembled from held bands rather than from one response.
+   *
+   * Tiles reach it by three routes — their own band, an ancestor's restricted by Morton prefix, or
+   * the union of held descendants — and only the first is the served set. `Assembled.tiles` carries
+   * which, and every non-exact tile is stale-marked with no count shown against it.
+   */
+  assembled: Assembled | null;
   status: DisplayStatus;
   lastError: {code: string; detail: string} | null;
   /** The depth the budget chose for the current view. */
@@ -53,6 +44,10 @@ export type AppState = {
   /** Pan-to-paint breakdown, in ms. */
   latency: {waited: number; fetch: number; server: number; total: number} | null;
   lastBytes: number;
+  /** Bytes the replica holds, so the cache's cost is visible rather than implicit. */
+  replicaBytes: number;
+  /** How the last ask split between held tiles and asked-for ones — the cache's effectiveness. */
+  lastPlan: {omitted: number; fetched: number} | null;
   inFlight: number;
   failures: RequestFailure[];
   selected: {id: bigint; scalars: unknown[]; externalId: string | null} | null;

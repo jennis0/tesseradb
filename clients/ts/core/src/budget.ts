@@ -1,4 +1,4 @@
-import {MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {MAX_DEPTH, WORLD_SIZE, mortonOfTile} from './coords.js';
 
 /**
  * Choosing which depth to request, so that the number of marks on screen is roughly constant
@@ -42,12 +42,36 @@ export type DepthChoice = {
   limitedBy: 'budget' | 'maxTiles' | 'maxDepth' | 'saturated';
 };
 
-/** How many tiles of `depth` a world-space bbox intersects. */
-export function tilesInBbox(bbox: [number, number, number, number], depth: number): number {
+/** The half-open tile index range of `depth` a world-space bbox intersects. */
+function tileRange(bbox: [number, number, number, number], depth: number) {
   const span = WORLD_SIZE / 2 ** depth;
   const [x0, y0, x1, y1] = bbox;
   const index = (v: number) => Math.min(2 ** depth - 1, Math.max(0, Math.floor(v / span)));
-  return (index(x1) - index(x0) + 1) * (index(y1) - index(y0) + 1);
+  return {x0: index(x0), y0: index(y0), x1: index(x1), y1: index(y1)};
+}
+
+/** How many tiles of `depth` a world-space bbox intersects. */
+export function tilesInBbox(bbox: [number, number, number, number], depth: number): number {
+  const r = tileRange(bbox, depth);
+  return (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
+}
+
+/**
+ * The Morton prefixes of those tiles, in raster order.
+ *
+ * The list rather than the count, because the replica addresses tiles individually: a tile it
+ * already holds is answered without a request, which is the only mechanism that makes server work
+ * scale with novelty rather than with viewport area (`delta-serving.md` §1). Bounded by the same
+ * `maxTiles` a caller feeds {@link chooseDepth}, so enumerating cannot be larger than the request
+ * that would have been made anyway.
+ */
+export function tilesOfBbox(bbox: [number, number, number, number], depth: number): bigint[] {
+  const r = tileRange(bbox, depth);
+  const tiles: bigint[] = [];
+  for (let y = r.y0; y <= r.y1; y++) {
+    for (let x = r.x0; x <= r.x1; x++) tiles.push(mortonOfTile(x, y, depth));
+  }
+  return tiles;
 }
 
 /**

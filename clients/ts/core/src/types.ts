@@ -126,8 +126,8 @@ export type ViewportResult = {
   ids: BigUint64Array;
   /**
    * Each point's 64-bit Morton position code, exactly as the server sent it. Its high 32 bits are
-   * the point's cell, so `code >> BigInt(32 - 2 * z)` is the depth-`z` tile containing it — hover
-   * bucketing and client-side clustering without a round trip.
+   * the point's Morton cell and its low 32 the sub-cell residual, so `tileOfCode(code, z)` is the
+   * depth-`z` tile containing it — hover bucketing and client-side clustering without a round trip.
    */
   codes: BigUint64Array;
   /**

@@ -5,11 +5,11 @@ import {
   WORLD_SIZE,
   calibrate,
   chooseDepth,
-  positionsToWorld,
+  tilesOfBbox,
   TesseraError,
-  type TesseraClient,
-  type ViewportResult
+  type Replica
 } from '@tessera/client';
+import {assemble, assertDrawsEveryServedMark, type Assembled} from './assemble.js';
 import {buildColourAttribute, widenDomain, type Encoding} from './colour.js';
 import type {Store} from './state.js';
 
@@ -58,26 +58,28 @@ export type ViewState = {
  * annotation). This keeps the verb's own shape.
  *
  * Consequences, all deliberate:
- * - **No per-tile cache.** A pan refetches the view — one request. Caching belongs to the replica
- *   store (client-interaction §10), not smuggled in here.
+ * - **The cache lives below this, in the replica.** This layer decides *which tiles to want*; the
+ *   replica decides which of those need asking for and answers the rest from held bands. Keeping
+ *   the two apart is what lets a consumer with its own tile scheduler use the replica without
+ *   running two schedulers against each other (client-interaction §10).
  * - **At most one request outstanding**; a view change aborts the previous one. That is the whole
  *   of the coalescing story at this layer, and it relies on the server's D-C cancellation
  *   (`viewer.rs`: a `CancelGuard` flips a `CancelToken` when axum drops the handler), without which
  *   an abandoned pan would still cost the server a full request.
- * - **Marks render as one binary attribute buffer.** `served` still splits the batch per tile for
- *   the counts panel; rendering does not need the split.
+ * - **Marks render as one binary attribute buffer**, assembled across bands. See `assemble.ts` for
+ *   why this is a concat rather than a slab, and at what mark budget that stops being true.
  */
 export class ViewportController {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private inFlight: AbortController | null = null;
-  /** The bbox and depth of the response currently held, for the covered-view check. */
+  /** The bbox and depth last asked for, for the covered-view check. */
   private held: {bbox: [number, number, number, number]; depth: number} | null = null;
   /** Monotonic; a response from an older request is dropped rather than rendered. */
   private generation = 0;
 
   constructor(
     private readonly store: Store,
-    private readonly client: TesseraClient
+    private readonly replica: Replica
   ) {}
 
   /** When the view last moved — the clock a user's sense of lag actually starts on. */
@@ -127,7 +129,7 @@ export class ViewportController {
 
   /** Does the held response already answer this view, at the depth the budget would ask for? */
   private covers(view: ViewState, width: number, height: number): boolean {
-    if (!this.held || !this.store.state.result) return false;
+    if (!this.held || !this.store.state.assembled) return false;
     const want = this.worldBbox(view, width, height, 1);
     const [hx0, hy0, hx1, hy1] = this.held.bbox;
     const inside = want[0] >= hx0 && want[1] >= hy0 && want[2] <= hx1 && want[3] <= hy1;
@@ -209,33 +211,46 @@ export class ViewportController {
     });
 
     try {
-      const dataBbox = worldToDataBbox(worldBbox, meta.quantisation);
-      const response = await this.client.viewport(
-        session.token,
-        {slice, zoom: choice.depth, bbox: dataBbox, k: meta.selection.kMaxMarks},
+      // The tile list, not the box: the replica answers from held bands whatever it can, and asks
+      // only for the rest. At Stage 1 that ask is still bbox-shaped on the wire.
+      const wanted = tilesOfBbox(worldBbox, choice.depth);
+      const frame = await this.replica.fetchTiles(
+        wanted,
+        choice.depth,
+        meta.selection.kMaxMarks,
         controller.signal
       );
       if (generation !== this.generation) return; // a newer request won; drop this one
 
-
       const arrivedAt = performance.now();
       this.held = {bbox: worldBbox, depth: choice.depth};
-      const visible = response.result.tiles.reduce((a, t) => a + Number(t.visible), 0);
-      const actual = response.result.ids.length;
+      const assembled = assemble(frame);
+      // The one place a client could violate I7 by omission, so it throws rather than warns.
+      assertDrawsEveryServedMark(assembled);
+
+      // **Calibration reads `served`, not the drawn count.** They agree today, but a drawn count
+      // also carries provisional marks from other depths and would, under elision, be the delta
+      // rather than the tile's size — either of which ratchets the budget the wrong way and, being
+      // one-directional, never recovers.
+      const visible = assembled.visibleInView;
+      const actual = assembled.exactServed;
 
       this.store.update((s) => {
-        s.result = response.result;
-        s.worldPositions = positionsToWorld(response.result.positions);
+        s.assembled = assembled;
         // Widened for the coloured column only. Widening every column would walk eighteen arrays
         // per response to build ramps nothing is displaying; the cost is paid when a column is
         // chosen, which is also when the domain first has a reader.
         if (s.colourBy) {
-          const column = response.result.scalars[s.colourBy];
+          const column = assembled.scalars[s.colourBy];
           const widened = column ? widenDomain(s.domains[s.colourBy] ?? null, column) : null;
           if (widened) s.domains[s.colourBy] = widened;
         }
-        s.lastTimings = response.timings;
-        s.lastBytes = response.bytes;
+        if (frame.response) {
+          s.lastTimings = frame.response.timings;
+          s.lastBytes = frame.response.bytes;
+        }
+        s.replicaBytes = this.replica.bytes;
+        s.lastPlan = frame.plan;
         s.lastVisibleInView = visible;
         s.mTarget = calibrate(
           {predictedMarks: choice.predictedMarks, actualMarks: actual, visibleInView: visible},
@@ -244,7 +259,7 @@ export class ViewportController {
         );
         s.inFlight = 0;
         // Empty and loaded are different answers, and both differ from refused.
-        s.status = actual === 0 && visible === 0 ? 'empty' : 'shown';
+        s.status = assembled.ids.length === 0 && visible === 0 ? 'empty' : 'shown';
         s.lastError = null;
         // The breakdown a user's "it feels laggy" actually decomposes into. `waited` is time the
         // client chose to spend before asking; `server` is the server's own figure; the remainder
@@ -252,7 +267,9 @@ export class ViewportController {
         s.latency = {
           waited: Math.round(startedAt - movedAt),
           fetch: Math.round(arrivedAt - startedAt),
-          server: Math.round(response.timings.serverUs / 1000),
+          // Zero when the view was answered entirely from held bands — which is the point of
+          // holding them, and reads correctly as "the server did no work for this".
+          server: Math.round((frame.response?.timings.serverUs ?? 0) / 1000),
           total: Math.round(performance.now() - movedAt)
         };
       });
@@ -282,9 +299,12 @@ export class ViewportController {
         // REFUSED, not empty. The marks from the previous view are now geometrically wrong for
         // this one, so they are dropped rather than left under a new transform — an empty region
         // and a failed one are semantic opposites (client-interaction §9).
+        //
+        // The replica keeps its bands: they are still valid for the tiles they name, and dropping
+        // them would turn one shed request into a cold cache. What is discarded is the *assembly*,
+        // which is this view's answer and is the thing now known to be incomplete.
         s.status = 'refused';
-        s.result = null;
-        s.worldPositions = null;
+        s.assembled = null;
         s.lastError = {
           code: e.code ?? 'fetch-failed',
           detail: e.detail ?? e.message ?? String(error)
@@ -345,6 +365,26 @@ function encodingOf(store: Store): Encoding {
 }
 
 /**
+ * Fade the marks a tile borrowed from another depth.
+ *
+ * Provisional marks are drawn — that is the whole point of best-available rendering, and it is what
+ * makes a zoom feel instant — but they must be visibly *not* the answer, because they are a
+ * superset of what the definition serves for that tile. Alpha in the existing RGBA buffer rather
+ * than a second layer, which would double the assembly the concat exists to keep cheap.
+ */
+const PROVISIONAL_ALPHA = 0.45;
+
+function fadeProvisional(colours: Uint8Array, assembled: Assembled): void {
+  if (assembled.provisional === 0) return;
+  for (const tile of assembled.tiles) {
+    if (tile.exact) continue;
+    for (let i = tile.from; i < tile.to; i++) {
+      colours[i * 4 + 3] = Math.round((colours[i * 4 + 3] ?? 255) * PROVISIONAL_ALPHA);
+    }
+  }
+}
+
+/**
  * The mark layer.
  *
  * **Every served mark is drawn.** The length handed to deck.gl is the served count, unconditionally
@@ -352,38 +392,33 @@ function encodingOf(store: Store): Encoding {
  * violate I7 by omission, so the invariant is asserted rather than assumed.
  */
 export function buildViewportLayers(store: Store): Layer[] {
-  const {result, worldPositions, selectedWorldXY, status} = store.state;
+  const {assembled, selectedWorldXY, status} = store.state;
   const layers: Layer[] = [];
 
-  if (result && worldPositions && result.ids.length > 0 && status !== 'refused') {
-    const served = result.tiles.reduce((a, t) => a + Number(t.served), 0);
-    if (result.ids.length !== served) {
-      throw new Error(
-        `I7: drawing ${result.ids.length} marks but the server served ${served}. ` +
-          `The client must draw every mark it is served.`
-      );
-    }
-    // One entry per served mark by construction — see `buildColourAttribute`. Asserted anyway,
+  if (assembled && assembled.ids.length > 0 && status !== 'refused') {
+    assertDrawsEveryServedMark(assembled);
+    // One entry per drawn mark by construction — see `buildColourAttribute`. Asserted anyway,
     // because a short buffer is the one way colour could silently drop marks: deck.gl reads
     // `length` from `data`, so a short attribute renders garbage rather than failing.
-    const colours = buildColourAttribute(result.ids.length, result.scalars, encodingOf(store));
-    if (colours.length !== result.ids.length * 4) {
+    const colours = buildColourAttribute(assembled.ids.length, assembled.scalars, encodingOf(store));
+    if (colours.length !== assembled.ids.length * 4) {
       throw new Error(
-        `I7: colour buffer covers ${colours.length / 4} of ${result.ids.length} marks. ` +
+        `I7: colour buffer covers ${colours.length / 4} of ${assembled.ids.length} marks. ` +
           `Colour is presentation and must never decide what is drawn.`
       );
     }
+    fadeProvisional(colours, assembled);
     layers.push(
       new ScatterplotLayer({
         id: 'marks',
         data: {
-          length: result.ids.length,
+          length: assembled.ids.length,
           attributes: {
-            getPosition: {value: worldPositions, size: 2},
+            getPosition: {value: assembled.positions, size: 2},
             getFillColor: {value: colours, size: 4, normalized: true}
           }
         },
-        tesseraIds: result.ids,
+        tesseraIds: assembled.ids,
         radiusUnits: 'pixels' as const,
         getRadius: 1.6,
         radiusMinPixels: 1,

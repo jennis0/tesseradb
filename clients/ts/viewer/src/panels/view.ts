@@ -40,25 +40,40 @@ export function renderCounts(state: AppState): string {
       break;
   }
 
-  const result = state.result;
-  if (!result) return panel('Counts', '<div class="muted">no data</div>');
+  const assembled = state.assembled;
+  if (!assembled) return panel('Counts', '<div class="muted">no data</div>');
 
+  // **Counts come only from exact tiles.** A tile drawn from an ancestor or from held descendants
+  // shows a superset of its served set, and reading a superset as density is the failure
+  // `caching.md` §6 guards against — so those tiles contribute marks to the picture and nothing at
+  // all to the numbers.
   let visible = 0n;
   let matched = 0n;
   let served = 0n;
-  for (const t of result.tiles) {
-    visible += t.visible;
-    matched += t.matched;
-    served += t.served;
+  let exactTiles = 0;
+  for (const tile of assembled.tiles) {
+    if (!tile.counts) continue;
+    visible += tile.counts.visible;
+    matched += tile.counts.matched;
+    served += BigInt(tile.counts.served);
+    exactTiles++;
   }
+
+  const provisional =
+    assembled.provisional > 0
+      ? `<div class="muted">${fmt(BigInt(assembled.provisional))} further marks are drawn from
+         held bands at another depth while this view loads. They are shown but not counted: a
+         superset of what is served here, and never a density.</div>`
+      : '';
 
   return panel(
     'Counts',
     `${row('served (drawn)', fmt(served))}
      ${row('visible (in mask)', fmt(visible))}
      ${row('matched', fmt(matched))}
-     ${row('non-empty tiles', fmt(result.tiles.length))}
+     ${row('counted tiles', fmt(BigInt(exactTiles)))}
      <div class="headline">${fmt(served)} of ${fmt(visible)} shown</div>
+     ${provisional}
      <div class="muted">counts cover the fetched region, which is ~30% wider than the viewport —
        the prefetch margin that lets small pans cost no request. They are exact masked figures for
        that region, not for the visible rectangle.</div>`
@@ -68,7 +83,8 @@ export function renderCounts(state: AppState): string {
 /** The budget readout — prediction against reality is the row that matters. */
 export function renderBudget(state: AppState): string {
   const view = state.view;
-  const actual = state.result?.ids.length ?? 0;
+  // Against the prediction, only exact tiles are comparable — they are what the budget asked for.
+  const actual = state.assembled?.exactDrawn ?? 0;
   const drift =
     view && view.predictedMarks > 0
       ? `${(((actual - view.predictedMarks) / view.predictedMarks) * 100).toFixed(0)}%`

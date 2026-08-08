@@ -35,7 +35,8 @@ const INTERESTING = ['count_ns', 'select_ns', 'gather_ns', 'arrow_serialise_ns',
 
 export function renderStats(state: AppState): string {
   const t = state.lastTimings;
-  const drawn = state.result?.ids.length ?? 0;
+  const drawn = state.assembled?.ids.length ?? 0;
+  const provisional = state.assembled?.provisional ?? 0;
 
   const stage = t?.stageNs
     ? INTERESTING.map((name) => {
@@ -62,8 +63,11 @@ export function renderStats(state: AppState): string {
      ${row('admission', t ? `${(t.admissionUs / 1000).toFixed(1)} ms` : '—')}
      ${row('bytes', state.lastBytes.toLocaleString('en-GB'))}
      ${row('in flight', String(state.inFlight))}
-     ${row('tiles in view', String(state.result?.tiles.length ?? 0))}
+     ${row('tiles in view', String(state.assembled?.tiles.length ?? 0))}
      ${row('marks drawn', drawn.toLocaleString('en-GB'))}
+     ${row('— of which provisional', provisional.toLocaleString('en-GB'))}
+     ${row('replica held', `${((state.replicaBytes ?? 0) / 1e6).toFixed(1)} MB`)}
+     ${row('tiles from cache', state.lastPlan ? `${state.lastPlan.omitted} of ${state.lastPlan.omitted + state.lastPlan.fetched}` : '—')}
      ${stage}`
   );
 }

@@ -1,5 +1,5 @@
 import {Deck} from '@deck.gl/core';
-import {TesseraClient} from '@tessera/client';
+import {Replica, TesseraClient} from '@tessera/client';
 import presetsJson from '../presets.json';
 import {readConfig} from './config.js';
 import {esc} from './html.js';
@@ -37,8 +37,7 @@ const store = createStore({
   terms: first.terms,
   k: undefined,
   underlayOffset: 0,
-  result: null,
-  worldPositions: null,
+  assembled: null,
   status: 'idle',
   lastError: null,
   view: null,
@@ -48,6 +47,8 @@ const store = createStore({
   lastTimings: null,
   latency: null,
   lastBytes: 0,
+  replicaBytes: 0,
+  lastPlan: null,
   inFlight: 0,
   failures: [],
   selected: null,
@@ -60,7 +61,13 @@ const store = createStore({
   domains: {}
 });
 
-const controller = new ViewportController(store, client);
+/**
+ * The replica sits between the stateless client and the scheduler: it owns the held bands and
+ * decides which of the scheduler's wanted tiles actually need asking for. Created after `meta`,
+ * because it needs the quantisation extent to turn tiles into a request box.
+ */
+let replica: Replica | null = null;
+let controller: ViewportController | null = null;
 const mapEl = document.getElementById('map') as HTMLDivElement;
 const panels = document.getElementById('panels')!;
 
@@ -76,7 +83,7 @@ const deck = new Deck({
   onViewStateChange: ({viewState}) => {
     const v = viewState as {target: number[]; zoom: number};
     currentView = {target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
-    controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+    controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
     return viewState;
   },
   onClick: (info) => {
@@ -140,13 +147,13 @@ function recordFailure(store: Store, what: string, error: unknown) {
  * legend shows the refusal in place of a swatch list.
  */
 async function resolveCategoryCodes(column: string) {
-  const {result, meta, session} = store.state;
-  if (!result || !meta || !session) return;
+  const {assembled, meta, session} = store.state;
+  if (!assembled || !meta || !session) return;
   if (store.state.categoryErrors[column]) return;
   const declared = meta.declaredScalars.find((c) => c.name === column);
   if (!declared?.category) return;
 
-  const values = result.scalars[column];
+  const values = assembled.scalars[column];
   if (!values) return;
 
   // Counted before anything is fetched, because frequency is what decides which values get one of
@@ -206,16 +213,16 @@ function render() {
     const preset = presets[Number(select.value)]!;
     // A different principal is a different mask: abort anything in flight for the old token, and
     // drop the calibration, which was measured against a different visible set.
-    controller.cancel();
+    controller?.cancel();
     client
       .authorise(preset.terms)
       .then((session) => {
         store.update((s) => {
+          replica?.setSession(session.tokenId);
           s.session = session;
           s.terms = preset.terms;
           s.termsLabel = preset.label;
-          s.result = null;
-          s.worldPositions = null;
+          s.assembled = null;
           s.status = 'idle';
           s.lastVisibleInView = null;
           s.mTarget = s.meta?.selection.thetaTargetMarks ?? 16;
@@ -231,7 +238,7 @@ function render() {
           s.ranks = {};
           s.domains = {};
         });
-        controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+        controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
       })
       .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));
   });
@@ -250,7 +257,7 @@ function render() {
       if (column?.category) {
         void resolveCategoryCodes(chosen);
       } else {
-        const values = store.state.result?.scalars[chosen];
+        const values = store.state.assembled?.scalars[chosen];
         const widened = values ? widenDomain(store.state.domains[chosen] ?? null, values) : null;
         store.update((s) => {
           if (widened) s.domains[chosen] = widened;
@@ -264,7 +271,7 @@ function render() {
     store.update((s) => {
       s.budget = Number(budgetInput.value);
     });
-    controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+    controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
   });
 }
 
@@ -284,10 +291,10 @@ panels.addEventListener('focusout', () => setTimeout(rerender, 0));
 let lastResolved: {column: string; result: unknown} | null = null;
 store.subscribe(
   coalesce(() => {
-    const {colourBy, result} = store.state;
-    if (!colourBy || !result) return;
-    if (lastResolved?.column === colourBy && lastResolved.result === result) return;
-    lastResolved = {column: colourBy, result};
+    const {colourBy, assembled} = store.state;
+    if (!colourBy || !assembled) return;
+    if (lastResolved?.column === colourBy && lastResolved.result === assembled) return;
+    lastResolved = {column: colourBy, result: assembled};
     void resolveCategoryCodes(colourBy);
   })
 );
@@ -301,6 +308,13 @@ async function start() {
     s.slice = meta.slices[0]!.id;
     s.mTarget = meta.selection.thetaTargetMarks;
   });
+  replica = new Replica(
+    (req, signal) => client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal),
+    meta.quantisation,
+    {slice: meta.slices[0]!.id}
+  );
+  replica.setSession(session.tokenId);
+  controller = new ViewportController(store, replica);
   controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 
