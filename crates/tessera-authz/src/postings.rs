@@ -370,7 +370,25 @@ impl PostingsReader {
     /// postings disagreement, which no per-lookup error here could repair. What it *did* do was
     /// make an absent term fatal, which is the wrong answer for every tiered read.
     pub fn posting(&self, t: TermId) -> io::Result<Option<PostingRef<'_>>> {
-        let idx = t.raw() as usize;
+        self.posting_at(t.raw())
+    }
+
+    /// The same lookup, addressed by a bare record ordinal.
+    ///
+    /// **This is the format core, and [`Self::posting`] is the authorisation index's typed view of
+    /// it.** The CSR postings format is shared with the attribute index
+    /// (`docs/design/filter-index.md` §2.1), whose ordinals are a different space: an attribute
+    /// ordinal is local to one column and may only narrow `M_sel` (I12), while a `TermId` gates
+    /// label containment (I3). The two must not be interconvertible, so the shared format cannot be
+    /// typed in either crate's newtype — it takes the raw ordinal, and each consumer wraps it at its
+    /// own boundary. A single typed API would force the other consumer to convert at every call
+    /// site, which is exactly the cross-wire the newtypes exist to forbid, reintroduced as
+    /// boilerplate.
+    ///
+    /// Prefer [`Self::posting`] inside this crate: passing a bare `u32` where a `TermId` belongs is
+    /// what the newtype prevents, and there is no reason to give that up here.
+    pub fn posting_at(&self, ordinal: u32) -> io::Result<Option<PostingRef<'_>>> {
+        let idx = ordinal as usize;
         if idx >= self.array.len() {
             return Ok(None);
         }

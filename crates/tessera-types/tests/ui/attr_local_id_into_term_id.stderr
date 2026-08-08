@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `TermId: From<AttrLocalId>` is not satisfied
+  --> tests/ui/attr_local_id_into_term_id.rs:17:23
+   |
+17 |     let _: TermId = a.into();
+   |                       ^^^^ the trait `From<AttrLocalId>` is not implemented for `TermId`
+   |
+   = note: required for `AttrLocalId` to implement `Into<TermId>`

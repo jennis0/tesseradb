@@ -62,7 +62,21 @@ pub fn write_delta_tier(
     entries: &[(TermId, Vec<u32>)],
     small_term_threshold: u32,
 ) -> io::Result<()> {
-    if !entries.windows(2).all(|w| w[0].0.raw() < w[1].0.raw()) {
+    let raw: Vec<(u32, Vec<u32>)> = entries
+        .iter()
+        .map(|(t, e)| (t.raw(), e.clone()))
+        .collect();
+    write_delta_tier_at(path, &raw, small_term_threshold)
+}
+
+/// The same writer, addressed by bare record ordinals — the format core
+/// ([`crate::PostingsReader::posting_at`] carries the argument for why both exist).
+pub fn write_delta_tier_at(
+    path: &Path,
+    entries: &[(u32, Vec<u32>)],
+    small_term_threshold: u32,
+) -> io::Result<()> {
+    if !entries.windows(2).all(|w| w[0].0 < w[1].0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "write_delta_tier: term ids must be strictly ascending (sorted, no duplicates)",
@@ -72,9 +86,9 @@ pub fn write_delta_tier(
     let mut terms: Vec<u32> = Vec::with_capacity(entries.len());
     let mut postings = LargeBinaryBuilder::new();
     for (term, entities) in entries {
-        terms.push(term.raw());
+        terms.push(*term);
         postings.append_value(encode_posting(
-            term.raw() as usize,
+            *term as usize,
             entities,
             small_term_threshold,
         )?);
@@ -179,10 +193,21 @@ impl DeltaTier {
     /// This tier's posting for `t`, or `None` if it carries none. `None` is an ordinary answer:
     /// a tier holds only the terms its flushed items carried.
     pub fn posting(&self, t: TermId) -> io::Result<Option<PostingRef<'_>>> {
-        let Ok(idx) = self.terms.values().binary_search(&t.raw()) else {
+        self.posting_at(t.raw())
+    }
+
+    /// The same lookup, addressed by a bare record ordinal — the format core
+    /// ([`crate::PostingsReader::posting_at`] carries the argument for why both exist).
+    pub fn posting_at(&self, ordinal: u32) -> io::Result<Option<PostingRef<'_>>> {
+        let Ok(idx) = self.terms.values().binary_search(&ordinal) else {
             return Ok(None);
         };
         read_posting(&self.postings, idx).map(Some)
+    }
+
+    /// The record ordinals this tier carries, ascending — [`Self::terms`] untyped.
+    pub fn ordinals(&self) -> impl Iterator<Item = u32> + '_ {
+        self.terms.values().iter().copied()
     }
 }
 

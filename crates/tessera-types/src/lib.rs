@@ -30,6 +30,20 @@ macro_rules! define_id_newtype {
 define_id_newtype!(EntityId, u64);
 define_id_newtype!(RowId, u32);
 define_id_newtype!(TermId, u32);
+// An attribute index ordinal, local to one column (`docs/design/filter-index.md` §2.2).
+//
+// **Deliberately not convertible to `TermId`, and the reason is an authorisation one.** The two
+// indexes share the CSR postings format, so a call site could otherwise pass one where the other
+// belongs. A `TermId` gates label containment and frontier depth (I3); an `AttrLocalId` may only
+// ever narrow `M_sel` (I12). Mistaking the second for the first unions the items carrying an
+// attribute value into `M_auth` — the authorisation bypass separate files were chosen to make
+// impossible (per-point-attributes §3.5), arriving instead through a shared reader. Separate files
+// close the descriptor collision; only separate types close the call-site one.
+//
+// This is also why the shared format takes a bare `u32` rather than either newtype
+// (`tessera_authz::PostingsReader::posting_at`): typing it in one crate's newtype would force the
+// other to convert at every call, reintroducing the crossing as boilerplate.
+define_id_newtype!(AttrLocalId, u32);
 define_id_newtype!(Handle, u32);
 define_id_newtype!(Priority, u16);
 define_id_newtype!(MortonCode, u32);
