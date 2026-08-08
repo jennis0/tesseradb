@@ -82,6 +82,7 @@ architecture design.
 | [`conformance.md`](conformance.md) | Normative | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
 | [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
 | [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
+| [`delta-serving.md`](delta-serving.md) | Provisional | What a client may declare it holds, and what that lets the server omit, skip or elide |
 | [`derived-artifact-gating.md`](derived-artifact-gating.md) | Provisional | Non-point artifacts: clusters, labels, hulls, cells — one class, three gates |
 | [`slices-and-multi-table.md`](slices-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |
 | [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |

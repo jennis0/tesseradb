@@ -76,6 +76,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `contracts.md` | Normative — r25 | 18 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
+| `delta-serving.md` | Provisional — under review | 2 |
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
