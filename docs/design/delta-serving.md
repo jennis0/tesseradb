@@ -380,20 +380,30 @@ The replica makes a *revisit* free; it does nothing for the first visit to new g
 most of what panning is. So the client buys a ring beyond the visible box while the view is still,
 and the next pan is answered from held bands.
 
-Three properties make this safe rather than merely cheap. Requesting a tile the viewport does not
-strictly need is **presentation, never selection** — which tiles a client asks for is its own
-business, and §7.2's prefixes nest, so a deeper or wider answer is a superset and nothing pops when
-the user arrives. The ring is nearly free *because the replica exists*: most of it is already held,
-so it is a near-empty request rather than a second viewport's worth of work. And it is never
-retried and never runs alongside a foreground request — anticipation that queues ahead of what the
-user is waiting for is the reason the view is slow, not the cure.
+Requesting a tile the viewport does not strictly need is **presentation, never selection** — which
+tiles a client asks for is its own business, and §7.2's prefixes nest, so a wider or deeper answer
+is a superset and nothing pops when the user arrives. It is never retried and never runs alongside
+a foreground request, because anticipation that queues ahead of what the user is waiting for is the
+reason a view is slow rather than the cure.
 
-Measured on the 2.4M corpus, six consecutive same-direction pans at depth 10:
+**It buys latency with server work, and does not avoid work.** Measured on the 2.4M corpus, six
+consecutive same-direction pans at depth 10:
 
-| | requests | pans needing none | tiles from cache |
-|---|---|---|---|
-| look-ahead off | 9 | 0 of 6 | 14,382 of 16,524 |
-| look-ahead on | 4 | 3 of 6 | 16,524 of 16,524 |
+| | requests | server CPU | wire | pans needing none | tiles from cache |
+|---|---|---|---|---|---|
+| look-ahead off | 7 | 26.4 ms | 3.51 MB | 0 of 6 | 14,382 of 16,524 |
+| look-ahead on | 4 | **47.8 ms** | **8.02 MB** | 3 of 6 | 16,524 of 16,524 |
+
+Most of the ring is already held — 46,070 of 46,410 tiles — so the *held* part is genuinely free.
+The remainder is not: it is speculative work for tiles the user may never visit, and a ring covers
+`RING_MARGIN²/MARGIN²` ≈ 2.9× the foreground's area, so each ring request costs about three times a
+foreground one. Fewer, larger, partly-wasted requests is the trade.
+
+Whether it is the right trade is a **deployment** question, not a client one. For a single
+principal on a dedicated box it plainly is. Against `caching.md` §4's ceiling of roughly 5–40
+concurrently active broad principals, an 81% CPU increase reduces that ceiling in proportion — so a
+deployment sized against active visible mass must count anticipation as load, and the switch to
+turn it off has to exist. It does, separately from the cache's own.
 
 **Anticipation needs its own idempotence guard, and neither equality nor containment provides one.**
 A renderer re-emits view-state events continuously — on every property update, and while a drag's
@@ -405,6 +415,15 @@ what the current view does *not* cover. Left ungated, the ring's own state updat
 timer and a fresh ring fires a quarter-second later, indefinitely — measured at seven per idle
 pause. The guard that works is **hysteresis**: a ring is bought to cover the next pan, so a drift
 of less than a quarter of the viewport does not need another one.
+
+**Look-ahead does not scale to the target operating point as written, and the limit is the
+client.** Enumerating a tile set and planning it against the replica are both linear in tile count,
+measured at 5.9 ms and 4.1 ms for today's ~4k-tile foreground. At `caching.md` §3's 1–2 × 10⁶-mark
+target a view spans 60–125 × 10³ tiles and its ring three times that: **181 ms to enumerate and
+56 ms to plan, per idle pause**, on the thread that also draws. That is a visible freeze, and it
+arrives before any of the wire or server costs above. Three ways out, none built: enumerate
+incrementally, move enumeration off the main thread, or address the ring as a difference from the
+foreground rather than as a superset of it. The last is the most promising and the least designed.
 
 **The next-depth fetch is specified and off.** Anticipating a zoom-*in* means requesting depth
 `d+1`, which the ring cannot help with — a zoom lands on tiles the replica has never seen. It is

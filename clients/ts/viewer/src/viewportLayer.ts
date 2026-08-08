@@ -236,10 +236,12 @@ export class ViewportController {
    * Fetch the ring around a view that has stopped moving, so the next pan is answered from held
    * bands rather than from the wire.
    *
-   * **Cheap only because the replica exists.** Most of the ring is already held, so this is a
-   * near-empty request rather than a second viewport's worth of work — the tiles it does ask for
-   * are exactly the ones a pan was about to need. Before the replica the same idea would have
-   * refetched everything on screen as well.
+   * **This buys latency with server work; it does not avoid work.** Most of the ring is already
+   * held, so the request is far smaller than a second viewport — but the remainder is speculative,
+   * for tiles the user may never visit, and the ring covers ~2.9× the foreground's area so each
+   * such request costs about three times as much. Measured over six pans on the demo corpus: 43%
+   * fewer requests, 81% more server CPU, 2.3× the bytes, and half the pans answered with no
+   * request at all. Whether that is the right trade depends on how many principals share the box.
    *
    * Never retried and never allowed to delay the foreground: a shed background request costs the
    * user nothing but a round trip they were going to pay anyway, and retrying into a saturated

@@ -108,8 +108,14 @@ export function plan(inputs: PlannerInputs): Plan {
 
   // **The ring, biased downwind.** A pan continues in the direction it started far more often than
   // it reverses, so shifting the ring along recent movement buys the next second of panning at the
-  // same tile cost as a centred one. Cheap after the replica exists: most of the ring is already
-  // held, so it is a near-empty request rather than a second viewport's worth of work.
+  // same tile cost as a centred one.
+  //
+  // **It is not free, and measurement says so.** Most of the ring is already held — 46,070 of
+  // 46,410 tiles on the demo corpus — but the remainder is speculative work for tiles the user may
+  // never look at, and a ring request covers `RING_MARGIN²/MARGIN²` ≈ 2.9× the foreground's area,
+  // so it costs about three times as much. Measured over six pans: 43% fewer requests, but 81%
+  // more server CPU and 2.3× the bytes. Look-ahead buys latency with server work; it does not
+  // avoid work.
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
   const ring = tilesOfBbox(worldBbox(viewport, RING_MARGIN, shift), choice.depth);
   if (ring.length <= maxTiles) {

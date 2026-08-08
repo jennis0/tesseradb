@@ -24,8 +24,14 @@ let requests = 0;
 const errors = [];
 page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+let serverUs = 0;
+let bytes = 0;
 page.on('response', (r) => {
-  if (new URL(r.url()).pathname === '/v1/viewport') requests++;
+  if (new URL(r.url()).pathname === '/v1/viewport') {
+    requests++;
+    serverUs += Number(r.headers()['x-tessera-server-us'] ?? 0);
+    bytes += Number(r.headers()['content-length'] ?? 0);
+  }
 });
 
 const url = process.argv.includes('--no-prefetch')
@@ -65,6 +71,8 @@ for (let i = 0; i < 4; i++) {
 // A run of pans in ONE direction — the case the ring is biased for, and the case a user panning
 // across a map actually performs.
 const before = requests;
+const beforeUs = serverUs;
+const beforeBytes = bytes;
 const perPan = [];
 for (let i = 0; i < 6; i++) {
   const at = requests;
@@ -82,6 +90,7 @@ const stats = await page.evaluate(() => {
 const free = perPan.filter((n) => n === 0).length;
 console.log(`per-pan viewport requests: [${perPan.join(', ')}]`);
 console.log(`${free} of ${perPan.length} pans needed no request at all (${total} requests total)`);
+console.log(`server CPU over those pans: ${((serverUs - beforeUs) / 1000).toFixed(1)} ms; wire ${(((bytes - beforeBytes)) / 1e6).toFixed(2)} MB`);
 console.log(`tiles from cache ${stats.cache}, prefetched ahead ${stats.prefetched}, replica ${stats.held}MB`);
 console.log(`console errors: ${errors.length ? errors.join(' | ') : 'none'}`);
 
