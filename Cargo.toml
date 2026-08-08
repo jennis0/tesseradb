@@ -4,6 +4,7 @@ members = [
     "crates/tessera-types",
     "crates/tessera-plugin",
     "crates/tessera-authz",
+    "crates/tessera-filter",
     "crates/tessera-store",
     "crates/tessera-spatial",
     "crates/tessera-lifecycle",

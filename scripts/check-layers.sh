@@ -15,6 +15,13 @@ deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
+# The filter index is entity-space and must stay there (filter-index §9). These are the two edges
+# tessera-authz is denied above, for the same reason: a crate that can see a RowId can relate the
+# two ID spaces, and I4 says only an explicit permutation may. The server edge keeps the filter
+# crate behind the engine's API, as tessera-store and tessera-authz already are.
+deny tessera-filter tessera-store
+deny tessera-filter tessera-spatial
+deny tessera-server tessera-filter
 # lifecycle §7's sync-engine rule, made mechanical (D-D): the engine's intra-request parallelism
 # is rayon's plain-thread pool, never tokio — an async runtime inside a supposedly synchronous
 # engine would reintroduce exactly the reactor-blocking hazard D-A moved off the server's own
@@ -22,7 +29,7 @@ deny tessera-wire tessera-authz
 deny tessera-engine tokio
 deny tessera-store tokio
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|TesseraId|Handle"; then
+if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|TesseraId|Handle"; then
   echo "FORBIDDEN: ID conversion in tessera-types"; fail=1
 fi
 # I10: the payload module never sees EntityId (handles + plain columns only)

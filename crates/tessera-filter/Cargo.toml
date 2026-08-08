@@ -1,0 +1,16 @@
+[package]
+name = "tessera-filter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+# For the CSR postings format only — `PostingsReader`, `DeltaTier` and their ordinal-addressed
+# format core. This crate reads attribute postings; it never reads an authorisation posting, and
+# nothing here constructs a `TermId`. See lib.rs for why the dependency is on the format rather
+# than the other way round.
+tessera-authz = { path = "../tessera-authz" }
+croaring.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

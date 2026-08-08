@@ -2321,6 +2321,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tessera-authz",
+ "tessera-filter",
  "tessera-plugin",
  "tessera-spatial",
  "tessera-store",
@@ -2373,6 +2374,16 @@ dependencies = [
  "tessera-store",
  "tessera-types",
  "tracing",
+]
+
+[[package]]
+name = "tessera-filter"
+version = "0.1.0"
+dependencies = [
+ "croaring",
+ "tempfile",
+ "tessera-authz",
+ "tessera-types",
 ]
 
 [[package]]
