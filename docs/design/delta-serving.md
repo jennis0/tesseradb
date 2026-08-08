@@ -427,6 +427,28 @@ timer and a fresh ring fires a quarter-second later, indefinitely — measured a
 pause. The guard that works is **hysteresis**: a ring is bought to cover the next pan, so a drift
 of less than a quarter of the viewport does not need another one.
 
+**⊘ Anticipation fires at rest, and that is a known gap rather than a settled choice.** A ring
+reaches `(RING_MARGIN − 1) / 2` ≈ 0.6 viewport-widths beyond the visible box, while a single drag
+can travel nearly a full width — so a gesture can outrun what was bought before it began, and
+nothing is bought during it, because every frame of movement re-arms the idle timer. What covers
+the remainder today is the foreground request fired mid-drag: at 140 ms of debounce a half-second
+gesture fires two or three, and on a corpus answering in single-digit milliseconds they keep up.
+On a corpus that does not, they will not.
+
+Moving the trigger onto movement was tried and **reverted**. On the only case that can be measured
+here — discrete pans, which idle-triggering already serves — it was slightly worse (2 of 6 pans
+needing no request against 3) and it made the admission gate shed, at a single client, on every
+run. The case it was built for could not be reached: the demo corpus answers too quickly for a
+gesture to outrun the foreground path, so the failure mode is unreachable rather than absent, and
+injecting response latency did not reach it either. Shipping it would have been a trade of a
+measured regression for an unmeasured benefit.
+
+Two things it needs before it is tried again. An instrument that can produce the failure — the 10⁹
+fixture, or injected latency validated against a case with a known answer. And a guard ordering
+that survives the trigger: checked after planning rather than before, the movement path enumerates
+the foreground and the ring on every view event, tens of thousands of Morton prefixes each at sixty
+events a second, which took the main thread out entirely.
+
 **Look-ahead does not scale to the target operating point as written, and the limit is the
 client.** Enumerating a tile set and planning it against the replica are both linear in tile count,
 measured at 5.9 ms and 4.1 ms for today's ~4k-tile foreground. At `caching.md` §3's 1–2 × 10⁶-mark
