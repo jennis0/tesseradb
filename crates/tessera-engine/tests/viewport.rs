@@ -1820,6 +1820,19 @@ fn distinct_key_first_viewports_overlap_instead_of_serialising() {
 
     const N: usize = 4;
     const ITEMS: u64 = 150_000;
+    // **Best of three, and the retry is not slack in the assertion.** The ratio is asymmetrically
+    // sensitive to whatever else is competing for cores: `serial` needs one core and `concurrent`
+    // needs N, so external load — a full-workspace run putting other test binaries on the same
+    // box — degrades exactly the quantity being measured while leaving its baseline alone. A
+    // genuinely serialised implementation cannot produce a fast `concurrent` on any attempt, so
+    // taking the best observation keeps the regression this test exists to catch while removing
+    // the load sensitivity. Captured failing once during a full-workspace run and not reproduced
+    // in twelve isolated ones, which is the signature of contention rather than of a real change.
+    //
+    // Timing the intervals rather than the totals would not help: under one global lock the
+    // waiting threads block *inside* `viewport`, so their measured intervals overlap just as much
+    // as genuinely concurrent builds do. The totals are what distinguish the two.
+    const ATTEMPTS: usize = 3;
 
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
@@ -1835,54 +1848,67 @@ fn distinct_key_first_viewports_overlap_instead_of_serialising() {
         &tmp.path().join("wal.log"),
     ));
 
-    let serial_sessions: Vec<_> = (0..N)
-        .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
-        .collect();
-    let serial_start = std::time::Instant::now();
-    for session in &serial_sessions {
-        engine
-            .viewport(
-                session,
-                ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-            )
-            .unwrap();
-    }
-    let serial = serial_start.elapsed();
+    // Every attempt mints fresh sessions, so every build is genuinely cold: the row-projection
+    // cache keys on `token_id`, so a new token is a new key and nothing is reused across attempts.
+    let measure = || {
+        let serial_sessions: Vec<_> = (0..N)
+            .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
+            .collect();
+        let serial_start = std::time::Instant::now();
+        for session in &serial_sessions {
+            engine
+                .viewport(
+                    session,
+                    ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+                )
+                .unwrap();
+        }
+        let serial = serial_start.elapsed();
 
-    let concurrent_sessions: Vec<Arc<Session>> = (0..N)
-        .map(|_| Arc::new(engine.authorise(&full_coverage_credential()).unwrap()))
-        .collect();
-    let barrier = Arc::new(std::sync::Barrier::new(N));
-    let concurrent_start = std::time::Instant::now();
-    let handles: Vec<_> = concurrent_sessions
-        .into_iter()
-        .map(|session| {
-            let engine = Arc::clone(&engine);
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                engine
-                    .viewport(
-                        &session,
-                        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                    )
-                    .unwrap();
+        let concurrent_sessions: Vec<Arc<Session>> = (0..N)
+            .map(|_| Arc::new(engine.authorise(&full_coverage_credential()).unwrap()))
+            .collect();
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let concurrent_start = std::time::Instant::now();
+        let handles: Vec<_> = concurrent_sessions
+            .into_iter()
+            .map(|session| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    engine
+                        .viewport(
+                            &session,
+                            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+                        )
+                        .unwrap();
+                })
             })
-        })
-        .collect();
-    for h in handles {
-        h.join().unwrap();
-    }
-    let concurrent = concurrent_start.elapsed();
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        (serial, concurrent_start.elapsed())
+    };
 
-    println!(
-        "distinct-key overlap ({cores} cores, N={N}): serial={serial:?} concurrent={concurrent:?}"
-    );
-    assert!(
-        concurrent < serial * 7 / 10,
-        "concurrent ({concurrent:?}) should be well under serial ({serial:?}) if distinct \
-         sessions' first-viewport builds genuinely overlap rather than serialising behind one \
-         lock (F4); generous 70% slack on a {cores}-core machine"
+    let mut observed = Vec::with_capacity(ATTEMPTS);
+    for attempt in 1..=ATTEMPTS {
+        let (serial, concurrent) = measure();
+        println!(
+            "distinct-key overlap ({cores} cores, N={N}, attempt {attempt}): \
+             serial={serial:?} concurrent={concurrent:?}"
+        );
+        if concurrent < serial * 7 / 10 {
+            return;
+        }
+        observed.push((serial, concurrent));
+    }
+
+    panic!(
+        "concurrent never landed under 70% of serial in {ATTEMPTS} attempts on a {cores}-core \
+         machine ({observed:?}) — distinct sessions' first-viewport builds are serialising behind \
+         one lock rather than overlapping (F4)"
     );
 }
 
