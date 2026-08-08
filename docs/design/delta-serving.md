@@ -32,10 +32,16 @@ two make server work scale with novelty rather than with viewport area. Elision 
 client-decode** mechanism whose server-side value grows with the declared-scalar tail.
 
 Confirmed on a second corpus, by naming tile sets explicitly and reading the server's own timing
-(2.4M items, depth 7, `k = 500`): a request for 1 to 164 tiles costs ~170 µs, and one for all
-16,384 costs 7.2 ms. **The fixed per-request prefix is ~170 µs and everything else is per-tile**,
-so a tile left out of the request costs essentially nothing, and a view answered entirely from the
-replica costs nothing at all because no request is made.
+(2.4M items, depth 7, `k = 500`, the lean five-column schema, **warm row-projection cache**): a
+request for 1 to 164 tiles costs ~170 µs, and one for all 16,384 costs 7.2 ms. **The fixed
+per-request prefix is ~170 µs and everything else is per-tile**, so a tile left out of the request
+costs essentially nothing, and a view answered entirely from the replica costs nothing at all
+because no request is made.
+
+Two limits on that figure, because both change what it means. It is **steady state**: a session
+whose projection is not resident pays the build instead, which `refresh.rs` measures at 4,550 ms at
+10⁹ — four orders of magnitude above this floor, and dominant whenever it happens. And the per-tile
+share grows with schema width, since the gather does; five declared columns is the narrow end.
 
 Throughout: `vis(T)` is a tile's visible set — the session's authorisation mask `M_auth` restricted
 to that tile's rows; `served(T)` is the subset design §7.2 serves, of size `m(T)`; θ is that
