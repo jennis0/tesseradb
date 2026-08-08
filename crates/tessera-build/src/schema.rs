@@ -1,9 +1,11 @@
 //! `schema.toml`: the caller declares what per-item data is *for*, and the placement follows.
 //!
 //! Per-point-attributes §2 is the design. A caller says `used_for = ["render"]` and gets a
-//! fixed-width column in `columns.arrow`; §10.3's other two cadences — `filter` (an entity-space
-//! posting) and `inspect` (a cold sidecar) — are declarable in the same file and **refused at
-//! parse**, each naming itself, per decision 0013. Nothing here derives a placement from the
+//! fixed-width column in `columns.arrow`. `filter` (an entity-space posting) is built **for a
+//! category**, whose identifier is its vocabulary code; every other family's filter index needs a
+//! per-column value dictionary that does not exist, and `inspect` (a cold sidecar) has nowhere to
+//! put data — both are declarable and **refused at parse**, each naming what is absent rather than
+//! saying "unsupported", per decision 0013. Nothing here derives a placement from the
 //! shape of the data file: a column that costs 0.93 GiB per byte per row per 10⁹ items is
 //! declared or it does not exist (§4.1).
 //!
@@ -126,6 +128,12 @@ pub struct Attribute {
     /// decide whether to mint without a second lookup into [`Schema::vocabularies`]. `None` iff
     /// `vocabulary` is `None`.
     pub vocabulary_kind: Option<VocabularyKind>,
+    /// Whether this column carries an entity-space filter index (`filter-index.md` §2).
+    ///
+    /// Only a category may set it, checked at parse: every other family's filter index needs a
+    /// per-column value dictionary that does not exist yet. The compiled form reaches the reader as
+    /// `MANIFEST.declared_scalars[..].filter`.
+    pub filter: bool,
 }
 
 /// Whether a vocabulary's value set is authored in full before the corpus exists, or grows as the
@@ -267,12 +275,28 @@ impl Schema {
                     decl.name
                 )));
             }
-            if !placement.render {
+            if !placement.render && !placement.filter {
                 return Err(schema_error(format!(
-                    "attribute '{}': `used_for` must contain \"render\". `filter` and `inspect` \
-                     are specified and not built (per-point-attributes §1), so an attribute \
-                     declaring neither `render` nor an unbuilt placement would declare nothing",
+                    "attribute '{}': `used_for` must contain \"render\" or \"filter\". `inspect` \
+                     is specified and not built (per-point-attributes §1), so an attribute \
+                     declaring only it would declare nothing",
                     decl.name
+                )));
+            }
+            // `filter` is built for categories and nothing else (filter-index §2.3, §2.5). A
+            // category's identifier is its vocabulary code and its postings are keyed by it; the
+            // other families need a per-column dictionary to intern values into, and the numeric
+            // ones need §3.4's structure choice, which waits on the cardinality sweep. Refused
+            // here rather than accepted and ignored, because a column that parsed as filterable
+            // and emitted no postings would serve an empty operand for every value it holds —
+            // indistinguishable from a correctly-computed empty answer (decision 0013).
+            if placement.filter && decl.ty != "category" {
+                return Err(schema_error(format!(
+                    "attribute '{}': `filter` is built for `type = \"category\"` only. This \
+                     column is `{}`, whose filter index needs a per-column value dictionary — and, \
+                     for a numeric, the range structure chosen from measured cardinality \
+                     (filter-index §3.4) — neither of which exists yet",
+                    decl.name, decl.ty
                 )));
             }
 
@@ -295,6 +319,7 @@ impl Schema {
                         ty,
                         vocabulary: Some(vocab_name),
                         vocabulary_kind: Some(vocab_kind),
+                        filter: placement.filter,
                     }
                 }
                 other => {
@@ -341,6 +366,10 @@ impl Schema {
                         ty,
                         vocabulary: None,
                         vocabulary_kind: None,
+                        // Unreachable while `filter` is category-only, and not asserted as such:
+                        // the parse check above is the guard, and a `false` here means the same
+                        // thing the check enforces rather than duplicating it.
+                        filter: false,
                     }
                 }
             };
@@ -431,26 +460,20 @@ impl Schema {
 /// Which of §10.3's three cadences an attribute declares.
 struct Placement {
     render: bool,
+    filter: bool,
 }
 
 impl Placement {
     fn parse(used_for: &[String], attribute: &str) -> Result<Placement> {
         let mut render = false;
+        let mut filter = false;
         for use_ in used_for {
             match use_.as_str() {
                 "render" => render = true,
+                "filter" => filter = true,
                 // Named individually, each stating what is absent rather than "unsupported":
                 // decision 0013's rule is that present-tense about absent machinery reads as an
                 // assurance, and so does a generic refusal that hides which half is missing.
-                "filter" => {
-                    return Err(schema_error(format!(
-                        "attribute '{attribute}': `filter` is specified and not built \
-                         (per-point-attributes §1 and §3.5). It needs the attribute dictionary \
-                         and its postings file, kept separate from the auth dictionary so that a \
-                         caller-supplied attribute descriptor cannot byte-equal a satisfied auth \
-                         descriptor; neither exists"
-                    )));
-                }
                 "inspect" => {
                     return Err(schema_error(format!(
                         "attribute '{attribute}': `inspect` is specified and not built \
@@ -468,7 +491,7 @@ impl Placement {
                 }
             }
         }
-        Ok(Placement { render })
+        Ok(Placement { render, filter })
     }
 }
 
@@ -926,12 +949,50 @@ listing = "public"
         }
     }
 
+    /// A category may declare `filter`, and it reaches the compiled form.
+    ///
+    /// This is the placement's whole observable effect at parse: `Attribute::filter` is what the
+    /// build compiles into `MANIFEST.declared_scalars[..].filter`, and a reader picks the postings
+    /// record format from the declaration rather than from a stored second copy (manifest §2.5).
+    #[test]
+    fn a_category_may_declare_filter() {
+        let text = SEVERITY.replace("[\"render\"]", "[\"render\", \"filter\"]");
+        let schema = parse_str(&text).expect("filter is built for a category");
+        assert!(schema.attributes[0].filter);
+
+        let render_only = parse_str(SEVERITY).expect("render alone stays legal");
+        assert!(!render_only.attributes[0].filter);
+    }
+
+    /// `filter` alone is a legal declaration — a column indexed for querying and never drawn.
+    /// §10.3 routes by access cadence, so per-query and per-mark are independent choices.
+    #[test]
+    fn filter_without_render_is_legal() {
+        let text = SEVERITY.replace("[\"render\"]", "[\"filter\"]");
+        let schema = parse_str(&text).expect("filter alone declares something");
+        assert!(schema.attributes[0].filter);
+        assert!(!schema.attributes[0].vocabulary.is_none());
+    }
+
+    /// `filter` is built for categories only, and the refusal says which machinery is missing
+    /// rather than "unsupported" (decision 0013). A plain numeric accepted-and-ignored here would
+    /// serve an empty operand for every value it holds, indistinguishable from a correct empty.
+    #[test]
+    fn filter_on_a_non_category_names_what_is_absent() {
+        const SCORE: &str = r#"
+[[attribute]]
+name = "score"
+type = "u16"
+used_for = ["render", "filter"]
+"#;
+        let message = err(SCORE);
+        assert!(message.contains("category"), "{message}");
+        assert!(message.contains("dictionary"), "{message}");
+    }
+
     /// Decision 0013: absent machinery names itself rather than refusing generically.
     #[test]
     fn the_unbuilt_placements_name_themselves() {
-        let filter = SEVERITY.replace("[\"render\"]", "[\"render\", \"filter\"]");
-        assert!(err(&filter).contains("§3.5"), "{}", err(&filter));
-
         let inspect = SEVERITY.replace("[\"render\"]", "[\"render\", \"inspect\"]");
         assert!(err(&inspect).contains("sidecar"), "{}", err(&inspect));
 

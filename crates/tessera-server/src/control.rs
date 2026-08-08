@@ -1971,11 +1971,13 @@ mod tests {
                     name: "department".to_string(),
                     arrow_type: ScalarType::U16,
                     vocabulary: Some("departments".to_string()),
+                    filter: false,
                 },
                 DeclaredScalar {
                     name: "score".to_string(),
                     arrow_type: ScalarType::F32,
                     vocabulary: None,
+                    filter: false,
                 },
             ]
         }

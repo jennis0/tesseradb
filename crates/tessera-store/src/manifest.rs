@@ -43,6 +43,26 @@ pub struct DeclaredScalar {
     /// not tolerance of an older manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
+    /// Whether this column carries an entity-space filter index (`filter-index.md` §2).
+    ///
+    /// **A flag rather than a descriptor, because everything else about the placement is derivable
+    /// from the declaration already here.** The family is `vocabulary.is_some()` — a category or
+    /// not — and the record format follows the family: scattered vocabulary codes are addressed by
+    /// a keyed file, dense interned ordinals by a positional one (§2.5). Storing either would be a
+    /// second copy of a fact this struct can answer, and `wire_type` exists because that kind of
+    /// second copy has already disagreed with itself once here.
+    ///
+    /// **No `serde(default)`**: a manifest that omits it is malformed, not filter-free. Decision
+    /// 0048's rule is the whole argument — do not default a field so that an older bundle still
+    /// opens, because there is no older bundle. This is the distinction [`DeclaredScalar::vocabulary`]
+    /// draws next door: its `default` is the `Option`'s own absence, a plain scalar genuinely having
+    /// no vocabulary, and not tolerance of a manifest written before the field existed.
+    ///
+    /// The failure a default would cause is ordinary rather than disclosure-shaped, and worth stating
+    /// as such: a column silently non-filterable is simply absent from `/v1/meta`'s operand list, so
+    /// no caller can name it. That is a capability that quietly went missing, not a wrong answer —
+    /// still worth refusing, but not for the reason a first draft of this comment gave.
+    pub filter: bool,
 }
 
 impl DeclaredScalar {
@@ -68,6 +88,21 @@ impl DeclaredScalar {
             Some(_) => ScalarType::Utf8,
             None => self.arrow_type,
         }
+    }
+
+    /// Whether this column's filter postings are addressed by a scattered identifier (a keyed file)
+    /// rather than a dense ordinal (a positional one) — `filter-index.md` §2.5.
+    ///
+    /// Derived, never stored, for the reason [`DeclaredScalar::filter`] gives. A category's codes are
+    /// drawn at random over the declared width, so a positional file would need one record per code
+    /// point — 4×10⁹ for a `u32`. Every other family's identifiers are interned positions and dense
+    /// by construction.
+    ///
+    /// Meaningless unless [`DeclaredScalar::filter`] is set; a caller reaching this on a
+    /// non-filterable column has already lost track of what it is doing, which is why this answers
+    /// the format question and not the "does it have postings" question.
+    pub fn filter_is_keyed(&self) -> bool {
+        self.vocabulary.is_some()
     }
 }
 
@@ -677,7 +712,8 @@ mod tests {
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar =
-            serde_json::from_str(r#"{"name": "score", "arrow_type": "f32"}"#).expect("f32 parses");
+            serde_json::from_str(r#"{"name": "score", "arrow_type": "f32", "filter": false}"#)
+                .expect("f32 parses");
         assert_eq!(good.arrow_type, ScalarType::F32);
         assert_eq!(
             serde_json::to_value(&good).unwrap()["arrow_type"],
@@ -705,6 +741,7 @@ mod tests {
             name: "department".to_string(),
             arrow_type: ScalarType::U16,
             vocabulary: Some("departments".to_string()),
+            filter: false,
         };
         assert_eq!(category.wire_type(), ScalarType::Utf8);
         assert_eq!(category.arrow_type, ScalarType::U16);
@@ -713,6 +750,7 @@ mod tests {
             name: "score".to_string(),
             arrow_type: ScalarType::U16,
             vocabulary: None,
+            filter: false,
         };
         assert_eq!(
             plain.wire_type(),

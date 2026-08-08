@@ -170,12 +170,18 @@ fn write_pairs(path: &Path) {
 /// (`BatchColumn::Discovered`, minted through a seeded `VocabularyMinter`, versus
 /// `BatchColumn::Keys`, resolved per row), and only the declared one refuses an unknown key —
 /// so a build that confused them would still produce a column, with different bytes in it.
+///
+/// Both carry `filter` as well, which is what puts the two builds' filter postings under this
+/// file's byte comparison. The emits are written from different shapes — the streaming build
+/// reads its attribute values column-major, the reference transposes them out of the staged
+/// items — and a keyed postings file that disagreed on code order or on which empty postings it
+/// dropped would still open and still answer, just not the same set.
 const ATTRIBUTED_SCHEMA: &str = r#"
 [[attribute]]
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+used_for   = ["render", "filter"]
 vocabulary = "declared"
 values_key = "archive"
 # `public` is only reachable with `declared` (§3.8), so this fixture covers both listings.
@@ -185,7 +191,7 @@ listing    = "public"
 name       = "department"
 type       = "category"
 width      = "u16"
-used_for   = ["render"]
+used_for   = ["render", "filter"]
 vocabulary = "discovered"
 listing    = "per_viewer"
 values_key = "department"

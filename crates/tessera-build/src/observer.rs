@@ -36,6 +36,10 @@ pub enum BuildStage {
     ExternalIds,
     /// 8. One pass over the points file, geometry in entity order.
     GeometryScan,
+    /// 8b. Entity-space filter postings, one file per `used_for = "filter"` column. Its own
+    ///    stage rather than a rider on `PostingsWrite`, which runs before the attribute values
+    ///    have been read; zero-length for a schema that declares no filterable column.
+    FilterPostings,
     /// 9. The tiler sort: `(morton, tessera_id)` ascending.
     TilerSort,
     /// 10. Segment files: `morton.u32`, `permutation.bin`, `columns.arrow`, and their fsyncs.
@@ -55,6 +59,7 @@ impl BuildStage {
             BuildStage::PostingsWrite => "postings_write",
             BuildStage::ExternalIds => "external_ids",
             BuildStage::GeometryScan => "geometry_scan",
+            BuildStage::FilterPostings => "filter_postings",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
             BuildStage::Manifests => "manifests",

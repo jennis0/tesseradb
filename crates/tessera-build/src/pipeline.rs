@@ -120,13 +120,14 @@
 //!   term, which is the same ascending list the linear build accumulates by walking items in
 //!   entity order.
 
+use std::collections::BTreeMap;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use tessera_authz::encode_posting;
+use tessera_authz::{encode_posting, write_delta_tier_at};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::ScalarValue;
@@ -1188,6 +1189,14 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::GeometryScan, n);
 
+    // ---- 8b. attribute filter postings (filter-index §4) -------------------------------
+    // Its own stage, after entity assignment and before the tiler sort: entity ids are final
+    // here (stage 5, permanent under I9) and the values have just been read, which are the two
+    // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
+    // attribute values exist.
+    let filter_paths = write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
+    timer.end(BuildStage::FilterPostings, n);
+
     // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
     // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
     // `priority = high16(tessera_id)` is now the sort key, so the identity must exist before
@@ -1289,6 +1298,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // ---- 11. manifests ---------------------------------------------------------------
     let mut other_paths = vec![postings_path, permutation_path, columns_path, morton_path];
+    other_paths.extend(filter_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
     let report = write_manifests(
@@ -1381,6 +1391,121 @@ fn read_attributes_by_entity(
         )));
     }
     Ok(by_entity)
+}
+
+/// Write the entity-space filter postings for every column declared `used_for = "filter"`, and
+/// return the paths so the manifest digests them.
+///
+/// **One file per column** — `attrs/<column>/postings.arrow` — never one file for the whole
+/// schema. A shared file would have to address a value as `base + local` over per-column extents,
+/// and under ingest a value minted after the build takes an ordinal belonging to the *next*
+/// column; the base-union-tiers read then merges one value's members into another's. Because
+/// vocabulary visibility is membership-derived, that shows a value to a principal on the strength
+/// of a different value's members — leak-register row C11, reachable by ordinary operation
+/// (filter-index §2.2).
+///
+/// **The keyed record format** (filter-index §2.5), not the positional one the authorisation index
+/// uses. A category's identifier is its vocabulary code, and codes are a sparse subset of a
+/// 32-bit space by construction — [`tessera_store::vocabulary`] mints them scattered so that the
+/// code itself carries no ordering information. A positional file would need a record per code up
+/// to the largest one drawn; the keyed file stores `(code, posting)` ascending and binary-searches.
+///
+/// **Code 0 is the reserved *absent* code**, so an entity carrying it gets no posting. This is the
+/// same zero the entity-major buffer is initialised to, which is safe only because the reader's
+/// count check upstream proves every entity was visited — an unvisited entity would be
+/// indistinguishable from one with no value, and here that is the difference between "absent from
+/// every filter result" and "silently in whichever bucket zero names".
+///
+/// Entities are swept ascending, so each posting's entity list arrives sorted and
+/// `encode_posting`'s unconditional sortedness check re-verifies the property this loop
+/// established rather than taking it on trust.
+///
+/// **The memory here is the whole-column-in-RAM shape, and filter-index §4 already prices it as
+/// outside the plan at 10⁹**: the attribute reader materialises `Vec<ScalarValue>` per column at
+/// ~24 B per value, and this grouping adds a `u32` per non-absent entity on top. The streaming
+/// emit that §4 specifies is not built; at the scales this pipeline is exercised at, the tail
+/// dominates and this is the smaller term.
+pub(crate) fn write_filter_postings(
+    partition_dir: &Path,
+    schema: &crate::schema::Schema,
+    by_entity: &[Vec<ScalarValue>],
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for (attribute, values) in schema.attributes.iter().zip(by_entity) {
+        if !postings_are_owed(schema, attribute) {
+            continue;
+        }
+        // Ascending by code, and each `Vec` ascending by entity: exactly the two orders
+        // `write_delta_tier_at` checks rather than trusts.
+        let mut by_code: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (entity, value) in values.iter().enumerate() {
+            let code = category_code(value, &attribute.name)?;
+            if code == tessera_store::vocabulary::ABSENT_CODE {
+                continue;
+            }
+            by_code.entry(code).or_default().push(entity as u32);
+        }
+        // A code with no members is dropped rather than written empty. The positional format has
+        // no such choice — every ordinal below the largest must exist — but a keyed file addresses
+        // by search, and a missing key already reads as the empty set (filter-index §6).
+        let entries: Vec<(u32, Vec<u32>)> = by_code.into_iter().collect();
+
+        let column_dir = partition_dir.join("attrs").join(&attribute.name);
+        std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+        let path = column_dir.join("postings.arrow");
+        write_delta_tier_at(&path, &entries, SMALL_TERM_THRESHOLD_DEFAULT)
+            .map_err(|e| BuildError::io(&path, e))?;
+        fsync_file(&path)?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Does this column owe a postings file?
+///
+/// Two independent reasons, and the second is the one a reader will not expect.
+///
+/// **`used_for = "filter"`** is the obvious one: the column is declared filterable, and postings are
+/// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
+///
+/// **`listing = "per_viewer"`** is the other, and it is *not* optional. That control gates the
+/// existence of a value name, and the gate is membership-derived: a value is offered only if the
+/// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
+/// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
+/// would have to derive membership by scanning the value column per request — which is inside a
+/// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
+/// compute-admission justification ("no mask composition, no projection, no file IO") false.
+///
+/// So a `per_viewer` category gets postings whatever its `used_for` says. This is the one place the
+/// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
+/// that does not answer identically and differ only in latency, but here a disclosure control depends
+/// on them existing.
+fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::Attribute) -> bool {
+    if attribute.filter {
+        return true;
+    }
+    attribute
+        .vocabulary
+        .as_ref()
+        .and_then(|name| schema.vocabularies.get(name))
+        .is_some_and(|v| v.listing == crate::schema::Listing::PerViewer)
+}
+
+/// The vocabulary code a category column's value carries.
+///
+/// The schema refuses `used_for = "filter"` on anything but a category, so the three unsigned
+/// widths §3.6 allows are the whole domain; anything else reaching here is a schema-compilation
+/// defect, and it fails loudly rather than filtering on a value it invented.
+fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
+    match value {
+        ScalarValue::U8(c) => Ok(*c as u32),
+        ScalarValue::U16(c) => Ok(*c as u32),
+        ScalarValue::U32(c) => Ok(*c),
+        other => Err(BuildError::Invalid(format!(
+            "attribute '{column}' is declared for filtering but carries {other:?}, which is not a \
+             category code"
+        ))),
+    }
 }
 
 /// Permute the entity-major columns into **row order**, ready for `write_columns`.

@@ -27,3 +27,8 @@ proptest = { workspace = true }
 # end to end, which takes the fold's tombstone set as a `croaring::Bitmap` (compaction §3). Not a
 # [dependencies] entry — no non-test code in this crate names the type.
 croaring = { workspace = true }
+# Test-only: `tests/filter_postings.rs` reads the filter postings this build writes through the
+# reader that will serve them, so the writer and the reader cannot drift on the record format.
+# The build side names only `tessera_authz::write_delta_tier_at`, so this stays out of
+# [dependencies] — a build-time dependency on the read crate would invert the layering.
+tessera-filter = { path = "../tessera-filter" }

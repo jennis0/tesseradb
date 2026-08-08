@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 
 use tessera_authz::{write_postings, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
-use tessera_spatial::tiler::{sort_batch, TilerItem};
+use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
@@ -507,6 +507,25 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         }
     }
 
+    // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
+    // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
+    // item's *position*, so the values are entity-major exactly here and nowhere after.
+    // Transposed into one vector per column because that is the shape the emit consumes — the
+    // streaming pipeline reads its attributes column-major already, and one of the two builds
+    // paying a transpose is better than two emit paths that could disagree about a record's
+    // contents (which `write_manifests` exists to prevent for the same reason).
+    let filter_paths = {
+        let by_entity: Vec<Vec<ScalarValue>> = (0..args.schema.attributes.len())
+            .map(|column| {
+                tiler_items
+                    .iter()
+                    .map(|item| item.scalars[column].clone())
+                    .collect()
+            })
+            .collect();
+        pipeline::write_filter_postings(&partition_dir, &args.schema, &by_entity)?
+    };
+
     // ---- 7. tiler and segment ---------------------------------------------------------
     let scalar_schema = scalar_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
@@ -529,6 +548,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         segment_dir.join("columns.arrow"),
         segment_dir.join("morton.u32"),
     ]);
+    other_paths.extend(filter_paths);
     write_manifests(
         args,
         &BundleFiles {
@@ -667,6 +687,7 @@ fn write_manifests(
                 name: a.name.clone(),
                 arrow_type: a.ty,
                 vocabulary: a.vocabulary.clone(),
+                filter: a.filter,
             })
             .collect(),
         // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
