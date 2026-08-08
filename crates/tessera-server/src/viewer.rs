@@ -316,7 +316,20 @@ async fn categories(
 struct ViewportReq {
     slice: String,
     zoom: u8,
-    bbox: [f64; 4],
+    /// Absent exactly when `tiles` is present — the two are alternatives, not a pair.
+    #[serde(default)]
+    bbox: Option<[f64; 4]>,
+    /// The exact depth-`zoom` Morton prefixes to answer for, in place of a bbox.
+    ///
+    /// A client holding a replica omits every tile it can prove it already has, and an omitted tile
+    /// costs the engine nothing at all — no range derivation, counting, selection or gather. That
+    /// is what makes server work scale with novelty rather than with viewport area.
+    ///
+    /// Refused, never silently preferred, when a bbox is sent too: two ways of naming a tile set in
+    /// one request is a contradiction the server must not resolve on the caller's behalf, and
+    /// `/v1/region` already sets that precedent with its "exactly one of polygon/bbox".
+    #[serde(default)]
+    tiles: Option<Vec<u64>>,
     #[serde(default)]
     k: Option<usize>,
     #[serde(default)]
@@ -368,11 +381,25 @@ fn run_viewport(
         .unwrap_or_else(|| state.engine.config().k_max_marks)
         .min(state.max_k);
 
+    // **Sorted and deduplicated here, not trusted from the caller.** The tile stream reports in
+    // this order and the points stream concatenates in it, so a repeated tile would be served —
+    // and drawn — twice, inflating every count a client derives from the response. Sorting also
+    // restores the raster-ish locality `tiles_for_bbox` gives for free, which the row-range
+    // derivation below is faster for.
+    let tiles = req.tiles.map(|mut list| {
+        list.sort_unstable();
+        list.dedup();
+        list
+    });
+    // Validated as present-and-alone by the handler before admission; the default here is inert.
+    let bbox = req.bbox.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+
     let out = state
         .engine
         .viewport(
             session,
-            ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
+            ViewportRequest::new(&req.slice, req.zoom, bbox, k)
+                .tiles(tiles.as_deref())
                 .stamp(stamp)
                 .underlay_offset(req.underlay_offset)
                 .cancel(Some(cancel)),
@@ -455,16 +482,48 @@ async fn viewport(
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
-    if req.bbox.iter().any(|v| !v.is_finite())
-        || req.bbox[0] > req.bbox[2]
-        || req.bbox[1] > req.bbox[3]
-    {
-        return Err(ApiError::Contract(
-            "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
-        ));
-    }
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
+    }
+
+    // **Exactly one of `bbox` and `tiles`.** Both is a contradiction the server must not resolve on
+    // the caller's behalf — silently preferring one would leave a client believing it had asked for
+    // a region it never received — and neither leaves nothing to answer for. `/v1/region`'s
+    // "exactly one of polygon/bbox" is the same shape.
+    match (&req.bbox, &req.tiles) {
+        (Some(bbox), None) => {
+            if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
+                return Err(ApiError::Contract(
+                    "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
+                ));
+            }
+        }
+        (None, Some(tiles)) => {
+            // A prefix carries no depth of its own, so one with bits above `zoom` names a tile at a
+            // depth this request is not asking about. Refused rather than masked off, for the same
+            // reason `underlay_offset` is: a silently reduced request hands back tiles the client
+            // cannot interpret.
+            let shift = 2 * u32::from(req.zoom);
+            if let Some(bad) = tiles
+                .iter()
+                .find(|&&prefix| shift < 64 && prefix >> shift != 0)
+            {
+                return Err(ApiError::Contract(format!(
+                    "tile prefix {bad} has bits above depth {}",
+                    req.zoom
+                )));
+            }
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError::Contract(
+                "send exactly one of bbox and tiles, not both".to_string(),
+            ));
+        }
+        (None, None) => {
+            return Err(ApiError::Contract(
+                "send exactly one of bbox and tiles".to_string(),
+            ));
+        }
     }
 
     // The cancellation token and its drop-guard, created before the admission-gate acquire below

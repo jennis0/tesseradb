@@ -312,8 +312,8 @@ async function start() {
     s.mTarget = meta.selection.thetaTargetMarks;
   });
   replica = new Replica(
-    (req, signal) => client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal),
-    meta.quantisation,
+    (req, signal) =>
+      client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal),
     {slice: meta.slices[0]!.id}
   );
   controller = new ViewportController(store, replica);

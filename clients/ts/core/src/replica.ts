@@ -1,6 +1,5 @@
 import {BandCache, bandsOfResult, type Band, type Resolved} from './bands.js';
-import {tileToCellBox, tileXY, CELL_GRID} from './coords.js';
-import type {Quantisation, ViewportResponse} from './types.js';
+import type {ViewportResponse} from './types.js';
 
 /**
  * Layer 1: the read-through replica.
@@ -78,10 +77,9 @@ export class Replica {
 
   constructor(
     private readonly fetchViewport: (
-      req: {slice: string; zoom: number; bbox: [number, number, number, number]; k?: number},
+      req: {slice: string; zoom: number; tiles: bigint[]; k?: number},
       signal?: AbortSignal
     ) => Promise<ViewportResponse>,
-    private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
   ) {
     this.cache = new BandCache(opts.cacheBytes ?? 512 * 1024 * 1024);
@@ -126,10 +124,9 @@ export class Replica {
    * Ask for a tile set, answering from the store where it can and issuing at most one request for
    * the rest.
    *
-   * **⊘ The request is still bbox-shaped.** `delta-serving.md` §13's tile-list operand does not
-   * exist yet, so the tiles that cannot be answered from the store are covered by their bounding
-   * box — a superset, so the answer is correct and the elision is only as good as the box is tight.
-   * Passing the list itself is what makes server work scale with novelty, and is Stage 2's change.
+   * The request names the tiles it actually needs, so a tile the store already holds is not merely
+   * discarded on arrival — it is never derived, counted, selected or gathered. That is what makes
+   * server work scale with what is new rather than with the area on screen.
    */
   async fetchTiles(
     tiles: bigint[],
@@ -145,12 +142,7 @@ export class Replica {
     let fetched: Band[] = [];
     if (plan.fetch.length > 0) {
       response = await this.fetchViewport(
-        {
-          slice: this.opts.slice,
-          zoom: depth,
-          bbox: boundingBbox(plan.fetch.map((f) => f.prefix), depth, this.quantisation),
-          k
-        },
+        {slice: this.opts.slice, zoom: depth, tiles: plan.fetch.map((f) => f.prefix), k},
         signal
       );
       fetched = this.absorb(response, depth, k);
@@ -165,12 +157,7 @@ export class Replica {
       }
     } else if (this.dueForRevalidation()) {
       response = await this.fetchViewport(
-        {
-          slice: this.opts.slice,
-          zoom: depth,
-          bbox: boundingBbox(tiles, depth, this.quantisation),
-          k: 0
-        },
+        {slice: this.opts.slice, zoom: depth, tiles, k: 0},
         signal
       );
       this.observe(response);
@@ -271,36 +258,6 @@ export class Replica {
       }
     });
   }
-}
-
-/** The data-space box covering a tile set at one depth. */
-function boundingBbox(
-  tiles: bigint[],
-  depth: number,
-  q: Quantisation
-): [number, number, number, number] {
-  let cx0 = Infinity;
-  let cy0 = Infinity;
-  let cx1 = -Infinity;
-  let cy1 = -Infinity;
-  for (const prefix of tiles) {
-    const {x, y} = tileXY(prefix, depth);
-    const cells = tileToCellBox({x, y, z: depth});
-    cx0 = Math.min(cx0, cells.cx0);
-    cy0 = Math.min(cy0, cells.cy0);
-    cx1 = Math.max(cx1, cells.cx1);
-    cy1 = Math.max(cy1, cells.cy1);
-  }
-  const spanX = q.xMax - q.xMin;
-  const spanY = q.yMax - q.yMin;
-  // Inset to cell centres, for the reason `tileToRequestBbox` documents at length: the server's
-  // bbox is closed, so a corner on a tile boundary selects the neighbouring row and column too.
-  return [
-    q.xMin + ((cx0 + 0.5) / CELL_GRID) * spanX,
-    q.yMin + ((cy0 + 0.5) / CELL_GRID) * spanY,
-    q.xMin + ((cx1 - 0.5) / CELL_GRID) * spanX,
-    q.yMin + ((cy1 - 0.5) / CELL_GRID) * spanY
-  ];
 }
 
 export type {Band, Resolved};

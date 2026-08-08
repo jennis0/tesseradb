@@ -31,6 +31,12 @@ selection 83–89%, gather 5.1–6.5%, counting 3.4–5.8%, range derivation 2.6
 two make server work scale with novelty rather than with viewport area. Elision is a **wire and
 client-decode** mechanism whose server-side value grows with the declared-scalar tail.
 
+Confirmed on a second corpus, by naming tile sets explicitly and reading the server's own timing
+(2.4M items, depth 7, `k = 500`): a request for 1 to 164 tiles costs ~170 µs, and one for all
+16,384 costs 7.2 ms. **The fixed per-request prefix is ~170 µs and everything else is per-tile**,
+so a tile left out of the request costs essentially nothing, and a view answered entirely from the
+replica costs nothing at all because no request is made.
+
 Throughout: `vis(T)` is a tile's visible set — the session's authorisation mask `M_auth` restricted
 to that tile's rows; `served(T)` is the subset design §7.2 serves, of size `m(T)`; θ is that
 section's identity threshold, `P_d` at depth *d*.

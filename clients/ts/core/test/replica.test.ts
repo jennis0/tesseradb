@@ -3,9 +3,7 @@ import {Replica} from '../src/replica.js';
 import {mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
 import {tilesInBbox, tilesOfBbox} from '../src/budget.js';
 
-import type {Quantisation, ViewportResponse, ViewportResult} from '../src/types.js';
-
-const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
+import type {ViewportResponse, ViewportResult} from '../src/types.js';
 
 /** A response serving `n` points for each named tile, identities ascending across the whole batch. */
 function response(tiles: {tile: bigint; served: number; visible?: number}[], pin = 'p1'): ViewportResponse {
@@ -35,35 +33,27 @@ function response(tiles: {tile: bigint; served: number; visible?: number}[], pin
 }
 
 /**
- * A server that answers only for the tiles its bbox actually covers — which is what makes the
- * "requests only what it does not hold" test mean anything. A fixture returning every tile
- * regardless would seed the cache with tiles no request ever asked for.
+ * A server that answers only for the tiles the request actually listed — which is what makes the
+ * "requests only what it does not hold" test mean anything. A fixture answering for tiles nobody
+ * asked about would seed the cache behind the replica's back.
  */
 function serveCovered(tiles: {tile: bigint; served: number}[], pin: () => string) {
-  return (req: {bbox: [number, number, number, number]; zoom: number}) => {
-    const covered = tiles.filter(({tile}) => {
-      const {x, y} = tileXY(tile, req.zoom);
-      const box = tileToCellBox({x, y, z: req.zoom});
-      const [x0, y0, x1, y1] = req.bbox;
-      return (
-        box.cx0 / 65536 <= x1 && box.cx1 / 65536 >= x0 && box.cy0 / 65536 <= y1 && box.cy1 / 65536 >= y0
-      );
-    });
-    return response(covered, pin());
-  };
+  return (req: {tiles: bigint[]}) => response(
+    tiles.filter(({tile}) => req.tiles.includes(tile)),
+    pin()
+  );
 }
 
 function replica(
-  serve: (req: {bbox: [number, number, number, number]; zoom: number; k?: number}) => ViewportResponse,
+  serve: (req: {tiles: bigint[]; zoom: number; k?: number}) => ViewportResponse,
   opts: {cache?: boolean; revalidateAfterMs?: number} = {}
 ) {
-  const calls: {bbox: [number, number, number, number]; zoom: number; k?: number}[] = [];
+  const calls: {tiles: bigint[]; zoom: number; k?: number}[] = [];
   const r = new Replica(
     async (req) => {
-      calls.push({bbox: req.bbox, zoom: req.zoom, k: req.k});
+      calls.push({tiles: req.tiles, zoom: req.zoom, k: req.k});
       return serve(req);
     },
-    Q,
     {slice: 's', now: () => 0, revalidateAfterMs: Infinity, ...opts}
   );
   r.reset();
@@ -235,10 +225,9 @@ describe('Replica.fetchTiles', () => {
     await r.fetchTiles([0n, 3n], 1, 500);
 
     expect(calls).toHaveLength(2);
-    // The second request's box covers tile 3 alone, not the union with the held tile 0.
-    const {x, y} = tileXY(3n, 1);
-    const cells = tileToCellBox({x, y, z: 1});
-    expect(calls[1]!.bbox[0]).toBeCloseTo((cells.cx0 + 0.5) / 65536, 6);
+    // The second request names tile 3 alone. Under a bbox it would have spanned the held tile 0 too
+    // and the server would have paid for it; naming the list is what makes the saving real.
+    expect(calls[1]!.tiles).toEqual([3n]);
   });
 
   it('serves bands but retains nothing when the cache is bypassed', async () => {
@@ -308,7 +297,6 @@ describe('Replica.tile coalescing', () => {
       async () => {
         throw new Error('transport');
       },
-      Q,
       {slice: 's', now: () => 0}
     );
     r.reset();

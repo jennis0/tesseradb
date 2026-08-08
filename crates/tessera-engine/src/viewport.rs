@@ -297,8 +297,24 @@ pub struct ViewportRequest<'a> {
     pub slice: &'a str,
     /// Tile depth, 0–16.
     pub zoom: u8,
-    /// `[x0, y0, x1, y1]` in the bundle's declared extent.
+    /// `[x0, y0, x1, y1]` in the bundle's declared extent. Ignored when `tiles` is present.
     pub bbox: [f64; 4],
+    /// The exact tiles to answer for, as depth-`zoom` Morton prefixes — in place of deriving them
+    /// from `bbox`.
+    ///
+    /// **This is how a client with a replica elides.** A tile it can prove it already holds is
+    /// simply absent from the list, and the engine then does no range derivation, no counting, no
+    /// selection scan and no gather for it — which is the only mechanism that makes server work
+    /// scale with what is *new* rather than with viewport area (`delta-serving.md` §1). A bbox
+    /// spends the full per-tile pipeline on every tile it spans whether the client needs it or not.
+    ///
+    /// **The naive path is unaffected.** A request carrying no list is answered from `bbox` exactly
+    /// as before, self-contained, with no declaration logic anywhere in the client
+    /// (`client-interaction.md` §5's REPLACE default).
+    ///
+    /// Sorted and deduplicated by the caller boundary before it reaches here: the points stream is
+    /// a flat concatenation in tile order, so a repeated tile would be served — and drawn — twice.
+    pub tiles: Option<&'a [u64]>,
     /// The client's per-tile mark budget. Clamped to `max_k` (the machine ceiling) and then to
     /// `k_max_marks` (§7.2's cap clause).
     ///
@@ -333,11 +349,18 @@ impl<'a> ViewportRequest<'a> {
             slice,
             zoom,
             bbox,
+            tiles: None,
             k,
             stamp: None,
             underlay_offset: None,
             cancel: None,
         }
+    }
+
+    /// Answer for exactly these depth-`zoom` Morton prefixes rather than for `bbox`'s span.
+    pub fn tiles(mut self, tiles: Option<&'a [u64]>) -> Self {
+        self.tiles = tiles;
+        self
     }
 
     pub fn stamp(mut self, stamp: Option<GenerationStamp>) -> Self {
@@ -827,6 +850,7 @@ impl Engine {
             slice,
             zoom,
             bbox,
+            tiles: requested_tiles,
             k,
             stamp,
             underlay_offset,
@@ -962,14 +986,27 @@ impl Engine {
         // *derived* underlay fan-out below while commenting that "`tiles_for_bbox` is itself
         // uncapped" — guarding the second-order factor and leaving the first-order one open. This
         // is the first-order bound; the underlay's is now genuinely second-order.
-        let tile_count = tiles_for_bbox_count(bbox, zoom, &extent);
+        // The same bound applies to an explicit list — the count is attacker-chosen either way, and
+        // a list makes it *more* directly so than a bbox does.
+        let tile_count = match requested_tiles {
+            Some(list) => list.len() as u64,
+            None => tiles_for_bbox_count(bbox, zoom, &extent),
+        };
         if tile_count > self.config.max_tiles_per_request as u64 {
             return Err(EngineError::TooManyTiles {
                 demanded: tile_count,
                 limit: self.config.max_tiles_per_request,
             });
         }
-        let tiles = tiles_for_bbox(bbox, zoom, &extent);
+        let tiles = match requested_tiles {
+            // **An explicit list replaces the derivation, and that is where the saving is.** Every
+            // tile a client can prove it already holds is absent, and absence costs nothing at all:
+            // no row range, no `count_range`, no selection scan, no gather. Ordering is the caller's
+            // (already sorted and deduplicated at the request boundary), and it is the order the
+            // tile stream reports and the points stream concatenates in.
+            Some(list) => list.iter().map(|&prefix| Tile { prefix, depth: zoom }).collect(),
+            None => tiles_for_bbox(bbox, zoom, &extent),
+        };
         probe.lap(|t| &mut t.tiles_for_bbox_ns);
         probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
 

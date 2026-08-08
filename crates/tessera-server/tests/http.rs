@@ -169,6 +169,148 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
     );
 }
 
+/// **A request names its tile set exactly once, by bbox or by list.**
+///
+/// The list is how a client with a replica elides: a tile it can prove it holds is simply absent,
+/// and an absent tile costs the engine nothing. Both operands together is a contradiction the
+/// server must not resolve on the caller's behalf, and neither leaves nothing to answer for.
+#[tokio::test]
+async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let post = |body: serde_json::Value| {
+        let client = server.client.clone();
+        let url = server.viewer_url("/v1/viewport");
+        let token = token.to_string();
+        async move {
+            client
+                .post(url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Both: refused rather than silently preferring one.
+    let resp = post(serde_json::json!({
+        "slice": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "tiles": [0], "k": 5
+    }))
+    .await;
+    assert_eq!(resp.status(), 422);
+
+    // Neither: there is no tile set to answer for.
+    let resp = post(serde_json::json!({"slice": "s0", "zoom": 1, "k": 5})).await;
+    assert_eq!(resp.status(), 422);
+
+    // A prefix with bits above the request's own depth names a tile at a depth nobody asked about.
+    let resp = post(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": [64], "k": 5})).await;
+    assert_eq!(resp.status(), 422);
+
+    // And the list, alone and well-formed, is served.
+    let resp = post(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": [0, 1, 2, 3], "k": 5})).await;
+    assert_eq!(resp.status(), 200);
+}
+
+/// **A listed tile set answers for exactly those tiles, once each, and omitting one omits its cost.**
+///
+/// This is the whole point of the operand: the bbox spends the full per-tile pipeline on every tile
+/// it spans, whereas a client that already holds a tile leaves it out and pays nothing for it.
+/// Duplicates are collapsed at the boundary, because the points stream is a flat concatenation in
+/// tile order and a repeated tile would be served — and drawn — twice.
+#[tokio::test]
+async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let fetch = |body: serde_json::Value| {
+        let client = server.client.clone();
+        let url = server.viewer_url("/v1/viewport");
+        let token = token.to_string();
+        async move {
+            let resp = client
+                .post(url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let bytes = resp.bytes().await.unwrap();
+            decode_viewport(&bytes)
+        }
+    };
+
+    // Every depth-1 tile, by bbox — the whole corpus.
+    let (all_tiles, all_points) = fetch(serde_json::json!({
+        "slice": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 500
+    }))
+    .await;
+    assert!(!all_tiles.is_empty());
+
+    // The same set named explicitly, with one tile repeated three times.
+    let mut listed: Vec<u64> = all_tiles.iter().map(|t| t.0).collect();
+    let repeated = listed[0];
+    listed.extend([repeated, repeated]);
+    let (dedup_tiles, dedup_points) = fetch(serde_json::json!({
+        "slice": "s0", "zoom": 1, "tiles": listed, "k": 500
+    }))
+    .await;
+    assert_eq!(
+        dedup_tiles.len(),
+        all_tiles.len(),
+        "a repeated tile must be collapsed, not served twice"
+    );
+    assert_eq!(dedup_points.len(), all_points.len());
+
+    // Now drop one tile, as a client holding it would. Its counts and its points both go with it.
+    let dropped = all_tiles[0];
+    let kept: Vec<u64> = all_tiles.iter().skip(1).map(|t| t.0).collect();
+    if !kept.is_empty() {
+        let (subset_tiles, subset_points) =
+            fetch(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": kept, "k": 500})).await;
+        assert_eq!(subset_tiles.len(), all_tiles.len() - 1);
+        assert!(
+            !subset_tiles.iter().any(|t| t.0 == dropped.0),
+            "an omitted tile must not be answered for at all"
+        );
+        assert!(
+            subset_points.len() < all_points.len(),
+            "and its points must not be gathered"
+        );
+    }
+}
+
 /// Owner ruling (contracts §3.2): `/v1/items` returns the identical `404` for "no such id" and
 /// "exists but is not visible to this principal" -- same status, same body, byte for byte. This
 /// test deliberately never learns which *external id* the invisible `tessera_id` names (that

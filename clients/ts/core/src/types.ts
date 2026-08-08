@@ -93,7 +93,19 @@ export type CategoryValue = {
 export type ViewportRequest = {
   slice: string;
   zoom: number;
-  bbox: [number, number, number, number];
+  /**
+   * The region to answer for. Send exactly one of this and {@link ViewportRequest.tiles} — the
+   * server refuses both, and refuses neither.
+   */
+  bbox?: [number, number, number, number];
+  /**
+   * The exact depth-`zoom` Morton prefixes to answer for.
+   *
+   * How a client with a replica elides: a tile it can prove it already holds is simply left out,
+   * and an omitted tile costs the server nothing — no range derivation, counting, selection or
+   * gather. A client with no replica sends a `bbox` and needs none of this.
+   */
+  tiles?: bigint[];
   /**
    * Omitted unless set. Contracts §3.2 defaults `k` to the deployment's own ceiling, so a caller
    * who never mentions it can never decrease it — which is what keeps P6's non-decreasing

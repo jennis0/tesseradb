@@ -129,7 +129,11 @@ export class TesseraClient {
     req: ViewportRequest,
     signal?: AbortSignal
   ): Promise<ViewportResponse> {
-    const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom, bbox: req.bbox};
+    const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom};
+    if (req.bbox) body.bbox = req.bbox;
+    // JSON has no 64-bit integer, and a Morton prefix at depth 16 needs 32 bits — inside `Number`'s
+    // exact range, so the narrowing is lossless here and stays so for every depth the grid allows.
+    if (req.tiles) body.tiles = req.tiles.map(Number);
     if (req.k !== undefined) body.k = req.k;
     if (req.underlayOffset) body.underlay_offset = req.underlayOffset;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
