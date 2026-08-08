@@ -224,7 +224,8 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
     assert_eq!(resp.status(), 422);
 
     // And the list, alone and well-formed, is served.
-    let resp = post(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": [0, 1, 2, 3], "k": 5})).await;
+    let resp =
+        post(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": [0, 1, 2, 3], "k": 5})).await;
     assert_eq!(resp.status(), 200);
 }
 
@@ -1655,5 +1656,93 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         bytes_1, bytes_8,
         "the full Arrow response body must be byte-for-byte identical regardless of \
          compute_threads, including on the mostly-empty-tile Ok(None) skip path"
+    );
+}
+
+/// **A single-flight shed must not claim the compute gate is saturated.** Concurrent viewports on
+/// a *cold* session — one whose row projection has not been built — race the engine's single-flight
+/// builder, and the losers are shed with 429 `backpressure`. That is a different mechanism from the
+/// compute-admission gate: the gate admitted every one of these requests and sheds nothing, which
+/// this test pins by reading its `shed_total` from `/control/status`. A body claiming a
+/// compute-admission bound therefore sends whoever reads it — client author or operator — to a
+/// gate with 48 free permits and a zero counter.
+///
+/// **Not a timing bet in the direction that matters.** If the projection happens to be built before
+/// any sibling arrives, no 429 is produced and there is nothing to assert; the test then passes
+/// vacuously rather than failing, because a 429 is the *loser's* answer and losing is not
+/// guaranteed. What it can never do is pass while a single-flight shed carries the gate's wording.
+/// The fixture is deliberately larger than [`N_ITEMS`] so the build is wide enough to lose to.
+#[tokio::test]
+async fn a_single_flight_shed_does_not_blame_the_compute_gate() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // The generous default gate: 48 admission permits against the handful of requests below, so
+    // any 429 here is necessarily the single-flight builder's and not the gate's.
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let mut racers = Vec::new();
+    for _ in 0..8 {
+        let client = server.client.clone();
+        let url = server.viewer_url("/v1/viewport");
+        let token = token.clone();
+        racers.push(tokio::spawn(async move {
+            let resp = client
+                .post(url)
+                .bearer_auth(token)
+                .json(&serde_json::json!({
+                    "slice": "s0", "zoom": 4, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+                }))
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body: serde_json::Value = if status == 429 {
+                resp.json().await.unwrap()
+            } else {
+                serde_json::Value::Null
+            };
+            (status, body)
+        }));
+    }
+
+    let mut shed = 0;
+    for racer in racers {
+        let (status, body) = racer.await.unwrap();
+        if status != 429 {
+            assert_eq!(status, 200, "a racer must be served or shed, nothing else");
+            continue;
+        }
+        shed += 1;
+        assert_eq!(body["error"], "backpressure", "the wire code is closed");
+        assert_eq!(body["retry_after_s"], 1);
+        let detail = body["detail"].as_str().unwrap();
+        assert!(
+            !detail.contains("compute-admission bound"),
+            "a single-flight shed must not claim compute-admission saturation, got: {detail}"
+        );
+        assert!(
+            detail.contains("row projection") || detail.contains("mask fragment"),
+            "the detail must name the mechanism that actually shed, got: {detail}"
+        );
+    }
+
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["compute"]["shed_total"], 0,
+        "the compute gate shed nothing, whatever the {shed} single-flight refusals said"
     );
 }

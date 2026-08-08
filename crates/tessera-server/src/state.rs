@@ -295,9 +295,10 @@ pub struct ComputeGate {
     /// a single process-wide counter, `/control/status`'s `shed_total`.
     ///
     /// **Does not count every 429 the server can return.** The engine's single-flight builders
-    /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`) also map to 429 `backpressure` at
-    /// `map_engine_error`, but those sheds happen *after* this gate has already admitted the
-    /// request — a distinct mechanism this counter has no visibility into. A caller correlating
+    /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`) also emit the 429 `backpressure`
+    /// code, as [`crate::error::ApiError::SingleFlightBackpressure`], but those sheds happen
+    /// *after* this gate has already admitted the request — a distinct mechanism this counter has
+    /// no visibility into, and one whose `detail` says so. A caller correlating
     /// `shed_total` against the client-observed 429 rate should expect the latter to be equal or
     /// higher; the gap is the single-flight sheds, not a bug to chase.
     shed_total: AtomicU64,
