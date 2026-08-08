@@ -152,6 +152,10 @@ export class TesseraClient {
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
         stageNs: stage ? stage.split(',').map(Number) : null
       },
+      identityKey: response.headers.get('x-tessera-identity-key') ?? '',
+      // Unquoted here: the quotes are HTTP's entity-tag syntax, not part of the value, and every
+      // comparison this client makes is against another value it took from this same header.
+      contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
       pin: response.headers.get('x-tessera-pin'),
       stale: response.headers.get('x-tessera-stale') === '1',
       bytes: bytes.byteLength

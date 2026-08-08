@@ -218,7 +218,10 @@ function render() {
       .authorise(preset.terms)
       .then((session) => {
         store.update((s) => {
-          replica?.setSession(session.tokenId);
+          // A different principal is a different render partition. The replica also drops on the
+          // identity coordinate the next response carries; this is the earlier of the two, so no
+          // band from the old mask is ever held while the new token's first request is in flight.
+          replica?.reset();
           s.session = session;
           s.terms = preset.terms;
           s.termsLabel = preset.label;
@@ -313,7 +316,6 @@ async function start() {
     meta.quantisation,
     {slice: meta.slices[0]!.id}
   );
-  replica.setSession(session.tokenId);
   controller = new ViewportController(store, replica);
   controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }

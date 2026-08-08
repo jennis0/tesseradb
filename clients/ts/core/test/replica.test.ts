@@ -23,7 +23,15 @@ function response(tiles: {tile: bigint; served: number; visible?: number}[], pin
     scalars: {},
     subCells: null
   };
-  return {result, timings: {serverUs: 0, admissionUs: 0, stageNs: null}, pin, stale: false, bytes: 0};
+  return {
+    result,
+    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
+    identityKey: 'ik',
+    contentKey: pin,
+    pin,
+    stale: false,
+    bytes: 0
+  };
 }
 
 /**
@@ -58,7 +66,7 @@ function replica(
     Q,
     {slice: 's', now: () => 0, revalidateAfterMs: Infinity, ...opts}
   );
-  r.setSession(1);
+  r.reset();
   return {r, calls};
 }
 
@@ -245,14 +253,34 @@ describe('Replica.fetchTiles', () => {
     expect(r.bytes).toBe(0);
   });
 
-  it('drops everything on a change of principal', async () => {
+  it('drops everything on an explicit reset', async () => {
     const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
 
     await r.fetchTiles([0n], 1, 500);
-    r.setSession(2);
+    r.reset();
     await r.fetchTiles([0n], 1, 500);
 
     expect(calls).toHaveLength(2);
+  });
+
+  it('drops everything when the server reports a different identity coordinate', async () => {
+    // Belt to reset()'s braces: the partition key comes from the server, so a client cannot hold
+    // one principal's bands under another's by forgetting to call anything.
+    let identity = 'alice';
+    const {r, calls} = replica((req) => ({
+      ...serveCovered([{tile: 0n, served: 2}], () => 'p1')(req),
+      identityKey: identity
+    }));
+
+    await r.fetchTiles([0n], 1, 500);
+    expect(r.bytes).toBeGreaterThan(0);
+
+    identity = 'bob';
+    await r.fetchTiles([0n, 1n], 1, 500);
+    // Tile 0's band was dropped when the coordinate moved, so it is asked for again.
+    const after = await r.fetchTiles([0n], 1, 500);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(after.tiles[0]?.resolved.bands[0]?.identityKey).toBe('bob');
   });
 });
 
@@ -283,7 +311,7 @@ describe('Replica.tile coalescing', () => {
       Q,
       {slice: 's', now: () => 0}
     );
-    r.setSession(1);
+    r.reset();
 
     const resolved = await Promise.all([r.tile(0n, 1, 500), r.tile(1n, 1, 500)]);
 

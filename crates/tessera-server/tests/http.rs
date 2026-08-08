@@ -81,6 +81,94 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     assert_eq!(points.len(), 5, "k=5 caps sampled points, not the count");
 }
 
+/// **The two view coordinates reach a client, and they are distinguishable and stable.**
+///
+/// The content coordinate travels as an entity tag because that is what HTTP already means by it,
+/// and because the tile-addressed route will want the same value for browser caching. The identity
+/// coordinate gets its own header: it answers a different question — whether a held band may be
+/// rendered at all rather than declared — and HTTP has one validator slot.
+///
+/// A client keys its replica partition on the identity coordinate, so a value that moved between
+/// two requests under one principal would drop every held band on every pan.
+#[tokio::test]
+async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requests() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let fetch = || async {
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let etag = resp.headers()["etag"].to_str().unwrap().to_string();
+        let identity = resp.headers()["x-tessera-identity-key"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        (etag, identity)
+    };
+
+    let (etag, identity) = fetch().await;
+
+    // Quoted, 32 hex characters, no weak-tag prefix: an exact comparison of an opaque value.
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"') && etag.len() == 34,
+        "entity tag must be a quoted 16-byte hex value, got {etag}"
+    );
+    assert!(etag[1..33].chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(identity.len(), 32);
+    assert!(identity.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(
+        &etag[1..33],
+        identity.as_str(),
+        "the two coordinates answer different questions and must not be one value"
+    );
+
+    // Nothing wrote in between, so neither may move.
+    let (etag_again, identity_again) = fetch().await;
+    assert_eq!(etag, etag_again);
+    assert_eq!(identity, identity_again);
+
+    // A different principal is a different render partition, and the client drops its bands on it.
+    let other = authorise(&server, &["1"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(other["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.headers()["x-tessera-identity-key"].to_str().unwrap(),
+        identity,
+        "a different mask must not share a render partition — that is decision 0029's disclosure"
+    );
+}
+
 /// Owner ruling (contracts §3.2): `/v1/items` returns the identical `404` for "no such id" and
 /// "exists but is not visible to this principal" -- same status, same body, byte for byte. This
 /// test deliberately never learns which *external id* the invisible `tessera_id` names (that

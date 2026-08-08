@@ -67,25 +67,6 @@ type PendingAsk = {
   resolve: (band: Resolved | null) => void;
 };
 
-/**
- * The identity coordinate, and a conservative stand-in for the content coordinate.
- *
- * **⊘ Neither is served by the engine yet.** `delta-serving.md` §2 specifies an `identity_key` over
- * the idset, auth-data hash, fragment identity and slice, and a `content_key` over the watermark of
- * the geometry served plus the overlay version, delivered as an entity tag. Until those exist:
- *
- * - identity is keyed on `(tokenId, slice)`, which is sound for the partition it governs — a token
- *   binds one principal to one authorisation — but does not notice a key rotation, so a client must
- *   still drop its store on re-authorisation, which {@link Replica.setSession} does;
- * - content is keyed on `x-tessera-pin`, the advisory geometry stamp. It moves on every flush *and*
- *   on every merge and compaction, so it **over-rotates**: declarations lapse where the real content
- *   coordinate would have held them. That costs bytes and never correctness, which is the right
- *   direction for a stand-in, and it is why no completeness claim here can outlive a flush.
- */
-function contentKeyOf(response: ViewportResponse): string {
-  return response.pin ?? 'unpinned';
-}
-
 export class Replica {
   private readonly cache: BandCache;
   private readonly now: () => number;
@@ -108,17 +89,15 @@ export class Replica {
   }
 
   /**
-   * Bind the store to a principal. A different one drops everything held, so cross-principal reuse
-   * is impossible by construction rather than by discipline (`client-interaction.md` §10).
+   * Drop everything held. Called when the token changes, before the new principal's first response
+   * can tell us its identity coordinate — so the store is never non-empty across a principal
+   * change even for one request (`client-interaction.md` §10).
    */
-  setSession(tokenId: number): void {
-    const key = `${tokenId}:${this.opts.slice}`;
-    if (key !== this.identityKey) {
-      this.cache.dropIdentity();
-      this.identityKey = key;
-      this.contentKey = '';
-      this.validatedAt = Number.NEGATIVE_INFINITY;
-    }
+  reset(): void {
+    this.cache.dropIdentity();
+    this.identityKey = '';
+    this.contentKey = '';
+    this.validatedAt = Number.NEGATIVE_INFINITY;
   }
 
   get bytes(): number {
@@ -237,13 +216,21 @@ export class Replica {
   }
 
   /**
-   * Take a response's content coordinate without taking its points.
+   * Take a response's coordinates without taking its points.
    *
    * A counts-only response carries no marks, so there is nothing to absorb — but its validator is
    * the whole point of having asked, and observing it is what bounds staleness.
+   *
+   * **A moved identity coordinate empties the store**, whatever the caller did or did not do about
+   * the token. That is the belt to `reset`'s braces: the partition key comes from the server, so a
+   * client cannot hold one principal's bands under another's by forgetting to call anything.
    */
   private observe(response: ViewportResponse): void {
-    this.contentKey = contentKeyOf(response);
+    if (response.identityKey !== this.identityKey) {
+      this.cache.dropIdentity();
+      this.identityKey = response.identityKey;
+    }
+    this.contentKey = response.contentKey;
     this.validatedAt = this.now();
   }
 

@@ -541,6 +541,16 @@ pub struct Engine {
     /// this type alone. `pub(crate)`: `viewport.rs`'s
     /// `Engine::item` inverts a caller-supplied `tessera_id` with it directly.
     pub(crate) identity_key: IdentityKey,
+    /// A per-process random value folded into every content key (`delta-serving.md` §2).
+    ///
+    /// **Without it a content key can collide across a restart.** `overlay_version` is an
+    /// in-process counter that starts at zero, so a post-restart key would repeat a pre-restart
+    /// one over different overlay content, and a client's held declaration would be honoured
+    /// against a visible set it was never computed for. Costs only that declarations lapse when
+    /// the process restarts, which the render/declare split makes invisible to a user.
+    ///
+    /// Not a secret and not a key: it never has to be unpredictable, only distinct.
+    pub(crate) boot_nonce: u64,
     /// The effective serial/parallel fan-out threshold
     /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`) this engine reads on every `viewport` call,
     /// defaulted at `open` to that constant and never otherwise written in production. Exists so
@@ -870,6 +880,7 @@ impl Engine {
             next_token_id: AtomicU64::new(0),
             write: WritePath::new(write_state),
             identity_key,
+            boot_nonce: OsRng.next_u64(),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             stale_serves: AtomicU64::new(0),
             refreshes: Arc::new(AtomicU64::new(0)),

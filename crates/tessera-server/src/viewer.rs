@@ -340,6 +340,7 @@ struct ViewportReq {
 /// costs measurable CPU.
 struct ViewportOutcome {
     bytes: Vec<u8>,
+    coordinates: tessera_engine::ViewCoordinates,
     stamp: GenerationStamp,
     stale: bool,
     timings: tessera_engine::StageTimings,
@@ -437,6 +438,7 @@ fn run_viewport(
     let arrow_serialise_ns = serialise_start.elapsed().as_nanos() as u64;
 
     Ok(ViewportOutcome {
+        coordinates: out.coordinates,
         bytes,
         stamp: out.stamp,
         stale: out.stale,
@@ -533,6 +535,22 @@ async fn viewport(
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
+        // **The content coordinate travels as an entity tag** (`delta-serving.md` §2). The
+        // semantics are exactly HTTP's — process my declarations only if this still holds — and
+        // contracts §0.2 adopts published formats rather than inventing. One documented deviation:
+        // a mismatched `If-Match` does not produce `412`, it produces the full response, because
+        // the request remains perfectly answerable and refusing it would turn the fail-closed path
+        // into a failure rather than a fallback. Weak-tag syntax is not used; this is an exact
+        // comparison of an opaque value.
+        .header("etag", format!("\"{}\"", hex16(&outcome.coordinates.content_key)))
+        // The authorisation coordinate, which governs whether a held band may be RENDERED at all
+        // and is therefore the client's cache PARTITION key. Separate from the entity tag because
+        // it answers a different question and moves on a different schedule: HTTP has one
+        // validator slot and this is not a validator.
+        .header(
+            "x-tessera-identity-key",
+            hex16(&outcome.coordinates.identity_key),
+        )
         .header("x-tessera-pin", pin_header)
         // The staleness signal (`geometry-pinning.md` §7). A header rather than a body field
         // because the body is Arrow IPC and this is one bit that every client — including one that
@@ -551,6 +569,17 @@ async fn viewport(
     Ok(response
         .body(Body::from(outcome.bytes))
         .expect("response construction cannot fail"))
+}
+
+/// Lower-case hex of an opaque 16-byte coordinate. Not a checksum and not reversible by a client:
+/// the only operation defined on it is equality against one the server minted earlier.
+fn hex16(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 /// The `x-tessera-stage-ns` value: a fixed-order CSV of unsigned integers, no names.

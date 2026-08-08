@@ -192,6 +192,22 @@ export type ViewportResponse = {
   result: ViewportResult;
   timings: Timings;
   /**
+   * Whether a held band may be **rendered at all** — the replica's partition key.
+   *
+   * Over the idset, the credential, the mask fragment's identity and the slice. A cache keyed more
+   * loosely than this serves one principal's authorised data to another, which is a disclosure and
+   * not a staleness bug (decision 0029), so a client drops everything held when it changes.
+   */
+  identityKey: string;
+  /**
+   * Whether a held band may be **declared** in a request — the response's entity tag, unquoted.
+   *
+   * Moves when the visible set could have gained rows, and deliberately not when a merge or a
+   * compaction rearranges the ones already there. A band whose key has rotated is still renderable;
+   * what it has lost is the right to be declared (`delta-serving.md` §2).
+   */
+  contentKey: string;
+  /**
    * The geometry this response was answered from (`x-tessera-pin`), to echo back on the next
    * request as {@link ViewportRequest.stamp}.
    *

@@ -40,6 +40,7 @@ use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use rayon::prelude::*;
 
 use tessera_authz::FrozenFragment;
@@ -357,9 +358,33 @@ impl<'a> ViewportRequest<'a> {
     }
 }
 
+/// The two coordinates a client keys its replica on (`delta-serving.md` §2).
+///
+/// Both are opaque: minted here, echoed back, compared for equality and nothing else. They answer
+/// two different questions, and a single coordinate answering both either voids a cache that is
+/// still sound or honours a declaration that is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewCoordinates {
+    /// Whether a held band may be **rendered at all** — the cache partition key.
+    ///
+    /// Over the idset, the auth-data hash, the mask fragment's identity and the slice: everything
+    /// that determines *what this principal may see*. Decision 0029's warning applies to this one —
+    /// a client cache keyed more loosely than this serves one principal's authorised data to
+    /// another, which is a disclosure and not a staleness bug.
+    pub identity_key: [u8; 16],
+    /// Whether a held band may be **declared** in a request.
+    ///
+    /// The identity key, plus the watermark of the geometry this response was actually served
+    /// from, plus the overlay version, plus the process's boot nonce. See
+    /// [`Engine::view_coordinates`] for why each is there and why the segment-set version is not.
+    pub content_key: [u8; 16],
+}
+
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
 #[derive(Debug, Clone)]
 pub struct ViewportOut {
+    /// The coordinates a client keys its replica on. See [`ViewCoordinates`].
+    pub coordinates: ViewCoordinates,
     /// The geometry this response was answered from — what a client echoes back next time.
     pub stamp: GenerationStamp,
     /// Whether the geometry moved since the stamp the request presented.
@@ -660,6 +685,61 @@ impl Engine {
     /// stale-serve — would pair a live fragment with a stale projection and, worse, insert the
     /// result under the *live* key, pinning the session's freshly flushed items invisible until
     /// the next publication. See [`crate::cache::SessionGeometry`].
+    /// Mint the two coordinates of `delta-serving.md` §2 for one answered request.
+    ///
+    /// **From the geometry actually served, not from the generation.** `session_geometry`'s rung 2
+    /// answers from the projection and fragment one `segments_version` below when that projection
+    /// still covers the row space, so two responses under a single generation snapshot can have
+    /// different visible sets — the stale one lacking rows flushed since. Minting from the
+    /// generation would give both the same key, and a later live response would then elide against
+    /// a bound the client declared from the stale one: a hole in the client's own picture that it
+    /// cannot detect, and one the server caused. The fragment's watermark is what distinguishes
+    /// them, so the fragment that was served is what is hashed.
+    ///
+    /// **The watermark, and deliberately not `segments_version`.** Only *additions* to a tile's
+    /// visible set can make an elision unsound: `tessera_id` is a keyed permutation and is not
+    /// monotone in the entity id, so a newly ingested entity can land below any declared bound.
+    /// Removals cannot — the client holds every visible identity below its bound, so a shrinking
+    /// set leaves it holding a superset. The watermark is what counts rows added; a merge or a
+    /// compaction moves `segments_version` and the prefix without adding one, and a declaration is
+    /// expressed in identity space, so keying on the segment-set version would void every
+    /// declaration on every background compaction for no correctness reason at all.
+    ///
+    /// **`overlay_version` earns its place on coherence, not safety.** Removals cannot open a hole,
+    /// but they move `visible` and `matched`, which a client must not go on presenting as current.
+    fn view_coordinates(
+        &self,
+        generation: &Generation,
+        geometry: &SessionGeometry,
+        slice: &str,
+    ) -> ViewCoordinates {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tessera-identity-key-v1");
+        hasher.update(generation.bundle.manifest.identity.idset.to_le_bytes());
+        hasher.update(geometry.auth_data_hash);
+        hasher.update(geometry.fragment.identity);
+        hasher.update((slice.len() as u64).to_le_bytes());
+        hasher.update(slice.as_bytes());
+        let identity_digest: [u8; 32] = hasher.finalize().into();
+        let mut identity_key = [0u8; 16];
+        identity_key.copy_from_slice(&identity_digest[..16]);
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"tessera-content-key-v1");
+        hasher.update(identity_key);
+        hasher.update(geometry.fragment.watermark.to_le_bytes());
+        hasher.update(generation.overlay_version.to_le_bytes());
+        hasher.update(self.boot_nonce.to_le_bytes());
+        let content_digest: [u8; 32] = hasher.finalize().into();
+        let mut content_key = [0u8; 16];
+        content_key.copy_from_slice(&content_digest[..16]);
+
+        ViewCoordinates {
+            identity_key,
+            content_key,
+        }
+    }
+
     fn session_geometry(
         &self,
         session: &Session,
@@ -831,6 +911,8 @@ impl Engine {
         // `EffectiveMask`) by every `tile_result` call — never re-fetched or re-built per tile.
         let geometry =
             self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
+        // Minted here, from the geometry that actually resolved — see `view_coordinates`.
+        let coordinates = self.view_coordinates(&generation, &geometry, slice);
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -1156,6 +1238,7 @@ impl Engine {
         }
 
         Ok(ViewportOut {
+            coordinates,
             stamp: answered_from,
             stale,
             tiles: tile_counts,

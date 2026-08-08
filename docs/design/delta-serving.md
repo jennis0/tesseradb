@@ -88,7 +88,10 @@ Declarations lapse across a restart; nothing else does.
 
 **The overlay version earns its place on coherence, not safety.** Removals cannot hole a
 declaration (§4), but they move the visible and matched counts, which a client must not keep
-presenting as current.
+presenting as current. It also moves on an ingest, before the flush that gives those items rows —
+so the key rotates while the row-space visible set is momentarily unchanged. That is
+over-rotation, and it is the right direction: over-rotating costs a client bytes it need not have
+spent, under-rotating costs it rows.
 
 **Filters.** The retrieval surface carries none today, so matched equals visible. When design
 §8.2's filter operands arrive, **declarations are ignored on any request carrying a filter**. A
@@ -175,7 +178,7 @@ Every way `vis(T)` can move, and what covers it:
 |---|---|---|
 | Flush | adds rows | the watermark |
 | Deny, suppress, unsuppress, delete | removes or restores rows | the overlay version — for coherence; safety does not need it |
-| Ingest buffer | no rows exist until flush, so none | nothing needed |
+| Ingest buffer | no rows exist until flush, so none | nothing needed for safety — but the buffer swap bumps the overlay version, so the key rotates anyway |
 | Row-space merge | permutes rows, adds no entity | nothing needed; the declaration is in identity space |
 | Entity-space coalesce | touches no row | nothing needed |
 | Compaction fold | rotates the prefix and every fragment identity; retires executed deletions — a removal | nothing needed |
