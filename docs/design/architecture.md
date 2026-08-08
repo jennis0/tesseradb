@@ -508,6 +508,8 @@ There is no leak in preserving labels under filtering: the principal could alrea
 
 **Label filtering — core, effectively free.** Resolve labels to nodes, union membership bitmaps, intersect. The label vocabulary *offered* must itself be containment-filtered, or the existence of a filterable label reveals a label the principal is not cleared to see (C11).
 
+**Per-item attributes — a scanned entity-space column, or a bitmap where values repeat.** A `filter` attribute is stored in entity space and evaluated with the mask as the scan's candidate, so its work is a function of the candidate and the column and never of the value being sought — which is what makes a value the principal cannot see indistinguishable in *work*, not merely in outcome, from one that does not exist. A per-value bitmap is derived on top only where the values carry an identity of their own and repeat heavily (categories), where it closes broad coverage at a measured 107×. §10.5 r37 states the placement rule; `filter-index.md` owns the choice.
+
 **Text — an embedded index.** Text results depend on the query, not the token, so they cache globally across all principals within a partition — a different key from the mask, and conflating the two yields either a cache that never hits or a leak. And **filter, do not rank**: relevance scores and rank shifts computed from corpus-global statistics are a demonstrated channel for inferring the content of unreadable documents (Appendix D).
 
 **Vectors — a sidecar in a different format.** Cold, large (Appendix A), read in a completely different pattern from the hot columns. This is where chunked object-store-native storage earns its place.
@@ -577,7 +579,7 @@ The organising property is that **the row ID is the array index**. Nothing is st
 
 One file per column per segment: raw little-endian, fixed-width, uncompressed, in **`(morton, tessera_id)`** order — the intra-leaf tiebreak is the item's identity, of which `priority` is the leading 16 bits (§7.2, contracts §2.6). Alongside them a sorted `morton.u32` column, 32 bits because §5.2 fixes the grid at 2¹⁶ × 2¹⁶ (contracts §2.5), which is also what tile ranges are derived from. Use the Arrow IPC file format with uncompressed buffers: self-describing, and the buffers remain page-aligned raw arrays that can be mmap'd and sliced zero-copy.
 
-**Route by access ratio, not data type** *(r21)*. The rule the sentence above is an instance of: data read once per **rendered mark** belongs in a fixed-width hot column; data read once per **query** belongs in an entity-space bitmap behind the filter contract (§8.2); data read once per **interaction** belongs in a cold sidecar keyed by the wire identity and opened on first use. A viewport draws ~10⁵ marks and a user clicks a handful, so the three cadences are four orders of magnitude apart and the placement decision follows from the ratio rather than from the type of the data. The caller's external ID is the first instance decided this way: it is per-interaction, so it is a sidecar (contracts §2.4), not a column. **The per-interaction row and §8.3's vector sidecar name one slot, not two**: per-point metadata, the full record, provenance, text and vectors are all per-interaction, and the intention is that a single adopted store eventually serves them rather than each growing its own format. The external-ID sidecar is that slot's first and deliberately transitional occupant. **Appendix D does not bar such an adoption:** it rejects adopting a search engine, vector database or relationship-based authorisation service **for the access-control layer**, where a wrong or stale answer is a disclosure. A cold store read only after the mask has already decided visibility never participates in masking; it inherits instead the ordinary conditions — fail-closed with typed errors, integrity verified before an answer leaves it, and off the request path. **Expanding the hot columnar store remains an available trade** — more per-point data on the render path, paid for in resident memory at 0.93 GiB per byte per row per 10⁹ items — and a proposal to take it should state that number against Appendix A's budget rather than treat the store as closed.
+**Route by access ratio, not data type** *(r21)*. The rule the sentence above is an instance of: data read once per **rendered mark** belongs in a fixed-width hot column; data read once per **query** belongs in **entity space behind the filter contract (§8.2)** — which is a flat value column scanned under the candidate mask, or a Roaring bitmap per value where the values already carry an identity of their own and repeat heavily, i.e. categories *(r37)*; data read once per **interaction** belongs in a cold sidecar keyed by the wire identity and opened on first use. A viewport draws ~10⁵ marks and a user clicks a handful, so the three cadences are four orders of magnitude apart and the placement decision follows from the ratio rather than from the type of the data. The caller's external ID is the first instance decided this way: it is per-interaction, so it is a sidecar (contracts §2.4), not a column. **The per-interaction row and §8.3's vector sidecar name one slot, not two**: per-point metadata, the full record, provenance, text and vectors are all per-interaction, and the intention is that a single adopted store eventually serves them rather than each growing its own format. The external-ID sidecar is that slot's first and deliberately transitional occupant. **Appendix D does not bar such an adoption:** it rejects adopting a search engine, vector database or relationship-based authorisation service **for the access-control layer**, where a wrong or stale answer is a disclosure. A cold store read only after the mask has already decided visibility never participates in masking; it inherits instead the ordinary conditions — fail-closed with typed errors, integrity verified before an answer leaves it, and off the request path. **Expanding the hot columnar store remains an available trade** — more per-point data on the render path, paid for in resident memory at 0.93 GiB per byte per row per 10⁹ items — and a proposal to take it should state that number against Appendix A's budget rather than treat the store as closed.
 
 ### 10.4 The query path
 
@@ -956,7 +958,20 @@ At 10<sup>9</sup> items:
 | Hot columns | 14 GB | 219 MB |
 | Position (cell + residual) | 8 GB | 125 MB |
 | Permutation `entity_to_row` | 4 GB | 62.5 MB |
+| Filter value column, per declared column | 1 GB per byte of width | 16 MB per byte |
+| Filter presence bitmap, per column with partial presence | ≤ ~125 MB | ~2 MB |
+| Category postings, per filterable category column | 8 B – 125 MB | proportional |
 | Source embeddings, if served | ~3 TB | separate store |
+
+**The filter rows are per *declared column*, and that is the whole of their arithmetic** *(r37)*. A
+filter column is stored in entity space at its declared width, so a `u8` category costs 1 GB at 10⁹ and
+a `u32` numeric 4 GB — and a schema declaring sixteen of them costs sixteen times whatever it declared,
+which is the number a plan step must report rather than let a deployment discover. The presence bitmap
+appears only where a column does not cover every entity; it is *measured* at ~36 KB for slice-blocked
+presence and 1.25 B per present entity when genuinely scattered, so the row above is its ceiling rather
+than its expectation. Category postings are *measured* at 8 B–54 KB where the value correlates with the
+label set and 2–125 MB where it does not — the same 0.31–1.01× deployment spread the membership probe
+found, and the reason both ends are quoted. `probes/2026-08-08-filter-layout/` is the source.
 
 Neither table carries a row for a tile table or for candidate lists. Neither structure exists: tile ranges are derived by binary search over `morton.u32` (§5.2) and there is one selection route, which is direct evaluation (§7.2).
 
@@ -1149,6 +1164,20 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r37** — **§10.5's per-query placement admits a scanned column, not only a bitmap** (2026-08-08).
+  r21 routed per-query data to "an entity-space bitmap behind the filter contract", which reads as
+  prescribing an inverted posting per distinct value. Measurement does not support that as the general
+  shape (`probes/2026-08-08-filter-layout/`): a masked scan over a flat entity-indexed column costs
+  **~2.9 ns per candidate entity** contiguous and **~22 ns** scattered, stable across 10⁶–10⁹, which is
+  inside budget for any principal seeing ≲1.7×10⁷ entities — and its work is a function of the candidate
+  and the column, never of the value, so a hidden value and a nonexistent one are indistinguishable **in
+  work** rather than merely in outcome. A per-value bitmap is retained where it earns its place:
+  **categories**, whose values already carry a vocabulary code and repeat heavily, where it closes the
+  broad-coverage corner at a measured **107×**. Nothing about the filter contract itself moves — the
+  operand still returns a bitmap, still takes the mask first, and still composes only by intersection.
+  The placement rule is what widens, from one structure to a choice between two with the criterion
+  stated. `filter-index.md` owns that choice.
 
 - **r36** — **C11 acquires the channel it was written for** (2026-08-07). `/v1/categories`
   publishes a category vocabulary, so the row's *"upheld by there being no channel"* is no longer

@@ -81,9 +81,13 @@ placement.
 
 ### 2.1 Derive what is cheap to re-derive; declare what is baked into rows
 
-Filter *structure* is derived from measured cardinality at build and re-derived at compaction — memo
-§6.6 puts a level tree below ~10⁶ distinct values and BSI above, and a caller who picks it turns a
-cardinality shift into an undiagnosable performance cliff. Report the choice; do not ask for it.
+Filter *structure* is derived at build and re-derived at compaction, and a caller who picks it turns a
+data-shape shift into an undiagnosable performance cliff. Report the choice; do not ask for it. **What
+is derived changed with the artefact**: an earlier drafting put a level tree below ~10⁶ distinct values
+and a bit-sliced index above, chosen from measured cardinality. Both structures are cut
+(`filter-index.md` §3). What is derived now is the column's *addressing* — no structure where every
+entity carries a value, a presence bitmap where presence is partial — and, for a category, a per-value
+posting. The rule that survives unchanged is this one: derive it, report it, never ask for it.
 
 Hot column **width** is the opposite case. It is baked into every row, so changing it rewrites the
 corpus — I9's side of the line.

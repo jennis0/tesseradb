@@ -57,6 +57,9 @@ Then, depending on what you are after:
 - **How concurrency and deletion work.** [`concurrency-lifecycle.md`](concurrency-lifecycle.md) —
   generations, retention, the removal rules (Rule S / Rule F), the write-ahead log — and
   [`write-path.md`](write-path.md) for the write path end to end.
+- **How filtering works.** [`filter-index.md`](filter-index.md) for the attribute index the operands
+  read, and [`filter-surface.md`](filter-surface.md) for what a query does with it. Both are
+  provisional and neither is built; `per-point-attributes.md` covers the `render` placement, which is.
 - **How any of it is checked.** [`conformance.md`](conformance.md).
 - **How a client talks to it.** [`client-interaction.md`](client-interaction.md) and its children.
 
@@ -87,6 +90,8 @@ architecture design.
 | [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |
 | [`write-path.md`](write-path.md) | Normative | The write path end to end: ingest, the commit window, the WAL, flush, the deny lifecycle, merge, and where compaction will sit. Absorbed `flush-and-merge.md` (deleted 2026-08-04) and the write-path halves of the lifecycle and system-architecture designs; its §13 is the map of what moved |
 | [`compaction.md`](compaction.md) | Normative | The fold: what retires at it, what it carries forward, the prefix rewrite and the `CURRENT` flip, reclamation, and the schedule that dispatches it. Answers write-path §8's obligation list, and is **built** — the deferred staging list (§6.2) and §6.1's two page-cache hints are what is not |
+| [`filter-index.md`](filter-index.md) | Provisional | The attribute index behind §8.2: the postings artefact, its four families, the two numeric structures, and its build, ingest and fold lifecycle — **nothing of it built** |
+| [`filter-surface.md`](filter-surface.md) | Provisional | What a query does with that index: operand evaluation, candidate push-down, the entity→row projection and its cache, composition and the counts a filter may produce — **nothing of it built** |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
 | [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
 | [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |
