@@ -1,11 +1,14 @@
 import {OrthographicView, type Layer} from '@deck.gl/core';
 import {ScatterplotLayer} from '@deck.gl/layers';
 import {
+  MARGIN,
+  RING_MARGIN,
   MAX_DEPTH,
   WORLD_SIZE,
   calibrate,
   chooseDepth,
-  tilesOfBbox,
+  plan,
+  worldBbox,
   TesseraError,
   type Replica
 } from '@tessera/client';
@@ -31,13 +34,20 @@ export const INITIAL_VIEW_STATE = {
 const DEBOUNCE_MS = 140;
 
 /**
- * Fetch this much more than the visible box, linearly, so that small pans need no request at all.
+ * How still the view must be before anticipatory work starts.
  *
- * Costs `MARGIN²` in tiles (1.3 → 1.69×) and buys the common interaction for free: measured, most
- * drags move the view by well under 30% of its width. The alternative — requesting exactly the
- * visible box — guarantees a round trip for every pixel of movement.
+ * Long enough that a continuous drag never triggers it — every frame of a drag cancels and re-arms
+ * — and short enough that the pause between two flicks is used.
  */
-const MARGIN = 1.3;
+const IDLE_MS = 250;
+
+/**
+ * How far the view must move, as a fraction of its own width, before another ring is worth buying.
+ *
+ * The ring already reaches `RING_MARGIN` beyond the visible box, so a drift well inside that is
+ * already covered by what was fetched last time.
+ */
+const RING_RESEEK_FRACTION = 0.25;
 
 /** Floor on the interval between leading-edge requests. Trailing debounce still applies between. */
 const LEADING_EDGE_MIN_GAP_MS = 400;
@@ -79,7 +89,16 @@ export class ViewportController {
 
   constructor(
     private readonly store: Store,
-    private readonly replica: Replica
+    private readonly replica: Replica,
+    /**
+     * Whether to buy the anticipatory ring at all.
+     *
+     * Separate from the replica's own switch, because they are different things: the cache decides
+     * what a request is *answered from*, look-ahead decides what is *asked for*. An operator
+     * worried about aggregate select CPU wants to turn off the second without losing the first,
+     * and the measurement wants each arm on its own.
+     */
+    private readonly prefetch = true
   ) {}
 
   /** When the view last moved — the clock a user's sense of lag actually starts on. */
@@ -88,6 +107,19 @@ export class ViewportController {
   private lastScheduleAt = 0;
   /** When a request last went out, so the leading edge cannot become a request storm. */
   private lastRequestAt = 0;
+  /**
+   * Recent movement, in world units per millisecond, which biases the anticipatory ring downwind.
+   *
+   * A pan continues in the direction it started far more often than it reverses, so a ring shifted
+   * along recent movement buys the next second of panning at the same tile cost as a centred one.
+   */
+  private velocity: [number, number] | undefined;
+  private lastTarget: [number, number] | null = null;
+  /** Where the last ring was centred, so a view that has barely moved asks for nothing. */
+  private ringAt: {x: number; y: number; depth: number} | null = null;
+  /** The idle timer that starts anticipatory work, and the request it started. */
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private background: AbortController | null = null;
 
   /**
    * Called on every view-state change.
@@ -102,7 +134,23 @@ export class ViewportController {
     // rather than accumulating an entire abandoned interaction.
     this.movedAt = now;
     const wasStill = now - this.lastScheduleAt > DEBOUNCE_MS;
+    const elapsed = now - this.lastScheduleAt;
+    const target: [number, number] = [view.target[0], view.target[1]];
+    this.velocity =
+      this.lastTarget && elapsed > 0 && elapsed < 200
+        ? [(target[0] - this.lastTarget[0]) / elapsed, (target[1] - this.lastTarget[1]) / elapsed]
+        : undefined;
+    this.lastTarget = target;
     this.lastScheduleAt = now;
+
+    // Movement cancels *pending* anticipatory work — it was chosen for a view that no longer
+    // exists — but never an in-flight ring. A ring already on the wire yields bands that stay valid
+    // whatever the view does next, so aborting it discards server work already spent and buys
+    // nothing; the request is the cost, and it has been paid.
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.prefetch) {
+      this.idleTimer = setTimeout(() => void this.anticipate(view, width, height), IDLE_MS);
+    }
 
     if (this.covers(view, width, height)) {
       // Already held. deck.gl re-projects the marks we have, so this pan costs nothing at all.
@@ -130,7 +178,7 @@ export class ViewportController {
   /** Does the held response already answer this view, at the depth the budget would ask for? */
   private covers(view: ViewState, width: number, height: number): boolean {
     if (!this.held || !this.store.state.assembled) return false;
-    const want = this.worldBbox(view, width, height, 1);
+    const want = worldBbox({target: [view.target[0], view.target[1]], zoom: view.zoom, width, height}, 1);
     const [hx0, hy0, hx1, hy1] = this.held.bbox;
     const inside = want[0] >= hx0 && want[1] >= hy0 && want[2] <= hx1 && want[3] <= hy1;
     if (!inside) return false;
@@ -152,47 +200,125 @@ export class ViewportController {
   /** Abort anything outstanding — used on principal change, where the token itself changes. */
   cancel() {
     if (this.timer) clearTimeout(this.timer);
+    this.cancelBackground();
     this.inFlight?.abort();
     this.inFlight = null;
     this.held = null;
     this.movedAt = 0;
+    this.velocity = undefined;
+    this.lastTarget = null;
+    this.ringAt = null;
   }
 
-  private worldBbox(
-    view: ViewState,
-    width: number,
-    height: number,
-    margin = MARGIN
-  ): [number, number, number, number] {
-    // OrthographicView: `zoom` is log2 pixels-per-world-unit.
-    const scale = 2 ** view.zoom;
-    const halfW = (width / 2 / scale) * margin;
-    const halfH = (height / 2 / scale) * margin;
-    const clamp = (v: number) => Math.min(WORLD_SIZE, Math.max(0, v));
-    return [
-      clamp(view.target[0] - halfW),
-      clamp(view.target[1] - halfH),
-      clamp(view.target[0] + halfW),
-      clamp(view.target[1] + halfH)
-    ];
+  /**
+   * Has the view moved far enough since the last ring to be worth another?
+   *
+   * The threshold is a fraction of the viewport, so it scales with zoom automatically: at depth 14
+   * a viewport is a thousandth of the width it is at depth 4, and a fixed world-space distance
+   * would be either meaningless or paralysing at one end or the other.
+   */
+  private ringIsStillGood(viewport: {target: [number, number]; zoom: number; width: number}, depth: number): boolean {
+    if (!this.ringAt || this.ringAt.depth !== depth) return false;
+    const worldWidth = viewport.width / 2 ** viewport.zoom;
+    const moved = Math.hypot(viewport.target[0] - this.ringAt.x, viewport.target[1] - this.ringAt.y);
+    return moved < worldWidth * RING_RESEEK_FRACTION;
+  }
+
+  /** Used only on a principal change, where the in-flight ring's bands would be unrenderable. */
+  private cancelBackground() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    this.background?.abort();
+    this.background = null;
+  }
+
+  /**
+   * Fetch the ring around a view that has stopped moving, so the next pan is answered from held
+   * bands rather than from the wire.
+   *
+   * **Cheap only because the replica exists.** Most of the ring is already held, so this is a
+   * near-empty request rather than a second viewport's worth of work — the tiles it does ask for
+   * are exactly the ones a pan was about to need. Before the replica the same idea would have
+   * refetched everything on screen as well.
+   *
+   * Never retried and never allowed to delay the foreground: a shed background request costs the
+   * user nothing but a round trip they were going to pay anyway, and retrying into a saturated
+   * gate is how anticipation becomes the reason the view is slow.
+   */
+  private async anticipate(view: ViewState, width: number, height: number) {
+    const {meta, session, budget, mTarget, lastVisibleInView} = this.store.state;
+    // Never two rings at once, and never one alongside a foreground request: the foreground is what
+    // the user is waiting for, and anticipation must not queue ahead of it at the admission gate.
+    if (!meta || !session || this.inFlight || this.background) return;
+
+    const viewport = {
+      target: [view.target[0], view.target[1]] as [number, number],
+      zoom: view.zoom,
+      width,
+      height
+    };
+    const planned = plan({
+      viewport,
+      budget,
+      mTarget,
+      maxTiles: meta.maxTilesPerRequest,
+      visibleInView: lastVisibleInView ?? undefined,
+      velocity: this.velocity
+    });
+    const ring = planned.background.find((b) => b.kind === 'ring');
+    if (!ring) return;
+
+    // **Hysteresis, not containment, and the distinction is what makes this work.** deck emits
+    // view-state events continuously while a drag's inertia decays, and the values drift by small
+    // amounts rather than repeating — so neither an equality guard nor a containment guard catches
+    // them: a box shifted by a hair is not inside the previous one. Left ungated, the ring's own
+    // store update re-arms the idle timer and a fresh ring fires a quarter-second later, over and
+    // over: measured at seven rings per idle pause.
+    //
+    // The foreground never showed this because `covers` answers a repeated view outright.
+    // Anticipation cannot borrow that check — its whole purpose is to fetch what the current view
+    // does *not* cover — so it needs its own, and the honest form is a movement threshold: a ring
+    // is bought to cover the *next* pan, and a drift of a fraction of the viewport does not need
+    // another one.
+    if (this.ringIsStillGood(viewport, ring.depth)) return;
+
+    const controller = new AbortController();
+    this.background = controller;
+    try {
+      const frame = await this.replica.fetchTiles(
+        ring.tiles,
+        ring.depth,
+        meta.selection.kMaxMarks,
+        controller.signal
+      );
+      // The ring never draws and never calibrates. It is at a margin the user is not looking at,
+      // so folding it into either would report a view that is not on screen.
+      this.ringAt = {x: viewport.target[0], y: viewport.target[1], depth: ring.depth};
+      this.store.update((s) => {
+        s.replicaBytes = this.replica.bytes;
+        s.prefetched = frame.plan.fetched;
+      });
+    } catch {
+      // Including a 429: the foreground's retry budget is the one that matters.
+    } finally {
+      if (this.background === controller) this.background = null;
+    }
   }
 
   private async request(view: ViewState, width: number, height: number, attempt = 0) {
     const {meta, session, slice, budget, mTarget, lastVisibleInView} = this.store.state;
     if (!meta || !session) return;
 
-    // Depth is chosen for what is VISIBLE; the margin is then fetched at that depth. Choosing it
-    // for the margined box instead would spend the budget on off-screen marks and quietly lower
-    // the resolution of what the user is actually looking at.
-    const visibleBbox = this.worldBbox(view, width, height, 1);
-    const worldBbox = this.worldBbox(view, width, height);
-    const choice = chooseDepth({
+    const inputs = {
+      viewport: {target: [view.target[0], view.target[1]] as [number, number], zoom: view.zoom, width, height},
       budget,
       mTarget,
-      worldBbox: visibleBbox,
       maxTiles: meta.maxTilesPerRequest,
-      visibleInView: lastVisibleInView ?? undefined
-    });
+      visibleInView: lastVisibleInView ?? undefined,
+      velocity: this.velocity
+    };
+    const planned = plan(inputs);
+    const choice = planned.choice;
 
     // A superseded request must not leave the lag clock running, or every later measurement
     // accumulates the whole abandoned interaction.
@@ -211,11 +337,8 @@ export class ViewportController {
     });
 
     try {
-      // The tile list, not the box: the replica answers from held bands whatever it can, and asks
-      // only for the rest. At Stage 1 that ask is still bbox-shaped on the wire.
-      const wanted = tilesOfBbox(worldBbox, choice.depth);
       const frame = await this.replica.fetchTiles(
-        wanted,
+        planned.foreground.tiles,
         choice.depth,
         meta.selection.kMaxMarks,
         controller.signal
@@ -223,7 +346,7 @@ export class ViewportController {
       if (generation !== this.generation) return; // a newer request won; drop this one
 
       const arrivedAt = performance.now();
-      this.held = {bbox: worldBbox, depth: choice.depth};
+      this.held = {bbox: worldBbox(inputs.viewport, MARGIN), depth: choice.depth};
       const assembled = assemble(frame);
       // The one place a client could violate I7 by omission, so it throws rather than warns.
       assertDrawsEveryServedMark(assembled);

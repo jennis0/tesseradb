@@ -1,10 +1,13 @@
 # Delta serving — what a client may declare, and what that lets the server skip
 
 **Date:** 2026-08-08
-**Status:** Provisional r1 — under review. **⊘ None of this is built**: today every viewport
-request is answered in full, and a client holds one response. **To become normative:** owner
-sign-off on the two coordinates of §2 and on the five escalations of §10, plus one adversarial
-review of §4's exactness argument.
+**Status:** Provisional r2 — under review. **⊘ Partially implemented.** Built: the two coordinates
+of §2, omission by explicit tile list (§3), emptiness caching, the client replica and its
+render-provenance rules (§7), the staleness bound (§8), and look-ahead's ring (§13). **Not built:**
+the server-side skip and band elision — the `declarations` operand of §6 does not exist, so no
+request carries a cut or a count and §5's failure directions describe a path with no traffic on it
+— and the next-depth fetch of §13. **To become normative:** owner sign-off on the two coordinates
+and on §10's remaining escalations, plus one adversarial review of §4's exactness argument.
 **Companion to** `caching.md`, whose §7 mechanism this specifies and whose §14.1 names it the
 feasibility item, and to `client-interaction.md` §5, whose prefix declarations it makes concrete.
 **Touches:** design §7.2, §8.2, §8.5; contracts §3.2; caching §5–§7, §11; client-interaction §4–§6, §10.
@@ -371,7 +374,46 @@ merge or a compaction.
 - **§7.2's "parent-granular by default"** holds for cuts and not for counts. A count declared
   against an ancestor cannot be distributed to the tiles beneath it (§6).
 
-## 13. Sequencing
+## 13. Look-ahead
+
+The replica makes a *revisit* free; it does nothing for the first visit to new ground, which is
+most of what panning is. So the client buys a ring beyond the visible box while the view is still,
+and the next pan is answered from held bands.
+
+Three properties make this safe rather than merely cheap. Requesting a tile the viewport does not
+strictly need is **presentation, never selection** — which tiles a client asks for is its own
+business, and §7.2's prefixes nest, so a deeper or wider answer is a superset and nothing pops when
+the user arrives. The ring is nearly free *because the replica exists*: most of it is already held,
+so it is a near-empty request rather than a second viewport's worth of work. And it is never
+retried and never runs alongside a foreground request — anticipation that queues ahead of what the
+user is waiting for is the reason the view is slow, not the cure.
+
+Measured on the 2.4M corpus, six consecutive same-direction pans at depth 10:
+
+| | requests | pans needing none | tiles from cache |
+|---|---|---|---|
+| look-ahead off | 9 | 0 of 6 | 14,382 of 16,524 |
+| look-ahead on | 4 | 3 of 6 | 16,524 of 16,524 |
+
+**Anticipation needs its own idempotence guard, and neither equality nor containment provides one.**
+A renderer re-emits view-state events continuously — on every property update, and while a drag's
+inertia decays — and the values drift by small amounts rather than repeating. An equality check
+therefore never fires, and a containment check fails too, because a box shifted by a hair is not
+inside the previous one. The foreground is immune only because its covered-view check answers a
+repeated view outright; anticipation cannot borrow that check, since its whole purpose is to fetch
+what the current view does *not* cover. Left ungated, the ring's own state update re-arms the idle
+timer and a fresh ring fires a quarter-second later, indefinitely — measured at seven per idle
+pause. The guard that works is **hysteresis**: a ring is bought to cover the next pan, so a drift
+of less than a quarter of the viewport does not need another one.
+
+**The next-depth fetch is specified and off.** Anticipating a zoom-*in* means requesting depth
+`d+1`, which the ring cannot help with — a zoom lands on tiles the replica has never seen. It is
+tile-count-neutral (four times the tiles over a quarter of the area) and emphatically not
+CPU-neutral: the client by construction holds none of depth `d+1`, so nothing elides and every idle
+pause costs a genuine slice of a viewport's selection scan, multiplied by every concurrent user.
+Measure before enabling it.
+
+## 14. Sequencing
 
 `caching.md` §14 puts delta-native serving first as the feasibility item and the client band cache
 second. Build order inverts them, because the cache is what *computes* a declaration: there is
@@ -385,6 +427,14 @@ the current mark target, large at big mark budgets — so the mark-budget sweep 
 an argument.
 
 ## Appendix R — Review record
+
+**r2 (2026-08-08) — the built half folded back in.** Three findings from implementing it, each of
+which changed the document rather than the code: emptiness must be cached before anything else or a
+mostly-empty viewport re-asks forever (§3); the per-request floor is a warm-cache figure and reads
+as an assurance without that condition (§1); and anticipation needs hysteresis rather than an
+equality or containment guard, because a renderer's view-state events drift rather than repeat
+(§13). The last was found by measurement, not review — seven rings per idle pause, in code whose
+unit tests all passed.
 
 **r1 (2026-08-08) — drafted**, from `caching.md` §7's mechanism and `client-interaction.md` §5's
 declarations, against three independent adversarial reviews of the implementation plan (performance,

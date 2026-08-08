@@ -48,6 +48,7 @@ const store = createStore({
   latency: null,
   lastBytes: 0,
   replicaBytes: 0,
+  prefetched: 0,
   lastPlan: null,
   inFlight: 0,
   failures: [],
@@ -316,7 +317,10 @@ async function start() {
       client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal),
     {slice: meta.slices[0]!.id}
   );
-  controller = new ViewportController(store, replica);
+  // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement
+  // wants, and the switch an operator watching aggregate select CPU would reach for.
+  const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
+  controller = new ViewportController(store, replica, prefetch);
   controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 

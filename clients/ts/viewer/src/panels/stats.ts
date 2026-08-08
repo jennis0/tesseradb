@@ -68,6 +68,7 @@ export function renderStats(state: AppState): string {
      ${row('— of which provisional', provisional.toLocaleString('en-GB'))}
      ${row('replica held', `${((state.replicaBytes ?? 0) / 1e6).toFixed(1)} MB`)}
      ${row('tiles from cache', state.lastPlan ? `${state.lastPlan.omitted} of ${state.lastPlan.omitted + state.lastPlan.fetched}` : '—')}
+     ${row('prefetched ahead', String(state.prefetched ?? 0))}
      ${stage}`
   );
 }
