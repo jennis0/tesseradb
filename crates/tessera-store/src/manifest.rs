@@ -439,8 +439,23 @@ impl Manifest {
     pub fn render_scalars(&self) -> impl Iterator<Item = &DeclaredScalar> {
         self.declared_scalars.iter().filter(|d| d.render)
     }
-}
 
+    /// Where each render column sits in the **full** declaration.
+    ///
+    /// A buffered row carries one scalar per declared column, positionally, while a segment's tail
+    /// is [`Self::render_scalars`] — so a flush has to select before it writes, and selecting by
+    /// position is the only form of that which cannot silently pair a value with another column's
+    /// name. Defined beside `render_scalars` because the two share one predicate: a flush that
+    /// selected on a different one would write a `utf8` title into an `i32` score's slot, which the
+    /// segment writer refuses by type only when the two happen to differ.
+    pub fn render_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.declared_scalars
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.render)
+            .map(|(index, _)| index)
+    }
+}
 
 /// One entry of `SEGMENTS-<n>.json`'s `segments` array — one build (or streamed) segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,6 +517,36 @@ pub struct DictExtent {
     pub records: u64,
 }
 
+/// One entry of `attr_extents`: one flush's values for one filterable column
+/// (`filter-index.md` §2.1, §2.5).
+///
+/// A value column is written once by the batch build and covers `[0, entity_id_high_water)`. An
+/// entity allocated afterwards has no slot in it, so each flush appends the values of the entities
+/// it publishes and the reader composes `base ∪ extents`. Entity ids are permanent (**I9**), so an
+/// extent never renumbers anything and the layers it joins are disjoint in entity space.
+///
+/// **Named here rather than derived from a path convention**, unlike the `deltas` list's first
+/// shape: a column's name is a path segment in `attrs/<column>/extents/`, and a reader that
+/// recovered it by splitting the path would be inferring the artefact's identity from its
+/// filename. It is also the difference between a missing file being an error and being an absence
+/// — a directory scan finds what is there, and this says what must be.
+///
+/// **The presence bitmap is not optional here**, where it is for a base column. A flush publishes
+/// an entity *set*, which need not be contiguous and never starts at zero, so positional addressing
+/// — "the entity id is the array index" — would read every value against the wrong entity. The
+/// base column's rule (the file's absence means positional) is exactly what must not apply to an
+/// extent, so the path is carried rather than probed for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttrExtent {
+    /// The [`DeclaredScalar::name`] this extends — the column's declared name, never a path
+    /// segment to be parsed back.
+    pub column: String,
+    /// Prefix-relative path of the values file.
+    pub values: String,
+    /// Prefix-relative path of the presence bitmap.
+    pub presence: String,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -560,6 +605,15 @@ pub struct SegmentsManifest {
     pub deltas: Vec<String>,
     #[serde(default)]
     pub dict_extents: Vec<DictExtent>,
+    /// Every filter-column extent this partition holds — see [`AttrExtent`]. Empty in a bundle
+    /// straight out of `tessera build`, whose value columns cover every entity it knows about.
+    ///
+    /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` and `locator_extents` are not:**
+    /// that list gates *state a reader might not be able to act on*, and this landed with the code
+    /// that reads it. A reader that carried the field and ignored it would answer filters short
+    /// over post-build entities, which is the failure the extent exists to remove — so there is no
+    /// version of this reader for which ignoring it is a posture.
+    pub attr_extents: Vec<AttrExtent>,
     #[serde(default)]
     pub external_id_runs: Vec<String>,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
@@ -740,9 +794,10 @@ mod tests {
     /// unavailable rather than one field, which is what makes a caller's refusal total.
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
-        let good: DeclaredScalar =
-            serde_json::from_str(r#"{"name": "score", "arrow_type": "f32", "filter": false, "render": true}"#)
-                .expect("f32 parses");
+        let good: DeclaredScalar = serde_json::from_str(
+            r#"{"name": "score", "arrow_type": "f32", "filter": false, "render": true}"#,
+        )
+        .expect("f32 parses");
         assert_eq!(good.arrow_type, ScalarType::F32);
         assert_eq!(
             serde_json::to_value(&good).unwrap()["arrow_type"],
@@ -825,6 +880,7 @@ mod tests {
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
+            attr_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),

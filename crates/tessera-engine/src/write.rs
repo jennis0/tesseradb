@@ -2814,6 +2814,30 @@ pub(crate) fn scalar_schema_of(
         .collect()
 }
 
+/// The filterable columns, with the position each occupies in a buffered row's scalar list.
+///
+/// **Positional against the full `declared_scalars`, not against the render tail.** A row's scalars
+/// are indexed positionally against the whole declaration (that is how the commit window finds a
+/// category key's vocabulary), and `scalar_schema_of` deliberately narrows to render columns — so
+/// building this from that list would read a filter column's value out of a neighbouring column's
+/// slot wherever the two differ, which is most schemas.
+pub(crate) fn filter_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Vec<crate::flush::FilterColumnSpec> {
+    manifest
+        .declared_scalars
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.filter)
+        .map(|(index, d)| crate::flush::FilterColumnSpec {
+            index,
+            name: d.name.clone(),
+            ty: d.arrow_type,
+            category: d.vocabulary.is_some(),
+        })
+        .collect()
+}
+
 /// A vocabulary code, at its column's declared width. Mirrors `tessera-server`'s own `category_code`
 /// helper of the same shape, which cannot be reused here: that one lives on the other side of the
 /// ingest boundary and returns an `ApiError`, where a mint failure here is `Executor`-internal and
@@ -2987,6 +3011,7 @@ mod vocabulary_extensions_tests {
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
+            attr_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -4621,6 +4646,7 @@ impl Executor {
             // the fold's flight appended an extent whose ordinals the live dictionary already
             // holds, and dropping it would shift every ordinal after it.
             dict_extents: live_manifest.dict_extents.clone(),
+            attr_extents: Vec::new(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -5271,6 +5297,8 @@ impl Executor {
         };
         let manifest = &generation.bundle.manifest;
         let scalar_schema = scalar_schema_of(manifest);
+        let filter_schema = filter_schema_of(manifest);
+        let render_indices: Vec<usize> = manifest.render_indices().collect();
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
         // path and only one could commit. Dispatching one makes that structurally unreachable and
@@ -5358,6 +5386,8 @@ impl Executor {
                     shard_id: manifest.identity.shard_id,
                     quantisation: manifest.quantisation,
                     scalar_schema: scalar_schema.clone(),
+                    render_indices: render_indices.clone(),
+                    filter_schema: filter_schema.clone(),
                     dict: Arc::clone(&generation.dict),
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
@@ -6967,6 +6997,30 @@ impl Executor {
             );
             return;
         };
+        // **Composed before the manifest is written, because a composition that refuses must not
+        // leave a published manifest naming the extents it refused.** The refusal is unreachable —
+        // an extent covers entities I9 has just issued, which no earlier layer can hold — so this
+        // is the same posture as every other flush failure: the files are orphans, the buffer
+        // stands, the next tick re-plans.
+        let extents: Vec<(String, Arc<tessera_filter::ValueColumn>)> = completed
+            .filter_extents
+            .iter()
+            .map(|e| (e.column.clone(), Arc::clone(&e.values)))
+            .collect();
+        let filter_columns = match live.filter_columns.with_extents(&extents) {
+            Ok(columns) => Arc::new(columns),
+            Err(e) => {
+                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a completed flush's filter extents would not compose onto the live \
+                     columns; discarding it rather than publishing a bundle whose filter answers \
+                     would be wrong. Its files are orphans and the buffer is retained"
+                );
+                return;
+            }
+        };
+
         let mut manifest = partition_data.manifest.clone();
         let manifest_n = self.allocate_manifest_n();
         manifest.watermark = completed.watermark;
@@ -6981,6 +7035,21 @@ impl Executor {
         if let Some(extent) = completed.dict_extent {
             manifest.dict_extents.push(extent);
         }
+        // Named in the manifest as well as digested in `files`: the reader composes exactly what
+        // this list names, so an extent on disk that no manifest names is not read and one named
+        // but absent is a refusal to open (`FilterColumns::open`).
+        manifest
+            .attr_extents
+            .extend(
+                completed
+                    .filter_extents
+                    .iter()
+                    .map(|e| tessera_store::manifest::AttrExtent {
+                        column: e.column.clone(),
+                        values: e.values_rel.clone(),
+                        presence: e.presence_rel.clone(),
+                    }),
+            );
         write_deny_state(&mut manifest, &live.overlay);
         write_vocabulary_extensions(
             &mut manifest,
@@ -7053,10 +7122,9 @@ impl Executor {
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
-            // A merge and a fold rewrite geometry, never the filter artefact, so the columns are
-            // carried forward. The rebuild `filter-index.md` §6 specifies at the fold is unbuilt;
-            // when it lands it replaces this clone rather than adding beside it.
-            filter_columns: Arc::clone(&live.filter_columns),
+            // The live columns with this flush's extents composed on — the whole of what makes an
+            // entity ingested since the build answer a filter on its own value.
+            filter_columns,
             segments_version,
             watermark,
             bundle: next_bundle,

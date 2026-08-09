@@ -837,27 +837,34 @@ impl Engine {
         let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
         // The filter artefact belongs to the published prefix, so it is opened here with the
-        // bundle and carried forward by every generation successor. `covered` is the build's entity
-        // high-water: entities allocated since carry no filter values, and a request reaching one
-        // is refused rather than answered short (`filter::FilterError::CoverageEndsAtBuild`).
+        // bundle and carried forward by every generation successor. The build's column plus every
+        // extent the partition's side-manifest names: a restart therefore composes exactly what the
+        // flushes before it published, rather than serving the build's coverage and answering short
+        // over everything ingested since (`filter-index.md` §2.1).
         let filter_columns = {
-            let partition_dir = prefix_dir
-                .join("partitions")
-                .join(bundle.partitions.keys().next().cloned().unwrap_or_default());
+            let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
+            let extents = bundle
+                .partitions
+                .get(&partition)
+                .map(|p| p.manifest.attr_extents.clone())
+                .unwrap_or_default();
             Arc::new(
                 crate::filter::FilterColumns::open(
-                    &partition_dir,
+                    &prefix_dir,
+                    &partition,
                     &bundle.manifest.declared_scalars,
-                    u32::try_from(bundle.manifest.entity_id_high_water).unwrap_or(u32::MAX),
+                    &extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
                     // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
                     true,
                 )
-                .map_err(|e| EngineError::Store(tessera_store::StoreError::Io {
-                    path: partition_dir.clone(),
-                    source: e,
-                }))?,
+                .map_err(|e| {
+                    EngineError::Store(tessera_store::StoreError::Io {
+                        path: prefix_dir.join("partitions").join(&partition),
+                        source: e,
+                    })
+                })?,
             )
         };
 

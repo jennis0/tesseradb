@@ -159,7 +159,6 @@ impl Hits {
         self.end = 0;
     }
 
-
     fn finish(mut self) -> Bitmap {
         self.close();
         self.out.add_many(&self.buf);
@@ -415,7 +414,6 @@ impl<'a> ByteSet<'a> {
     }
 }
 
-
 /// Visit `bitmap`'s set values as ascending, non-overlapping, **inclusive** runs.
 ///
 /// Bulk-read through the cursor rather than one value at a time: a contiguous candidate collapses
@@ -528,7 +526,7 @@ pub enum Codes {
 }
 
 impl Codes {
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             Codes::U8(v) => v.len(),
             Codes::U16(v) => v.len(),
@@ -758,8 +756,12 @@ impl ValueColumn {
     /// slices walked the same way, and 64 Ki of them amortises any per-range overhead many times
     /// over.
     #[inline]
-    fn for_each_slot_run(&self, candidate: &Bitmap, len: usize, mut f: impl FnMut(usize, usize, u32)) {
-
+    fn for_each_slot_run(
+        &self,
+        candidate: &Bitmap,
+        len: usize,
+        mut f: impl FnMut(usize, usize, u32),
+    ) {
         match &self.presence {
             // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
             // array. The run structure is the *candidate's*, so a scattered candidate degenerates
@@ -1136,14 +1138,24 @@ impl ValueColumn {
                 }
                 return;
             }
-            search_region(&finder, needle.len(), bytes, offsets, slot0, count, entity0, &mut hits);
+            search_region(
+                &finder,
+                needle.len(),
+                bytes,
+                offsets,
+                slot0,
+                count,
+                entity0,
+                &mut hits,
+            );
         });
         hits.finish()
     }
 
     /// The UTF-8 value an entity carries, or `None` where it carries none or the column is numeric.
     pub fn text_of(&self, entity: u32) -> Option<&str> {
-        self.slot_of(entity).and_then(|slot| self.codes.text_at(slot))
+        self.slot_of(entity)
+            .and_then(|slot| self.codes.text_at(slot))
     }
 
     fn slot_of(&self, entity: u32) -> Option<usize> {
@@ -1276,7 +1288,10 @@ impl ValueColumn {
                 let presence = Bitmap::try_deserialize::<Portable>(&bytes).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("presence bitmap at {} is not portable Roaring", path.display()),
+                        format!(
+                            "presence bitmap at {} is not portable Roaring",
+                            path.display()
+                        ),
                     )
                 })?;
                 ValueColumn::partial(codes, presence)
@@ -1405,7 +1420,6 @@ fn read_values(path: &Path, mmap: bool) -> io::Result<Codes> {
     })
 }
 
-
 /// Write a value column, and its presence bitmap where presence is partial.
 ///
 /// `presence` is `None` when every entity in `0..codes.len()` carries a value. Writing an
@@ -1486,8 +1500,7 @@ pub fn write_value_column(
         .map_err(|e| io::Error::other(e.to_string()))?;
     w.write(&batch)
         .map_err(|e| io::Error::other(e.to_string()))?;
-    w.finish()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    w.finish().map_err(|e| io::Error::other(e.to_string()))?;
 
     if let Some(p) = presence {
         std::fs::write(presence_path, p.serialize::<Portable>())?;
@@ -1524,8 +1537,11 @@ mod tests {
     #[test]
     fn a_partial_column_resolves_slots_through_presence() {
         // Entities 10, 20, 30 carry values; everything else carries none.
-        let column =
-            ValueColumn::partial(Codes::U16(vec![100, 200, 100].into()), candidate([10, 20, 30])).unwrap();
+        let column = ValueColumn::partial(
+            Codes::U16(vec![100, 200, 100].into()),
+            candidate([10, 20, 30]),
+        )
+        .unwrap();
         let hits = column.scan_eq(&candidate(0..40), AttrLocalId::new(100));
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![10, 30]);
         assert_eq!(column.value_of(20), Some(AttrLocalId::new(200)));
@@ -1536,7 +1552,8 @@ mod tests {
     /// would pair every entity after the discrepancy with another entity's value.
     #[test]
     fn a_presence_count_mismatch_is_refused() {
-        let err = ValueColumn::partial(Codes::U8(vec![1, 2].into()), candidate([5, 6, 7])).unwrap_err();
+        let err =
+            ValueColumn::partial(Codes::U8(vec![1, 2].into()), candidate([5, 6, 7])).unwrap_err();
         assert!(format!("{err}").contains("presence has 3 entities but 2 values"));
     }
 
@@ -1545,7 +1562,11 @@ mod tests {
         let column = ValueColumn::universal(Codes::U16(vec![1, 2, 3, 4, 5].into()));
         let hits = column.scan_in(
             &candidate(0..5),
-            &[AttrLocalId::new(2), AttrLocalId::new(5), AttrLocalId::new(99)],
+            &[
+                AttrLocalId::new(2),
+                AttrLocalId::new(5),
+                AttrLocalId::new(99),
+            ],
         );
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 4]);
     }
@@ -1652,9 +1673,7 @@ mod tests {
             3
         );
         // `<= -1` over a u8 excludes everything.
-        assert!(column
-            .scan_range(&all, None, Some(at(-1, true)))
-            .is_empty());
+        assert!(column.scan_range(&all, None, Some(at(-1, true))).is_empty());
         // `>= 300` likewise.
         assert!(column
             .scan_range(&all, Some(at(300, true)), None)
@@ -1705,7 +1724,11 @@ mod tests {
                 }),
                 None,
             );
-            assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1], "inclusive={inclusive}");
+            assert_eq!(
+                hits.iter().collect::<Vec<_>>(),
+                vec![1],
+                "inclusive={inclusive}"
+            );
         }
         for inclusive in [true, false] {
             let hits = column.scan_range(
@@ -1716,7 +1739,11 @@ mod tests {
                     inclusive,
                 }),
             );
-            assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0], "inclusive={inclusive}");
+            assert_eq!(
+                hits.iter().collect::<Vec<_>>(),
+                vec![0],
+                "inclusive={inclusive}"
+            );
         }
     }
 
@@ -1749,9 +1776,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
-        assert!(column
-            .scan_num_in(&all, &[Scalar::Int(9999)])
-            .is_empty());
+        assert!(column.scan_num_in(&all, &[Scalar::Int(9999)]).is_empty());
     }
 
     /// NaN satisfies no bound and no equality — inherited from IEEE rather than implemented, and
@@ -1772,16 +1797,15 @@ mod tests {
             }),
         );
         assert_eq!(wide.iter().collect::<Vec<_>>(), vec![0, 2], "NaN is absent");
-        assert!(column
-            .scan_num_eq(&all, Scalar::Float(f64::NAN))
-            .is_empty());
+        assert!(column.scan_num_eq(&all, Scalar::Float(f64::NAN)).is_empty());
     }
 
     /// An unbounded range matches every entity **carrying a value** — not every entity. An item
     /// with no value has nothing to compare, exactly as for equality.
     #[test]
     fn an_unbounded_range_still_excludes_absent_values() {
-        let column = ValueColumn::partial(Codes::I32(vec![5, 7].into()), candidate([1, 4])).unwrap();
+        let column =
+            ValueColumn::partial(Codes::I32(vec![5, 7].into()), candidate([1, 4])).unwrap();
         let hits = column.scan_range(&candidate(0..6), None, None);
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 4]);
     }
@@ -1810,7 +1834,11 @@ mod tests {
         let column = text_column(&["smith", "smythe", "jones", "smith"]);
         let hits = column.scan_text_in(
             &candidate(0..4),
-            &["smith".to_string(), "jones".to_string(), "absent".to_string()],
+            &[
+                "smith".to_string(),
+                "jones".to_string(),
+                "absent".to_string(),
+            ],
         );
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2, 3]);
     }
@@ -1821,7 +1849,10 @@ mod tests {
     fn a_code_set_predicate_on_text_matches_nothing() {
         let column = text_column(&["1", "2"]);
         assert!(column
-            .scan_in(&candidate(0..2), &[AttrLocalId::new(1), AttrLocalId::new(2)])
+            .scan_in(
+                &candidate(0..2),
+                &[AttrLocalId::new(1), AttrLocalId::new(2)]
+            )
             .is_empty());
     }
 
@@ -1830,9 +1861,7 @@ mod tests {
         let column = text_column(&["smith", "smythe", "smote", "jones"]);
         let hits = column.scan_text_prefix(&candidate(0..4), "sm");
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
-        assert!(column
-            .scan_text_prefix(&candidate(0..4), "zz")
-            .is_empty());
+        assert!(column.scan_text_prefix(&candidate(0..4), "zz").is_empty());
     }
 
     /// Substring was cut to #44 because a trigram conjunction returns a superset needing
@@ -1877,21 +1906,33 @@ mod tests {
         let all = candidate(0..4);
 
         assert_eq!(
-            column.scan_text_eq(&all, "naïve").iter().collect::<Vec<_>>(),
+            column
+                .scan_text_eq(&all, "naïve")
+                .iter()
+                .collect::<Vec<_>>(),
             vec![0],
             "the two-byte ï does not equate to the one-byte i"
         );
         assert_eq!(
-            column.scan_text_prefix(&all, "na").iter().collect::<Vec<_>>(),
+            column
+                .scan_text_prefix(&all, "na")
+                .iter()
+                .collect::<Vec<_>>(),
             vec![0, 2]
         );
         assert_eq!(
-            column.scan_text_contains(&all, "本").iter().collect::<Vec<_>>(),
+            column
+                .scan_text_contains(&all, "本")
+                .iter()
+                .collect::<Vec<_>>(),
             vec![1],
             "a multi-byte needle inside a multi-byte value"
         );
         assert_eq!(
-            column.scan_text_in(&all, &["café".into(), "日本語".into()]).iter().collect::<Vec<_>>(),
+            column
+                .scan_text_in(&all, &["café".into(), "日本語".into()])
+                .iter()
+                .collect::<Vec<_>>(),
             vec![1, 3]
         );
         // The empty needle is contained in everything, as `str::contains` also holds.
@@ -1915,9 +1956,17 @@ mod tests {
             vec![0, 2, 3],
             "the empty needle matches the empty values and nothing else"
         );
-        assert!(column.scan_text_in(&all, &["a".into(), "a".into()]).iter().eq([1]),
-            "a repeated needle is one needle");
-        assert!(column.scan_text_in(&all, &[]).is_empty(), "no needle, no match");
+        assert!(
+            column
+                .scan_text_in(&all, &["a".into(), "a".into()])
+                .iter()
+                .eq([1]),
+            "a repeated needle is one needle"
+        );
+        assert!(
+            column.scan_text_in(&all, &[]).is_empty(),
+            "no needle, no match"
+        );
     }
 
     /// The code table is built over the column's declared width, so its extremes must be members
@@ -2026,7 +2075,13 @@ mod tests {
         // container, and one that matches nothing at all.
         for (label, modulus) in [("dense", 2u32), ("sparse", 900), ("none", 0)] {
             let values: Vec<u8> = (0..n)
-                .map(|e| if modulus != 0 && e % modulus == 0 { 7 } else { 1 })
+                .map(|e| {
+                    if modulus != 0 && e % modulus == 0 {
+                        7
+                    } else {
+                        1
+                    }
+                })
                 .collect();
             let column = ValueColumn::universal(Codes::U8(values.clone().into()));
 
@@ -2092,9 +2147,13 @@ mod tests {
     #[test]
     fn a_text_result_is_complete_across_the_fold_boundary() {
         let n: u32 = (CHUNK as u32) + 500;
-        let column = ValueColumn::universal(Codes::text(
-            (0..n).map(|e| if e % 3 == 0 { "hit".into() } else { "miss".into() }),
-        ));
+        let column = ValueColumn::universal(Codes::text((0..n).map(|e| {
+            if e % 3 == 0 {
+                "hit".into()
+            } else {
+                "miss".into()
+            }
+        })));
         let mut all = Bitmap::new();
         all.add_range(0..n);
         all.run_optimize();
@@ -2165,7 +2224,11 @@ mod tests {
         let column = text_column(&["aaaa", "b", "aa"]);
         let hits = column.scan_text_contains(&candidate(0..3), "a");
         assert_eq!(hits.to_vec(), vec![0, 2]);
-        assert_eq!(hits.cardinality(), 2, "each entity once, however many matches");
+        assert_eq!(
+            hits.cardinality(),
+            2,
+            "each entity once, however many matches"
+        );
     }
 
     /// The mask still goes in first for text, by the same shared walker every other family uses.

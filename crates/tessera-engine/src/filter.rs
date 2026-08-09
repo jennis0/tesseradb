@@ -26,9 +26,38 @@
 //! could be given away is the accelerator: a category's derived posting is intersected rather than
 //! scanned, and `probes/2026-08-08-filter-layout/` measures that pair at 0.000 ms alike for a
 //! valueless value and a hidden 250M-member one, because Roaring short-circuits on container keys.
+//!
+//! # A column is layers, because the corpus grows and the build's column does not
+//!
+//! The batch build writes a column covering `[0, entity_id_high_water)`, and every flush since has
+//! published entities above it. Each flush therefore appends an **extent** — its own entities'
+//! values with its own presence bitmap (`filter-index.md` §2.1, §2.5) — and a column here is the
+//! base plus every live extent, scanned in turn and unioned.
+//!
+//! **The layers are disjoint in entity space and that is checked, not assumed.** Entity ids are
+//! permanent and issued from the high-water (**I9**), so a flush can only add entities no earlier
+//! layer holds; [`FilterColumns::compose`] refuses an extent that overlaps what is already
+//! composed, because two layers claiming one entity would make it match both values, and a filter
+//! naming either would return it. That is a wrong answer with no symptom, so it is a refusal at
+//! open rather than a comment.
+//!
+//! Composition is per **generation**, not per request: a published flush builds the next
+//! `FilterColumns` from the live one by pushing a pointer, and the per-request cost is one scan per
+//! layer over a candidate that has already been intersected with the layer's presence. So the work
+//! stays a function of `(candidate, column)` — the number of layers is a property of the bundle,
+//! not of what is being asked for.
+//!
+//! # What is still answered short, and why that one is the design
+//!
+//! A **buffered** entity — accepted, acked, not yet flushed — is in the candidate and in no layer,
+//! so it matches no predicate. `filter-index.md` §5 rules on that directly: a buffered entity has
+//! no row, the entity-space verbs under-report until its flush, and under-reporting narrows `M_sel`
+//! and is safe under **I12**. It is a bounded lag measured in one flush interval, not a coverage
+//! cliff that never closes, which is what the refusal this composition replaced was answering.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
@@ -185,10 +214,21 @@ impl FilterExpr {
 /// caller error, where an unresolvable *value* is an empty operand (`filter-surface.md` §2.1).
 #[derive(Debug, Default)]
 pub struct FilterColumns {
-    columns: BTreeMap<String, ValueColumn>,
-    /// Entities `[0, covered)` have values in these columns. Entities at or above it were
-    /// allocated after the build and **have no filter data at all** — see [`FilterError`].
-    covered: u32,
+    columns: BTreeMap<String, Layers>,
+}
+
+/// One column as it is scanned: the build's base column, then one layer per flush that has
+/// published since (see this module's header).
+///
+/// `Arc` per layer because a publication builds the next generation's columns from the live ones —
+/// the base is a memory map of a multi-gigabyte file, and the flush that added one entity must not
+/// re-open it.
+#[derive(Debug, Clone)]
+struct Layers {
+    layers: Vec<Arc<ValueColumn>>,
+    /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
+    /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
+    covered: Bitmap,
 }
 
 /// Why a filter could not be answered.
@@ -199,16 +239,6 @@ pub enum FilterError {
     UndeclaredColumn(String),
     /// The expression nests deeper than [`MAX_FILTER_DEPTH`].
     TooDeep { depth: usize, max: usize },
-    /// ⊘ The candidate reaches entities the filter artefact does not cover.
-    ///
-    /// **Refused rather than answered short.** A flush appends entities; `filter-index.md` §2.1
-    /// specifies a value-column extent per flush, and nothing emits one, so entities allocated
-    /// since the build carry no values. Answering anyway would omit them — which narrows `M_sel`
-    /// and is safe under **I12**, but produces a result *indistinguishable from a correct one*.
-    /// That is the same reason `/v1/categories` refuses a `per_viewer` column rather than serving
-    /// it empty (per-point-attributes §3.3): an underived answer must not wear a derived one's
-    /// clothes (decision 0013).
-    CoverageEndsAtBuild { covered: u32, requested: u32 },
 }
 
 impl std::fmt::Display for FilterError {
@@ -222,13 +252,6 @@ impl std::fmt::Display for FilterError {
                 "the filter expression nests {depth} deep; the limit is {max}. Refused rather than \
                  flattened, which would answer a different question"
             ),
-            FilterError::CoverageEndsAtBuild { covered, requested } => write!(
-                f,
-                "the filter index covers entities below {covered}; this request reaches {requested}. \
-                 Entities allocated since the build carry no filter values, because the per-flush \
-                 value-column extent (filter-index §2.1) is specified and not built. Refused rather \
-                 than answered short: a short result is indistinguishable from a correct one"
-            ),
         }
     }
 }
@@ -236,12 +259,14 @@ impl std::fmt::Display for FilterError {
 impl std::error::Error for FilterError {}
 
 impl FilterColumns {
-    /// Open every filter column the manifest declares, under `partition_dir`.
+    /// Open every filter column the manifest declares, with every extent the partition's
+    /// side-manifest names.
     ///
     /// A declared column whose files are missing is an **error**, not an absence: the manifest
-    /// digests them, so a missing one means the bundle is not what its manifest says it is.
-    /// `covered` is the build's entity high-water: the columns hold values for `[0, covered)` and
-    /// nothing above it.
+    /// digests them, so a missing one means the bundle is not what its manifest says it is. The
+    /// same rule covers an extent, and there it is the whole safety argument — an extent that
+    /// failed to open and was skipped would answer "those entities carry no value", which is
+    /// indistinguishable from a correct answer.
     ///
     /// **`mmap` decides whether a declared column costs resident memory before anyone filters on
     /// it.** Every declared column is opened here, at once, and a value column is 1 GB per byte of
@@ -251,34 +276,90 @@ impl FilterColumns {
     /// pressure. The engine passes `true`; tests that build a column and read it back in the same
     /// process pass `false`, exactly as they do for `PostingsReader::open`.
     pub fn open(
-        partition_dir: &Path,
+        prefix_dir: &Path,
+        partition: &str,
         declared: &[tessera_store::manifest::DeclaredScalar],
-        covered: u32,
+        extents: &[tessera_store::manifest::AttrExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
+        let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
         for scalar in declared.iter().filter(|d| d.filter) {
             let dir = partition_dir.join("attrs").join(&scalar.name);
-            columns.insert(scalar.name.clone(), ValueColumn::open_dir(&dir, mmap)?);
+            let base = Arc::new(ValueColumn::open_dir(&dir, mmap)?);
+            let covered = base.present();
+            columns.insert(
+                scalar.name.clone(),
+                Layers {
+                    layers: vec![base],
+                    covered,
+                },
+            );
         }
-        Ok(FilterColumns { columns, covered })
+        let mut open = FilterColumns { columns };
+        for extent in extents {
+            let column = tessera_filter::open_extent(
+                &prefix_dir.join(&extent.values),
+                &prefix_dir.join(&extent.presence),
+                mmap,
+            )?;
+            open.compose(&extent.column, Arc::new(column))?;
+        }
+        Ok(open)
+    }
+
+    /// Add one flush's extent to a column, refusing an entity two layers both claim.
+    ///
+    /// **The refusal is what keeps a layered column a function.** Entity ids are permanent and
+    /// issued from the high-water (**I9**), so an extent's entities belong to no earlier layer and
+    /// the overlap is unreachable — which is exactly why it is checked here rather than reasoned
+    /// about at the call site: if I9 ever failed, the symptom would be an entity matching two
+    /// values at once and a filter naming either returning it, with nothing to notice.
+    fn compose(&mut self, column: &str, extent: Arc<ValueColumn>) -> std::io::Result<()> {
+        let Some(layers) = self.columns.get_mut(column) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "a filter extent names column '{column}', which the schema does not declare \
+                     filterable"
+                ),
+            ));
+        };
+        let present = extent.present();
+        if layers.covered.and_cardinality(&present) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "a filter extent for column '{column}' claims entities an earlier layer \
+                     already holds values for; entity ids are permanent (I9) and an extent may \
+                     only add ids no layer holds"
+                ),
+            ));
+        }
+        layers.covered |= present;
+        layers.layers.push(extent);
+        Ok(())
+    }
+
+    /// This generation's columns with one flush's extents added — the successor generation's.
+    ///
+    /// Cheap by construction: the base columns are `Arc`s, so a flush that published one entity
+    /// clones pointers rather than re-opening a memory-mapped column per declared attribute.
+    pub fn with_extents(
+        &self,
+        extents: &[(String, Arc<ValueColumn>)],
+    ) -> std::io::Result<FilterColumns> {
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+        };
+        for (column, extent) in extents {
+            next.compose(column, Arc::clone(extent))?;
+        }
+        Ok(next)
     }
 
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
-    }
-
-    /// Refuse a candidate that reaches past the artefact. Checked on the candidate's **maximum**,
-    /// so a principal whose visible set predates the build is answered normally — the refusal is as
-    /// narrow as the gap is.
-    fn check_coverage(&self, candidate: &Bitmap) -> Result<(), FilterError> {
-        match candidate.maximum() {
-            Some(max) if max >= self.covered => Err(FilterError::CoverageEndsAtBuild {
-                covered: self.covered,
-                requested: max,
-            }),
-            _ => Ok(()),
-        }
     }
 
     /// Entities in `candidate` whose value for `column` satisfies `operand`.
@@ -286,28 +367,25 @@ impl FilterColumns {
     /// The result is a subset of `candidate` by
     /// construction, so it is already inside the composed verdict — **I12**'s "a filter narrows
     /// `M_sel` and never widens it" is a property of the shape here rather than a check.
+    ///
+    /// **Every layer is scanned and the results unioned.** The layers partition entity space, so
+    /// the union is disjoint and an entity is tested against exactly one value however many flushes
+    /// have published — which is what makes composition a union rather than a precedence rule.
     pub fn resolve(
         &self,
         column: &str,
         operand: &FilterOperand,
         candidate: &Bitmap,
     ) -> Result<Bitmap, FilterError> {
-        self.check_coverage(candidate)?;
-        let values = self
+        let column = self
             .columns
             .get(column)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        Ok(match operand {
-            FilterOperand::Equals(v) => values.scan_eq(candidate, *v),
-            FilterOperand::In(vs) => values.scan_in(candidate, vs),
-            FilterOperand::TextEquals(s) => values.scan_text_eq(candidate, s),
-            FilterOperand::TextIn(ss) => values.scan_text_in(candidate, ss),
-            FilterOperand::TextPrefix(s) => values.scan_text_prefix(candidate, s),
-            FilterOperand::TextContains(s) => values.scan_text_contains(candidate, s),
-            FilterOperand::NumEquals(n) => values.scan_num_eq(candidate, *n),
-            FilterOperand::NumIn(ns) => values.scan_num_in(candidate, ns),
-            FilterOperand::Range { lo, hi } => values.scan_range(candidate, *lo, *hi),
-        })
+        let mut out = Bitmap::new();
+        for values in &column.layers {
+            out |= scan(values, operand, candidate);
+        }
+        Ok(out)
     }
 
     /// Compose several operands: `candidate ∧ op₁ ∧ … ∧ opₙ`.
@@ -320,7 +398,6 @@ impl FilterColumns {
         operands: impl IntoIterator<Item = (&'a str, &'a FilterOperand)>,
         candidate: &Bitmap,
     ) -> Result<Bitmap, FilterError> {
-        self.check_coverage(candidate)?;
         let mut live = candidate.clone();
         for (column, operand) in operands {
             live = self.resolve(column, operand, &live)?;
@@ -345,7 +422,6 @@ impl FilterColumns {
                 max: MAX_FILTER_DEPTH,
             });
         }
-        self.check_coverage(candidate)?;
         self.eval(expr, candidate)
     }
 
@@ -370,6 +446,26 @@ impl FilterColumns {
                 Ok(out)
             }
         }
+    }
+}
+
+/// One operand against one layer.
+///
+/// **The dispatch is here, once, rather than per layer inside a scan.** Each arm is the scan the
+/// column crate exposes for that family, and the match is on the *operand* — never on the values —
+/// so a layer costs what its share of the candidate costs and nothing about which value is sought
+/// reaches this decision.
+fn scan(values: &ValueColumn, operand: &FilterOperand, candidate: &Bitmap) -> Bitmap {
+    match operand {
+        FilterOperand::Equals(v) => values.scan_eq(candidate, *v),
+        FilterOperand::In(vs) => values.scan_in(candidate, vs),
+        FilterOperand::TextEquals(s) => values.scan_text_eq(candidate, s),
+        FilterOperand::TextIn(ss) => values.scan_text_in(candidate, ss),
+        FilterOperand::TextPrefix(s) => values.scan_text_prefix(candidate, s),
+        FilterOperand::TextContains(s) => values.scan_text_contains(candidate, s),
+        FilterOperand::NumEquals(n) => values.scan_num_eq(candidate, *n),
+        FilterOperand::NumIn(ns) => values.scan_num_in(candidate, ns),
+        FilterOperand::Range { lo, hi } => values.scan_range(candidate, *lo, *hi),
     }
 }
 

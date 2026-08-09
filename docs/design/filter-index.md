@@ -10,12 +10,12 @@ project-vs-per-tile rule. Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
-wire surface (`/v1/meta`'s operand list, the viewport's filter expression, the boolean tree). What
-remains unbuilt is the **write** side and two operands: ingest, flush extents, deletion and the fold
-touch no attribute artefact, so a filter refuses rather than answers short once the candidate reaches
-an entity allocated since the build; lists, `none_of` and `match` are specified and refuse by name;
-and the derived category postings are emitted, digested and **not read at serving**. Marked at each
-claim.
+wire surface (`/v1/meta`'s operand list, the viewport's filter expression, the boolean tree) — and
+the **flush's half of the write side**: a flush appends one extent per filterable column and the
+reader composes base with extents, so an entity ingested since the build answers a filter on its own
+value (§5). What remains unbuilt is **deletion and the fold**, which touch no attribute artefact, and
+two operands: lists, `none_of` and `match` are specified and refuse by name; and the derived category
+postings are emitted, digested and **not read at serving**. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4;
@@ -56,14 +56,15 @@ visibility, so building it closes the `listing = "per_viewer"` refusal rather th
 is **entity-space, so it is slice-invariant**: a slice attaches, populates or drops without touching any
 of it (§7).
 
-> **⊘ Built: the read path, for every family.** The value column, its presence bitmap, the masked
-> scan behind every operator each family declares, and `entity → value` all exist for categories,
-> strings and numerics, in both build implementations and under the manifest digest; a category's
-> derived per-value postings are emitted and digested but not read at serving. **The write side is
-> not built** — ingest, deletion and the fold touch no attribute artefact — and neither are lists,
-> `none_of` or `match`; each is marked at its claim. Present behaviour is fail-closed
-> throughout: a filter that cannot be expressed narrows nothing, and a value set that cannot be gated
-> is withheld entirely.
+> **⊘ Built: the read path for every family, and ingest.** The value column, its presence bitmap,
+> the masked scan behind every operator each family declares, and `entity → value` all exist for
+> categories, strings and numerics, in both build implementations and under the manifest digest; a
+> category's derived per-value postings are emitted and digested but not read at serving. A flush
+> appends an extent per column and a generation composes them (§5). **Deletion and the fold touch no
+> attribute artefact**, and neither are lists, `none_of` or `match`; each is marked at its claim.
+> Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows nothing, a
+> value set that cannot be gated is withheld entirely, and an extent that will not open refuses
+> rather than reading as "those entities carry no value".
 
 ### 1.1 What this deliberately does not do
 
@@ -347,8 +348,16 @@ which is the cross-wire the newtypes exist to forbid, reintroduced as boilerplat
 attrs/<column>/values.arrow            the value column, entity-ordered (§2.1)
 attrs/<column>/presence.roaring        present entities — omitted where presence is universal
 attrs/<column>/postings.arrow          derived per-value postings — categories only (§2.3)
-attrs/<column>/extents/<flush_id>.arrow  one appended extent per flush that touched the column
+attrs/<column>/extents/<flush_id>.arrow    one extent per flush, its values in entity order
+attrs/<column>/extents/<flush_id>.roaring  that extent's present entities — never omitted
 ```
+
+**An extent's presence bitmap is not optional, where a base column's is.** The base column omits it
+to mean *the entity id is the array index*; a flush publishes an entity set that starts above the
+build's high-water and need not be contiguous (§2.1), so an extent read positionally would pair
+every value with the wrong entity. Both files are named in the partition's side-manifest and
+digested, so a missing one refuses at open rather than reading as "those entities carry no value" —
+which is the wrong answer that looks exactly like a right one.
 
 **One record batch per value column**, which is what lets the reader map the file and borrow the
 values out of it rather than copying them (§8). A second batch is refused rather than concatenated,
@@ -508,9 +517,17 @@ cache misses on every read (§2.2).
 
 **A value column extends by appending an extent.** The commit window is signature-sorted and allocated
 from the high-water in one call (write-path §2.3), monotone and never reused under **I9**, so a flush's
-entities occupy an ascending range and nothing already written moves. The extent covers that range;
-addressing across extents is a bounds check rather than a search, and a scan decomposes across them by
-clipping the candidate mask to each.
+entities are ids no earlier layer holds and nothing already written moves. A scan decomposes across
+the layers by clipping the candidate to each — which the extent's own presence bitmap does, at
+O(containers touched) — and the results are unioned. The union is disjoint by **I9**, and that is
+*checked* at composition rather than assumed: two layers claiming one entity would make it match two
+values at once, and a filter naming either would return it with nothing to notice.
+
+**Composition is per generation, not per request.** A published flush builds the next generation's
+columns from the live ones by pushing a pointer, so a request pays one scan per layer over a
+candidate the layer has already narrowed, and the layer count is a property of the bundle rather than
+of what is asked for — the work stays a function of `(candidate, column)`, which is what §2.2's
+timing property requires.
 
 That is the whole of it, and the absences are the point:
 
@@ -534,9 +551,16 @@ incrementally, which is what makes it self-retiring and keeps ordinal stability 
 
 **Resolution stays fail-closed in the same direction and for a simpler reason.** A buffered entity has no
 row, so no row-space verb sees it; the entity-space verbs under-report until flush. Under-reporting
-narrows `M_sel`, which is safe under **I12**.
+narrows `M_sel`, which is safe under **I12** — and it is a lag of one flush interval rather than a
+coverage cliff, which is what makes it a design rather than a gap.
 
-> **⊘ None of this is built.** Ingest touches no attribute artefact today.
+> **⊘ Built, except the accelerator's tail.** A flush writes one extent per filterable column —
+> including one for a column no flushed entity carries a value in, so the file set is a function of
+> the schema rather than of the data — names both files in the partition's side-manifest, digests
+> them, and composes them onto the live generation's columns before the manifest commits. A
+> category's derived postings still cover `[0, fold_watermark)` and **the un-folded tail is not
+> scanned and unioned in**: they are not read at serving at all (§2.3), so nothing depends on it
+> yet, and the scan over base ∪ extents is the whole answer.
 
 
 ## 6. Deletion, suppression and retirement
@@ -551,10 +575,14 @@ lost twice in this project's review history, which is why it is restated at ever
 | Deletion | **nothing until the fold** | the overlay's `deleted` set; the flush never writes the row, and the entity ID stays burned (**I9**) |
 | Compaction fold | deleted entities' value slots are blanked; the derived postings are rebuilt whole | the tombstone leaves `deleted` in the fold's own publication (Rule F) |
 
-> **⊘ Specified, not implemented.** The middle column describes an artefact whose value column does not
-> exist. Rules S and F themselves are built and enforced for the authorisation index, and the fold that
-> executes them runs — so a reader may take the *rules* as delivered and must not read this table as
-> saying anything about attribute data.
+> **⊘ Specified, not implemented, and the fold is worse than silent about it.** Rules S and F
+> themselves are built and enforced for the authorisation index, and the fold that executes them
+> runs — so a reader may take the *rules* as delivered and must not read this table as saying
+> anything about attribute data. What is *not* true is that a fold leaves the artefact alone: it
+> carries forward exactly the files its new manifest names, `attrs/` is in neither list, and the old
+> prefix is then reclaimed — so a folded bundle has no filter artefact at all and an engine restarting
+> onto one fails to open. Pre-existing, and stated here rather than at the fold because this is where
+> a reader looks for what the fold does to a column.
 
 **Why the fold blanks a deleted entity's slot, and it is not Rule F's reason.** Decision 0050 requires a
 deleted entity to be gone from the *authorisation* term index, and its argument is a fail-open: leave the
@@ -729,6 +757,15 @@ the same two edges the authorisation crate is denied, for the same reason.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-09 — the flush's half of the write side landed, and one measurement is worth carrying.**
+§5's extent is built and §1's and §5's markers move with it; §2.5 gains the extent's presence file,
+which is mandatory where a base column's is optional, and §6 records that a fold destroys the
+artefact today rather than merely failing to rebuild it. The measurement: adding the three extent
+functions to the *same file* as the scan cost the universal-contiguous arm 0.27 → 0.46 ns per
+candidate entity at 10⁹ — code that never runs during a scan, in a file whose module doc already
+records three such regressions — and moving them to their own module restored 0.26 ns exactly.
+Anything that adds to `values.rs` must re-run `probes/2026-08-08-filter-layout/`'s `realscan`.
 
 **2026-08-08 (r4) — the organising rule changed, on an owner ruling and the first measurements.**
 r1–r3 specified an **inverted posting per distinct value for every family**, a shape imported from the

@@ -31,9 +31,9 @@ use tessera_engine::filter::{
     candidate, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand, Scalar,
 };
 use tessera_engine::ViewportRequest;
-use tessera_store::read::open_bundle;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
+use tessera_store::read::open_bundle;
 use tessera_types::AttrLocalId;
 
 const N: u64 = 60;
@@ -202,11 +202,12 @@ fn fixture() -> Fixture {
 
     let opened = open_bundle(&bundle).unwrap();
     let phash = opened.partitions.keys().next().unwrap().clone();
-    let partition_dir = bundle.join(&prefix).join("partitions").join(&phash);
     let columns = FilterColumns::open(
-        &partition_dir,
+        &bundle.join(&prefix),
+        &phash,
         &opened.manifest.declared_scalars,
-        opened.manifest.entity_id_high_water as u32,
+        // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
+        &opened.partitions[&phash].manifest.attr_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
         true,
@@ -260,7 +261,9 @@ fn candidate_for(fx: &Fixture, credential: &[u8]) -> (tessera_engine::Engine, Bi
     let cache = fx._dir.path().join(format!("cache-{}", credential.len()));
     let wal = fx._dir.path().join(format!("wal-{}", credential.len()));
     let engine = open_engine(&fx.bundle, &cache, &wal);
-    let session = engine.authorise(credential).expect("the credential resolves");
+    let session = engine
+        .authorise(credential)
+        .expect("the credential resolves");
     let generation = engine.generation();
     let cand = candidate(
         &session.fragment,
@@ -320,7 +323,10 @@ fn a_wider_principal_sees_a_superset_of_the_same_filter() {
         wide_hits.cardinality() > narrow_hits.cardinality(),
         "the fixture must make masking and filtering select different items"
     );
-    assert!(narrow_hits.cardinality() > 0, "and the narrow set must be non-empty");
+    assert!(
+        narrow_hits.cardinality() > 0,
+        "and the narrow set must be non-empty"
+    );
 }
 
 /// **A principal who can see nothing gets nothing**, for every operand — including one naming a
@@ -358,11 +364,7 @@ fn string_filters_agree_with_the_corpus_under_a_real_mask() {
 
     let eq = fx
         .columns
-        .resolve(
-            "title",
-            &FilterOperand::TextEquals(title_of(3)),
-            &cand,
-        )
+        .resolve("title", &FilterOperand::TextEquals(title_of(3)), &cand)
         .unwrap();
     assert_eq!(as_vec(&eq), expected(&fx, &terms, |e| e == 3));
 
@@ -453,25 +455,36 @@ fn an_undeclared_column_is_distinguishable_from_an_empty_result() {
         .is_ok_and(|b| b.is_empty()));
 }
 
-/// **⊘ A filter refuses once the candidate reaches entities the artefact does not cover.**
-///
-/// A flush appends entities. `filter-index.md` §2.1 specifies a value-column extent per flush and
-/// nothing emits one, so an entity allocated since the build carries no filter values at all.
-/// Answering anyway would omit it — safe under I12, since it only narrows `M_sel`, and *wrong* in a
-/// way the caller cannot detect, because a short result looks exactly like a correct one.
-///
-/// The refusal is as narrow as the gap: a principal whose visible set predates the build is still
-/// answered normally, which the second half of this test pins so the guard cannot quietly become
-/// "refuse everything once anything has flushed".
-#[test]
-fn a_filter_refuses_rather_than_answering_short_after_a_flush() {
-    let fx = fixture();
-    let cache = fx._dir.path().join("cache-flush");
-    let wal = fx._dir.path().join("wal-flush");
-    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+// =================================================================================================
+// The per-flush extent (filter-index §2.1, §2.5)
+// =================================================================================================
 
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting: {what}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Ingest one row and wait for the flush that publishes it.
+///
+/// `department` is passed as a `WalScalar` rather than a key so a caller can express **absence** —
+/// the reserved code 0, which is what the ingest boundary turns a null category into — beside the
+/// ordinary key case a declared vocabulary resolves at the commit window.
+fn ingest_and_flush(
+    engine: &tessera_engine::Engine,
+    external: &str,
+    department: WalScalar,
+    title: &str,
+    score: i32,
+) -> u64 {
+    let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
-        external_id: Some(b"post-build".to_vec()),
+        external_id: Some(external.as_bytes().to_vec()),
         slice: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
@@ -480,20 +493,29 @@ fn a_filter_refuses_rather_than_answering_short_after_a_flush() {
         // why `declared_scalars` keeps the full list while the *segment* narrows to render columns.
         // A category arrives as its **key**, never a code (contracts §2.4).
         scalars: vec![
-            WalScalar::Utf8("eng".to_string()),
-            WalScalar::Utf8("paper-99".to_string()),
-            WalScalar::I32(42),
+            department,
+            WalScalar::Utf8(title.to_string()),
+            WalScalar::I32(score),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
     let allocated = engine
-        .accept_ingest(vec![row], "batch-1".to_string(), [0u8; 32])
+        .accept_ingest(vec![row], external.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0];
     assert!(
         allocated.raw() >= N,
         "the new entity is above the build's high-water"
     );
+    engine.request_flush();
+    wait_until("the flush to publish", || {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        engine.write_executor_stats().flushes > flushes_before
+    });
+    allocated.raw()
+}
 
+/// The candidate a full-coverage session sees against the engine's live generation.
+fn live_candidate(engine: &tessera_engine::Engine) -> (Arc<tessera_engine::Generation>, Bitmap) {
     let session = engine
         .authorise(&full_coverage_credential())
         .expect("credential resolves");
@@ -504,29 +526,421 @@ fn a_filter_refuses_rather_than_answering_short_after_a_flush() {
         &generation.overlay,
         &generation.buffer,
     );
-    assert!(
-        cand.contains(allocated.raw() as u32),
-        "the ingested entity is in the candidate — it is visible, it simply has no filter values"
-    );
+    (generation, cand)
+}
+
+/// **An entity ingested after the build answers a filter on its own value.**
+///
+/// This is the whole point of the per-flush extent (`filter-index.md` §2.1): the build's column
+/// covers `[0, entity_id_high_water)`, the flush appends the entities it publishes, and the reader
+/// composes the two. The negative half is what makes it a filter rather than a bit that says
+/// "recent": the same entity must be *absent* from a filter naming a different value, in all three
+/// families.
+#[test]
+fn an_entity_ingested_after_the_build_answers_a_filter_on_its_own_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-flush");
+    let wal = fx._dir.path().join("wal-flush");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let new = ingest_and_flush(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("eng".to_string()),
+        "paper-99",
+        42,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    assert!(cand.contains(new), "the ingested entity is visible");
+    let columns = &generation.filter_columns;
+    let matched = |operand: FilterOperand, column: &str| -> Bitmap {
+        columns
+            .resolve(column, &operand, &cand)
+            .expect("a composed column answers rather than refusing")
+    };
 
     let eng = AttrLocalId::new(fx.codes["eng"]);
+    let sales = AttrLocalId::new(fx.codes["sales"]);
+    assert!(matched(FilterOperand::Equals(eng), "department").contains(new));
+    assert!(!matched(FilterOperand::Equals(sales), "department").contains(new));
+    assert!(matched(FilterOperand::In(vec![sales, eng]), "department").contains(new));
+
+    assert!(matched(FilterOperand::TextEquals("paper-99".into()), "title").contains(new));
+    assert!(!matched(FilterOperand::TextEquals("paper-01".into()), "title").contains(new));
+    assert!(matched(FilterOperand::TextPrefix("paper-9".into()), "title").contains(new));
+    assert!(matched(FilterOperand::TextContains("per-99".into()), "title").contains(new));
+
+    let at = |v: i128| Endpoint {
+        value: Scalar::Int(v),
+        inclusive: true,
+    };
+    assert!(matched(
+        FilterOperand::Range {
+            lo: Some(at(42)),
+            hi: Some(at(42))
+        },
+        "score"
+    )
+    .contains(new));
+    assert!(!matched(
+        FilterOperand::Range {
+            lo: Some(at(43)),
+            hi: None
+        },
+        "score"
+    )
+    .contains(new));
+
+    // A tree over columns reaches the extent too — every leaf composes its own layers, so a
+    // conjunction narrowing the candidate as it goes cannot lose the new entity between them.
+    let tree = FilterExpr::AllOf(vec![
+        FilterExpr::Leaf {
+            column: "department".to_string(),
+            operand: FilterOperand::Equals(eng),
+        },
+        FilterExpr::Leaf {
+            column: "title".to_string(),
+            operand: FilterOperand::TextPrefix("paper-9".into()),
+        },
+    ]);
+    assert!(columns.evaluate(&tree, &cand).unwrap().contains(new));
+}
+
+/// **The build's own entities answer exactly as they did before the flush.**
+///
+/// An extent adds a layer; it must not move what the base layer says. Asserted as bitmap equality
+/// over every column and every family rather than by spot check, because the failure this guards —
+/// an extent's slots being read against base entities — shifts *values along entities* and would
+/// leave most spot checks passing.
+#[test]
+fn a_flush_does_not_disturb_what_the_build_already_answered() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-undisturbed");
+    let wal = fx._dir.path().join("wal-undisturbed");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let operands: Vec<(&str, FilterOperand)> = vec![
+        ("department", FilterOperand::Equals(eng)),
+        ("title", FilterOperand::TextPrefix("paper-1".into())),
+        ("title", FilterOperand::TextContains("2".into())),
+        (
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(20),
+                    inclusive: true,
+                }),
+                hi: Some(Endpoint {
+                    value: Scalar::Int(60),
+                    inclusive: false,
+                }),
+            },
+        ),
+    ];
+
+    let (_generation, cand) = live_candidate(&engine);
+    let built: Vec<Bitmap> = operands
+        .iter()
+        .map(|(column, operand)| fx.columns.resolve(column, operand, &cand).unwrap())
+        .collect();
+
+    ingest_and_flush(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("eng".to_string()),
+        "paper-12",
+        42,
+    );
+
+    let (generation, cand_after) = live_candidate(&engine);
+    let below = cand_after.and(&Bitmap::from_range(0..N as u32));
+    for ((column, operand), before) in operands.iter().zip(&built) {
+        let after = generation
+            .filter_columns
+            .resolve(column, operand, &below)
+            .unwrap();
+        assert_eq!(
+            after.to_vec(),
+            before.to_vec(),
+            "column '{column}' answered differently for the build's own entities after a flush"
+        );
+    }
+}
+
+/// **An ingested entity with no value for a column is absent from every predicate on it**, which is
+/// not the same as matching nothing: its *other* columns still answer.
+///
+/// A category spends the reserved code 0 on absence (per-point-attributes §3.4), so the flush gives
+/// that entity no slot in the department extent at all — while the same flush's title and score
+/// extents carry it. An extent that treated absence as a value would put every such item in
+/// whichever bucket code 0 named.
+#[test]
+fn an_ingested_entity_with_no_value_is_absent_from_every_predicate_on_that_column() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-absent");
+    let wal = fx._dir.path().join("wal-absent");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Code 0 at the declared width: what the ingest boundary turns a null category into.
+    let new = ingest_and_flush(&engine, "no-dept", WalScalar::U8(0), "paper-98", 7) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    let every_code: Vec<AttrLocalId> = fx.codes.values().map(|c| AttrLocalId::new(*c)).collect();
+    for operand in [
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["sales"])),
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+        FilterOperand::In(every_code),
+        // Code 0 itself is the unresolvable sentinel, and an item carrying no value must not match
+        // a filter naming it either.
+        FilterOperand::Equals(AttrLocalId::new(0)),
+    ] {
+        assert!(
+            !columns
+                .resolve("department", &operand, &cand)
+                .unwrap()
+                .contains(new),
+            "an item with no department matched {operand:?}"
+        );
+    }
+    assert!(
+        columns
+            .resolve(
+                "title",
+                &FilterOperand::TextEquals("paper-98".into()),
+                &cand
+            )
+            .unwrap()
+            .contains(new),
+        "the same flush's other columns still carry it"
+    );
+}
+
+/// **Several flushes compose**, and each entity answers on its own value.
+///
+/// One extent working is not the property; the property is that layers accumulate. A composition
+/// that kept only the newest extent, or that read the second extent's slots through the first's
+/// presence, passes the single-flush test and fails this one.
+#[test]
+fn several_flushes_compose_and_each_entity_keeps_its_own_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-many");
+    let wal = fx._dir.path().join("wal-many");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let first = ingest_and_flush(
+        &engine,
+        "first",
+        WalScalar::Utf8("eng".to_string()),
+        "alpha",
+        1,
+    ) as u32;
+    let second = ingest_and_flush(
+        &engine,
+        "second",
+        WalScalar::Utf8("sales".to_string()),
+        "beta",
+        2,
+    ) as u32;
+    let third = ingest_and_flush(
+        &engine,
+        "third",
+        WalScalar::Utf8("legal".to_string()),
+        "gamma",
+        3,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    for (entity, key, title, score) in [
+        (first, "eng", "alpha", 1i128),
+        (second, "sales", "beta", 2),
+        (third, "legal", "gamma", 3),
+    ] {
+        let code = AttrLocalId::new(fx.codes[key]);
+        let by_code = columns
+            .resolve("department", &FilterOperand::Equals(code), &cand)
+            .unwrap();
+        assert!(by_code.contains(entity), "{key} lost its own value");
+        for (other, other_key) in [(first, "eng"), (second, "sales"), (third, "legal")] {
+            if other != entity {
+                assert!(
+                    !by_code.contains(other),
+                    "{other_key} matched {key}'s value: the layers are being read against the \
+                     wrong entities"
+                );
+            }
+        }
+        assert!(columns
+            .resolve("title", &FilterOperand::TextEquals(title.into()), &cand)
+            .unwrap()
+            .contains(entity));
+        let at = |v: i128| Endpoint {
+            value: Scalar::Int(v),
+            inclusive: true,
+        };
+        assert!(columns
+            .resolve(
+                "score",
+                &FilterOperand::Range {
+                    lo: Some(at(score)),
+                    hi: Some(at(score))
+                },
+                &cand
+            )
+            .unwrap()
+            .contains(entity));
+    }
+}
+
+/// **The extents survive a restart**, which is what makes them the artefact rather than a cache of
+/// what this process happened to flush.
+///
+/// The reopened engine composes exactly the extents the partition's side-manifest names — so this
+/// also pins that they *are* named there, since a manifest that recorded nothing would reopen with
+/// the build's coverage alone and answer this filter short.
+#[test]
+fn a_restart_composes_the_extents_the_manifest_names() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-restart");
+    let wal = fx._dir.path().join("wal-restart");
+    let new = {
+        let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+        ingest_and_flush(
+            &engine,
+            "post-build",
+            WalScalar::Utf8("legal".to_string()),
+            "paper-97",
+            11,
+        ) as u32
+    };
+
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let (generation, cand) = live_candidate(&engine);
+    assert!(cand.contains(new), "the flushed entity is visible again");
+    let legal = AttrLocalId::new(fx.codes["legal"]);
+    assert!(generation
+        .filter_columns
+        .resolve("department", &FilterOperand::Equals(legal), &cand)
+        .unwrap()
+        .contains(new));
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "title",
+            &FilterOperand::TextEquals("paper-97".into()),
+            &cand
+        )
+        .unwrap()
+        .contains(new));
+}
+
+/// **A named extent that is not there refuses to open**, rather than degrading to "those entities
+/// carry no value".
+///
+/// That degradation is the failure mode this whole composition replaced a refusal to avoid: a
+/// short answer is indistinguishable from a correct one. The manifest names and digests both files,
+/// so a missing one means the bundle is not what its manifest says — and the presence bitmap is the
+/// half a reader could most easily be tempted to treat as optional, since a *base* column's missing
+/// presence file legitimately means positional addressing.
+///
+/// Asserted against the reader rather than against `Engine::open`, deliberately: a bundle whose
+/// newest side-manifest names a missing file is *stepped past* by the loader (contracts §2.3), so
+/// an engine opening over one answers from the previous manifest and never reaches this rule. The
+/// rule still has to hold, because the manifest a loader does select is one every file of which it
+/// believes to be there.
+#[test]
+fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-missing");
+    let wal = fx._dir.path().join("wal-missing");
+    {
+        let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+        ingest_and_flush(
+            &engine,
+            "post-build",
+            WalScalar::Utf8("eng".to_string()),
+            "paper-96",
+            5,
+        );
+    }
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.bundle.join("CURRENT")).unwrap()).unwrap();
+    let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
+    let opened = open_bundle(&fx.bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let extents = opened.partitions[&phash].manifest.attr_extents.clone();
+    assert!(
+        !extents.is_empty(),
+        "the flush recorded its extents in the side-manifest"
+    );
+    let open = |extents: &[tessera_store::manifest::AttrExtent]| {
+        FilterColumns::open(
+            &prefix,
+            &phash,
+            &opened.manifest.declared_scalars,
+            extents,
+            true,
+        )
+    };
+    assert!(open(&extents).is_ok(), "the extents as written compose");
+
+    for named in [&extents[0].values, &extents[0].presence] {
+        let path = prefix.join(named);
+        let held = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            open(&extents).is_err(),
+            "an extent the manifest names but that is absent ({named}) must refuse, never read as \
+             'those entities carry no value'"
+        );
+        std::fs::write(&path, held).unwrap();
+    }
+    assert!(open(&extents).is_ok(), "restored, it composes again");
+}
+
+/// **Two layers may not claim one entity, and that is checked rather than reasoned about.**
+///
+/// Entity ids are permanent and issued from the high-water (**I9**), so an extent can only add ids
+/// no earlier layer holds — the overlap is unreachable through the write path. What makes it worth
+/// a check is the symptom if I9 ever failed: the entity would carry two values at once and a filter
+/// naming either would return it, with nothing anywhere to notice.
+#[test]
+fn an_extent_overlapping_an_earlier_layer_is_refused() {
+    let fx = fixture();
+    let mut presence = Bitmap::new();
+    presence.add(0);
+    let overlapping = Arc::new(
+        tessera_filter::ValueColumn::partial(
+            tessera_filter::Codes::text(vec!["collision".to_string()]),
+            presence,
+        )
+        .unwrap(),
+    );
     let err = fx
         .columns
-        .resolve("department", &FilterOperand::Equals(eng), &cand)
-        .expect_err("a candidate past the artefact must be refused");
-    assert!(
-        matches!(err, FilterError::CoverageEndsAtBuild { .. }),
-        "{err:?}"
-    );
-    // The message names what is absent rather than refusing generically (decision 0013).
-    assert!(format!("{err}").contains("specified and not built"));
+        .with_extents(&[("title".to_string(), overlapping)])
+        .expect_err("an extent claiming entity 0 overlaps the base column");
+    assert!(format!("{err}").contains("I9"), "{err}");
 
-    // And the guard is narrow: a candidate entirely below the build's high-water still answers.
-    let below = cand.and(&Bitmap::from_range(0..N as u32));
+    // And an extent for a column the schema does not declare filterable is refused too: it would
+    // otherwise be silently dropped, which is a value column quietly going missing.
+    let mut presence = Bitmap::new();
+    presence.add(N as u32 + 1);
+    let stray = Arc::new(
+        tessera_filter::ValueColumn::partial(
+            tessera_filter::Codes::text(vec!["stray".to_string()]),
+            presence,
+        )
+        .unwrap(),
+    );
     assert!(fx
         .columns
-        .resolve("department", &FilterOperand::Equals(eng), &below)
-        .is_ok());
+        .with_extents(&[("no_such_column".to_string(), stray)])
+        .is_err());
 }
 
 /// **A row carrying the wrong number of scalars is refused, not a panic.**
@@ -594,21 +1008,21 @@ fn a_filtered_viewport_serves_only_matching_marks() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let unfiltered = engine
-        .viewport(&session, ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000))
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000),
+        )
         .expect("an unfiltered viewport answers");
 
     let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
     let filtered = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
-                .filter(leaf("department", eng)),
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(leaf("department", eng)),
         )
         .expect("a filtered viewport answers");
 
-    let expected_count = (0..N)
-        .filter(|&e| department_of(e) == Some("eng"))
-        .count() as u64;
+    let expected_count = (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64;
     assert!(expected_count > 0 && expected_count < N, "a real subset");
 
     assert_eq!(
@@ -639,7 +1053,10 @@ fn a_filter_does_not_move_the_threshold_anchor() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let unfiltered = engine
-        .viewport(&session, ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000))
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000),
+        )
         .unwrap();
     let filtered = engine
         .viewport(
@@ -686,11 +1103,16 @@ fn a_viewport_naming_an_undeclared_column_is_refused() {
     let err = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
-                .filter(leaf("no_such_column", FilterOperand::TextPrefix("x".into()))),
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(leaf(
+                "no_such_column",
+                FilterOperand::TextPrefix("x".into()),
+            )),
         )
         .expect_err("an undeclared column is refused");
-    assert!(format!("{err}").contains("not declared filterable"), "{err}");
+    assert!(
+        format!("{err}").contains("not declared filterable"),
+        "{err}"
+    );
 }
 
 /// **Disjunction across columns** — the case `in` cannot express, since `in` only ORs values within
@@ -891,6 +1313,7 @@ fn a_range_composes_with_a_category_and_a_string() {
     assert_eq!(
         as_vec(&fx.columns.evaluate(&expr, &cand).unwrap()),
         expected(&fx, &[ALL_TERM], |e| score_of(e) >= 50
-            && (department_of(e) == Some("eng") || title_of(e).starts_with("paper-1")))
+            && (department_of(e) == Some("eng")
+                || title_of(e).starts_with("paper-1")))
     );
 }

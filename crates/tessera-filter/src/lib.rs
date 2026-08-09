@@ -43,10 +43,12 @@
 //! members — leak-register row C11, reachable by ordinary operation (filter-index §2.2).
 
 mod column;
+mod extent;
 mod pack;
 mod values;
 
 pub use column::{resolve_union, ColumnPostings};
+pub use extent::{extent_paths, open_extent, write_extent, EXTENTS_DIR};
 pub use values::{
     write_value_column, Codes, Endpoint, Scalar, ValueColumn, PRESENCE_FILE, VALUES_FILE,
 };

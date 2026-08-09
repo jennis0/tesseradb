@@ -186,11 +186,12 @@ channels are in the leak register (C11, C22, C23).
 filterable end to end — a flat entity-indexed value column scanned under the composed candidate,
 per-value Roaring postings derived over it for categories, `all_of`/`any_of` composition
 (decision 0059), the operand on `/v1/viewport`, the per-column operator list on `/v1/meta`, and a
-conformance differential that moves **I12's mask half to covered**. What is *not* built is the
-per-flush value-column extent: an entity allocated since the build carries no filter values, so a
-filter whose candidate reaches one is **refused rather than answered short**. That is the binding
-constraint on making the feature usable in a deployment that ingests, and it constrains nothing
-else. Numeric ranges are refused at schema parse with the reason named.
+conformance differential that moves **I12's mask half to covered** — and, since the per-flush
+value-column extent landed, an entity ingested after the build answers a filter on its own value. A
+buffered entity still does not, until its flush; `filter-index.md` §5 rules that under-reporting for
+one flush interval is safe under **I12**. What remains is the **fold**, which today carries no
+`attrs/` file forward at all, so a folded bundle loses the artefact. Numeric ranges are refused at
+schema parse with the reason named.
 
 **[#83]'s input now exists.** A `per_viewer` category gets its membership postings whatever its
 `used_for` says, so the artefact §3.3's predicate was waiting on is emitted. `/v1/categories` still

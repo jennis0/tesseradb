@@ -44,9 +44,11 @@ What it deliberately does **not** cover, so the next reader is not left inferrin
 - **θ-live filtered selection** — §5.2's rule that a filtered selection stays anchored on
   `M_auth`. This module runs θ saturated so that a composition bug and a θ bug cannot masquerade
   as each other (the same argument `conftest.catalogue_server` makes for the mask tests).
-- **Post-build ingest** — a filter whose candidate reaches entities allocated after the build
-  refuses (no per-flush extent is emitted yet). The fixture is build-only, so that refusal is
-  neither exercised nor accidentally depended on.
+- **Post-build ingest** — a flush now appends a value-column extent and a filter answers over the
+  entities it published (`filter-index.md` §2.1). The fixture here is build-only, so that path is
+  exercised in `crates/tessera-engine/tests/filtering.rs` against a real flush rather than over
+  HTTP; extending the catalogue to ingest would make every other module's server mutable under it,
+  which is the same reason Rule S is not driven here.
 """
 
 from __future__ import annotations

@@ -37,8 +37,9 @@ unknown-value / hidden-value / valueless-value outcome equivalence (C11, per-poi
 deliberately not asserted by a conformance test — surface §9's C11 row); I12's frontier half and
 I3 (no label service exists); Rule S over filter results (the suite's overlay machinery drives
 suppression against its own servers, and no filter test drives it yet — stated in the test module
-rather than silently absent); and any post-build ingest state, the per-flush extent being unbuilt
-(a filter over entities allocated after the build refuses, and this oracle models no such state).
+rather than silently absent); and any post-build ingest state — the per-flush extent is built and an
+entity ingested after the build answers on its own value, but the suite's fixtures are build-only, so
+this oracle has no such state to model and would owe a generation function for it if they gained one.
 
 ## The mask is an input, not a product
 

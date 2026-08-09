@@ -175,6 +175,16 @@ pub(crate) struct FlushContext {
     pub(crate) shard_id: u32,
     pub(crate) quantisation: Quantisation,
     pub(crate) scalar_schema: Vec<(String, ScalarType)>,
+    /// Where each of `scalar_schema`'s columns sits in a buffered row's scalar list
+    /// (`Manifest::render_indices`). A buffered row carries every declared column and a segment's
+    /// tail carries only the render ones, so the two lists are the same length only where the
+    /// schema declares nothing `filter`-only.
+    pub(crate) render_indices: Vec<usize>,
+    /// The filterable columns, and where each one's value sits in a buffered row's positional
+    /// scalar list. Disjoint from `scalar_schema`'s purpose and often from its contents: that one
+    /// is the *render* tail the segment writer takes, this one is entity-space and never reaches a
+    /// row (per-point-attributes §3.9).
+    pub(crate) filter_schema: Vec<FilterColumnSpec>,
     /// The dictionary the plan's terms were resolved against, and the one promotion extends.
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every **extension** term id this plan's items carry (§3.2).
@@ -226,6 +236,10 @@ pub(crate) struct CompletedFlush {
     pub(crate) locator_extent: tessera_store::manifest::LocatorExtent,
     /// `Some` iff this flush promoted (§3.2); its digest is already in `files`.
     pub(crate) dict_extent: Option<DictExtent>,
+    /// One entry per filterable column: this flush's values for the entities it published
+    /// (`filter-index.md` §2.1). Their digests are already in `files`, and each is opened on the
+    /// pool so that publication composes a pointer rather than doing file IO on the executor.
+    pub(crate) filter_extents: Vec<FlushedExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
@@ -275,17 +289,34 @@ pub(crate) fn execute_flush(
     let promoted_from = promotion.extent.as_ref().map(|_| ctx.dict.len());
 
     // ---- the segment, its extents and its locator -------------------------------------------
-    let rows: Vec<FlushRow> = plan
-        .items
-        .iter()
-        .map(|(entity, item)| FlushRow {
+    //
+    // **The row's scalars are narrowed to the render columns, positionally.** A buffered row
+    // carries one value per *declared* column — that is the contract the commit window indexes a
+    // category key by — while the segment's tail is the render subset (`scalar_schema_of`), which
+    // is what keeps a `filter`-only column out of the hot column entirely (§10.3). Handing the
+    // writer the full list pairs each value with the next render column's name, and the writer
+    // catches that only where the two types happen to differ.
+    let mut rows: Vec<FlushRow> = Vec::with_capacity(plan.items.len());
+    for (entity, item) in &plan.items {
+        let mut scalars = Vec::with_capacity(ctx.render_indices.len());
+        for &index in &ctx.render_indices {
+            let value = item.scalars.get(index).ok_or_else(|| {
+                FlushFailed(format!(
+                    "a buffered row carries {} scalars, but a render column is declared at \
+                     position {index}",
+                    item.scalars.len()
+                ))
+            })?;
+            scalars.push(to_scalar_value(value));
+        }
+        rows.push(FlushRow {
             entity_id: *entity,
             external_id: item.external_id.clone(),
             x: item.x,
             y: item.y,
-            scalars: item.scalars.iter().map(to_scalar_value).collect(),
-        })
-        .collect();
+            scalars,
+        });
+    }
     let out = write_flush_segment(
         &ctx.prefix_dir,
         &ctx.partition,
@@ -342,6 +373,17 @@ pub(crate) fn execute_flush(
         None => None,
     };
 
+    // ---- the filter columns' extents (filter-index §2.1) ------------------------------------
+    let filter_extents = write_filter_extents(&plan, &ctx)?;
+    for extent in &filter_extents {
+        for rel in [&extent.values_rel, &extent.presence_rel] {
+            files.insert(
+                rel.clone(),
+                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+            );
+        }
+    }
+
     let seg_dir = segment_dir(&ctx);
     let segment = SegmentData {
         seg_id: ctx.seg_id.clone(),
@@ -364,6 +406,7 @@ pub(crate) fn execute_flush(
         external_id_run: out.external_id_run,
         locator_extent: out.locator_extent,
         dict_extent,
+        filter_extents,
         files,
         tier,
         tier_path: tier_rel,
@@ -522,6 +565,212 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
         }),
         postings,
     })
+}
+
+/// One filterable column, and where its value sits in a buffered row's positional scalar list.
+///
+/// **The index is positional against `MANIFEST.declared_scalars`**, which is the same contract the
+/// commit window indexes a row's scalars by when it resolves a category key to a code. Carrying the
+/// index rather than looking the column up by name at the write is what keeps the two from
+/// disagreeing about which value belongs to which column.
+#[derive(Debug, Clone)]
+pub(crate) struct FilterColumnSpec {
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) ty: ScalarType,
+    /// A category, so its values are vocabulary codes and code 0 means *absent*.
+    pub(crate) category: bool,
+}
+
+/// One flush's extent for one column: durable, digested by the caller, and open.
+pub(crate) struct FlushedExtent {
+    pub(crate) column: String,
+    pub(crate) values_rel: String,
+    pub(crate) presence_rel: String,
+    /// Opened here on the pool, so publication is a pointer push on the executor thread.
+    pub(crate) values: Arc<tessera_filter::ValueColumn>,
+}
+
+/// Write one extent per filterable column, covering exactly the entities this flush publishes.
+///
+/// **Every declared filter column gets one, including a column no flushed entity carries a value
+/// in.** The file set is then a function of the schema rather than of the data, so what a flush
+/// produces is predictable from the manifest alone; an empty extent costs a few hundred bytes and
+/// composes to nothing.
+///
+/// **A deleted entity is already gone from the plan**, so it acquires no slot here any more than it
+/// acquires a row — which is what keeps write-path §5.4's Rule F the only route by which a deletion
+/// touches an artefact, rather than this pass quietly becoming a second one.
+fn write_filter_extents(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<Vec<FlushedExtent>, FlushFailed> {
+    let mut out = Vec::with_capacity(ctx.filter_schema.len());
+    for spec in &ctx.filter_schema {
+        let (codes, presence) = extent_values(spec, plan)?;
+        let column_rel = format!("partitions/{}/attrs/{}", ctx.partition, spec.name);
+        let column_dir = ctx.prefix_dir.join(&column_rel);
+        let (values_path, presence_path) =
+            tessera_filter::write_extent(&column_dir, &ctx.seg_id, &codes, &presence)
+                .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        // Derived from the paths just written rather than formatted a second time: the manifest
+        // names what is on disk, or it names nothing.
+        let rel = |path: &PathBuf| -> Result<String, FlushFailed> {
+            path.strip_prefix(&ctx.prefix_dir)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(|p| p.to_string())
+                .ok_or_else(|| {
+                    FlushFailed(format!(
+                        "filter extent path {} is not under the prefix",
+                        path.display()
+                    ))
+                })
+        };
+        let values = tessera_filter::open_extent(&values_path, &presence_path, true)
+            .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        out.push(FlushedExtent {
+            column: spec.name.clone(),
+            values_rel: rel(&values_path)?,
+            presence_rel: rel(&presence_path)?,
+            values: Arc::new(values),
+        });
+    }
+    Ok(out)
+}
+
+/// One column's values for this flush's entities, and the entities that carry one.
+///
+/// **Absence is out of band, and each family spends a different thing on it** — the same rule the
+/// batch build writes by (`tessera-build`'s `write_column_values`), restated here because the two
+/// read different shapes: the build reads a `ScalarValue` out of a points file, and this reads the
+/// `WalScalar` the buffer holds, on the other side of a crate boundary the layer script draws. A
+/// category spends the reserved code 0, which its vocabulary keeps out of the value space, so an
+/// item carrying it gets no slot at all. Every other family carries a value for every row the
+/// ingest plane accepted — `WalScalar` has no null, and contracts §2.4 refuses the empty string on
+/// that plane — so presence is the flush's whole entity set.
+///
+/// A value of the wrong shape for its declared column **fails the flush** rather than being
+/// dropped: the commit window narrows a category key to its declared width before the row is
+/// buffered, so a mismatch here is a defect on the write path and not caller input, and filtering
+/// on a value this code invented is worse than not flushing.
+fn extent_values(
+    spec: &FilterColumnSpec,
+    plan: &FlushPlan,
+) -> Result<(tessera_filter::Codes, croaring::Bitmap), FlushFailed> {
+    use tessera_filter::Codes;
+
+    let mut presence = croaring::Bitmap::new();
+    let mut entities = Vec::with_capacity(plan.items.len());
+    for (entity, item) in &plan.items {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            FlushFailed(format!(
+                "entity {} does not fit the u32 entity space (I9's ceiling)",
+                entity.raw()
+            ))
+        })?;
+        let value = item.scalars.get(spec.index).ok_or_else(|| {
+            FlushFailed(format!(
+                "a buffered row carries {} scalars, but column '{}' is declared at position {}",
+                item.scalars.len(),
+                spec.name,
+                spec.index
+            ))
+        })?;
+        entities.push((entity, value));
+    }
+
+    let wrong = |value: &WalScalar| {
+        FlushFailed(format!(
+            "column '{}' is declared {:?} but a buffered row carries {value:?}",
+            spec.name, spec.ty
+        ))
+    };
+
+    if spec.ty == ScalarType::Utf8 {
+        let mut held: Vec<String> = Vec::with_capacity(entities.len());
+        for (entity, value) in entities {
+            let WalScalar::Utf8(text) = value else {
+                return Err(wrong(value));
+            };
+            presence.add(entity);
+            held.push(text.clone());
+        }
+        return Ok((Codes::text(held), presence));
+    }
+
+    if spec.category {
+        let mut held: Vec<u32> = Vec::with_capacity(entities.len());
+        for (entity, value) in entities {
+            let code = match value {
+                WalScalar::U8(c) => u32::from(*c),
+                WalScalar::U16(c) => u32::from(*c),
+                WalScalar::U32(c) => *c,
+                other => return Err(wrong(other)),
+            };
+            if code == tessera_store::vocabulary::ABSENT_CODE {
+                continue;
+            }
+            presence.add(entity);
+            held.push(code);
+        }
+        // The declared width is the storage width, exactly as at the build: the column is priced
+        // at 1 GB per byte of width per 10⁹ items, so a `u8` category stored as `u32` costs three
+        // times what it needs — and an extent that stored a different width from its base would
+        // make the two disagree about what the column *is* at the next fold that concatenates them.
+        let codes = match spec.ty {
+            ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect::<Vec<_>>().into()),
+            ScalarType::U16 => {
+                Codes::U16(held.iter().map(|&c| c as u16).collect::<Vec<_>>().into())
+            }
+            _ => Codes::U32(held.into()),
+        };
+        return Ok((codes, presence));
+    }
+
+    // A plain numeric: every entity is present, carrying whatever it holds. The build has the same
+    // shape and the same gap — no bit pattern is spare, so nothing distinguishes "carries no score"
+    // from "carries 0" — and an extent inventing a presence rule the base column does not have
+    // would make one flush's entities answer a range differently from the build's.
+    macro_rules! gather {
+        ($variant:ident, $ctor:expr) => {{
+            let mut held = Vec::with_capacity(entities.len());
+            for (entity, value) in entities {
+                match value {
+                    WalScalar::$variant(x) => held.push(*x),
+                    other => return Err(wrong(other)),
+                }
+                presence.add(entity);
+            }
+            $ctor(held.into())
+        }};
+    }
+    let codes = match spec.ty {
+        ScalarType::Bool => {
+            let mut held = Vec::with_capacity(entities.len());
+            for (entity, value) in entities {
+                match value {
+                    WalScalar::Bool(b) => held.push(u8::from(*b)),
+                    other => return Err(wrong(other)),
+                }
+                presence.add(entity);
+            }
+            Codes::U8(held.into())
+        }
+        ScalarType::U8 => gather!(U8, Codes::U8),
+        ScalarType::U16 => gather!(U16, Codes::U16),
+        ScalarType::U32 => gather!(U32, Codes::U32),
+        ScalarType::U64 => gather!(U64, Codes::U64),
+        ScalarType::I8 => gather!(I8, Codes::I8),
+        ScalarType::I16 => gather!(I16, Codes::I16),
+        ScalarType::I32 => gather!(I32, Codes::I32),
+        ScalarType::I64 => gather!(I64, Codes::I64),
+        ScalarType::F32 => gather!(F32, Codes::F32),
+        ScalarType::F64 => gather!(F64, Codes::F64),
+        ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
+        ScalarType::Utf8 => unreachable!("utf8 is handled above"),
+    };
+    Ok((codes, presence))
 }
 
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it

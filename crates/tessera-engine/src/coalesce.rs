@@ -501,6 +501,7 @@ mod tests {
                 path: "terms/terms-0.dict".to_string(),
                 records: 4,
             }],
+            attr_extents: Vec::new(),
             external_id_runs: vec!["entities/external-ids-0.arrow".to_string()],
             locator_extents: Vec::new(),
             tombstones: Vec::new(),

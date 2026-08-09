@@ -443,12 +443,23 @@ through files the first attempt has mapped:
 | File | What it is |
 |---|---|
 | `morton.u32` | the segment's sorted codes — every flush segment is internally Morton-sorted against the same slice bounds, so a tile resolves to one contiguous range per segment through the same binary search |
-| `columns.arrow` | `(tessera_id, residual, …declared scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046) |
+| `columns.arrow` | `(tessera_id, residual, …**render** scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046). A buffered row carries one value per *declared* column, which is what the commit window indexes a category key by, so the flush selects the render subset **by position** before it writes — the tail must match the build's, and a `filter`-only column has no slot in any row (§10.3) |
 | *(no `permutation.bin`)* | the segment's entity→row extent is built **in memory** and never written: its bounds ride the manifest's `segments` entry, and its row map is **rebuilt at open from the segment's own `tessera_id` column** by inverting the identity key — nothing on disk carries it, deliberately (a per-segment permutation file sized to the bundle's whole entity space is the wrong shape for a few thousand ids at the top of it). *Contracts §2.6's streamed-segment `permutation.bin` was stale and is corrected at r16 — caught by this document's fidelity review after r2 had laundered it* |
 | `delta.arrow` | the **sparse delta postings tier**: term → entities, only for terms present in the flushed set, tagged records as base postings. *(Contracts §2.4 names this `terms/deltas-<n>.arrow`; the built layout is the per-segment path above, with the manifest's `files` map and segment list carrying the truth — a contract correction is proposed, spec §13.3)* |
 | an external-id **run** | the flushed `(external_id, entity)` pairs, sorted by caller key — a run, not an extent: nothing orders two runs against each other (contracts §2.4) |
 | a **locator extent** | entity→ordinal for the flushed range, run-local ordinals — the drill-down direction for flushed entities, without which `/v1/items` would fail for them once their WAL region is reclaimed |
 | a **dictionary extent** | only when the flush promotes (below) |
+
+Two files per filterable column are written **outside** the segment directory, under
+`partitions/<phash>/attrs/<column>/extents/<seg_id>.{arrow,roaring}`: the values of the entities this
+flush published, and the presence bitmap saying which entities they belong to. The value column is
+entity space and slice-invariant, so it lives beside no segment — and one is written for every
+column the schema declares filterable, including a column no flushed entity carries a value in, so
+what a flush produces is a function of the schema rather than of the data. `filter-index.md` §2.1
+owns the artefact; what this section owes it is that the presence bitmap is **never** omitted here
+(a flush's entities start above the build's high-water, so positional addressing would misaddress
+every value) and that both files are named in the side-manifest's `attr_extents` as well as digested
+in `files`, so a missing one refuses rather than reading as "those entities carry no value".
 
 **The watermark the flush publishes is `entity_hi + 1`.** Composition treats entities at or
 above the watermark as buffer-resident, so `entity_hi` exactly would leave the highest flushed
@@ -507,29 +518,35 @@ completed flush already wrote), the executor:
    ordinals are positions and no longer the positions it assigned; a non-promoting flush is
    exempt — its tier names only ordinals below the planned length, which append-only extension
    preserves).
-2. **Assembles the side-manifest at publication, from the live partition manifest** — never from
+2. **Composes the flush's filter extents onto the live generation's columns, before the manifest
+   is written**, refusing — and discarding the flush — if an extent claims an entity a layer
+   already holds. That cannot happen while **I9** holds, which is why it is a check and not a
+   comment: the symptom would be an entity carrying two values at once, and a discard here leaves
+   the same orphans-and-retry posture every other flush failure does, where publishing first would
+   leave a committed manifest naming extents no reader may compose.
+3. **Assembles the side-manifest at publication, from the live partition manifest** — never from
    a plan-time clone: `n` from the executor's counter; watermark; `entity_id_high_water` (max of
-   live and the flush's); the segment appended; the run, locator extent and (if promoting)
-   dictionary extent appended; the `files` map extended; and **the deny fields serialised fresh
+   live and the flush's); the segment appended; the run, locator extent, filter extents and (if
+   promoting) dictionary extent appended; the `files` map extended; and **the deny fields serialised fresh
    from the live overlay** — `deny` = the suppression bitmap, `tombstones` = the deleted bitmap
    — so a suppression accepted during the flush's flight is in the manifest the flush publishes.
    Contracts §2.3 makes each `SEGMENTS-<n>.json` complete current state, and *current* is
    decided here. (Assembling on the executor is forced, not preferred: with `n` fixed at
    dispatch, a deny publication during the flight takes a higher `n`, the committed flush
    manifest is never the newest, and a restore silently loses the segment.)
-3. **Writes the manifest — the commit point.** Failure discards the flush: files become orphans,
+4. **Writes the manifest — the commit point.** Failure discards the flush: files become orphans,
    the buffer is retained, the next tick re-plans. Because every file was made durable on the
    pool before submission, contracts §2.3's "written after every file it names is durable"
    holds.
-4. **Swaps**: the new generation shares the bundle base and adds the segment and its extent
+5. **Swaps**: the new generation shares the bundle base and adds the segment and its extent
    (row space is base permutation + ordered extent list; `row_base` = the slice's current row
    total; refused if the row space moved under the flush); the buffer minus **exactly the
    consumed ids** (an O(buffered) clone on the executor — the measured head-of-line term the
-   deny lane sees, spec §5.7); the delta tier appended; the promoted dictionary;
-   `segments_version + 1`; and `denied[slice]` **re-derived against the new row space** — the
+   deny lane sees, spec §5.7); the delta tier appended; the promoted dictionary; the filter
+   columns composed at step 2; `segments_version + 1`; and `denied[slice]` **re-derived against the new row space** — the
    moment a suppressed-or-deleted-while-buffered item acquires a row is the moment it enters the
    row-space mask.
-5. **Prunes** row-projection cache entries more than one generation back
+6. **Prunes** row-projection cache entries more than one generation back
    (`KEEP_SUPERSEDED_GENERATIONS = 1` — the depth the patch needs; the superseded generation
    itself is retained only by requests still holding its `Arc`).
 
