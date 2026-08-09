@@ -48,6 +48,45 @@ nothing, and a broad principal — which fills the cache fastest — was the wor
 Bands now remember their own tile index, and the cost scales with what is drawn: 211,900 marks cost
 6.0 ms and 5,700 cost 0.4 ms.
 
+**Then the buffers stopped being rebuilt.** A redraw used to concatenate every drawn mark into fresh
+typed arrays and hand deck.gl new references, which is a full re-upload whether or not anything had
+changed. With a persistent slab — one buffer, a stable slot per band, written once — the steady frame
+is a residency check:
+
+| | select | assemble | slab | stand-in colour | redraw |
+|---|---|---|---|---|---|
+| 35,296 marks / 24,462 bands | 0.6 ms | 0.1 ms | 0.1 ms | 0.0 ms | **0.8 ms** |
+
+Assembly is 0.1 ms because exact bands are no longer copied at all — they are handed to the slab by
+reference, and only the stand-in bands, whose clip changes whenever a response lands, are still
+concatenated per frame. Across the seven pans redraw ran 0.8–4.2 ms, the high end being `select`
+under 6,359 stand-in bands rather than anything the slab does.
+
+**Then the frame stopped being re-derived.** At a 10⁶-mark budget the same redraw measured 18–26 ms,
+and none of it was the slab: deriving the frame is per-*band* work, and a zoom-in leaves 3.9 × 10⁴
+stand-in bands carrying 2.0 × 10⁵ marks between them — five marks each.
+
+| | select | assemble | slab | stand-in colour |
+|---|---|---|---|---|
+| 39,121 stand-in bands | 5.9 ms | 18.6 ms | 1.2 ms | 0.5 ms |
+
+The cost is per band and not per mark, which two negative results establish. Short-circuiting the
+per-point restriction where a band's tile sits wholly inside the clip changed nothing measurable —
+**every** stand-in band was already whole (12,639 of 12,639), so no per-point filtering was running.
+And a micro-benchmark of the concat at that exact shape — 1.96 × 10⁵ marks in 3.9 × 10⁴ pieces —
+costs 2.8 ms, against the 18.6 ms measured. What remains is ~0.8 µs of overhead per band, spread
+across the region query, the restriction and the column fold.
+
+A derived frame is now reused while the depth, the store's change counter and a containing rectangle
+all hold, so it is derived when the store changes rather than on every animation frame. Measured in
+the browser on the broad principal: a 350 px drag produces **6–8** frame derivations, one per
+arriving response, against one per rendered frame before.
+
+**The upload is still not measured, and is the reason to be careful about this table.** This harness
+has no GPU. What it establishes is that the *CPU* side of a steady frame is now under a millisecond
+and that no buffer is rebuilt; whether the remaining upload on an arrival frame is what a user feels
+is a question only real hardware answers.
+
 ## Anticipation, bounded in bytes
 
 With three bites per still period the ring moved **7.6–12.7 MB per pan at a 5 × 10⁴ mark budget** —

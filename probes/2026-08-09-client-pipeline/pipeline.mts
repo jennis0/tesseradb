@@ -10,7 +10,8 @@ import {TesseraClient} from '../../clients/ts/core/src/client.js';
 import {Replica} from '../../clients/ts/core/src/replica.js';
 import {plan} from '../../clients/ts/core/src/prefetch.js';
 import {inlineDecoder} from '../../clients/ts/core/src/decoder.js';
-import {assemble} from '../../clients/ts/viewer/src/assemble.js';
+import {assemble, assembledMarks} from '../../clients/ts/viewer/src/assemble.js';
+import {MarkSlab} from '../../clients/ts/viewer/src/slab.js';
 import {bandsOfResult} from '../../clients/ts/core/src/bands.js';
 import {buildColourAttribute} from '../../clients/ts/viewer/src/colour.js';
 
@@ -34,6 +35,7 @@ const terms = Array.from({length: 201}, (_, i) => String(i));
 const session = await client.authorise(terms);
 const meta = await client.meta(session.token);
 
+const slab = new MarkSlab();
 let requests = 0;
 let bytes = 0;
 let wireMs = 0;
@@ -88,7 +90,7 @@ for (let step = 0; step < STEPS; step++) {
   const ta = performance.now();
   const assembled = assemble(frame, ['primary_category']);
   const asmMs = performance.now() - ta;
-  const drawn = assembled.ids.length;
+  const drawn = assembledMarks(assembled);
 
   // The redraw path on its own: what a *frame* costs when nothing is fetched. This is what runs on
   // every animation frame of a drag, so it is the number that decides whether panning is smooth.
@@ -114,15 +116,29 @@ for (let step = 0; step < STEPS; step++) {
   const asmNoCols = phase('asm(0col)', () => void assemble(f, []));
   const asmCols = phase('asm(1col)', () => void assemble(f, ['primary_category']));
   const a = assemble(f, ['primary_category']);
-  const colourP = phase('colour', () =>
-    void buildColourAttribute(a.ids.length, a.scalars, {kind: 'uniform'})
+  // The slab, warmed first: what is being measured is the *steady* frame, where every band already
+  // has a slot and the whole call is a residency check. The first sync writes them and is the
+  // arrival cost, which the fetch phases above already carry.
+  slab.sync(a.bands, a.depth, {kind: 'uniform'}, null);
+  const slabP = phase('slab', () => void slab.sync(a.bands, a.depth, {kind: 'uniform'}, null));
+  const standInP = phase('stand-in colour', () =>
+    void buildColourAttribute(a.provisional, a.standIn.scalars, {kind: 'uniform'})
   );
-  const redrawMs = selectP.ms + asmCols.ms + colourP.ms;
+  const redrawMs = selectP.ms + asmCols.ms + slabP.ms + standInP.ms;
+  if (redrawMs > 8) {
+    console.log(
+      `      [redraw ${step}] ${redrawMs.toFixed(1)} ms = select ${selectP.ms.toFixed(1)} ` +
+        `+ assemble ${asmCols.ms.toFixed(1)} + slab ${slabP.ms.toFixed(1)} ` +
+        `+ stand-in colour ${standInP.ms.toFixed(1)} | exact ${a.bands.length} bands, ` +
+        `stand-in ${a.provisional} marks over ${f.fallback.length} bands`
+    );
+  }
   if (step === STEPS - 1) {
     console.log(
-      `\n  breakdown at ${a.ids.length} marks / ${replica.bandCount} bands: ` +
+      `\n  breakdown at ${assembledMarks(a)} marks / ${replica.bandCount} bands: ` +
         `select ${selectP.ms.toFixed(1)} | assemble ${asmCols.ms.toFixed(1)} ` +
-        `(without scalars ${asmNoCols.ms.toFixed(1)}) | colour ${colourP.ms.toFixed(1)} ms`
+        `(without scalars ${asmNoCols.ms.toFixed(1)}) | slab ${slabP.ms.toFixed(1)} ` +
+        `| stand-in colour ${standInP.ms.toFixed(1)} ms`
     );
   }
 
