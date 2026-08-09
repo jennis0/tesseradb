@@ -69,8 +69,8 @@ broken by a plausible-looking change:
   suppression applies to every request the moment it is accepted, whatever stamp was presented.
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
-machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Five
-of the thirteen invariants are currently covered as designed; six have no coverage, four of them
+machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Six
+of the thirteen invariants are currently covered as designed; five have no coverage, three of them
 for want of an implementation to test rather than for want of a test.
 
 ## Working method

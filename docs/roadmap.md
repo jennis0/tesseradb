@@ -172,8 +172,8 @@ or refreshes credentials, and retrieving a visible set by reference is literally
 > [#83 Derive vocabulary visibility][#83]
 
 An item becomes more than a coordinate. [#42] lets a deployment declare per-item columns at build
-time and serves them; [#43] makes them filterable, and needs [#42] first because the service
-advertises an empty operand list until something populates one.
+time and serves them; [#43] makes them filterable, and needed [#42] first because the service
+advertised an empty operand list until something populated one.
 
 **[#42] and [#82] are closed.** A `schema.toml` compiles into the manifest, both build
 implementations emit the columns, flush, merge and the fold carry them, a vocabulary can be
@@ -182,15 +182,28 @@ which is what makes a category renderable rather than merely present. Both oblig
 itself are discharged: the differential oracle runs over a non-empty column set, and the attribute
 channels are in the leak register (C11, C22, C23).
 
-**What that leaves is [#83], and it constrains only itself.** `listing = "per_viewer"` is refused
-until the per-`(column, code)` membership sets exist, so a deployment whose value *names* are
-sensitive cannot yet have them; `public` vocabularies are unaffected. The artefact is measured at
-0.31–1.01× the render column it indexes, so it is a sizing question rather than a feasibility one.
-It can land beside [#43] and blocks nothing.
+**[#43] is largely closed, and what remains of it is one thing.** Categories and strings are
+filterable end to end — a flat entity-indexed value column scanned under the composed candidate,
+per-value Roaring postings derived over it for categories, `all_of`/`any_of` composition
+(decision 0059), the operand on `/v1/viewport`, the per-column operator list on `/v1/meta`, and a
+conformance differential that moves **I12's mask half to covered**. What is *not* built is the
+per-flush value-column extent: an entity allocated since the build carries no filter values, so a
+filter whose candidate reaches one is **refused rather than answered short**. That is the binding
+constraint on making the feature usable in a deployment that ingests, and it constrains nothing
+else. Numeric ranges are refused at schema parse with the reason named.
+
+**[#83]'s input now exists.** A `per_viewer` category gets its membership postings whatever its
+`used_for` says, so the artefact §3.3's predicate was waiting on is emitted. `/v1/categories` still
+refuses rather than filtering — that is engine work, not an absent artefact — and one amendment is
+owed with it: contracts §3.2 classifies the endpoint outside the compute-admission gate on the
+grounds that it does *"no mask composition, no projection, no file IO"*, and the gate needs the
+session's fragment and a bitmap intersection per value.
 
 The shape is deliberate and worth preserving under pressure: filters are order-independent set
-producers composed by intersection. The leak register can be exhaustive because there are about
-five retrieval shapes; a general expression endpoint could not be enumerated that way. New
+producers, composed as a boolean tree **evaluated inside the candidate** (decision 0059) — which is
+what keeps every node a subset of the principal's own mask, and I12 a property of the expression's
+shape rather than a check. The leak register can be exhaustive because the *leaves* are enumerable;
+a general expression endpoint over arbitrary predicates could not be. New
 capability enters through the filter contract (§8.2) so that expressiveness never reaches the
 authorisation layer.
 

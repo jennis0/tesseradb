@@ -67,22 +67,22 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r36 | 21 |
+| `architecture.md` | Normative — r38 | 22 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
-| `conformance.md` | Normative — r8 | 15 |
-| `contracts.md` | Normative — r25 | 18 |
+| `conformance.md` | Normative — r9 | 15 |
+| `contracts.md` | Normative — r26 | 20 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
-| `filter-index.md` | Provisional — under review | 2 |
-| `filter-surface.md` | Provisional — under review | 5 |
+| `filter-index.md` | Provisional — under review | 6 |
+| `filter-surface.md` | Provisional — under review | 7 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
-| `per-point-attributes.md` | Provisional — under review | 6 |
+| `per-point-attributes.md` | Provisional — under review | 7 |
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
 | `system-architecture.md` | Normative — r14 | 24 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
