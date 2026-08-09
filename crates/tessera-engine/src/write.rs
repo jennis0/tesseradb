@@ -1610,6 +1610,24 @@ pub enum AcceptError {
         y: f32,
         quantisation: tessera_store::manifest::Quantisation,
     },
+    /// A row carries a number of scalars other than one per declared column.
+    ///
+    /// **The commit window indexes `row.scalars` positionally against `MANIFEST.declared_scalars`**
+    /// — that is how a category's key finds its vocabulary — so arity is not a convenience here, it
+    /// is what makes the index in bounds. Without this check a short row panicked inside the write
+    /// executor and surfaced to the caller as a lost receipt.
+    ///
+    /// Checked at the engine's boundary for the same more-than-one-caller reason as
+    /// [`Self::OutsideExtent`]: the invariant is *every buffered row carries one scalar per declared
+    /// column*, which is a fact about the buffer, and the HTTP handler is only one of the buffer's
+    /// writers. Note the declared list is the **full** one, filterable-only columns included — a
+    /// caller supplies a value for every declared column, and only the *segment* narrows to the
+    /// render ones.
+    ScalarArity {
+        index: usize,
+        expected: usize,
+        got: usize,
+    },
     /// A partition is serving a stepped-down side-manifest (owner-ruled gate, 2026-08-04;
     /// write-path §5.6). Ingest is refused **at the engine's boundary**, for the same
     /// more-than-one-caller reason as [`Self::OutsideExtent`]: a stepped-down node that accepted
@@ -1626,6 +1644,16 @@ impl std::fmt::Display for AcceptError {
         match self {
             AcceptError::Submit(e) => write!(f, "{e}"),
             AcceptError::Exec(e) => write!(f, "{e}"),
+            AcceptError::ScalarArity {
+                index,
+                expected,
+                got,
+            } => write!(
+                f,
+                "row {index} carries {got} scalars, but the schema declares {expected}. Every \
+                 declared column needs a value, in declaration order — including a column declared \
+                 only for filtering"
+            ),
             AcceptError::OutsideExtent {
                 index,
                 x,

@@ -496,3 +496,53 @@ fn a_filter_refuses_rather_than_answering_short_after_a_flush() {
         .resolve("department", &FilterOperand::Equals(eng), &below)
         .is_ok());
 }
+
+/// **A row carrying the wrong number of scalars is refused, not a panic.**
+///
+/// The commit window indexes `row.scalars` positionally against `declared_scalars` to find a
+/// category key's vocabulary, so a short row indexed out of bounds — panicking inside the write
+/// executor and reaching the caller as a lost receipt, which reads as an infrastructure fault
+/// rather than the malformed request it is.
+#[test]
+fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-arity");
+    let wal = fx._dir.path().join("wal-arity");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let short = UnallocatedRow {
+        external_id: Some(b"short".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        // The schema declares two columns.
+        scalars: vec![WalScalar::Utf8("eng".to_string())],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    };
+    let err = engine
+        .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
+        .expect_err("a short row is refused");
+    assert!(
+        format!("{err}").contains("carries 1 scalars, but the schema declares 2"),
+        "{err}"
+    );
+
+    // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
+    // (I9) and leaves the executor running.
+    let good = UnallocatedRow {
+        external_id: Some(b"good".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("paper-98".to_string()),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    };
+    assert!(engine
+        .accept_ingest(vec![good], "batch-good".to_string(), [2u8; 32])
+        .is_ok());
+}

@@ -1550,7 +1550,9 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
         AcceptError::Exec(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
         // Ingest-only, and refused before the submit — unreachable from a change, and in force in
         // no sense even if it were.
-        AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => false,
+        AcceptError::OutsideExtent { .. }
+        | AcceptError::ScalarArity { .. }
+        | AcceptError::SteppedDown => false,
     };
     if in_force {
         tracing::error!(

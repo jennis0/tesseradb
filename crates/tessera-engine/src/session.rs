@@ -1997,6 +1997,23 @@ impl Engine {
         if self.any_partition_stepped_down() {
             return Err(crate::write::AcceptError::SteppedDown);
         }
+        // **Arity before the submit.** The commit window indexes `row.scalars` positionally against
+        // `declared_scalars` to find a category key's vocabulary, so a short row indexed out of
+        // bounds and panicked the executor — surfacing as a lost receipt rather than a refusal.
+        // Checked here for the same reason the extent check is: the invariant is about the buffer,
+        // and the buffer has more than one writer.
+        let declared = self.meta().declared_scalars.len();
+        if let Some((index, row)) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.scalars.len() != declared)
+        {
+            return Err(crate::write::AcceptError::ScalarArity {
+                index,
+                expected: declared,
+                got: row.scalars.len(),
+            });
+        }
         let quantisation = self.meta().quantisation;
         if let Some((index, row)) = rows
             .iter()

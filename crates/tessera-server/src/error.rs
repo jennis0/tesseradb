@@ -490,7 +490,11 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::VocabularyRefused { detail }) => {
             ApiError::Contract(detail.clone())
         }
-        e @ AcceptError::OutsideExtent { .. } => ApiError::Contract(e.to_string()),
+        // Both are the caller's row, malformed in a way the engine refused before anything was
+        // acked or WAL-durable — a contract answer, not a fault.
+        e @ (AcceptError::OutsideExtent { .. } | AcceptError::ScalarArity { .. }) => {
+            ApiError::Contract(e.to_string())
+        }
     }
 }
 
@@ -571,7 +575,9 @@ pub fn map_change_batch_error(
             AcceptError::Submit(e) => e.may_have_taken_effect(),
             // Refused before the submit, so it never reached the executor. Ingest-only in
             // practice; named rather than folded, per this function's own rule.
-            AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => false,
+            AcceptError::OutsideExtent { .. }
+            | AcceptError::ScalarArity { .. }
+            | AcceptError::SteppedDown => false,
         });
     if !reached_executor {
         tracing::error!(
@@ -585,7 +591,9 @@ pub fn map_change_batch_error(
         || failures.iter().any(|(op, f)| match f {
             AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
             AcceptError::Submit(e) => e.may_have_taken_effect(),
-            AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => false,
+            AcceptError::OutsideExtent { .. }
+            | AcceptError::ScalarArity { .. }
+            | AcceptError::SteppedDown => false,
         });
     // The exact negation, item by item, so no item can be counted in both halves or in neither. A
     // `ReceiptLost` is in neither category's *certain* sense — it lands in `may_be_in_force` and out
@@ -595,7 +603,9 @@ pub fn map_change_batch_error(
         AcceptError::Exec(e) => !exec_failure_may_be_in_force(*op, e),
         AcceptError::Submit(e) => !e.may_have_taken_effect(),
         // Refused before the submit: certainly not applied, which is this half's sense exactly.
-        AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => true,
+        AcceptError::OutsideExtent { .. }
+        | AcceptError::ScalarArity { .. }
+        | AcceptError::SteppedDown => true,
     });
 
     tracing::error!(
