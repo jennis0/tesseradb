@@ -138,7 +138,7 @@ impl DeltaTier {
             .expect("memmap2::Mmap never returns a null base pointer");
         let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
 
-        let batch = decode_single_batch(&buffer)?;
+        let batch = decode_single_batch(&buffer, "delta tier")?;
         if batch.num_columns() != 2 {
             return Err(invalid_data(format!(
                 "delta tier: expected two columns, found {}",

@@ -321,7 +321,7 @@ impl PostingsReader {
             Buffer::from_vec(data)
         };
 
-        let batch = decode_single_batch(&buffer)?;
+        let batch = decode_single_batch(&buffer, "postings.arrow")?;
 
         if batch.num_columns() != 1 {
             return Err(invalid_data(format!(
@@ -478,12 +478,15 @@ pub(crate) fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
 
 /// Decode the (single) record batch of an Arrow IPC FILE held in `buffer`, without copying its
 /// buffers (subject to alignment — see [`FileDecoder::with_require_alignment`]'s default).
-pub(crate) fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
+///
+/// `what` names the artefact in error messages. It is public because the attribute value column is
+/// read the same way and by the same argument — a mapped file whose values must not be copied on
+/// open — and one decoder read by two crates is worth more than a second copy of this footer
+/// arithmetic (`tessera_filter::values::read_values`).
+pub fn decode_single_batch(buffer: &Buffer, what: &str) -> io::Result<RecordBatch> {
     const FOOTER_TRAILER_LEN: usize = 10; // 4-byte footer length + 6-byte "ARROW1" magic
     if buffer.len() < FOOTER_TRAILER_LEN {
-        return Err(invalid_data(
-            "postings.arrow: file too short to contain a footer",
-        ));
+        return Err(invalid_data(format!("{what}: file too short to contain a footer")));
     }
 
     let trailer_start = buffer.len() - FOOTER_TRAILER_LEN;
@@ -491,19 +494,17 @@ pub(crate) fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
         .try_into()
         .expect("slice length matches FOOTER_TRAILER_LEN");
     let footer_len =
-        read_footer_length(trailer).map_err(|e| invalid_data(format!("postings.arrow: {e}")))?;
+        read_footer_length(trailer).map_err(|e| invalid_data(format!("{what}: {e}")))?;
     if footer_len > trailer_start {
-        return Err(invalid_data(
-            "postings.arrow: footer length exceeds file size",
-        ));
+        return Err(invalid_data(format!("{what}: footer length exceeds file size")));
     }
 
     let footer = root_as_footer(&buffer[trailer_start - footer_len..trailer_start])
-        .map_err(|e| invalid_data(format!("postings.arrow: invalid footer: {e}")))?;
+        .map_err(|e| invalid_data(format!("{what}: invalid footer: {e}")))?;
 
     let schema_fb = footer
         .schema()
-        .ok_or_else(|| invalid_data("postings.arrow: footer has no schema"))?;
+        .ok_or_else(|| invalid_data(format!("{what}: footer has no schema")))?;
     let schema: SchemaRef = Arc::new(arrow::ipc::convert::fb_to_schema(schema_fb));
 
     let version: MetadataVersion = footer.version();
@@ -515,16 +516,16 @@ pub(crate) fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
             let data = buffer.slice_with_length(offset, block_len);
             decoder
                 .read_dictionary(block, &data)
-                .map_err(|e| invalid_data(format!("postings.arrow: {e}")))?;
+                .map_err(|e| invalid_data(format!("{what}: {e}")))?;
         }
     }
 
     let batches = footer
         .recordBatches()
-        .ok_or_else(|| invalid_data("postings.arrow: footer has no record batches"))?;
+        .ok_or_else(|| invalid_data(format!("{what}: footer has no record batches")))?;
     if batches.len() != 1 {
         return Err(invalid_data(format!(
-            "postings.arrow: expected exactly one record batch, found {}",
+            "{what}: expected exactly one record batch, found {}",
             batches.len()
         )));
     }
@@ -535,8 +536,8 @@ pub(crate) fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
 
     decoder
         .read_record_batch(block, &data)
-        .map_err(|e| invalid_data(format!("postings.arrow: {e}")))?
-        .ok_or_else(|| invalid_data("postings.arrow: record batch block decoded to nothing"))
+        .map_err(|e| invalid_data(format!("{what}: {e}")))?
+        .ok_or_else(|| invalid_data(format!("{what}: record batch block decoded to nothing")))
 }
 
 /// Validate a footer `Block`'s `(offset, bodyLength + metaDataLength)` against the file length,

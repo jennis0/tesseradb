@@ -222,10 +222,39 @@ is what the per-value loop was already paying.
 embarrassingly parallel, but it borrows capacity from concurrent requests, which the
 compute-admission gate exists to ration — so it is a concurrency decision rather than a free win.
 
-**The residency problem this does not touch.** `FilterColumns::open` materialises every declared
-column into memory at generation open — tens of GB at 10⁹ × 16 columns, paid whether or not a filter
-is ever issued. That is a bigger operational term than anything measured here, and it is the next
-change rather than a further constant-factor one.
+**The residency problem this does not touch** is arm 5's.
+
+## Arm 5 — what a generation pays to *open* its filter columns
+
+Every declared filter column is opened at once at generation open and held for the process lifetime,
+so residency is a term a deployment pays whether or not anyone ever filters. `residency`
+([`layoutprobe/src/bin/residency.rs`](layoutprobe/src/bin/residency.rs), raw
+[`run-residency.csv`](run-residency.csv)) opens eight 10⁸-entity `u32` columns — 3.2 GB of values —
+and reads RSS from `/proc/self/statm`, which counts *resident* pages rather than virtual size. One
+arm per process, because the read arm's freed pages would otherwise sit in the allocator's arena and
+flatter the mapped one.
+
+| | Open | Resident after open | After one 1% scan | Scan, cold | warm |
+|---|---|---|---|---|---|
+| read into memory | 2,196 ms | **3,301 MB** | 3,301 MB | 0.35 ms | 0.27 ms |
+| mapped | **0.2 ms** | **2 MB** | 6 MB | 0.26 ms | 0.24 ms |
+
+**Three orders of magnitude on open latency and 1,650× on resident bytes, and the scan is
+unaffected.** The mapped arm resides only what it touches: 2 MB at open, 6 MB after a scan that
+reads 4 MB of one column. Extrapolated at the ratio the design sizes against — 10⁹ entities, 16
+declared columns at `u32` — the read path is **64 GB resident before a single filter arrives**, and
+the mapped path is the working set of whatever is actually scanned.
+
+**The scan figures here are warm-page-cache and should not be read as a cold-start claim.** The
+files had just been written, so neither arm paid disk. What the comparison does establish is that
+mapping costs the scan nothing once the pages are resident, and that the read arm pays its I/O for
+**every declared column** at open where the mapped arm pays it only for the columns a request
+touches. A genuinely cold first scan would pay disk on either path; only the read path pays it
+sixteen times over for columns nobody asked about.
+
+**This is why `FilterColumns::open` takes an `mmap` flag and the engine passes `true`** — the same
+construction and the same argument as `PostingsReader::open`, which the auth index has used since it
+was built.
 
 ## Arm 3 — getting the result into row space
 

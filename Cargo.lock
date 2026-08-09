@@ -2383,6 +2383,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "croaring",
+ "memmap2",
  "tempfile",
  "tessera-authz",
  "tessera-types",

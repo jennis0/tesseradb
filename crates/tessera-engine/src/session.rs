@@ -849,6 +849,10 @@ impl Engine {
                     &partition_dir,
                     &bundle.manifest.declared_scalars,
                     u32::try_from(bundle.manifest.entity_id_high_water).unwrap_or(u32::MAX),
+                    // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
+                    // declared column at once and holds them for the process lifetime, so the
+                    // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
+                    true,
                 )
                 .map_err(|e| EngineError::Store(tessera_store::StoreError::Io {
                     path: partition_dir.clone(),

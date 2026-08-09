@@ -1,0 +1,3 @@
+mode,n,columns,open_ms,rss_after_open_mb,rss_after_one_scan_mb,scan_cold_ms,scan_warm_ms
+read,100000000,8,2195.9,3301,3301,0.35,0.27
+mmap,100000000,8,0.2,2,6,0.26,0.24

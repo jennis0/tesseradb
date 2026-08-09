@@ -35,7 +35,9 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
+use arrow::buffer::{Buffer, ScalarBuffer};
 use croaring::{Bitmap, Portable};
 use tessera_types::AttrLocalId;
 
@@ -106,21 +108,29 @@ pub const PRESENCE_FILE: &str = "presence.roaring";
 /// per 10⁹ items, and the entity-space column is priced the same way — 1 GB per byte of width at
 /// 10⁹, per declared column (Appendix A). Widening a category from `u8` to `u32` to avoid a match
 /// arm here would cost 3 GB.
+///
+/// **The buffers are `ScalarBuffer`, not `Vec`, and that is what makes the column mappable.** A
+/// `ScalarBuffer<T>` dereferences to `&[T]` and owns a reference-counted Arrow `Buffer` underneath,
+/// which may be an ordinary allocation *or* a window onto a memory map — so the same enum serves a
+/// column built in memory and one opened from a bundle without a copy on either path. Holding
+/// `Vec`s instead would force every declared column to be read into the heap at generation open,
+/// which at 10⁹ × 16 columns is tens of GB paid whether or not a filter is ever issued. The scan
+/// itself is unaffected: it walks a `&[T]` either way.
 #[derive(Debug, Clone)]
 pub enum Codes {
-    U8(Vec<u8>),
-    U16(Vec<u16>),
-    U32(Vec<u32>),
-    U64(Vec<u64>),
-    I8(Vec<i8>),
-    I16(Vec<i16>),
-    I32(Vec<i32>),
+    U8(ScalarBuffer<u8>),
+    U16(ScalarBuffer<u16>),
+    U32(ScalarBuffer<u32>),
+    U64(ScalarBuffer<u64>),
+    I8(ScalarBuffer<i8>),
+    I16(ScalarBuffer<i16>),
+    I32(ScalarBuffer<i32>),
     /// Also `timestamp_us` — microseconds since the epoch, stored as the `i64` it is. The *type*
     /// exists so the unit is in the manifest rather than a convention between a schema author and
     /// their client; the storage and the comparison are an `i64`'s.
-    I64(Vec<i64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
+    I64(ScalarBuffer<i64>),
+    F32(ScalarBuffer<f32>),
+    F64(ScalarBuffer<f64>),
     /// UTF-8 values, concatenated, with `offsets[k]..offsets[k+1]` delimiting slot `k`.
     ///
     /// **A string column carries no dictionary and no index, and that is the design rather than a
@@ -132,9 +142,13 @@ pub enum Codes {
     ///
     /// Interning would also not be free of consequence: it is what made a value's identity durable,
     /// and a durable per-value identity is what the C11 ordinal hazard lives in.
+    ///
+    /// **The offsets are 64-bit**, which is a capacity requirement rather than a preference: Arrow's
+    /// 32-bit `Utf8` caps a column's concatenated bytes at 2 GiB, and a 10⁹-entity string column
+    /// passes that at two bytes per value. The file is written as `LargeUtf8` for the same reason.
     Text {
-        bytes: Vec<u8>,
-        offsets: Vec<u32>,
+        bytes: Buffer,
+        offsets: ScalarBuffer<i64>,
     },
 }
 
@@ -175,12 +189,15 @@ impl Codes {
     /// Build a text column from values in slot order.
     pub fn text(values: impl IntoIterator<Item = String>) -> Codes {
         let mut bytes = Vec::new();
-        let mut offsets = vec![0u32];
+        let mut offsets = vec![0i64];
         for v in values {
             bytes.extend_from_slice(v.as_bytes());
-            offsets.push(bytes.len() as u32);
+            offsets.push(bytes.len() as i64);
         }
-        Codes::Text { bytes, offsets }
+        Codes::Text {
+            bytes: Buffer::from_vec(bytes),
+            offsets: offsets.into(),
+        }
     }
 
     #[inline]
@@ -783,17 +800,25 @@ impl ValueColumn {
     /// and a filter reporting items as carrying values they do not have. The presence file's
     /// existence *is* the signal that addressing is not positional, so the two must be resolved
     /// together.
-    pub fn open_dir(dir: &Path) -> io::Result<Self> {
+    pub fn open_dir(dir: &Path, mmap: bool) -> io::Result<Self> {
         let presence = dir.join(PRESENCE_FILE);
         Self::open(
             &dir.join(VALUES_FILE),
             presence.exists().then_some(presence.as_path()),
+            mmap,
         )
     }
 
     /// Read a column from explicit paths. Prefer [`Self::open_dir`], which cannot mismatch them.
-    pub fn open(values_path: &Path, presence_path: Option<&Path>) -> io::Result<Self> {
-        let codes = read_values(values_path)?;
+    ///
+    /// **The presence bitmap is read into memory either way, and only the values are mapped.** The
+    /// asymmetry is the measured size ratio: at 10⁹ the values are 1 GB per byte of declared width
+    /// while the presence bitmap is 36 KB for the slice-blocked shape and 125 MB at its scattered
+    /// worst (probe `2026-08-08-filter-layout`). Roaring also wants its own owned representation to
+    /// answer a rank in the scan's inner loop, so mapping it would buy little and cost the run-merge
+    /// its structure.
+    pub fn open(values_path: &Path, presence_path: Option<&Path>, mmap: bool) -> io::Result<Self> {
+        let codes = read_values(values_path, mmap)?;
         match presence_path {
             None => Ok(ValueColumn::universal(codes)),
             Some(path) => {
@@ -810,76 +835,113 @@ impl ValueColumn {
     }
 }
 
-fn read_values(path: &Path) -> io::Result<Codes> {
-    use arrow::array::{Array, StringArray};
+/// Read a value column's Arrow IPC file **without copying its values**.
+///
+/// When `mmap` is set the file is mapped and the batch decoded straight out of the mapping; when it
+/// is not, the file is read into one owned buffer and decoded from that. Either way the `Codes`
+/// buffers are windows onto the backing bytes — the `ScalarBuffer`s hold the reference-counted
+/// `Buffer`, which owns the mapping, so the column stays valid for as long as it is held and the
+/// pages are faulted in on demand rather than at open. This is the same construction
+/// `PostingsReader::open` uses, for the same reason and with the same safety argument.
+///
+/// **The values file carries exactly one record batch**, and a second is refused rather than
+/// concatenated. Concatenating would copy — which is the whole cost this exists to avoid — and there
+/// is no bundle that holds a multi-batch value column: the writer emits one batch, and pre-release
+/// there is no past to be compatible with (decision 0048).
+fn read_values(path: &Path, mmap: bool) -> io::Result<Codes> {
+    use arrow::array::{Array, LargeStringArray};
     use arrow::datatypes::DataType;
 
-    let file = std::fs::File::open(path)?;
-    let reader = arrow::ipc::reader::FileReader::try_new(file, None)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let buffer = if mmap {
+        let file = std::fs::File::open(path)?;
+        // SAFETY: the same argument as `PostingsReader::open`'s mmap arm. `arc` owns the mapping
+        // for as long as any `Buffer` built from it is alive — it is captured as the buffer's
+        // `Allocation` — the mapping is valid for `len` bytes for its whole lifetime, and
+        // `memmap2::Mmap` never returns a null base pointer.
+        let mapping = unsafe { memmap2::Mmap::map(&file) }?;
+        let len = mapping.len();
+        let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
+        let ptr = std::ptr::NonNull::new(arc.as_ptr() as *mut u8)
+            .expect("memmap2::Mmap never returns a null base pointer");
+        unsafe { Buffer::from_custom_allocation(ptr, len, arc) }
+    } else {
+        Buffer::from_vec(std::fs::read(path)?)
+    };
 
-    // Accumulated per width rather than through one widened buffer: the declared width *is* the
-    // storage width (Appendix A prices it at 1 GB per byte per 10⁹ per column), so reading a `u8`
-    // column into `i64`s and narrowing afterwards would cost eight times the memory this exists to
-    // avoid.
-    macro_rules! collect {
-        ($batches:expr, $arr:ty, $ctor:expr) => {{
-            let mut out = Vec::new();
-            for batch in $batches {
-                let batch =
-                    batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-                let a = batch.column(0).as_any().downcast_ref::<$arr>().ok_or_else(|| {
+    // One record batch, refused rather than concatenated if there are more: the reader borrows its
+    // values from the batch's buffers instead of copying them, and concatenating is the copy this
+    // exists to avoid. `decode_single_batch` is where that rule is enforced.
+    let batch = tessera_authz::decode_single_batch(&buffer, &format!("{}", path.display()))?;
+    if batch.num_columns() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "value column at {}: expected exactly one column, found {}",
+                path.display(),
+                batch.num_columns()
+            ),
+        ));
+    }
+    let ty = batch.schema_ref().field(0).data_type().clone();
+
+    // Borrowed at the declared width rather than widened: the declared width *is* the storage width
+    // (Appendix A prices it at 1 GB per byte per 10⁹ per column), so reading a `u8` column through
+    // `i64`s would cost eight times the memory this exists to avoid — and here it would also cost
+    // the zero copy, since a widened value cannot be a window onto the file.
+    macro_rules! borrow {
+        ($arr:ty, $ctor:expr) => {{
+            let a = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<$arr>()
+                .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("value column at {}: batches disagree on type", path.display()),
+                        format!(
+                            "value column at {}: the batch disagrees with the schema's type",
+                            path.display()
+                        ),
                     )
                 })?;
-                out.extend(a.values().iter().copied());
-            }
-            $ctor(out)
+            $ctor(a.values().clone())
         }};
     }
 
-    let schema = reader.schema();
-    let ty = schema
-        .fields()
-        .first()
-        .map(|f| f.data_type().clone())
-        // An empty file is an empty column, not an error: a schema may declare a filterable column
-        // a corpus has no values for.
-        .unwrap_or(DataType::UInt8);
-
     Ok(match ty {
-        DataType::UInt8 => collect!(reader, arrow::array::UInt8Array, Codes::U8),
-        DataType::UInt16 => collect!(reader, arrow::array::UInt16Array, Codes::U16),
-        DataType::UInt32 => collect!(reader, arrow::array::UInt32Array, Codes::U32),
-        DataType::UInt64 => collect!(reader, arrow::array::UInt64Array, Codes::U64),
-        DataType::Int8 => collect!(reader, arrow::array::Int8Array, Codes::I8),
-        DataType::Int16 => collect!(reader, arrow::array::Int16Array, Codes::I16),
-        DataType::Int32 => collect!(reader, arrow::array::Int32Array, Codes::I32),
-        DataType::Int64 => collect!(reader, arrow::array::Int64Array, Codes::I64),
-        DataType::Float32 => collect!(reader, arrow::array::Float32Array, Codes::F32),
-        DataType::Float64 => collect!(reader, arrow::array::Float64Array, Codes::F64),
-        DataType::Utf8 => {
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut offsets: Vec<u32> = vec![0];
-            for batch in reader {
-                let batch =
-                    batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-                let a = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("schema says utf8");
-                // Materialised rather than borrowed: `Codes::Text` owns its bytes, and
-                // `StringArray` has already validated UTF-8, so the concatenation needs no second
-                // validation pass.
-                for k in 0..a.len() {
-                    bytes.extend_from_slice(a.value(k).as_bytes());
-                    offsets.push(bytes.len() as u32);
-                }
+        DataType::UInt8 => borrow!(arrow::array::UInt8Array, Codes::U8),
+        DataType::UInt16 => borrow!(arrow::array::UInt16Array, Codes::U16),
+        DataType::UInt32 => borrow!(arrow::array::UInt32Array, Codes::U32),
+        DataType::UInt64 => borrow!(arrow::array::UInt64Array, Codes::U64),
+        DataType::Int8 => borrow!(arrow::array::Int8Array, Codes::I8),
+        DataType::Int16 => borrow!(arrow::array::Int16Array, Codes::I16),
+        DataType::Int32 => borrow!(arrow::array::Int32Array, Codes::I32),
+        DataType::Int64 => borrow!(arrow::array::Int64Array, Codes::I64),
+        DataType::Float32 => borrow!(arrow::array::Float32Array, Codes::F32),
+        DataType::Float64 => borrow!(arrow::array::Float64Array, Codes::F64),
+        DataType::LargeUtf8 => {
+            let a = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "value column at {}: the batch disagrees with the schema's type",
+                            path.display()
+                        ),
+                    )
+                })?;
+            // The offsets and the bytes are the array's own buffers, so a text column maps exactly
+            // as a numeric one does. `LargeStringArray` validated UTF-8 on construction, which is
+            // what lets `text_at` slice by offset without a second validation pass — it still
+            // *checks* the conversion, because a corrupt file must fail closed on a request path
+            // rather than reinterpret bytes.
+            let offsets: ScalarBuffer<i64> = a.offsets().clone().into_inner();
+            Codes::Text {
+                bytes: a.values().clone(),
+                offsets,
             }
-            Codes::Text { bytes, offsets }
         }
         other => {
             return Err(io::Error::new(
@@ -892,6 +954,7 @@ fn read_values(path: &Path) -> io::Result<Codes> {
         }
     })
 }
+
 
 /// Write a value column, and its presence bitmap where presence is partial.
 ///
@@ -909,46 +972,61 @@ pub fn write_value_column(
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
+    // The array borrows the `Codes` buffers rather than rebuilding them, so writing a column costs
+    // no second copy of it — which matters most at the fold, where every column is rewritten.
     let (array, ty): (ArrayRef, DataType) = match codes {
-        Codes::U8(v) => (Arc::new(UInt8Array::from(v.clone())), DataType::UInt8),
-        Codes::U16(v) => (Arc::new(UInt16Array::from(v.clone())), DataType::UInt16),
-        Codes::U32(v) => (Arc::new(UInt32Array::from(v.clone())), DataType::UInt32),
+        Codes::U8(v) => (Arc::new(UInt8Array::new(v.clone(), None)), DataType::UInt8),
+        Codes::U16(v) => (
+            Arc::new(UInt16Array::new(v.clone(), None)),
+            DataType::UInt16,
+        ),
+        Codes::U32(v) => (
+            Arc::new(UInt32Array::new(v.clone(), None)),
+            DataType::UInt32,
+        ),
         Codes::U64(v) => (
-            Arc::new(arrow::array::UInt64Array::from(v.clone())),
+            Arc::new(arrow::array::UInt64Array::new(v.clone(), None)),
             DataType::UInt64,
         ),
         Codes::I8(v) => (
-            Arc::new(arrow::array::Int8Array::from(v.clone())),
+            Arc::new(arrow::array::Int8Array::new(v.clone(), None)),
             DataType::Int8,
         ),
         Codes::I16(v) => (
-            Arc::new(arrow::array::Int16Array::from(v.clone())),
+            Arc::new(arrow::array::Int16Array::new(v.clone(), None)),
             DataType::Int16,
         ),
         Codes::I32(v) => (
-            Arc::new(arrow::array::Int32Array::from(v.clone())),
+            Arc::new(arrow::array::Int32Array::new(v.clone(), None)),
             DataType::Int32,
         ),
         Codes::I64(v) => (
-            Arc::new(arrow::array::Int64Array::from(v.clone())),
+            Arc::new(arrow::array::Int64Array::new(v.clone(), None)),
             DataType::Int64,
         ),
         Codes::F32(v) => (
-            Arc::new(arrow::array::Float32Array::from(v.clone())),
+            Arc::new(arrow::array::Float32Array::new(v.clone(), None)),
             DataType::Float32,
         ),
         Codes::F64(v) => (
-            Arc::new(arrow::array::Float64Array::from(v.clone())),
+            Arc::new(arrow::array::Float64Array::new(v.clone(), None)),
             DataType::Float64,
         ),
-        Codes::Text { .. } => {
-            let n = codes.len();
-            let values: Vec<&str> = (0..n).map(|k| codes.text_at(k).unwrap_or("")).collect();
-            (
-                Arc::new(arrow::array::StringArray::from(values)),
-                DataType::Utf8,
-            )
-        }
+        // `LargeUtf8`, not `Utf8`: 32-bit offsets cap the concatenated bytes at 2 GiB, which a
+        // 10⁹-entity column passes at two bytes a value. `try_new` is what validates the offsets
+        // ascend and the bytes are UTF-8, so a column that could not be read back is refused here
+        // rather than at the next open.
+        Codes::Text { bytes, offsets } => (
+            Arc::new(
+                arrow::array::LargeStringArray::try_new(
+                    arrow::buffer::OffsetBuffer::new(offsets.clone()),
+                    bytes.clone(),
+                    None,
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
+            ),
+            DataType::LargeUtf8,
+        ),
     };
     let schema = Arc::new(Schema::new(vec![Field::new("value", ty, false)]));
     let batch = RecordBatch::try_new(schema.clone(), vec![array])
@@ -979,7 +1057,7 @@ mod tests {
 
     #[test]
     fn a_universal_column_scans_by_direct_index() {
-        let column = ValueColumn::universal(Codes::U8(vec![7, 3, 7, 9, 7]));
+        let column = ValueColumn::universal(Codes::U8(vec![7, 3, 7, 9, 7].into()));
         let hits = column.scan_eq(&candidate(0..5), AttrLocalId::new(7));
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2, 4]);
     }
@@ -988,7 +1066,7 @@ mod tests {
     /// from the result, and never contributes work either.
     #[test]
     fn the_candidate_bounds_the_result() {
-        let column = ValueColumn::universal(Codes::U8(vec![7, 3, 7, 9, 7]));
+        let column = ValueColumn::universal(Codes::U8(vec![7, 3, 7, 9, 7].into()));
         let hits = column.scan_eq(&candidate([0, 1, 3]), AttrLocalId::new(7));
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0]);
     }
@@ -997,7 +1075,7 @@ mod tests {
     fn a_partial_column_resolves_slots_through_presence() {
         // Entities 10, 20, 30 carry values; everything else carries none.
         let column =
-            ValueColumn::partial(Codes::U16(vec![100, 200, 100]), candidate([10, 20, 30])).unwrap();
+            ValueColumn::partial(Codes::U16(vec![100, 200, 100].into()), candidate([10, 20, 30])).unwrap();
         let hits = column.scan_eq(&candidate(0..40), AttrLocalId::new(100));
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![10, 30]);
         assert_eq!(column.value_of(20), Some(AttrLocalId::new(200)));
@@ -1008,13 +1086,13 @@ mod tests {
     /// would pair every entity after the discrepancy with another entity's value.
     #[test]
     fn a_presence_count_mismatch_is_refused() {
-        let err = ValueColumn::partial(Codes::U8(vec![1, 2]), candidate([5, 6, 7])).unwrap_err();
+        let err = ValueColumn::partial(Codes::U8(vec![1, 2].into()), candidate([5, 6, 7])).unwrap_err();
         assert!(format!("{err}").contains("presence has 3 entities but 2 values"));
     }
 
     #[test]
     fn set_membership_is_one_pass() {
-        let column = ValueColumn::universal(Codes::U16(vec![1, 2, 3, 4, 5]));
+        let column = ValueColumn::universal(Codes::U16(vec![1, 2, 3, 4, 5].into()));
         let hits = column.scan_in(
             &candidate(0..5),
             &[AttrLocalId::new(2), AttrLocalId::new(5), AttrLocalId::new(99)],
@@ -1026,7 +1104,7 @@ mod tests {
     /// same work, as a value that does not exist in the vocabulary at all.
     #[test]
     fn an_unheld_value_is_empty_rather_than_an_error() {
-        let column = ValueColumn::universal(Codes::U8(vec![1, 2, 3]));
+        let column = ValueColumn::universal(Codes::U8(vec![1, 2, 3].into()));
         assert!(column
             .scan_eq(&candidate(0..3), AttrLocalId::new(42))
             .is_empty());
@@ -1059,7 +1137,7 @@ mod tests {
 
     #[test]
     fn a_range_honours_each_endpoints_inclusivity() {
-        let column = num_column(Codes::I32(vec![10, 20, 30, 40]));
+        let column = num_column(Codes::I32(vec![10, 20, 30, 40].into()));
         let all = candidate(0..4);
         // [20, 40]
         assert_eq!(
@@ -1095,7 +1173,7 @@ mod tests {
         // 2⁵³ and 2⁵³+1 are the adjacent pair `f64` cannot separate: both round to 2⁵³. (2⁵³+2 is
         // representable, which is why the naive "+1, +3" fixture does *not* exercise this.)
         let lo = 1u64 << 53;
-        let column = num_column(Codes::U64(vec![lo, lo + 1]));
+        let column = num_column(Codes::U64(vec![lo, lo + 1].into()));
         assert_eq!(
             lo as f64,
             (lo + 1) as f64,
@@ -1114,7 +1192,7 @@ mod tests {
     /// once, so the inner loop never sees them.
     #[test]
     fn a_bound_outside_the_types_range_resolves_to_all_or_nothing() {
-        let column = num_column(Codes::U8(vec![0, 128, 255]));
+        let column = num_column(Codes::U8(vec![0, 128, 255].into()));
         let all = candidate(0..3);
         // `>= -5` over a u8 constrains nothing.
         assert_eq!(
@@ -1144,7 +1222,7 @@ mod tests {
     /// step must not wrap.
     #[test]
     fn an_exclusive_integer_bound_at_the_extreme_does_not_wrap() {
-        let column = num_column(Codes::U8(vec![0, 1, 254, 255]));
+        let column = num_column(Codes::U8(vec![0, 1, 254, 255].into()));
         let all = candidate(0..4);
         // `> 255` is nothing, not everything.
         assert!(column
@@ -1166,7 +1244,7 @@ mod tests {
     /// between: `>= 3.2` and `> 3.2` both admit 4 and reject 3.
     #[test]
     fn a_fractional_bound_on_an_integer_column_rounds_outward() {
-        let column = num_column(Codes::I32(vec![3, 4]));
+        let column = num_column(Codes::I32(vec![3, 4].into()));
         let all = candidate(0..2);
         for inclusive in [true, false] {
             let hits = column.scan_range(
@@ -1195,7 +1273,7 @@ mod tests {
     /// A NaN *bound* excludes everything, as a NaN value satisfies nothing.
     #[test]
     fn a_nan_bound_matches_nothing() {
-        let column = num_column(Codes::I32(vec![1, 2, 3]));
+        let column = num_column(Codes::I32(vec![1, 2, 3].into()));
         assert!(column
             .scan_range(
                 &candidate(0..3),
@@ -1212,7 +1290,7 @@ mod tests {
     /// away per element — and a set of only such needles matches nothing.
     #[test]
     fn numeric_set_membership_drops_out_of_range_needles() {
-        let column = num_column(Codes::U8(vec![1, 2]));
+        let column = num_column(Codes::U8(vec![1, 2].into()));
         let all = candidate(0..2);
         assert_eq!(
             column
@@ -1230,7 +1308,7 @@ mod tests {
     /// the reason this design needs no order-preserving key.
     #[test]
     fn a_nan_matches_no_range_and_no_equality() {
-        let column = num_column(Codes::F64(vec![1.0, f64::NAN, 3.0]));
+        let column = num_column(Codes::F64(vec![1.0, f64::NAN, 3.0].into()));
         let all = candidate(0..3);
         let wide = column.scan_range(
             &all,
@@ -1253,7 +1331,7 @@ mod tests {
     /// with no value has nothing to compare, exactly as for equality.
     #[test]
     fn an_unbounded_range_still_excludes_absent_values() {
-        let column = ValueColumn::partial(Codes::I32(vec![5, 7]), candidate([1, 4])).unwrap();
+        let column = ValueColumn::partial(Codes::I32(vec![5, 7].into()), candidate([1, 4])).unwrap();
         let hits = column.scan_range(&candidate(0..6), None, None);
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 4]);
     }
@@ -1269,7 +1347,7 @@ mod tests {
 
     #[test]
     fn numeric_set_membership_is_exact() {
-        let column = num_column(Codes::I64(vec![1, 2, 3]));
+        let column = num_column(Codes::I64(vec![1, 2, 3].into()));
         let hits = column.scan_num_in(
             &candidate(0..3),
             &[Scalar::Int(1), Scalar::Int(3), Scalar::Int(99)],
@@ -1361,7 +1439,7 @@ mod tests {
         let presence = dir.path().join("presence.roaring");
         let codes = Codes::text(["alpha".to_string(), "".to_string(), "gamma".to_string()]);
         write_value_column(&values, &presence, &codes, None).unwrap();
-        let column = ValueColumn::open(&values, None).unwrap();
+        let column = ValueColumn::open(&values, None, false).unwrap();
         assert_eq!(column.text_of(0), Some("alpha"));
         assert_eq!(column.text_of(1), Some(""));
         assert_eq!(column.text_of(2), Some("gamma"));
@@ -1380,19 +1458,71 @@ mod tests {
         let values = dir.path().join("values.arrow");
         let presence = dir.path().join("presence.roaring");
 
-        let codes = Codes::U32(vec![5, 6, 7]);
+        let codes = Codes::U32(vec![5, 6, 7].into());
         let present = candidate([2, 4, 8]);
         write_value_column(&values, &presence, &codes, Some(&present)).unwrap();
-        let column = ValueColumn::open(&values, Some(&presence)).unwrap();
+        let column = ValueColumn::open(&values, Some(&presence), false).unwrap();
         assert_eq!(column.value_of(4), Some(AttrLocalId::new(6)));
         assert_eq!(column.value_of(3), None);
         assert_eq!(column.present().iter().collect::<Vec<_>>(), vec![2, 4, 8]);
 
         // Universal presence writes no bitmap and reads back without one.
         let values2 = dir.path().join("v2.arrow");
-        write_value_column(&values2, &presence, &Codes::U8(vec![9, 8]), None).unwrap();
-        let dense = ValueColumn::open(&values2, None).unwrap();
+        write_value_column(&values2, &presence, &Codes::U8(vec![9, 8].into()), None).unwrap();
+        let dense = ValueColumn::open(&values2, None, false).unwrap();
         assert_eq!(dense.value_of(0), Some(AttrLocalId::new(9)));
         assert_eq!(dense.value_of(5), None);
+    }
+
+    /// The mapped column and the read one must answer identically, for **every** family — the
+    /// engine maps and the tests mostly read, so a divergence would be invisible until it was
+    /// served. Text is the case worth naming: its bytes and offsets are two separate buffers
+    /// borrowed from the same array, so a column that mapped its bytes and copied its offsets (or
+    /// the reverse) would read plausible values at the wrong boundaries rather than fail.
+    #[test]
+    fn mapping_a_column_and_reading_it_answer_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let presence = dir.path().join("presence.roaring");
+
+        for (name, codes) in [
+            ("u8", Codes::U8(vec![7, 3, 7, 9].into())),
+            ("u32", Codes::U32(vec![5, 6, 7, 5].into())),
+            ("i64", Codes::I64(vec![-9, 0, 1 << 40, 3].into())),
+            ("f64", Codes::F64(vec![-1.5, 0.0, 2.25, 9.0].into())),
+            (
+                "text",
+                Codes::text(["alpha", "", "gamma", "alpha"].map(String::from)),
+            ),
+        ] {
+            let values = dir.path().join(format!("{name}.arrow"));
+            write_value_column(&values, &presence, &codes, None).unwrap();
+
+            let mapped = ValueColumn::open(&values, None, true).unwrap();
+            let read = ValueColumn::open(&values, None, false).unwrap();
+            let all = candidate(0..4);
+
+            for slot in 0..4u32 {
+                assert_eq!(
+                    mapped.text_of(slot),
+                    read.text_of(slot),
+                    "{name}: text at {slot}"
+                );
+                assert_eq!(
+                    mapped.value_of(slot),
+                    read.value_of(slot),
+                    "{name}: value at {slot}"
+                );
+            }
+            assert_eq!(
+                mapped.scan_range(&all, None, None).cardinality(),
+                read.scan_range(&all, None, None).cardinality(),
+                "{name}: an unbounded range covers the same slots"
+            );
+            assert_eq!(
+                mapped.scan_text_prefix(&all, "alph").to_vec(),
+                read.scan_text_prefix(&all, "alph").to_vec(),
+                "{name}: prefix"
+            );
+        }
     }
 }

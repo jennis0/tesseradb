@@ -1548,9 +1548,9 @@ fn write_column_values(
         // throughout is worth a match arm: the column is priced at 1 GB per byte of width per 10⁹
         // items (Appendix A), so a `u8` category stored as `u32` would cost 3 GB it does not need.
         match attribute.ty {
-            ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect()),
-            ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect()),
-            _ => Codes::U32(held),
+            ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect::<Vec<_>>().into()),
+            ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect::<Vec<_>>().into()),
+            _ => Codes::U32(held.into()),
         }
     } else {
         // **A plain numeric has no absent representation, and that is a real gap rather than a
@@ -1619,7 +1619,7 @@ fn numeric_codes(attribute: &crate::schema::Attribute, values: &[ScalarValue]) -
                     }
                 }
             }
-            $ctor(out)
+            $ctor(out.into())
         }};
     }
     Ok(match attribute.ty {
@@ -1636,7 +1636,7 @@ fn numeric_codes(attribute: &crate::schema::Attribute, values: &[ScalarValue]) -
                     }
                 }
             }
-            Codes::U8(out)
+            Codes::U8(out.into())
         }
         ScalarType::U8 => gather!(U8, Codes::U8),
         ScalarType::U16 => gather!(U16, Codes::U16),

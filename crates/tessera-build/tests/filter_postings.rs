@@ -430,7 +430,7 @@ fn the_derived_postings_agree_with_the_value_column() {
     let dir = build_with(FILTER_SCHEMA);
     let out = dir.path().join("bundle");
     let cdir = column_dir(&out, "department");
-    let column = ValueColumn::open_dir(&cdir).unwrap();
+    let column = ValueColumn::open_dir(&cdir, true).unwrap();
     let postings = ColumnPostings::open_keyed(&postings_path(&out, "department")).unwrap();
 
     // Every entity, so the scan's candidate excludes nothing.
@@ -458,7 +458,7 @@ fn the_column_answers_entity_to_value() {
     let entity_of = source_to_entity(&out);
     let codes = codes_of(&out, "department");
     let cdir = column_dir(&out, "department");
-    let column = ValueColumn::open_dir(&cdir).unwrap();
+    let column = ValueColumn::open_dir(&cdir, true).unwrap();
 
     for source in 0..N {
         let entity = entity_of[&source];
@@ -492,7 +492,7 @@ fn a_universal_column_writes_no_presence_bitmap() {
         !cdir.join("presence.roaring").exists(),
         "a universal column must not write a presence bitmap"
     );
-    let column = ValueColumn::open_dir(&cdir).unwrap();
+    let column = ValueColumn::open_dir(&cdir, true).unwrap();
     assert_eq!(column.present().cardinality(), N);
 }
 
@@ -547,7 +547,7 @@ fn a_string_column_answers_all_three_predicates() {
 
     let entity_of = source_to_entity(&out);
     let cdir = column_dir(&out, "title");
-    let column = ValueColumn::open_dir(&cdir).unwrap();
+    let column = ValueColumn::open_dir(&cdir, true).unwrap();
 
     let mut all = croaring::Bitmap::new();
     all.add_range(0u32..N as u32);
@@ -603,7 +603,7 @@ fn an_absent_string_is_not_an_empty_string() {
 
     let entity_of = source_to_entity(&out);
     let cdir = column_dir(&out, "title");
-    let column = ValueColumn::open_dir(&cdir).unwrap();
+    let column = ValueColumn::open_dir(&cdir, true).unwrap();
 
     // Source 1 holds "", source 2 holds nothing.
     assert_eq!(column.text_of(entity_of[&1]), Some(""));

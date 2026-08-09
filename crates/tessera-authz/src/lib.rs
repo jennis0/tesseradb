@@ -10,8 +10,8 @@ pub use fragment::{
     build_fragment, build_fragment_with_deltas, FragmentCache, FragmentCacheError, FrozenFragment,
 };
 pub use postings::{
-    encode_posting, encode_posting_bitmap, write_posting_records, write_postings, PostingRef,
-    PostingsReader, PostingsSpool,
+    decode_single_batch, encode_posting, encode_posting_bitmap, write_posting_records,
+    write_postings, PostingRef, PostingsReader, PostingsSpool,
 };
 pub use term_sweep::sweep_term_postings;
 pub use tier::{coalesce_delta_tiers, write_delta_tier, write_delta_tier_at, DeltaTier};

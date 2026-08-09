@@ -16,6 +16,9 @@ croaring.workspace = true
 # rule intact: `check-layers.sh` denies filter → store, so this crate stays entity-space and never
 # meets `RowId`.
 arrow.workspace = true
+# The value column is mapped rather than read: at 10⁹ it is 1 GB per byte of declared width per
+# column, and a generation opens every declared column at once. See `values::read_values`.
+memmap2 = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

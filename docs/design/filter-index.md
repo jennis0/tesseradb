@@ -245,6 +245,12 @@ attrs/<column>/postings.arrow          derived per-value postings — categories
 attrs/<column>/extents/<flush_id>.arrow  one appended extent per flush that touched the column
 ```
 
+**One record batch per value column**, which is what lets the reader map the file and borrow the
+values out of it rather than copying them (§8). A second batch is refused rather than concatenated,
+because concatenating is exactly the copy the mapping exists to avoid. A `utf8` column is written
+`LargeUtf8`: 32-bit offsets cap the concatenated bytes at 2 GiB, which a 10⁹-entity column passes at
+two bytes a value.
+
 **Per column, not per column group**, and the reason is a format constraint rather than a preference:
 per-column presence makes the compact value arrays *different lengths*, and one Arrow record batch
 cannot hold columns of differing length. Grouping survives only for a set of columns that are all
@@ -534,13 +540,29 @@ that do not know slices exist.
 
 Attribute filters are read once per **query** — not once per rendered mark, and not once per session.
 §10.3 (r21) names that cadence as one of the three the routing rule is built on, and §10.5 orders
-structures by cadence rather than by size. What is open is the *number*: nothing prices the filter index
-resident, and no residency arm has run against one.
+structures by cadence rather than by size.
+
+**The value columns are mapped, not read, and that is what keeps the cadence affordable.** A
+generation opens every *declared* filter column at once and holds them for the process lifetime, so
+reading them would make residency a function of what the schema declares rather than of what anyone
+filters on: at 10⁹ with sixteen `u32` columns, 64 GB resident before a single filter arrives.
+Measured over eight 10⁸-entity `u32` columns — 3.2 GB of values (probe arm 5):
+
+| | Open | Resident after open | After one 1% scan |
+|---|---|---|---|
+| read into memory | 2,196 ms | 3,301 MB | 3,301 MB |
+| **mapped** | **0.2 ms** | **2 MB** | 6 MB |
+
+The scan is unaffected — 0.24–0.27 ms either way — so the mapping costs nothing once the pages are
+resident and resides only what a request touches. Those scan figures are warm-page-cache and are not
+a cold-start claim; what the comparison establishes is that the read path pays its I/O for every
+declared column while the mapped path pays it for the columns actually scanned.
 
 - **Category membership at 0.31–1.01× the render column it indexes** (*measured* at 2.4×10⁶ items; the 10⁹
   figure is *modelled*, and index §4.1 says why the ratio may not hold).
-- **The value column is the resident term, and it is the column's own bytes** — 1 GB per `u8` column at
-  10⁹, 4 GB per `u32`. There is no dictionary beside it to hold resident. An earlier revision priced an
+- **The value column is the resident term, and it is the working set rather than the column** — the
+  column is 1 GB per `u8` at 10⁹ and 4 GB per `u32`, and mapping means what resides is the part a scan
+  touches. There is no dictionary beside it to hold resident. An earlier revision priced an
   FST dictionary here (*measured* 0.78 GB against 7.09 GB for the equivalent hash map at 1.17×10⁸ keys);
   that structure is cut, and the figure is retained only in [`dict-fst`](../../probes/2026-08-03-dict-fst/)
   where it still governs the authorisation dictionary.
@@ -548,7 +570,8 @@ resident, and no residency arm has run against one.
   8 B–54 KB correlated, 2–125 MB scattered, against a 1 GB `u8` column.
 - **The scan is sequential over the candidate's range**, so a column that is not resident is paged in at
   the access pattern page-cache handles best. That is *reasoning, not measurement*: every constant in
-  §2.2 was measured in RAM, and no cold-scan arm has run.
+  §2.2 was measured in RAM, and no cold-scan arm — one that drops the page cache first — has run. Arm
+  5 shows only that a *warm* mapped scan costs what a resident one costs.
 
 **Open-time cost is dominated by the digest sweep, not by record validation, and the design must not claim
 otherwise.** Bundle open reads every file the manifest names **in full** and hashes it — deliberately, and

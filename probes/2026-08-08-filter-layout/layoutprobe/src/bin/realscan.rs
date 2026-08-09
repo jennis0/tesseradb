@@ -37,7 +37,7 @@ fn main() {
 
     for &n in &scales {
         let values: Vec<u32> = (0..n).map(|e| (splitmix(e) % DOMAIN as u64) as u32).collect();
-        let universal = ValueColumn::universal(Codes::U32(values));
+        let universal = ValueColumn::universal(Codes::U32(values.into()));
 
         // A **slice-blocked** partial column: ten slices interleaved in 10⁵-entity runs, which is
         // the shape concurrent multi-slice ingest produces (write-path §4.2). This exercises the
@@ -61,7 +61,7 @@ fn main() {
             present.run_optimize();
             let count = present.cardinality();
             (
-                ValueColumn::partial(Codes::U32(held), present).expect("counts agree"),
+                ValueColumn::partial(Codes::U32(held.into()), present).expect("counts agree"),
                 count,
             )
         };

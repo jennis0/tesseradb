@@ -207,6 +207,9 @@ fn fixture() -> Fixture {
         &partition_dir,
         &opened.manifest.declared_scalars,
         opened.manifest.entity_id_high_water as u32,
+        // Mapped, which is what the engine does at session open — so the round-trip these tests
+        // assert is the one a served request actually takes.
+        true,
     )
     .expect("declared filter columns open");
     let codes = opened

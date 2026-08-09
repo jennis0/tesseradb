@@ -242,15 +242,24 @@ impl FilterColumns {
     /// digests them, so a missing one means the bundle is not what its manifest says it is.
     /// `covered` is the build's entity high-water: the columns hold values for `[0, covered)` and
     /// nothing above it.
+    ///
+    /// **`mmap` decides whether a declared column costs resident memory before anyone filters on
+    /// it.** Every declared column is opened here, at once, and a value column is 1 GB per byte of
+    /// declared width per 10⁹ entities — so reading them into the heap would make sixteen declared
+    /// columns tens of GB of residency paid at open by a deployment that may never issue a filter.
+    /// Mapped, the pages are faulted in by the scans that touch them and reclaimable under
+    /// pressure. The engine passes `true`; tests that build a column and read it back in the same
+    /// process pass `false`, exactly as they do for `PostingsReader::open`.
     pub fn open(
         partition_dir: &Path,
         declared: &[tessera_store::manifest::DeclaredScalar],
         covered: u32,
+        mmap: bool,
     ) -> std::io::Result<Self> {
         let mut columns = BTreeMap::new();
         for scalar in declared.iter().filter(|d| d.filter) {
             let dir = partition_dir.join("attrs").join(&scalar.name);
-            columns.insert(scalar.name.clone(), ValueColumn::open_dir(&dir)?);
+            columns.insert(scalar.name.clone(), ValueColumn::open_dir(&dir, mmap)?);
         }
         Ok(FilterColumns { columns, covered })
     }
