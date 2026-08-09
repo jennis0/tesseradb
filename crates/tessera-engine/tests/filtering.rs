@@ -27,7 +27,7 @@ use common::*;
 use croaring::Bitmap;
 use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{candidate, FilterColumns, FilterError, FilterOperand};
+use tessera_engine::filter::{candidate, FilterColumns, FilterError, FilterExpr, FilterOperand};
 use tessera_engine::ViewportRequest;
 use tessera_store::read::open_bundle;
 use tessera_lifecycle::command::UnallocatedRow;
@@ -226,6 +226,13 @@ fn expected(fx: &Fixture, terms: &[u64], pred: impl Fn(u64) -> bool) -> Vec<u32>
     v
 }
 
+fn leaf(column: &str, operand: FilterOperand) -> FilterExpr {
+    FilterExpr::Leaf {
+        column: column.to_string(),
+        operand,
+    }
+}
+
 fn as_vec(b: &Bitmap) -> Vec<u32> {
     b.iter().collect()
 }
@@ -371,7 +378,10 @@ fn two_operands_compose_by_intersection() {
     let prefix = FilterOperand::TextPrefix("paper-1".to_string());
     let got = fx
         .columns
-        .resolve_all([("department", &eng), ("title", &prefix)], &cand)
+        .evaluate(
+            &FilterExpr::AllOf(vec![leaf("department", eng), leaf("title", prefix)]),
+            &cand,
+        )
         .unwrap();
 
     assert_eq!(
@@ -572,7 +582,7 @@ fn a_filtered_viewport_serves_only_matching_marks() {
         .viewport(
             &session,
             ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
-                .filters(vec![("department".to_string(), eng)]),
+                .filter(leaf("department", eng)),
         )
         .expect("a filtered viewport answers");
 
@@ -614,10 +624,10 @@ fn a_filter_does_not_move_the_threshold_anchor() {
     let filtered = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filters(vec![(
-                "department".to_string(),
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(leaf(
+                "department",
                 FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
-            )]),
+            )),
         )
         .unwrap();
 
@@ -656,11 +666,129 @@ fn a_viewport_naming_an_undeclared_column_is_refused() {
     let err = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filters(vec![(
-                "no_such_column".to_string(),
-                FilterOperand::TextPrefix("x".into()),
-            )]),
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                .filter(leaf("no_such_column", FilterOperand::TextPrefix("x".into()))),
         )
         .expect_err("an undeclared column is refused");
     assert!(format!("{err}").contains("not declared filterable"), "{err}");
+}
+
+/// **Disjunction across columns** — the case `in` cannot express, since `in` only ORs values within
+/// one column. Checked against the corpus, not against the index.
+#[test]
+fn any_of_unions_across_columns() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::AnyOf(vec![
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+        ),
+        leaf("title", FilterOperand::TextPrefix("paper-1".into())),
+    ]);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("legal")
+            || title_of(e).starts_with("paper-1"))
+    );
+    // A union of subsets of the candidate is still a subset — I12 by shape rather than by check.
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// Nesting: a conjunction one of whose clauses is a disjunction.
+#[test]
+fn a_conjunction_may_contain_a_disjunction() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::AllOf(vec![
+        leaf("title", FilterOperand::TextContains("-1".into())),
+        FilterExpr::AnyOf(vec![
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            ),
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+            ),
+        ]),
+    ]);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| title_of(e).contains("-1")
+            && matches!(department_of(e), Some("eng") | Some("legal")))
+    );
+}
+
+/// The two empty cases are the identities of their operators, and they differ. `all_of: []` is the
+/// whole candidate — nothing was asked for, so nothing is excluded. `any_of: []` is empty — items
+/// matching one of no alternatives. Stated because the asymmetry looks like a bug on sight.
+#[test]
+fn the_empty_combinators_are_their_operators_identities() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+
+    assert_eq!(
+        fx.columns
+            .evaluate(&FilterExpr::AllOf(vec![]), &cand)
+            .unwrap()
+            .cardinality(),
+        cand.cardinality()
+    );
+    assert!(fx
+        .columns
+        .evaluate(&FilterExpr::AnyOf(vec![]), &cand)
+        .unwrap()
+        .is_empty());
+}
+
+/// Nesting is bounded and **refused rather than flattened** — a silently flattened expression
+/// answers a different question. Unbounded depth is unbounded per-request work from one
+/// authenticated call, the argument §7.3's sub-cell budget already makes.
+#[test]
+fn an_over_deep_expression_is_refused() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let mut expr = leaf("title", FilterOperand::TextPrefix("p".into()));
+    for _ in 0..8 {
+        expr = FilterExpr::AllOf(vec![expr]);
+    }
+    let err = fx.columns.evaluate(&expr, &cand).expect_err("too deep");
+    assert!(matches!(err, FilterError::TooDeep { .. }), "{err:?}");
+    assert!(format!("{err}").contains("rather than flattened"));
+}
+
+/// A disjunction whose branches a principal cannot see is empty, not an error — and costs the same
+/// as one they can, since every branch is evaluated under their own candidate.
+#[test]
+fn a_disjunction_stays_inside_a_narrow_principals_mask() {
+    let fx = fixture();
+    let (_engine, narrow) = candidate_for(&fx, &subset_credential());
+
+    let expr = FilterExpr::AnyOf(vec![
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["sales"])),
+        ),
+    ]);
+    let got = fx.columns.evaluate(&expr, &narrow).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[SUBSET_TERM], |e| matches!(
+            department_of(e),
+            Some("eng") | Some("sales")
+        ))
+    );
+    assert!(got.andnot(&narrow).is_empty());
 }

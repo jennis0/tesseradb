@@ -262,6 +262,19 @@ impl Schema {
                 )));
             }
             check_column_name(&decl.name)?;
+            // **Column names and filter combinators share one namespace** (decision 0059). A leaf
+            // in a filter expression is a column name directly — there is no wrapper object — so a
+            // column called `any_of` would be ambiguous with the combinator at request time.
+            // Refused at the build instead, where it is one error against one declaration rather
+            // than a request that means two things.
+            if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
+                return Err(schema_error(format!(
+                    "attribute '{}': that name is a filter combinator (decision 0059), and a \
+                     filter expression names columns directly, so a column may not take one. \
+                     Reserved: all_of, any_of, none_of",
+                    decl.name
+                )));
+            }
             let placement = Placement::parse(&decl.used_for, &decl.name)?;
             if decl.multi == Some(true) {
                 return Err(schema_error(format!(
@@ -1125,6 +1138,23 @@ used_for = ["render"]
 
     /// A string is refused from the **hot column**, not from the bundle: `filter` puts it in
     /// entity space, where it is read once per query rather than once per rendered mark.
+    /// A column may not take a combinator's name — refused at the build, not resolved at the
+    /// request.
+    #[test]
+    fn a_column_may_not_be_named_after_a_combinator() {
+        for name in ["all_of", "any_of", "none_of"] {
+            let text = format!(
+                r#"
+[[attribute]]
+name = "{name}"
+type = "utf8"
+used_for = ["filter"]
+"#
+            );
+            assert!(err(&text).contains("filter combinator"), "{}", err(&text));
+        }
+    }
+
     #[test]
     fn a_filter_only_string_is_accepted() {
         let text = r#"

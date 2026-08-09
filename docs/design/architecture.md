@@ -482,7 +482,7 @@ At 10<sup>7</sup> this is a modest optimisation. At 10<sup>9</sup> it substantia
 ### 8.1 Two masks
 
 - **`M_auth`** — what the token permits (**I1**). Governs label containment, maximum frontier depth, node geometry, and the security boundary.
-- **`M_sel = M_auth ∧ filter₁ ∧ … ∧ filterₙ`** — what the query asked for. Governs which points render and matched counts.
+- **`M_sel = M_auth ∧ expr`** — what the query asked for, where `expr` is any boolean combination of leaf predicates *(r38, decision 0059; was a conjunction of operands)*. Governs which points render and matched counts. **Every node evaluates inside the candidate**, so `M_sel ⊆ M_auth` holds by the shape of the expression rather than by a check, whatever combinators it uses.
 
 **The failure this prevents.** With a single composed mask, containment would be tested against `M_auth ∧ text ∧ vector`. A generating set contains items that do not match the text query, so containment fails for essentially every label the instant anyone types, and every label vanishes. A frontier descending on filtered counts would likewise dissolve as the filter narrows, destroying the frame of reference exactly when it is most needed. **I3** and **I12** prevent both.
 
@@ -510,7 +510,7 @@ There is no leak in preserving labels under filtering: the principal could alrea
 
 **Per-item attributes — a scanned entity-space column, or a bitmap where values repeat.** A `filter` attribute is stored in entity space and evaluated with the mask as the scan's candidate, so its work is a function of the candidate and the column and never of the value being sought — which is what makes a value the principal cannot see indistinguishable in *work*, not merely in outcome, from one that does not exist. A per-value bitmap is derived on top only where the values carry an identity of their own and repeat heavily (categories), where it closes broad coverage at a measured 107×. §10.5 r37 states the placement rule; `filter-index.md` owns the choice.
 
-**Text — an embedded index.** Text results depend on the query, not the token, so they cache globally across all principals within a partition — a different key from the mask, and conflating the two yields either a cache that never hits or a leak. And **filter, do not rank**: relevance scores and rank shifts computed from corpus-global statistics are a demonstrated channel for inferring the content of unreadable documents (Appendix D).
+**Text — a column type, not a filter family** *(r38, decision 0059)*. An earlier revision made text a single corpus-wide embedded index reached by its own operand. It is instead an attribute with a declared type, which gives a document as many text fields as it declares rather than the one body a global operand could address: `utf8` matches stored bytes (`eq`, `prefix`, `contains`), `text` matches analysed tokens (`match`, ⊘ unbuilt). **Filter, do not rank** survives the change and is the load-bearing half: relevance scores and rank shifts computed from corpus-global statistics are a demonstrated channel for inferring the content of unreadable documents (Appendix D). The global-cache argument does not survive it — under masked evaluation every operand result is principal-specific, so there was never a shared cache to key.
 
 **Vectors — a sidecar in a different format.** Cold, large (Appendix A), read in a completely different pattern from the hot columns. This is where chunked object-store-native storage earns its place.
 
@@ -1164,6 +1164,18 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r38** — **filters compose as a boolean tree, and text becomes a column type** (2026-08-09,
+  decision 0059). §8.2's "composition by intersection only" was written for operands evaluated
+  *unmasked*; under masked evaluation every node of an expression returns a subset of the candidate,
+  so union and negation cannot widen what a principal may see and **I12** holds structurally. The
+  wire form is `all_of` / `any_of`, bounded in depth; `none_of` is specified and unbuilt, carrying
+  one rule that must ship with it — over a `per_viewer` category it is evaluated *within the visible
+  vocabulary*, since set complement over the column would prove the existence of values `listing`
+  hides (C11). Separately §8.3's `text` operand is deleted: a text field is an attribute with a
+  declared type, so a document may have as many as it declares. Elasticsearch's `bool` spelling is
+  **not** adopted — its `should` is a scoring clause, not a disjunction, and §8.3 already rules
+  filter-do-not-rank.
 
 - **r37** — **§10.5's per-query placement admits a scanned column, not only a bitmap** (2026-08-08).
   r21 routed per-query data to "an entity-space bitmap behind the filter contract", which reads as

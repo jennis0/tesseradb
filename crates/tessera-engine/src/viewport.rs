@@ -329,13 +329,12 @@ pub struct ViewportRequest<'a> {
     /// D-G) — a build already in flight runs to completion regardless of this token, because its
     /// result serves later arrivals too (D-C's scope note: bounded, useful work).
     pub cancel: Option<CancelToken>,
-    /// Attribute filters, as `(column, operand)`. Empty is the unfiltered request.
+    /// The request's filter expression, or `None` for an unfiltered request.
     ///
-    /// **Composed by intersection and applied above the mask** — never folded into it
-    /// (`filter-surface.md` §5.1). A filter narrows which marks are *drawn*; it never moves the
-    /// selection threshold, which stays anchored on the unfiltered composed total (**I12**: a
-    /// filter may move the frontier up, never down).
-    pub filters: Vec<(String, crate::filter::FilterOperand)>,
+    /// **Applied above the mask, never folded into it** (`filter-surface.md` §5.1). A filter narrows
+    /// which marks are *drawn*; it never moves the selection threshold, which stays anchored on the
+    /// unfiltered composed total (**I12**: a filter may move the frontier up, never down).
+    pub filter: Option<crate::filter::FilterExpr>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -349,13 +348,13 @@ impl<'a> ViewportRequest<'a> {
             stamp: None,
             underlay_offset: None,
             cancel: None,
-            filters: Vec::new(),
+            filter: None,
         }
     }
 
-    /// Attach attribute filters. See [`ViewportRequest::filters`].
-    pub fn filters(mut self, filters: Vec<(String, crate::filter::FilterOperand)>) -> Self {
-        self.filters = filters;
+    /// Attach a filter expression. See [`ViewportRequest::filter`].
+    pub fn filter(mut self, filter: crate::filter::FilterExpr) -> Self {
+        self.filter = Some(filter);
         self
     }
 
@@ -776,7 +775,7 @@ impl Engine {
     /// NOT gated — see [`check_cancelled`]'s doc.
     pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
         let ViewportRequest {
-            filters: _,
+            filter: _,
             slice,
             zoom,
             bbox,
@@ -907,9 +906,7 @@ impl Engine {
         // 10⁸ matches). Only the projecting route is built. It is exact at every size; what is
         // missing is the cheap route for the broad case, which is a latency gap and not a
         // correctness one.
-        let mask = if req.filters.is_empty() {
-            mask
-        } else {
+        let mask = if let Some(expr) = &req.filter {
             let candidate = crate::filter::candidate(
                 &session.fragment,
                 &session.satisfied,
@@ -918,12 +915,11 @@ impl Engine {
             );
             let entities = generation
                 .filter_columns
-                .resolve_all(
-                    req.filters.iter().map(|(c, o)| (c.as_str(), o)),
-                    &candidate,
-                )
+                .evaluate(expr, &candidate)
                 .map_err(|e| EngineError::FilterRefused(e.to_string()))?;
             mask.with_filter(slice_data.row_space.project(&entities))
+        } else {
+            mask
         };
 
         let q = &generation.bundle.manifest.quantisation;

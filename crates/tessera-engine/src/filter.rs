@@ -62,6 +62,50 @@ pub enum FilterOperand {
     TextContains(String),
 }
 
+/// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.
+///
+/// **Any boolean combination, evaluated inside the candidate** (decision 0059). Every node returns a
+/// subset of the candidate — a leaf does, and union and intersection of subsets are subsets — so
+/// **I12**'s "a filter narrows `M_sel` and never widens it" is a property of the shape rather than a
+/// check, and no expression can name a set outside the principal's own mask.
+///
+/// `NoneOf` is deliberately absent: it needs the `per_viewer` rule decision 0059 records — negation
+/// over a gated category must be evaluated *within the visible vocabulary*, or it becomes an
+/// existence oracle over the values `listing` hides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterExpr {
+    /// One column's predicate.
+    Leaf {
+        column: String,
+        operand: FilterOperand,
+    },
+    /// Every sub-expression must match. Empty matches the whole candidate — the identity, and what
+    /// an absent filter means.
+    AllOf(Vec<FilterExpr>),
+    /// At least one sub-expression must match. **Empty matches nothing**, which is the identity for
+    /// union and not an oversight: `any_of: []` asks for items matching one of no alternatives.
+    AnyOf(Vec<FilterExpr>),
+}
+
+/// How deep a filter expression may nest.
+///
+/// Unbounded depth is unbounded per-request work from one authenticated call, which is the argument
+/// §7.3's sub-cell budget already makes. Refused rather than truncated: a silently flattened
+/// expression answers a question the caller did not ask.
+pub const MAX_FILTER_DEPTH: usize = 4;
+
+impl FilterExpr {
+    /// Nesting depth, with a leaf at 1.
+    pub fn depth(&self) -> usize {
+        match self {
+            FilterExpr::Leaf { .. } => 1,
+            FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
+                1 + kids.iter().map(FilterExpr::depth).max().unwrap_or(0)
+            }
+        }
+    }
+}
+
 /// One bundle's filter columns, keyed by declared column name.
 ///
 /// Opened once per generation, not per request. A column absent from the map is one the schema did
@@ -82,6 +126,8 @@ pub enum FilterError {
     /// The column is not declared filterable. A caller error, distinguishable from an empty
     /// result, which an undeclared column must never be served as.
     UndeclaredColumn(String),
+    /// The expression nests deeper than [`MAX_FILTER_DEPTH`].
+    TooDeep { depth: usize, max: usize },
     /// ⊘ The candidate reaches entities the filter artefact does not cover.
     ///
     /// **Refused rather than answered short.** A flush appends entities; `filter-index.md` §2.1
@@ -100,6 +146,11 @@ impl std::fmt::Display for FilterError {
             FilterError::UndeclaredColumn(name) => {
                 write!(f, "column '{name}' is not declared filterable")
             }
+            FilterError::TooDeep { depth, max } => write!(
+                f,
+                "the filter expression nests {depth} deep; the limit is {max}. Refused rather than \
+                 flattened, which would answer a different question"
+            ),
             FilterError::CoverageEndsAtBuild { covered, requested } => write!(
                 f,
                 "the filter index covers entities below {covered}; this request reaches {requested}. \
@@ -194,6 +245,47 @@ impl FilterColumns {
             }
         }
         Ok(live)
+    }
+
+    /// Evaluate a filter expression against `candidate`.
+    ///
+    /// **Every node is evaluated under the candidate, never over the column at large.** A
+    /// conjunction narrows the candidate as it goes, so a selective first clause makes the rest
+    /// cheaper; a disjunction evaluates each branch under the *original* candidate and unions —
+    /// which is what keeps `any_of` a subset of it, since each branch already is.
+    pub fn evaluate(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
+        let depth = expr.depth();
+        if depth > MAX_FILTER_DEPTH {
+            return Err(FilterError::TooDeep {
+                depth,
+                max: MAX_FILTER_DEPTH,
+            });
+        }
+        self.check_coverage(candidate)?;
+        self.eval(expr, candidate)
+    }
+
+    fn eval(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
+        match expr {
+            FilterExpr::Leaf { column, operand } => self.resolve(column, operand, candidate),
+            FilterExpr::AllOf(kids) => {
+                let mut live = candidate.clone();
+                for kid in kids {
+                    live = self.eval(kid, &live)?;
+                    if live.is_empty() {
+                        break;
+                    }
+                }
+                Ok(live)
+            }
+            FilterExpr::AnyOf(kids) => {
+                let mut out = Bitmap::new();
+                for kid in kids {
+                    out |= self.eval(kid, candidate)?;
+                }
+                Ok(out)
+            }
+        }
     }
 }
 
