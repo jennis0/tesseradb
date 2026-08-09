@@ -18,6 +18,7 @@ function response(tiles: {tile: bigint; served: number; visible?: number}[], pin
     ids: BigUint64Array.from({length: total}, (_, i) => BigInt(i + 1)),
     codes: new BigUint64Array(total),
     positions: new Float64Array(total * 2),
+    world: new Float32Array(total * 2),
     scalars: {},
     subCells: null
   };

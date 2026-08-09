@@ -11,6 +11,7 @@ import {Replica} from '../../clients/ts/core/src/replica.js';
 import {plan} from '../../clients/ts/core/src/prefetch.js';
 import {inlineDecoder} from '../../clients/ts/core/src/decoder.js';
 import {assemble} from '../../clients/ts/viewer/src/assemble.js';
+import {bandsOfResult} from '../../clients/ts/core/src/bands.js';
 import {buildColourAttribute} from '../../clients/ts/viewer/src/colour.js';
 
 const arg = (n: string, d: number) => {
@@ -36,6 +37,7 @@ const meta = await client.meta(session.token);
 let requests = 0;
 let bytes = 0;
 let wireMs = 0;
+let absorbMs = 0;
 const replica = new Replica(
   async (req, signal) => {
     const t = performance.now();
@@ -43,6 +45,12 @@ const replica = new Replica(
     wireMs += performance.now() - t;
     requests += 1;
     bytes += r.bytes;
+    // What the main thread does with a response once it has arrived: split it into bands. Timed
+    // separately because it lands as a burst rather than spread over frames, which is what a hitch
+    // is. Decoding is already off-thread; this is not.
+    const ta = performance.now();
+    bandsOfResult(r.result, req.zoom, {identityKey: '', contentKey: '', capUsed: 500, now: 0});
+    absorbMs += performance.now() - ta;
     return r;
   },
   meta.quantisation,
@@ -55,7 +63,7 @@ let visibleInView: number | undefined;
 // margined box at the depth the budget picks.
 const viewport = {target: [256, 256] as [number, number], zoom: arg('zoom', 4.3), width: 1280, height: 800};
 
-console.log('step | reqs | wire+dec | redraw | bands  | held pts | drawn  | bytes');
+console.log('step | reqs | wire+dec | absorb | redraw | bands  | held pts | drawn  | bytes');
 for (let step = 0; step < STEPS; step++) {
   // A third of a viewport per step, which is what a drag moves.
   const stride = (viewport.width / 2 ** viewport.zoom) / 3;
@@ -63,6 +71,7 @@ for (let step = 0; step < STEPS; step++) {
   const r0 = requests;
   const b0 = bytes;
   const w0 = wireMs;
+  const a0 = absorbMs;
 
   const p = plan({
     viewport,
@@ -127,7 +136,8 @@ for (let step = 0; step < STEPS; step++) {
 
   console.log(
     `${String(step).padStart(4)} | ${String(requests - r0).padStart(4)} | ` +
-      `${(wireMs - w0).toFixed(0).padStart(8)} | ${redrawMs.toFixed(1).padStart(6)} | ` +
+      `${(wireMs - w0).toFixed(0).padStart(8)} | ${(absorbMs - a0).toFixed(1).padStart(6)} | ` +
+      `${redrawMs.toFixed(1).padStart(6)} | ` +
       `${String(replica.bandCount).padStart(6)} | ` +
       `${String(replica.points).padStart(8)} | ${String(drawn).padStart(6)} | ` +
       `${((bytes - b0) / 1e6).toFixed(2)} MB`

@@ -1,4 +1,5 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
+import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
 import type {ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
 
@@ -122,6 +123,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   // catch it. The narrowing to the renderer's `f32` world space happens later, per band, where the
   // precision is no longer needed.
   const positions = new Float64Array(ids.length * 2);
+  const world = new Float32Array(ids.length * 2);
   // **The halves are read as `u32`s over the same bytes, never as `BigInt`s.** Arrow's `u64` column
   // is little-endian, so each code is already two 32-bit words in the order this loop wants them,
   // and a `Uint32Array` view costs nothing. Taking them off the `BigUint64Array` instead — one read
@@ -136,8 +138,12 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const hi = halves[i * 2 + 1]!;
     const qx = compact(lo) + compact(hi) * 65536;
     const qy = compact(lo >>> 1) + compact(hi >>> 1) * 65536;
-    positions[i * 2] = qx / 65536;
-    positions[i * 2 + 1] = qy / 65536;
+    const x = qx / 65536;
+    const y = qy / 65536;
+    positions[i * 2] = x;
+    positions[i * 2 + 1] = y;
+    world[i * 2] = x / CELLS_PER_WORLD_UNIT;
+    world[i * 2 + 1] = y / CELLS_PER_WORLD_UNIT;
   }
 
   const scalars: Record<string, ScalarColumn> = {};
@@ -157,5 +163,5 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     }
   }
 
-  return {tiles, ids, codes, positions, scalars, subCells};
+  return {tiles, ids, codes, positions, world, scalars, subCells};
 }

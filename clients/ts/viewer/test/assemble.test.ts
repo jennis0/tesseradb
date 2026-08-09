@@ -136,7 +136,8 @@ describe('assemble', () => {
       ],
       ids: BigUint64Array.from([1n, 2n, 3n, 4n, 5n]),
       codes: new BigUint64Array(5),
-      positions: Float64Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
+      positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
+      world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}},
       subCells: null
     };

@@ -1,4 +1,4 @@
-import {CELLS_PER_WORLD_UNIT, WORLD_SIZE, tileContains, tileXY} from './coords.js';
+import {WORLD_SIZE, tileContains, tileXY} from './coords.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
 import {
   coverageAdd,
@@ -170,12 +170,8 @@ export function bandsOfResult(
     if (served === 0) continue;
     const end = offset + served;
     const ids = result.ids.slice(offset, end);
-    // Cell space to the renderer's world `f32`, once per band. Not done in the decoder because a
-    // cell coordinate needs an `f64` mantissa to round-trip (see `decode.ts`), and not done per
-    // redraw because it produces the same numbers every time.
-    const cells = result.positions.subarray(offset * 2, end * 2);
-    const positions = new Float32Array(cells.length);
-    for (let i = 0; i < cells.length; i++) positions[i] = cells[i]! / CELLS_PER_WORLD_UNIT;
+    // Already in world space — the decoder produced it, which in a browser means a worker did.
+    const positions = result.world.slice(offset * 2, end * 2);
     const scalars = sliceScalars(result.scalars, offset, end);
     const {x, y} = tileXY(tile.tile, depth);
     bands.push({

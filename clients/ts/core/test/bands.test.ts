@@ -67,6 +67,7 @@ describe('bandsOfResult', () => {
       ids: BigUint64Array.from([1n, 2n, 5n, 6n, 7n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n, 0n]),
       positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
+      world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars,
       subCells: null
     };
@@ -88,6 +89,7 @@ describe('bandsOfResult', () => {
       ids: BigUint64Array.from([1n, 2n, 3n, 4n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n]),
       positions: new Float64Array(8),
+      world: new Float32Array(8),
       scalars: {},
       subCells: null
     };

@@ -26,10 +26,10 @@ export type DecodeRequest = {id: number; bytes: ArrayBuffer};
 /** Every buffer in a decoded result, so the reply transfers rather than copies. */
 function transferables(result: {
   ids: BigUint64Array;
-  positions: Float64Array;
+  world: Float32Array;
   scalars: Record<string, ScalarColumn>;
 }): Transferable[] {
-  const out: Transferable[] = [result.ids.buffer, result.positions.buffer];
+  const out: Transferable[] = [result.ids.buffer, result.world.buffer];
   for (const column of Object.values(result.scalars)) {
     const values = column.values as unknown;
     if (ArrayBuffer.isView(values)) out.push((values as ArrayBufferView).buffer);
@@ -41,7 +41,11 @@ function transferables(result: {
 self.onmessage = (event: MessageEvent<DecodeRequest>) => {
   const {id, bytes} = event.data;
   try {
-    const result = decodeViewport(new Uint8Array(bytes));
+    const decoded = decodeViewport(new Uint8Array(bytes));
+    // **Cell space and the codes stay in the worker.** Nothing downstream reads them — a band holds
+    // world positions and the region queries work there — so shipping them would double the bytes
+    // crossing the boundary for no reader.
+    const result = {...decoded, positions: new Float64Array(0), codes: new BigUint64Array(0)};
     self.postMessage({id, result}, {transfer: transferables(result)});
   } catch (error) {
     self.postMessage({id, error: error instanceof Error ? error.message : String(error)});

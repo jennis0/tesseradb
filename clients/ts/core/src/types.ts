@@ -153,6 +153,16 @@ export type ViewportResult = {
    */
   positions: Float64Array;
   /**
+   * The same points in the renderer's world space, `f32`.
+   *
+   * Carried beside {@link positions} rather than instead of it because the two answer different
+   * questions: cell space is 32 bits per axis and round-trips to the server's `code`, which `f32`
+   * cannot (see `decode.ts`); world space is what a band holds and a buffer uploads. Computing it
+   * here means the per-point pass happens wherever decoding does — a worker, in a browser — rather
+   * than on the thread that draws.
+   */
+  world: Float32Array;
+  /**
    * The declared-scalar tail, one entry per column, keyed by column name.
    *
    * See {@link ScalarColumn} for why these are typed arrays rather than `unknown[]`.
