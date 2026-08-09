@@ -1,4 +1,4 @@
-import {tileContains, tileOfCode, tileXY} from './coords.js';
+import {CELLS_PER_WORLD_UNIT, WORLD_SIZE, tileContains, tileOfCode, tileXY} from './coords.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
 import {
   coverageAdd,
@@ -55,8 +55,15 @@ export type Band = {
   prefix: bigint;
   ids: BigUint64Array;
   codes: BigUint64Array;
-  /** Interleaved x,y in cell space — two entries per point, so `positions.length === 2 * ids.length`. */
-  positions: Float64Array;
+  /**
+   * Interleaved x,y in **deck.gl world space**, `f32` — two entries per point.
+   *
+   * Converted once when the band is built rather than on every assembly. The wire carries `f64`
+   * cell space and the renderer wants `f32` world space; doing that per point per redraw is the
+   * single most expensive thing in the render path, and it produces the same numbers every time.
+   * Storing the converted form also halves the bytes: 8 per point rather than 16.
+   */
+  positions: Float32Array;
   scalars: Record<string, ScalarColumn>;
   /** `m(T)` as the server reported it: how many points the definition serves for this tile. */
   served: number;
@@ -97,7 +104,7 @@ export function isComplete(band: Band, contentKey: string, k: number): boolean {
 function bandBytes(
   ids: BigUint64Array,
   codes: BigUint64Array,
-  positions: Float64Array,
+  positions: Float32Array,
   scalars: Record<string, ScalarColumn>
 ): number {
   let bytes = ids.byteLength + codes.byteLength + positions.byteLength;
@@ -155,7 +162,11 @@ export function bandsOfResult(
     const end = offset + served;
     const ids = result.ids.slice(offset, end);
     const codes = result.codes.slice(offset, end);
-    const positions = result.positions.slice(offset * 2, end * 2);
+    // Cell space to world space, once. `Float32Array.set` from an `f64` source converts in native
+    // code, so the only per-element work left is the scale.
+    const cells = result.positions.subarray(offset * 2, end * 2);
+    const positions = new Float32Array(cells.length);
+    for (let i = 0; i < cells.length; i++) positions[i] = cells[i]! / CELLS_PER_WORLD_UNIT;
     const scalars = sliceScalars(result.scalars, offset, end);
     bands.push({
       depth,
@@ -420,14 +431,25 @@ export class BandCache {
   /**
    * The same, to a *region* rather than a single tile — what a zoom-in fallback actually needs.
    *
-   * The prefix argument is the natural one for a tile; a fallback is admitted over a rectangle, and
-   * testing each point's tile against the rectangle avoids restricting once per tile in it.
+   * **Tested in world space, not in identity space.** A tile rectangle at a depth is a world-space
+   * box, and the band already holds each point's world position, so containment is four `f32`
+   * comparisons. Deriving each point's tile instead — a `BigInt` shift and a per-bit `BigInt` loop
+   * — is around twenty `BigInt` allocations per point, which at 10^6 points is the difference
+   * between a redraw and a two-second freeze. This is the zoom path, so it runs on exactly the
+   * interaction least able to afford it.
    */
   static restrictToRect(band: Band, depth: number, rect: TileRect): number[] {
+    const span = WORLD_SIZE / 2 ** depth;
+    const x0 = rect.x0 * span;
+    const x1 = (rect.x1 + 1) * span;
+    const y0 = rect.y0 * span;
+    const y1 = (rect.y1 + 1) * span;
     const indices: number[] = [];
-    for (let i = 0; i < band.codes.length; i++) {
-      const {x, y} = tileXY(tileOfCode(band.codes[i]!, depth), depth);
-      if (rectContainsTile(rect, x, y)) indices.push(i);
+    const p = band.positions;
+    for (let i = 0; i < band.ids.length; i++) {
+      const x = p[i * 2]!;
+      const y = p[i * 2 + 1]!;
+      if (x >= x0 && x < x1 && y >= y0 && y < y1) indices.push(i);
     }
     return indices;
   }

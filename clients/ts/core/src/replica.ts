@@ -163,11 +163,42 @@ export class Replica {
    * discarded on arrival — it is never derived, counted, selected or gathered. That is what makes
    * server work scale with what is new rather than with the area on screen.
    */
+  /**
+   * What the store can draw for a region **right now**, without touching the network.
+   *
+   * Separated from {@link fetchRegion} because drawing and fetching want opposite treatment.
+   * Fetching is rate-limited — a drag emits per frame and must not become a request per frame.
+   * Reading the store is local work costing microseconds, and gating it behind the same debounce
+   * makes every view change wait for a network policy before consulting a cache that could have
+   * answered at once. That is pop-in with a warm cache and nothing to fetch.
+   */
+  frameFromCache(want: TileRect, depth: number, k: number): ReplicaFrame {
+    const plan = this.cache.planRegion(want, depth, this.contentKey, k);
+    const {exact, fallback} = this.cache.bandsForRegion(want, depth, this.contentKey, k);
+    return {
+      depth,
+      want,
+      exact,
+      fallback,
+      response: null,
+      plan: {wanted: plan.wanted, novel: plan.novel, requests: 0}
+    };
+  }
+
   async fetchRegion(
     want: TileRect,
     depth: number,
     k: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /**
+     * The region to *draw*, if wider than the region to fetch.
+     *
+     * They are different questions. What to fetch is bounded by what the budget will pay for; what
+     * to draw is bounded by what is already held, and drawing only the fetched box means the drawn
+     * buffer ends 30% beyond the screen — so a pan of more than 15% of the viewport runs off the
+     * edge of the marks and waits for a re-assembly even though every point was already in memory.
+     */
+    render: TileRect = want
   ): Promise<ReplicaFrame> {
     const plan =
       this.opts.cache === false
@@ -208,11 +239,11 @@ export class Replica {
     const {exact, fallback} =
       this.opts.cache === false
         ? {exact: fetched, fallback: [] as Band[]}
-        : this.cache.bandsForRegion(want, depth, this.contentKey, k);
+        : this.cache.bandsForRegion(render, depth, this.contentKey, k);
 
     return {
       depth,
-      want,
+      want: render,
       exact,
       fallback,
       response,

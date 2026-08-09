@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {bandsOfResult, mortonOfTile, tileXY, type Band, type ReplicaFrame} from '@tessera/client';
+import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tessera/client';
 import type {ScalarColumn, ViewportResult} from '@tessera/client';
 import {assemble, assertDrawsEveryServedMark} from '../src/assemble.js';
 
@@ -18,7 +18,10 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
     prefix,
     ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
     codes: BigUint64Array.from({length: n}, () => morton << 32n),
-    positions: Float64Array.from({length: n * 2}, (_, i) => (i % 2 === 0 ? cell.cx : cell.cy)),
+    // World space already — the cell->world conversion happens when a band is built.
+    positions: Float32Array.from({length: n * 2}, (_, i) =>
+      (i % 2 === 0 ? cell.cx : cell.cy) / 128
+    ),
     scalars,
     served,
     capUsed: 500,
@@ -63,29 +66,27 @@ describe('assemble', () => {
     assertDrawsEveryServedMark(out);
   });
 
-  it('narrows cell space to world units once', () => {
+  it('carries the already-converted world positions through untouched', () => {
     const out = assemble(frame(2, [band(2, 0n, 1, 1, {cx: 256, cy: 128})]));
     expect(out.positions[0]).toBeCloseTo(2, 6); // 256 cells / 128 cells-per-world-unit
     expect(out.positions[1]).toBeCloseTo(1, 6);
   });
 
-  it('restricts an ancestor band to the tile asked for, and marks it provisional', () => {
-    // A depth-4 parent holding points in two different depth-6 children.
+  it('restricts an ancestor band to the region asked for, and marks it provisional', () => {
+    // A depth-4 parent holding points in two different depth-6 tiles. At depth 6 a tile spans
+    // 512/64 = 8 world units, so tile (1,0) is x in [8,16) and tile (2,0) is x in [16,24) —
+    // containment is decided on the positions, which is what the restriction actually tests.
     const parent = band(4, 0n, 0);
-    const inChild = mortonOfTile(1, 0, 6); // one specific depth-6 tile
-    const other = mortonOfTile(2, 0, 6);
-    const codes = [inChild, inChild, other];
     const enriched: Band = {
       ...parent,
       ids: BigUint64Array.from([1n, 2n, 3n]),
-      codes: BigUint64Array.from(codes.map((c) => c << BigInt(64 - 12))),
-      positions: new Float64Array(6),
+      codes: new BigUint64Array(3),
+      positions: Float32Array.from([10, 4, 12, 4, 18, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([7, 8, 9])}},
       served: 3
     };
 
-    const {x, y} = tileXY(inChild, 6);
-    const out = assemble(frame(6, [], [enriched], {x0: x, y0: y, x1: x, y1: y}));
+    const out = assemble(frame(6, [], [enriched], {x0: 1, y0: 0, x1: 1, y1: 0}), ['w']);
 
     expect(out.ids.length).toBe(2); // only the two points inside that region
     expect([...out.ids]).toEqual([1n, 2n]);
@@ -123,7 +124,7 @@ describe('assemble', () => {
   it('carries scalars through a mixed assembly in point order', () => {
     const a = band(2, 0n, 2);
     const b = band(2, 1n, 3);
-    const out = assemble(frame(2, [a, b]));
+    const out = assemble(frame(2, [a, b]), ['w']);
     expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([0, 1, 0, 1, 2]);
   });
 
@@ -141,7 +142,7 @@ describe('assemble', () => {
     };
     const bands = bandsOfResult(result, 2, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 
-    const out = assemble(frame(2, bands));
+    const out = assemble(frame(2, bands), ['w']);
 
     expect([...out.ids]).toEqual([...result.ids]);
     expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([10, 11, 12, 13, 14]);

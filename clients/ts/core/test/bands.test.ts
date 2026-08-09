@@ -14,7 +14,7 @@ function band(overrides: Partial<Band> & {depth: number; prefix: bigint; n: numb
   return {
     ids,
     codes,
-    positions: new Float64Array(n * 2),
+    positions: new Float32Array(n * 2),
     scalars: {},
     served: n,
     capUsed: 500,
@@ -62,7 +62,7 @@ describe('bandsOfResult', () => {
       ],
       ids: BigUint64Array.from([1n, 2n, 5n, 6n, 7n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n, 0n]),
-      positions: Float64Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
+      positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
       scalars,
       subCells: null
     };
@@ -73,7 +73,8 @@ describe('bandsOfResult', () => {
     expect([...bands[0]!.ids]).toEqual([1n, 2n]);
     expect([...bands[1]!.ids]).toEqual([5n, 6n, 7n]);
     expect([...(bands[1]!.scalars.w!.values as Uint32Array)]).toEqual([12, 13, 14]);
-    expect(bands[1]!.positions).toEqual(Float64Array.from([2, 2, 3, 3, 4, 4]));
+    // Cell space on the wire, world space in the band — converted once, when the band is built.
+    expect(bands[1]!.positions).toEqual(Float32Array.from([2, 2, 3, 3, 4, 4]));
     expect(bands[0]!.heldBelow).toBe(3n); // one past the largest held identity
   });
 

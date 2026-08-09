@@ -74,9 +74,9 @@ export function renderCounts(state: AppState): string {
      ${row('counted tiles', fmt(BigInt(exactTiles)))}
      <div class="headline">${fmt(served)} of ${fmt(visible)} shown</div>
      ${provisional}
-     <div class="muted">counts cover the fetched region, which is ~30% wider than the viewport —
-       the prefetch margin that lets small pans cost no request. They are exact masked figures for
-       that region, not for the visible rectangle.</div>`
+     <div class="muted">counts cover the drawn region, which reaches well beyond the viewport so
+       that panning inside it costs neither a request nor a redraw. They are exact masked figures
+       for that region, not for the visible rectangle.</div>`
   );
 }
 

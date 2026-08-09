@@ -2,6 +2,7 @@ import {OrthographicView, type Layer} from '@deck.gl/core';
 import {ScatterplotLayer} from '@deck.gl/layers';
 import {
   MARGIN,
+  RENDER_MARGIN,
   RING_MARGIN,
   MAX_DEPTH,
   WORLD_SIZE,
@@ -120,6 +121,9 @@ export class ViewportController {
   /** The idle timer that starts anticipatory work, and the request it started. */
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private background: AbortController | null = null;
+  /** The newest view awaiting a cache redraw, and the frame callback that will draw it. */
+  private pendingRedraw: {view: ViewState; width: number; height: number} | null = null;
+  private redrawHandle: number | null = null;
 
   /**
    * Called on every view-state change.
@@ -153,10 +157,23 @@ export class ViewportController {
     }
 
     if (this.covers(view, width, height)) {
-      // Already held. deck.gl re-projects the marks we have, so this pan costs nothing at all.
+      // Already drawn. deck.gl re-projects the marks we have, so this pan costs nothing at all.
       this.movedAt = 0;
       return;
     }
+
+    // **Escaped the drawn buffer: redraw from the store at once, before deciding about fetching.**
+    // The two are separate concerns and only one of them needs rate-limiting. A drag emits per
+    // frame and must not become a request per frame, which is what the debounce below is for;
+    // reading the store is local and costs microseconds, and putting it behind the same delay
+    // makes every view change wait on a network policy before consulting a cache that could have
+    // answered instantly. Measured before this existed: 65-197 ms to repaint a view that needed
+    // **zero** requests, which is pop-in with a warm cache and nothing to fetch.
+    //
+    // It also covers the zoom case, which a wider drawn buffer cannot. A zoom lands at a depth
+    // nothing is held at, but prefix nesting means the parent band restricted to the new view is a
+    // legitimate superset — drawn immediately, stale-marked, and replaced when the fetch lands.
+    this.scheduleRedraw(view, width, height);
 
     if (this.timer) clearTimeout(this.timer);
     // Leading edge only for a gesture that STARTS from stillness — one wheel notch, a click. A
@@ -175,7 +192,70 @@ export class ViewportController {
     this.timer = setTimeout(() => void this.request(view, width, height), DEBOUNCE_MS);
   }
 
-  /** Does the held response already answer this view, at the depth the budget would ask for? */
+  /**
+   * Coalesce redraws to one per animation frame, keeping the newest view.
+   *
+   * **A redraw is cheap but not free, and view changes arrive faster than frames.** A wheel-zoom
+   * or a drag emits several view states per frame, and running an assembly for each one puts tens
+   * of milliseconds of main-thread work behind every intermediate state nobody ever sees — which
+   * is how a 136 ms assembly at 10^6 marks became a multi-second freeze. Rate-limited on frames
+   * rather than on a timer, because the frame is the only rate at which a redraw can be observed.
+   */
+  private scheduleRedraw(view: ViewState, width: number, height: number) {
+    this.pendingRedraw = {view, width, height};
+    if (this.redrawHandle !== null) return;
+    this.redrawHandle = requestAnimationFrame(() => {
+      this.redrawHandle = null;
+      const next = this.pendingRedraw;
+      this.pendingRedraw = null;
+      if (next) this.redrawFromCache(next.view, next.width, next.height);
+    });
+  }
+
+  /**
+   * Draw whatever the store holds for this view, synchronously and without touching the network.
+   *
+   * Never touches the calibration: `m_target` corrects against what the *server* served, and
+   * feeding it a cache read would ratchet the depth on evidence the server never gave. Nor does it
+   * blank the view — a redraw with nothing held leaves the previous marks up, because an empty
+   * cache is not an empty region and the two must not look alike (client-interaction §9).
+   */
+  private redrawFromCache(view: ViewState, width: number, height: number) {
+    const {meta, session, budget, mTarget, lastVisibleInView} = this.store.state;
+    if (!meta || !session) return;
+
+    const viewport = {
+      target: [view.target[0], view.target[1]] as [number, number],
+      zoom: view.zoom,
+      width,
+      height
+    };
+    const planned = plan({
+      viewport,
+      budget,
+      mTarget,
+      maxTiles: meta.maxTilesPerRequest,
+      visibleInView: lastVisibleInView ?? undefined,
+      heldBytes: this.replica.bytes,
+      budgetBytes: this.replica.budgetBytes
+    });
+    const frame = this.replica.frameFromCache(
+      planned.render,
+      planned.choice.depth,
+      meta.selection.kMaxMarks
+    );
+    const assembled = assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []);
+    if (assembled.ids.length === 0) return;
+    assertDrawsEveryServedMark(assembled);
+
+    this.held = {bbox: worldBbox(viewport, RENDER_MARGIN), depth: planned.choice.depth};
+    this.store.update((s) => {
+      s.assembled = assembled;
+      s.status = 'shown';
+    });
+  }
+
+  /** Does the drawn buffer already answer this view, at the depth the budget would ask for? */
   private covers(view: ViewState, width: number, height: number): boolean {
     if (!this.held || !this.store.state.assembled) return false;
     const want = worldBbox({target: [view.target[0], view.target[1]], zoom: view.zoom, width, height}, 1);
@@ -200,6 +280,7 @@ export class ViewportController {
   /** Abort anything outstanding — used on principal change, where the token itself changes. */
   cancel() {
     if (this.timer) clearTimeout(this.timer);
+    this.cancelRedraw();
     this.cancelBackground();
     this.inFlight?.abort();
     this.inFlight = null;
@@ -225,6 +306,12 @@ export class ViewportController {
   }
 
   /** Used only on a principal change, where the in-flight ring's bands would be unrenderable. */
+  private cancelRedraw() {
+    if (this.redrawHandle !== null) cancelAnimationFrame(this.redrawHandle);
+    this.redrawHandle = null;
+    this.pendingRedraw = null;
+  }
+
   private cancelBackground() {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
@@ -350,13 +437,18 @@ export class ViewportController {
         planned.foreground.rect,
         choice.depth,
         meta.selection.kMaxMarks,
-        controller.signal
+        controller.signal,
+        planned.render
       );
       if (generation !== this.generation) return; // a newer request won; drop this one
 
       const arrivedAt = performance.now();
-      this.held = {bbox: worldBbox(inputs.viewport, MARGIN), depth: choice.depth};
-      const assembled = assemble(frame);
+      // **The covered-view test is against what was DRAWN, not what was fetched.** Panning inside
+      // the drawn buffer is a deck re-projection and costs nothing; testing against the fetched box
+      // instead sends every pan beyond 15% of the viewport through the debounce and a re-assembly
+      // for marks that were already on screen.
+      this.held = {bbox: worldBbox(inputs.viewport, RENDER_MARGIN), depth: choice.depth};
+      const assembled = assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []);
       // The one place a client could violate I7 by omission, so it throws rather than warns.
       assertDrawsEveryServedMark(assembled);
 

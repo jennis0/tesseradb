@@ -1,4 +1,4 @@
-import {BandCache, CELLS_PER_WORLD_UNIT, type Band, type ReplicaFrame} from '@tessera/client';
+import {BandCache, type Band, type ReplicaFrame} from '@tessera/client';
 import type {ScalarColumn} from '@tessera/client';
 
 /**
@@ -52,7 +52,13 @@ function pieceLength(piece: Piece): number {
   return piece.indices ? piece.indices.length : piece.band.ids.length;
 }
 
-/** Concatenate one column across pieces, preserving its declared Arrow type. */
+/**
+ * Concatenate one column across pieces, preserving its declared Arrow type.
+ *
+ * **Only the columns a caller asks for.** Every declared column arrives in the response and is held
+ * per band, but a redraw needs exactly the one being coloured by — assembling all of them was five
+ * times the work for four columns nothing reads.
+ */
 function assembleScalar(name: string, pieces: Piece[], total: number): ScalarColumn | null {
   const first = pieces.find((p) => p.band.scalars[name])?.band.scalars[name];
   if (!first) return null;
@@ -83,9 +89,16 @@ function assembleScalar(name: string, pieces: Piece[], total: number): ScalarCol
       o += len;
       continue;
     }
-    const source = column.values as unknown as {[i: number]: unknown};
-    if (piece.indices) for (const i of piece.indices) out[o++] = source[i];
-    else for (let i = 0; i < len; i++) out[o++] = source[i];
+    if (piece.indices) {
+      const source = column.values as unknown as {[i: number]: unknown};
+      for (const i of piece.indices) out[o++] = source[i];
+    } else {
+      (out as unknown as {set(v: ArrayLike<number>, o: number): void}).set(
+        column.values as unknown as ArrayLike<number>,
+        o
+      );
+      o += len;
+    }
   }
   return {arrowType: first.arrowType, values: out} as unknown as ScalarColumn;
 }
@@ -96,7 +109,7 @@ function assembleScalar(name: string, pieces: Piece[], total: number): ScalarCol
  * Positions narrow from `f64` cell space to `f32` world here, which is the single place precision
  * is spent — the same conversion `positionsToWorld` performs for a whole response.
  */
-export function assemble(frame: ReplicaFrame): Assembled {
+export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assembled {
   const tiles: AssembledTile[] = [];
   const pieces: Piece[] = [];
   let total = 0;
@@ -147,24 +160,24 @@ export function assemble(frame: ReplicaFrame): Assembled {
   let o = 0;
   for (const piece of pieces) {
     if (piece.indices) {
+      // The restricted path — an ancestor band clipped to the region — is inherently per point.
       for (const i of piece.indices) {
         ids[o] = piece.band.ids[i]!;
-        positions[o * 2] = piece.band.positions[i * 2]! / CELLS_PER_WORLD_UNIT;
-        positions[o * 2 + 1] = piece.band.positions[i * 2 + 1]! / CELLS_PER_WORLD_UNIT;
+        positions[o * 2] = piece.band.positions[i * 2]!;
+        positions[o * 2 + 1] = piece.band.positions[i * 2 + 1]!;
         o++;
       }
     } else {
-      for (let i = 0; i < piece.band.ids.length; i++) {
-        ids[o] = piece.band.ids[i]!;
-        positions[o * 2] = piece.band.positions[i * 2]! / CELLS_PER_WORLD_UNIT;
-        positions[o * 2 + 1] = piece.band.positions[i * 2 + 1]! / CELLS_PER_WORLD_UNIT;
-        o++;
-      }
+      // **A whole band is a memcpy.** `TypedArray.set` copies in native code; the per-element loop
+      // this replaces was the bulk of a 136 ms assembly at 10^6 marks, and it was copying values
+      // that had already been converted to their final form when the band was built.
+      ids.set(piece.band.ids, o);
+      positions.set(piece.band.positions, o * 2);
+      o += piece.band.ids.length;
     }
   }
 
-  const names = new Set<string>();
-  for (const piece of pieces) for (const name of Object.keys(piece.band.scalars)) names.add(name);
+  const names = new Set<string>(columns ?? []);
   const scalars: Record<string, ScalarColumn> = {};
   for (const name of names) {
     const column = assembleScalar(name, pieces, total);

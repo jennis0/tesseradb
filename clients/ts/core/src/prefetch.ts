@@ -59,6 +59,8 @@ export type Plan = {
   choice: DepthChoice;
   /** What the user is looking at. Always first, always issued. */
   foreground: PlannedFetch;
+  /** What to draw: everything held over a wider box. See {@link RENDER_MARGIN}. */
+  render: TileRect;
   /** Anticipatory, issued only while the view is still, and abandoned the moment it moves. */
   background: PlannedFetch[];
 };
@@ -71,6 +73,26 @@ export type Plan = {
  * visible box — guarantees a round trip for every pixel of movement.
  */
 export const MARGIN = 1.3;
+
+/**
+ * How far beyond the visible box the *drawn* buffer reaches.
+ *
+ * **Wider than {@link MARGIN}, because drawing and fetching are bounded by different things.** What
+ * to fetch is limited by what the budget will pay for; what to draw is limited only by what is
+ * already held, and re-assembling costs milliseconds where a round trip costs hundreds. Drawing
+ * only the fetched box puts the edge of the marks 30% beyond the screen, so a pan of more than 15%
+ * of the viewport runs off it and waits for a re-assembly — measured at 65–197 ms with **zero**
+ * requests, which is pop-in with a fully warm cache and nothing to fetch.
+ *
+ * Costs `RENDER_MARGIN²` in marks drawn, and deck.gl takes binary attributes so the marks are a
+ * buffer upload rather than per-mark work.
+ *
+ * **Modest, because it is no longer hiding a delay.** A wider buffer was worth a great deal while
+ * escaping it meant waiting on the fetch debounce; now that escaping it redraws from the store
+ * synchronously, this only has to keep small pans from redrawing at all. Widening it further trades
+ * marks drawn for redraws avoided, and the redraw is cheap.
+ */
+export const RENDER_MARGIN = 1.8;
 /**
  * How far the anticipatory ring reaches when the replica is nearly full.
  *
@@ -175,7 +197,12 @@ export function plan(inputs: PlannerInputs): Plan {
     background.push({kind: 'ring', depth: choice.depth, rect: ring});
   }
 
-  return {choice, foreground, background};
+  return {
+    choice,
+    foreground,
+    render: tileRectOfBbox(worldBbox(viewport, RENDER_MARGIN), choice.depth),
+    background
+  };
 }
 
 /**
