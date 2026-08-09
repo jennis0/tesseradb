@@ -1,5 +1,5 @@
 import {WORLD_SIZE} from './coords.js';
-import {chooseDepth, tileRectOfBbox, type DepthChoice} from './budget.js';
+import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type DepthChoice} from './budget.js';
 import {rectArea, type TileRect} from './rects.js';
 
 /**
@@ -50,14 +50,16 @@ export type PlannerInputs = {
 
 /** One region to ask about, in tile-index space at `depth`. */
 export type PlannedFetch = {
-  kind: 'foreground' | 'ring' | 'deeper';
+  kind: 'visible' | 'foreground' | 'ring' | 'deeper';
   depth: number;
   rect: TileRect;
 };
 
 export type Plan = {
   choice: DepthChoice;
-  /** What the user is looking at. Always first, always issued. */
+  /** Exactly what is on screen. Issued first, so the screen fills before the margin is bought. */
+  visible: PlannedFetch;
+  /** The screen plus its prefetch margin. Issued second; the overlap subtracts away. */
   foreground: PlannedFetch;
   /** What to draw: everything held over a wider box. See {@link RENDER_MARGIN}. */
   render: TileRect;
@@ -122,7 +124,8 @@ export const RING_FILL_TARGET = 0.6;
  * and it was fetching a thin margin and then waiting to be asked again.
  *
  * Grows as `RING_MARGIN_MAX` down to `RING_MARGIN` as the replica fills, so an empty cache is
- * aggressive and a full one stops buying what it would have to evict.
+ * aggressive and a full one stops buying what it would have to evict. The reach is spent on
+ * *coarser* bands rather than more fine ones — see {@link plan} — so a wide ring is affordable.
  *
  * **It is bought with server work, and the exchange rate is steep.** Measured over six pans on the
  * demo corpus, against the fixed 2.2× ring: four of six pans needing no request instead of three,
@@ -176,6 +179,21 @@ export function plan(inputs: PlannerInputs): Plan {
     rect: tileRectOfBbox(worldBbox(viewport, MARGIN), choice.depth)
   };
 
+  /**
+   * The visible box alone, fetched before the margin.
+   *
+   * **The screen fills in the time its own contents take, not the time the margin takes.** One
+   * request for the margined box means the user waits for `MARGIN²` — 1.69× — of the marks they can
+   * actually see, and on cold ground at a high budget that difference is seconds. Splitting costs
+   * one extra round trip, against a per-request floor of ~170 µs; the margin is then a rectangle
+   * subtraction away and is fetched second, off the critical path.
+   */
+  const visible_: PlannedFetch = {
+    kind: 'visible',
+    depth: choice.depth,
+    rect: tileRectOfBbox(visible, choice.depth)
+  };
+
   const background: PlannedFetch[] = [];
 
   // **The ring, biased downwind.** A pan continues in the direction it started far more often than
@@ -190,15 +208,29 @@ export function plan(inputs: PlannerInputs): Plan {
   // The bias is the part whose value is unmeasured. A symmetric ring fetches ahead in every
   // direction at once and so costs the same whether the guess was right or not; shifting it is
   // what would make the cost depend on predicting correctly.
-  const margin = ringMargin(inputs.heldBytes ?? 0, inputs.budgetBytes ?? 0);
+  // **The periphery is fetched coarser, not just further.** Each level shallower is a quarter of
+  // the points per unit area, and §7.2's prefixes nest, so a coarse band is a legitimate superset
+  // of the fine one it will be replaced by — it draws immediately when the user arrives and refines
+  // when the foreground fetch lands. Doubling the reach while dropping a depth therefore costs
+  // about the same as the band before it, instead of four times as much: a ring reaching 8x the
+  // viewport costs three foregrounds rather than sixty-four.
+  //
+  // Without this a wide ring is unaffordable at any useful reach. Measured at a fixed depth, a 6x
+  // ring asked for 2.3 x 10^6 points in one response.
+  const reach = ringMargin(inputs.heldBytes ?? 0, inputs.budgetBytes ?? 0);
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
-  const ring = tileRectOfBbox(worldBbox(viewport, margin, shift), choice.depth);
-  if (rectArea(ring) <= maxTiles) {
-    background.push({kind: 'ring', depth: choice.depth, rect: ring});
+  for (let step = 0; ; step++) {
+    const depth = choice.depth - step;
+    const margin = RING_MARGIN * 2 ** step;
+    if (depth < MIN_DEPTH || margin > reach * 2) break;
+    const rect = tileRectOfBbox(worldBbox(viewport, Math.min(margin, reach * 2), shift), depth);
+    if (rectArea(rect) > maxTiles) break;
+    background.push({kind: 'ring', depth, rect});
   }
 
   return {
     choice,
+    visible: visible_,
     foreground,
     render: tileRectOfBbox(worldBbox(viewport, RENDER_MARGIN), choice.depth),
     background

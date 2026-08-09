@@ -1,4 +1,4 @@
-import {decodeViewport} from './decode.js';
+import {createDecoder, type Decoder} from './decoder.js';
 import type {
   ArrowType,
   CategoryValue,
@@ -49,6 +49,13 @@ export type TesseraClientOptions = {
    * typed, and client-interaction §7 for the topology that is actually recommended.
    */
   sessionCredential?: string;
+  /**
+   * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
+   *
+   * Exists for tests and for a consumer that already owns a worker pool — not as a switch anyone
+   * needs to think about.
+   */
+  decoder?: Decoder;
 };
 
 /**
@@ -60,7 +67,21 @@ export type TesseraClientOptions = {
  * check against the contracts spec.
  */
 export class TesseraClient {
+  /**
+   * Where responses are turned into typed arrays.
+   *
+   * Created lazily and shared across requests. In a browser this is a worker, so decode does not
+   * compete with drawing; everywhere else it is the same synchronous call this always made.
+   */
+  private decoder: Decoder | null = null;
+
   constructor(private readonly opts: TesseraClientOptions) {}
+
+  /** Release the decode worker, if one was created. */
+  close(): void {
+    this.decoder?.close();
+    this.decoder = null;
+  }
 
   async authorise(terms: string[]): Promise<Session> {
     if (!this.opts.sessionCredential) {
@@ -149,8 +170,9 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const bytes = new Uint8Array(await response.arrayBuffer());
     const stage = response.headers.get('x-tessera-stage-ns');
+    this.decoder ??= this.opts.decoder ?? createDecoder();
     return {
-      result: decodeViewport(bytes),
+      result: await this.decoder.decode(bytes),
       timings: {
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),

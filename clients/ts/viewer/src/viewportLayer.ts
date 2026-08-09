@@ -48,7 +48,13 @@ const IDLE_MS = 250;
  * The ring already reaches `RING_MARGIN` beyond the visible box, so a drift well inside that is
  * already covered by what was fetched last time.
  */
-const RING_RESEEK_FRACTION = 0.25;
+/**
+ * Anticipatory fetches allowed between one movement and the next.
+ *
+ * Bounds what a still view costs. Each is one bounded request, so this is the number of bites taken
+ * out of the graded ring before the client waits to be asked for something.
+ */
+const MAX_PREFETCH_PER_PAUSE = 3;
 
 /** Floor on the interval between leading-edge requests. Trailing debounce still applies between. */
 const LEADING_EDGE_MIN_GAP_MS = 400;
@@ -116,11 +122,20 @@ export class ViewportController {
    */
   private velocity: [number, number] | undefined;
   private lastTarget: [number, number] | null = null;
-  /** Where the last ring was centred, so a view that has barely moved asks for nothing. */
-  private ringAt: {x: number; y: number; depth: number} | null = null;
   /** The idle timer that starts anticipatory work, and the request it started. */
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private background: AbortController | null = null;
+  /**
+   * Anticipatory fetches issued since the view last moved.
+   *
+   * **A graded ring always has work left in it**, so "is anything novel" cannot be the whole guard:
+   * without a budget the idle timer re-fires every quarter-second, finds the next strip, and issues
+   * requests forever — starving the foreground at the connection pool and at the admission gate,
+   * which measured as pan-to-paint in the tens of seconds while the server's own share stayed in
+   * single-digit milliseconds. The budget resets when the user moves, because that is when what to
+   * anticipate has changed.
+   */
+  private prefetchesSinceMove = 0;
   /** The newest view awaiting a cache redraw, and the frame callback that will draw it. */
   private pendingRedraw: {view: ViewState; width: number; height: number} | null = null;
   private redrawHandle: number | null = null;
@@ -146,7 +161,9 @@ export class ViewportController {
         : undefined;
     this.lastTarget = target;
     this.lastScheduleAt = now;
+    this.prefetchesSinceMove = 0;
 
+    // A fresh still period, so anticipation may spend again.
     // Movement cancels *pending* anticipatory work — it was chosen for a view that no longer
     // exists — but never an in-flight ring. A ring already on the wire yields bands that stay valid
     // whatever the view does next, so aborting it discards server work already spent and buys
@@ -288,21 +305,6 @@ export class ViewportController {
     this.movedAt = 0;
     this.velocity = undefined;
     this.lastTarget = null;
-    this.ringAt = null;
-  }
-
-  /**
-   * Has the view moved far enough since the last ring to be worth another?
-   *
-   * The threshold is a fraction of the viewport, so it scales with zoom automatically: at depth 14
-   * a viewport is a thousandth of the width it is at depth 4, and a fixed world-space distance
-   * would be either meaningless or paralysing at one end or the other.
-   */
-  private ringIsStillGood(viewport: {target: [number, number]; zoom: number; width: number}, depth: number): boolean {
-    if (!this.ringAt || this.ringAt.depth !== depth) return false;
-    const worldWidth = viewport.width / 2 ** viewport.zoom;
-    const moved = Math.hypot(viewport.target[0] - this.ringAt.x, viewport.target[1] - this.ringAt.y);
-    return moved < worldWidth * RING_RESEEK_FRACTION;
   }
 
   /** Used only on a principal change, where the in-flight ring's bands would be unrenderable. */
@@ -342,6 +344,7 @@ export class ViewportController {
     // Never two rings at once, and never one alongside a foreground request: the foreground is what
     // the user is waiting for, and anticipation must not queue ahead of it at the admission gate.
     if (!meta || !session || this.inFlight || this.background) return;
+    if (this.prefetchesSinceMove >= MAX_PREFETCH_PER_PAUSE) return;
 
     const viewport = {
       target: [view.target[0], view.target[1]] as [number, number],
@@ -359,7 +362,16 @@ export class ViewportController {
       heldBytes: this.replica.bytes,
       budgetBytes: this.replica.budgetBytes
     });
-    const ring = planned.background.find((b) => b.kind === 'ring');
+    // **The nearest band with anything novel in it, coarsest last.** The bands are ordered fine and
+    // near to coarse and far, so taking the first that has work fills the neighbourhood before the
+    // periphery — and taking only one leaves the thread free between pauses.
+    let ring = null as (typeof planned.background)[number] | null;
+    for (const band of planned.background) {
+      if (this.replica.novelIn(band.rect, band.depth, meta.selection.kMaxMarks) > 0) {
+        ring = band;
+        break;
+      }
+    }
     if (!ring) return;
 
     // **Hysteresis, not containment, and the distinction is what makes this work.** deck emits
@@ -374,20 +386,25 @@ export class ViewportController {
     // does *not* cover — so it needs its own, and the honest form is a movement threshold: a ring
     // is bought to cover the *next* pan, and a drift of a fraction of the viewport does not need
     // another one.
-    if (this.ringIsStillGood(viewport, ring.depth)) return;
 
     const controller = new AbortController();
     this.background = controller;
     try {
+      // **One bite per idle pause.** The ring may be much wider than a single response should be,
+      // and decode is synchronous on this thread — so it takes the nearest novel strip and leaves
+      // the rest for the next pause. The region still fills; it stops doing it in one block that
+      // freezes the view.
+      this.prefetchesSinceMove += 1;
       const frame = await this.replica.fetchRegion(
         ring.rect,
         ring.depth,
         meta.selection.kMaxMarks,
-        controller.signal
+        controller.signal,
+        undefined,
+        1
       );
       // The ring never draws and never calibrates. It is at a margin the user is not looking at,
       // so folding it into either would report a view that is not on screen.
-      this.ringAt = {x: viewport.target[0], y: viewport.target[1], depth: ring.depth};
       this.store.update((s) => {
         s.replicaBytes = this.replica.bytes;
         s.prefetched = frame.plan.novel;
@@ -423,6 +440,7 @@ export class ViewportController {
     this.inFlight = controller;
     const generation = ++this.generation;
 
+    const s0 = this.store.state.colourBy;
     const movedAt = this.movedAt || performance.now();
     const startedAt = performance.now();
     this.lastRequestAt = startedAt;
@@ -433,8 +451,12 @@ export class ViewportController {
     });
 
     try {
+      // **Two fetches, screen first.** The visible box is what the user is waiting for; the margin
+      // exists so the *next* pan costs nothing. Asking for both at once makes the screen wait for
+      // 1.69× the marks it will show. The second call subtracts the first's coverage, so it fetches
+      // the annulus and nothing more.
       const frame = await this.replica.fetchRegion(
-        planned.foreground.rect,
+        planned.visible.rect,
         choice.depth,
         meta.selection.kMaxMarks,
         controller.signal,
@@ -501,6 +523,34 @@ export class ViewportController {
       });
       this.movedAt = 0;
       this.inFlight = null;
+
+      // The margin, off the critical path: the screen is already drawn, and this only decides
+      // whether the *next* small pan needs the wire. Failures are swallowed for the same reason a
+      // shed ring is — the user has their view either way.
+      if (planned.foreground.rect !== planned.visible.rect) {
+        try {
+          const margin = await this.replica.fetchRegion(
+            planned.foreground.rect,
+            choice.depth,
+            meta.selection.kMaxMarks,
+            controller.signal,
+            planned.render
+          );
+          if (generation !== this.generation) return;
+          const widened = assemble(margin, s0 ? [s0] : []);
+          if (widened.ids.length > 0) {
+            assertDrawsEveryServedMark(widened);
+            this.store.update((s) => {
+              s.assembled = widened;
+              s.replicaBytes = this.replica.bytes;
+              s.replicaPoints = this.replica.points;
+              s.replicaBands = this.replica.bandCount;
+            });
+          }
+        } catch {
+          // Already drawn; the margin is an optimisation for the next gesture.
+        }
+      }
     } catch (error) {
       if (controller.signal.aborted || generation !== this.generation) return;
 

@@ -117,13 +117,18 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   const ids = u64Column(pointTable, 'tessera_id');
   const codes = u64Column(pointTable, 'code');
   const positions = new Float64Array(ids.length * 2);
+  // **The halves are read as `u32`s over the same bytes, never as `BigInt`s.** Arrow's `u64` column
+  // is little-endian, so each code is already two 32-bit words in the order this loop wants them,
+  // and a `Uint32Array` view costs nothing. Taking them off the `BigUint64Array` instead — one read
+  // plus a shift plus a mask — is three `BigInt` allocations per point, which at 2.5 × 10^6 points
+  // measured 2.5 s of decode on the main thread and was the largest single cost in the client.
+  const halves = new Uint32Array(codes.buffer, codes.byteOffset, codes.length * 2);
   for (let i = 0; i < ids.length; i++) {
-    const code = codes[i]!;
-    // Split into two u32 halves before deinterleaving: JS bitwise operators are int32, so the
-    // spread/compact arithmetic has to happen 32 bits at a time. The halves recombine by
-    // multiplication rather than by shifting, which would overflow int32 at the top of the axis.
-    const hi = Number(code >> 32n) >>> 0;
-    const lo = Number(code & 0xffffffffn) >>> 0;
+    // JS bitwise operators are int32, so the spread/compact arithmetic happens 32 bits at a time.
+    // The halves recombine by multiplication rather than by shifting, which would overflow int32
+    // at the top of the axis.
+    const lo = halves[i * 2]!;
+    const hi = halves[i * 2 + 1]!;
     const qx = compact(lo) + compact(hi) * 65536;
     const qy = compact(lo >>> 1) + compact(hi >>> 1) * 65536;
     positions[i * 2] = qx / 65536;

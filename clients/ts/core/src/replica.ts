@@ -75,6 +75,26 @@ export type ReplicaFrame = {
   };
 };
 
+/**
+ * Tiles per request, so one response cannot decode for seconds.
+ *
+ * Sized in tiles rather than points because the client cannot know the point count before asking;
+ * at the demo corpus's density this is ~2 × 10^5 points, a few hundred milliseconds of decode.
+ */
+const MAX_TILES_PER_REQUEST = 25_000;
+
+/** Split a rectangle into row-strips of at most `maxTiles`, preserving full width. */
+function splitRect(rect: TileRect, maxTiles: number): TileRect[] {
+  const width = rect.x1 - rect.x0 + 1;
+  const rowsPerPiece = Math.max(1, Math.floor(maxTiles / width));
+  if ((rect.y1 - rect.y0 + 1) <= rowsPerPiece) return [rect];
+  const out: TileRect[] = [];
+  for (let y = rect.y0; y <= rect.y1; y += rowsPerPiece) {
+    out.push({x0: rect.x0, y0: y, x1: rect.x1, y1: Math.min(rect.y1, y + rowsPerPiece - 1)});
+  }
+  return out;
+}
+
 type PendingAsk = {
   prefix: bigint;
   resolve: (band: Resolved | null) => void;
@@ -130,6 +150,16 @@ export class Replica {
 
   get bandCount(): number {
     return this.cache.bandCount;
+  }
+
+  /**
+   * How many tiles of a region are not yet held — without fetching anything.
+   *
+   * Lets a scheduler pick the nearest band with work in it rather than re-asking for one already
+   * covered, which is what keeps a graded ring from re-fetching its inner bands forever.
+   */
+  novelIn(want: TileRect, depth: number, k: number): number {
+    return this.cache.planRegion(want, depth, this.contentKey, k).novel;
   }
 
   /** The byte budget the store was given, so a caller can size its look-ahead against it. */
@@ -198,7 +228,22 @@ export class Replica {
      * buffer ends 30% beyond the screen — so a pan of more than 15% of the viewport runs off the
      * edge of the marks and waits for a re-assembly even though every point was already in memory.
      */
-    render: TileRect = want
+    render: TileRect = want,
+    /**
+     * Most requests to issue in one call, for a caller that must not monopolise the main thread.
+     *
+     * **Decode is synchronous and on the render thread**, so the ceiling on anticipation is not the
+     * network or the server — measured, the server answers a ring in single-digit milliseconds —
+     * but how long the client spends turning the answer into typed arrays. A wide ring asked for
+     * 2.3 × 10^6 points, and the ~2.8 s of decode and absorb that followed queued behind it every
+     * gesture the user made: pan-to-paint went from 19 ms to 8.8 s while the server's own share
+     * stayed at 9 ms. Splitting the request does not help on its own — the total work is the same
+     * and the thread is the same.
+     *
+     * So a background caller takes one bite per idle pause and the region fills over several. The
+     * cache still reaches its target; it just stops doing it all at once.
+     */
+    maxRequests = Infinity
   ): Promise<ReplicaFrame> {
     const plan =
       this.opts.cache === false
@@ -208,10 +253,18 @@ export class Replica {
     let response: ViewportResponse | null = null;
     let fetched: Band[] = [];
 
-    // **One request per novel rectangle, not one per tile.** A pan yields a single strip, so this
-    // is one request in the common case and never more than a handful — `rectSubtractAll` bounds
+    // **One request per novel rectangle, and no rectangle large enough to block a frame.** A pan
+    // yields a single strip, so this is one request in the common case — `rectSubtractAll` bounds
     // the fragmentation rather than letting it grow with the number of past fetches.
-    for (const rect of plan.fetch) {
+    //
+    // Each is then split so no single response decodes for longer than a frame or two. Measured
+    // before this existed: a wide anticipatory ring asked for one rectangle of 188 × 10^3 tiles,
+    // got 2.3 × 10^6 points back, and spent 2.5 s decoding and 0.3 s absorbing them **on the main
+    // thread** — during which a pan the user had already made sat queued behind it and measured
+    // 7.5 s, against its own server time of 5 ms and its own response of 212 KB. Nothing was slow
+    // except the size of one bite.
+    const pieces = plan.fetch.flatMap((r) => splitRect(r, MAX_TILES_PER_REQUEST));
+    for (const rect of pieces.slice(0, maxRequests)) {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
       response = await this.fetchViewport({slice: this.opts.slice, zoom: depth, bbox, k}, signal);
       fetched = fetched.concat(this.absorb(response, depth, k));

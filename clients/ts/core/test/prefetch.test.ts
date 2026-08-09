@@ -47,6 +47,15 @@ describe('plan', () => {
     expect(visibleOnly.choice.depth).toBeGreaterThanOrEqual(asIfMargined.choice.depth);
   });
 
+  it('plans the visible box separately, and inside the margined one', () => {
+    // The screen is fetched first so it fills in its own time rather than the margin's; the margin
+    // is then a subtraction away and costs a second, off-critical-path request.
+    const p = plan(BASE);
+    expect(rectArea(p.visible.rect)).toBeLessThan(rectArea(p.foreground.rect));
+    expect(rectContains(p.foreground.rect, p.visible.rect)).toBe(true);
+    expect(p.visible.depth).toBe(p.choice.depth);
+  });
+
   it('fetches the margined box in the foreground', () => {
     const p = plan(BASE);
     const tight = plan({...BASE, viewport: {...BASE.viewport, width: 1, height: 1}});
@@ -71,13 +80,29 @@ describe('plan', () => {
   });
 
   it('reaches further while the replica is empty, and pulls in as it fills', () => {
-    const empty = plan({...BASE, heldBytes: 0, budgetBytes: 512e6});
-    const half = plan({...BASE, heldBytes: 154e6, budgetBytes: 512e6}); // half of the fill target
-    const full = plan({...BASE, heldBytes: 512e6, budgetBytes: 512e6});
-    const area = (p: ReturnType<typeof plan>) =>
-      rectArea(p.background.find((b) => b.kind === 'ring')!.rect);
-    expect(area(empty)).toBeGreaterThan(area(half));
-    expect(area(half)).toBeGreaterThan(area(full));
+    // Reach is spent on extra, coarser bands rather than on a bigger fine one, so it is the band
+    // COUNT that responds to how full the cache is.
+    const bands = (heldBytes: number) =>
+      plan({...BASE, heldBytes, budgetBytes: 512e6}).background.length;
+    expect(bands(0)).toBeGreaterThan(bands(154e6));
+    expect(bands(154e6)).toBeGreaterThanOrEqual(bands(512e6));
+    expect(bands(512e6)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('grades the ring by depth, each band coarser and wider than the last', () => {
+    const p = plan({...BASE, heldBytes: 0, budgetBytes: 512e6});
+    const ring = p.background.filter((b) => b.kind === 'ring');
+    expect(ring.length).toBeGreaterThan(1);
+    for (let i = 1; i < ring.length; i++) {
+      expect(ring[i]!.depth).toBe(ring[i - 1]!.depth - 1);
+    }
+    // Each band is about the tile count of the one before: twice the reach at a quarter the
+    // density. That is what makes a wide ring affordable rather than quadratic.
+    for (let i = 1; i < ring.length; i++) {
+      const ratio = rectArea(ring[i]!.rect) / rectArea(ring[i - 1]!.rect);
+      expect(ratio).toBeGreaterThan(0.3);
+      expect(ratio).toBeLessThan(3);
+    }
   });
 
   it('never reaches past the fixed floor, however full', () => {

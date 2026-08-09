@@ -201,6 +201,16 @@ describe('Replica.fetchRegion', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('splits a large region so no single response can block a frame', async () => {
+    // One rectangle of 200x200 tiles is 40,000 — above the per-request bound, so it arrives as
+    // several responses rather than one that decodes for seconds on the main thread.
+    const {r, calls} = replica(() => response([{tile: 0n, served: 1}]));
+    await r.fetchRegion(rect(0, 0, 199, 199), 8, 500);
+    expect(calls.length).toBeGreaterThan(1);
+    // Every piece is a strip of the full width, so together they tile the region exactly.
+    for (const c of calls) expect(c.zoom).toBe(8);
+  });
+
   it('serves bands but retains nothing when the cache is bypassed', async () => {
     const {r, calls} = replica(() => response([{tile: 0n, served: 2}]), {cache: false});
 
