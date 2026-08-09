@@ -219,9 +219,29 @@ pub struct EffectiveMask {
     base: Arc<RowProjection>,
     minus: Bitmap,
     plus: Bitmap,
+    /// The rows an attribute filter admits, or `None` when the request carried no filter.
+    ///
+    /// **Applied above composition, never folded into `base`** (`filter-surface.md` §5.1). Folding
+    /// it in would break the structural invariants the diffs are asserted against and the
+    /// unfiltered total θ must anchor on — and the anchor staying unfiltered is **I12**: a filter
+    /// may move the frontier up, never down.
+    ///
+    /// It is a *row-space* set because that is the space counts are taken in. Its entity-space
+    /// origin already met the composed verdict, so intersecting here narrows and cannot widen.
+    filter: Option<Bitmap>,
 }
 
 impl EffectiveMask {
+    /// Narrow this mask by an attribute filter's row-space set.
+    ///
+    /// Consumes and returns, so a filtered mask cannot be built by mutating one already handed to
+    /// a counting path — the unfiltered mask and the filtered one are different values.
+    pub fn with_filter(mut self, rows: Bitmap) -> Self {
+        self.filter = Some(rows);
+        self
+    }
+
+
     /// `base.range_cardinality(r) − |minus ∩ r| + |plus ∩ r|` — see this module's doc for why the
     /// two clamps in [`compose`] make this arithmetic exact rather than merely approximate.
     pub fn count_range(&self, r: Range<u32>) -> u64 {
@@ -249,8 +269,34 @@ impl EffectiveMask {
     ///
     /// O(containers in the diffs): `base`'s cardinality is memoised
     /// ([`RowProjection::cardinality`]) and the diffs are tiny by construction.
+    /// **Deliberately blind to `filter`**, which is what makes it θ's anchor.
+    ///
+    /// §8.4 and **I12**: anchoring the selection threshold on *filtered* counts would make θ a
+    /// function of the filter, so the frontier would coarsen as a viewer typed — a filter moving
+    /// the frontier down, which I12 forbids. The anchor is the composed mask's own total, filter or
+    /// no filter, and this method is the one `Threshold::anchor` calls.
     pub fn visible_total(&self) -> u64 {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
+    }
+
+    /// The rows in `r` that are visible **and** match the request's filter — `TileCount::matched`.
+    ///
+    /// **Distinct from [`Self::count_range`], which stays the composed *visible* count.** The two
+    /// are separate wire fields because they answer different questions: `visible` is how many
+    /// items in this tile the principal may see, `matched` how many of those the filter admits.
+    /// Collapsing them would make a filter look like a permission change, and would put a
+    /// filter-dependent quantity where §7.1 discloses an exact composed one.
+    ///
+    /// Without a filter the two agree, and this returns `count_range` rather than materialising a
+    /// bitmap to reach the same number.
+    pub fn count_matched_range(&self, r: Range<u32>) -> u64 {
+        match &self.filter {
+            None => self.count_range(r),
+            // With a filter the term-by-term arithmetic no longer holds — a row can be in `base`
+            // and out of the filter — so this materialises the intersection. O(containers in the
+            // range), not O(rows).
+            Some(_) => self.rows_in_range(r).cardinality(),
+        }
     }
 
     /// The effective mask restricted to `r`: `(base ∩ r) ∖ minus ∪ (plus ∩ r)`, as a bitmap.
@@ -285,10 +331,19 @@ impl EffectiveMask {
         // `or_inplace` on already-disjoint-from-`result` content (plus ∩ base = ∅ by
         // construction — see the structural invariant asserted in `compose`) — no double count.
         result.or_inplace(&plus_in_range);
+        // **Last, and by intersection only.** The filter narrows the composed result; applying it
+        // earlier — to `base`, or before the `plus` union — would let a filtered row be reinstated
+        // by the diff, which is the fold `filter-surface.md` §5.1 forbids.
+        if let Some(filter) = &self.filter {
+            result.and_inplace(filter);
+        }
         result
     }
 
     pub fn contains_row(&self, row: u32) -> bool {
+        if self.filter.as_ref().is_some_and(|f| !f.contains(row)) {
+            return false;
+        }
         if self.minus.contains(row) {
             return false;
         }
@@ -301,8 +356,17 @@ impl EffectiveMask {
     /// route a given mask exercises. The route choice is observable in timing (a diffs-empty mask
     /// skips the per-tile materialisation) but never in output — the C19-adjacent note in memo
     /// `2026-07-30-viewport-hot-path-and-bundle-size-review.md` §B9.
+    /// **A filter counts as a diff.** The steady-state route walks `base` in place precisely
+    /// because there is nothing to subtract from it; a filter is exactly something to subtract, so
+    /// a filtered mask must never take that route. Omitting `filter` here served every visible row
+    /// under a filter that had narrowed nothing — the whole narrowing bypassed by a fast path that
+    /// predated it, with no error and a plausible-looking answer.
+    ///
+    /// This is the shape to watch for whenever a narrowing is added to this type: every route that
+    /// asks "can I skip the diffs?" is asking "is `base` already the answer?", and a new field that
+    /// makes it not the answer belongs in this predicate.
     pub fn diffs_are_empty(&self) -> bool {
-        self.minus.is_empty() && self.plus.is_empty()
+        self.minus.is_empty() && self.plus.is_empty() && self.filter.is_none()
     }
 
     /// Visit the visible rows of `r` as ascending, non-overlapping, half-open runs — selection's
@@ -593,7 +657,15 @@ pub fn compose(
         "compose: plus ∩ base ≠ ∅ — the ∖ base clamp is supposed to make this impossible"
     );
 
-    EffectiveMask { base, minus, plus }
+    EffectiveMask {
+        base,
+        minus,
+        plus,
+        // Composition never filters. A request that carries operands narrows the result afterwards
+        // via `with_filter`, which is what keeps this function's structural invariants — and the
+        // unfiltered total θ anchors on — properties of composition alone.
+        filter: None,
+    }
 }
 
 /// `entity`'s raw id, cast down to the `u32` the fragment's bitmap operates over. Infallible in

@@ -224,6 +224,12 @@ pub struct Generation {
     /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
     /// denied".
     pub denied: Arc<DenyMask>,
+    /// The bundle's filter columns, opened once per generation.
+    ///
+    /// **Generation-scoped for the same reason the dictionary is**: the artefact belongs to the
+    /// published prefix, so a new bundle brings new columns and a session reading the old
+    /// generation keeps reading the old ones. Empty when the schema declares nothing filterable.
+    pub filter_columns: Arc<crate::filter::FilterColumns>,
 }
 
 impl Generation {

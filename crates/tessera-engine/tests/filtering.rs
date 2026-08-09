@@ -28,12 +28,15 @@ use croaring::Bitmap;
 use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{candidate, FilterColumns, FilterError, FilterOperand};
+use tessera_engine::ViewportRequest;
 use tessera_store::read::open_bundle;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
 use tessera_types::AttrLocalId;
 
 const N: u64 = 60;
+/// The whole declared extent, so a depth-0 request covers every item.
+const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// A `u8` category and a per-item string. The category is `per_viewer`, which is the shape that
 /// also owes membership postings; the string is `filter`-only, which is the shape that owes none.
@@ -545,4 +548,119 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
     assert!(engine
         .accept_ingest(vec![good], "batch-good".to_string(), [2u8; 32])
         .is_ok());
+}
+
+/// **A filtered viewport returns only matching marks — end to end, through the engine.**
+///
+/// This is the first assertion that the filter reaches the *served* answer rather than an
+/// entity-space bitmap a test built itself. The expected set comes from the fixture's inputs, and
+/// the comparison is on `tessera_id` rather than row, because the served order is the engine's.
+#[test]
+fn a_filtered_viewport_serves_only_matching_marks() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-vp");
+    let wal = fx._dir.path().join("wal-vp");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let unfiltered = engine
+        .viewport(&session, ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000))
+        .expect("an unfiltered viewport answers");
+
+    let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
+    let filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                .filters(vec![("department".to_string(), eng)]),
+        )
+        .expect("a filtered viewport answers");
+
+    let expected_count = (0..N)
+        .filter(|&e| department_of(e) == Some("eng"))
+        .count() as u64;
+    assert!(expected_count > 0 && expected_count < N, "a real subset");
+
+    assert_eq!(
+        filtered.points.len() as u64,
+        expected_count,
+        "the filtered viewport draws exactly the matching items"
+    );
+    assert_eq!(unfiltered.points.len() as u64, N);
+
+    // Every filtered mark is one the unfiltered request also served — a filter narrows and never
+    // widens (I12), asserted on the served identities rather than on counts alone.
+    let unfiltered_ids: std::collections::HashSet<u64> =
+        unfiltered.points.tessera_ids.iter().copied().collect();
+    for id in &filtered.points.tessera_ids {
+        assert!(unfiltered_ids.contains(id));
+    }
+}
+
+/// **The selection threshold stays anchored on the unfiltered total** (§8.4, I12). A filter may
+/// move the frontier up, never down — so the anchor a filtered request uses is the same one the
+/// unfiltered request uses, and a viewer typing does not coarsen their own map.
+#[test]
+fn a_filter_does_not_move_the_threshold_anchor() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-theta");
+    let wal = fx._dir.path().join("wal-theta");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let unfiltered = engine
+        .viewport(&session, ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000))
+        .unwrap();
+    let filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filters(vec![(
+                "department".to_string(),
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            )]),
+        )
+        .unwrap();
+
+    let sum = |v: &[tessera_engine::TileCount], f: fn(&tessera_engine::TileCount) -> u64| -> u64 {
+        v.iter().map(f).sum()
+    };
+    // `visible` is the composed count and must not move with the filter — that is what keeps θ's
+    // anchor unfiltered, and with it I12's "a filter moves the frontier up, never down".
+    assert_eq!(
+        sum(&filtered.tiles, |t| t.visible),
+        sum(&unfiltered.tiles, |t| t.visible),
+        "`visible` must not move with the filter"
+    );
+    // `matched` is what does move, and it is the filtered figure.
+    assert_eq!(
+        sum(&filtered.tiles, |t| t.matched),
+        (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64
+    );
+    assert_eq!(
+        sum(&unfiltered.tiles, |t| t.matched),
+        sum(&unfiltered.tiles, |t| t.visible),
+        "unfiltered, matched == visible"
+    );
+}
+
+/// An undeclared column refuses the request rather than serving an empty viewport — an empty
+/// answer is a real one, and must not stand in for one that could not be computed.
+#[test]
+fn a_viewport_naming_an_undeclared_column_is_refused() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-bad");
+    let wal = fx._dir.path().join("wal-bad");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let err = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filters(vec![(
+                "no_such_column".to_string(),
+                FilterOperand::TextPrefix("x".into()),
+            )]),
+        )
+        .expect_err("an undeclared column is refused");
+    assert!(format!("{err}").contains("not declared filterable"), "{err}");
 }

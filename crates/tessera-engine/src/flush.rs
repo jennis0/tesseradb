@@ -683,6 +683,8 @@ mod tests {
         tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
         let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
+            // A test fixture's schema declares nothing filterable, so there is nothing to open.
+            filter_columns: Arc::new(crate::filter::FilterColumns::default()),
             prefix: "v00000".to_string(),
             vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
             segments_version: 0,

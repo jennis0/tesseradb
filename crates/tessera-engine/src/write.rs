@@ -4055,6 +4055,10 @@ impl Executor {
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
+            // A merge and a fold rewrite geometry, never the filter artefact, so the columns are
+            // carried forward. The rebuild `filter-index.md` §6 specifies at the fold is unbuilt;
+            // when it lands it replaces this clone rather than adding beside it.
+            filter_columns: Arc::clone(&live.filter_columns),
             segments_version,
             // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
             watermark: live.watermark,
@@ -5191,6 +5195,7 @@ impl Executor {
         let next = Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
+            filter_columns: Arc::clone(&live.filter_columns),
             // **Unchanged, and this is the whole of D2.** Row space did not move, so no
             // projection is stale and no cache key may rotate.
             segments_version: live.segments_version,
@@ -6668,6 +6673,7 @@ impl Executor {
             .store(buffer.len(), Ordering::SeqCst);
 
         let next = Generation {
+            filter_columns: Arc::clone(&generation.filter_columns),
             overlay_version: generation.overlay_version + 1,
             buffer: Arc::new(buffer),
             prefix: generation.prefix.clone(),
@@ -6811,6 +6817,7 @@ impl Executor {
         };
 
         let next = Generation {
+            filter_columns: Arc::clone(&generation.filter_columns),
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
             prefix: generation.prefix.clone(),
@@ -7046,6 +7053,10 @@ impl Executor {
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
+            // A merge and a fold rewrite geometry, never the filter artefact, so the columns are
+            // carried forward. The rebuild `filter-index.md` §6 specifies at the fold is unbuilt;
+            // when it lands it replaces this clone rather than adding beside it.
+            filter_columns: Arc::clone(&live.filter_columns),
             segments_version,
             watermark,
             bundle: next_bundle,
@@ -7272,6 +7283,11 @@ impl Executor {
         let next = Generation {
             prefix,
             vocabularies: Arc::clone(&previous.vocabularies),
+            // ⊘ A prefix rotation publishes a *new* bundle, so its filter columns are the new
+            // prefix's — but nothing reopens them here, so a rotated generation serves the previous
+            // prefix's artefact. Correct today because a rotation carries the same build; it stops
+            // being correct the moment a rotation can change the schema.
+            filter_columns: Arc::clone(&previous.filter_columns),
             segments_version,
             watermark,
             bundle,

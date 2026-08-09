@@ -79,7 +79,13 @@ pub enum ScalarOut {
     Utf8(String),
 }
 
-/// One tile's count row. `matched == visible` always, there being no filter contract yet (⊘).
+/// One tile's count row.
+///
+/// `visible` is the composed count — how many of this tile's items the principal may see — and
+/// `matched` how many of those the request's filter admits. They are equal on an unfiltered
+/// request, and deliberately separate fields: collapsing them would make a filter read as a
+/// permission change, and would put a filter-dependent quantity where §7.1 discloses an exact
+/// composed one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileCount {
     /// The tile's Morton prefix at the request's zoom depth.
@@ -323,6 +329,13 @@ pub struct ViewportRequest<'a> {
     /// D-G) — a build already in flight runs to completion regardless of this token, because its
     /// result serves later arrivals too (D-C's scope note: bounded, useful work).
     pub cancel: Option<CancelToken>,
+    /// Attribute filters, as `(column, operand)`. Empty is the unfiltered request.
+    ///
+    /// **Composed by intersection and applied above the mask** — never folded into it
+    /// (`filter-surface.md` §5.1). A filter narrows which marks are *drawn*; it never moves the
+    /// selection threshold, which stays anchored on the unfiltered composed total (**I12**: a
+    /// filter may move the frontier up, never down).
+    pub filters: Vec<(String, crate::filter::FilterOperand)>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -336,7 +349,14 @@ impl<'a> ViewportRequest<'a> {
             stamp: None,
             underlay_offset: None,
             cancel: None,
+            filters: Vec::new(),
         }
+    }
+
+    /// Attach attribute filters. See [`ViewportRequest::filters`].
+    pub fn filters(mut self, filters: Vec<(String, crate::filter::FilterOperand)>) -> Self {
+        self.filters = filters;
+        self
     }
 
     pub fn stamp(mut self, stamp: Option<GenerationStamp>) -> Self {
@@ -756,6 +776,7 @@ impl Engine {
     /// NOT gated — see [`check_cancelled`]'s doc.
     pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
         let ViewportRequest {
+            filters: _,
             slice,
             zoom,
             bbox,
@@ -873,6 +894,37 @@ impl Engine {
             denied,
         );
         probe.lap(|t| &mut t.compose_ns);
+
+        // **Above composition, and only ever narrowing.** The operand is resolved in entity space
+        // under the composed candidate — so the result already excludes suppressed and
+        // deleted-but-unfolded entities — and then projected into this slice's row space to meet
+        // the mask.
+        //
+        // ⊘ **Projected, not tested per tile.** `probes/2026-08-08-filter-layout/` arm 3 measures
+        // the crossover: a projection costs ~27 ns per set bit and scales with the *result*, while
+        // a per-tile membership test costs ~6–22 ns per viewport row and scales with the
+        // *viewport* — so a broad filter should test per tile (2,779 ms against 6.49 ms at 10⁹,
+        // 10⁸ matches). Only the projecting route is built. It is exact at every size; what is
+        // missing is the cheap route for the broad case, which is a latency gap and not a
+        // correctness one.
+        let mask = if req.filters.is_empty() {
+            mask
+        } else {
+            let candidate = crate::filter::candidate(
+                &session.fragment,
+                &session.satisfied,
+                &generation.overlay,
+                &generation.buffer,
+            );
+            let entities = generation
+                .filter_columns
+                .resolve_all(
+                    req.filters.iter().map(|(c, o)| (c.as_str(), o)),
+                    &candidate,
+                )
+                .map_err(|e| EngineError::FilterRefused(e.to_string()))?;
+            mask.with_filter(slice_data.row_space.project(&entities))
+        };
 
         let q = &generation.bundle.manifest.quantisation;
         let extent = Bounds {
@@ -1473,7 +1525,17 @@ fn tile_result(
         .iter()
         .map(|(s, range)| {
             let (segment, row_base) = segments[*s];
-            let visible = mask.count_range(row_base + range.start..row_base + range.end);
+            // **The count selection draws from, which under a filter is `M_sel`'s.** Selection
+            // picks rows from the filtered set, and its decode-tier choice turns on this figure:
+            // a fully-visible range takes the `FullRange` tier, which extends every row *without
+            // consulting the mask*. Supplying the unfiltered count there served every row in the
+            // range under a filter that had narrowed the counts correctly — the filter applied to
+            // `matched` and bypassed entirely in what was drawn.
+            //
+            // `TileCount::visible` is computed separately and stays unfiltered; the two figures
+            // answer different questions (§7.1).
+            let visible =
+                mask.count_matched_range(row_base + range.start..row_base + range.end);
             SelectionPart {
                 segment,
                 range: range.clone(),
@@ -1482,7 +1544,18 @@ fn tile_result(
             }
         })
         .collect();
-    let visible: u64 = parts.iter().map(|p| p.visible).sum();
+    // What selection draws from: `M_sel`'s count, equal to the composed count when unfiltered.
+    let matched: u64 = parts.iter().map(|p| p.visible).sum();
+    // The composed count — how many of this tile's items the principal may see, which a filter does
+    // not change. Summed over the same segment ranges, so the two cannot disagree about which rows
+    // this tile covers.
+    let visible: u64 = tile_parts
+        .iter()
+        .map(|(s, range)| {
+            let (_, row_base) = segments[*s];
+            mask.count_range(row_base + range.start..row_base + range.end)
+        })
+        .sum();
     stats.lap(|t| &mut t.count_ns);
 
     if visible == 0 {
@@ -1491,10 +1564,12 @@ fn tile_result(
         return Ok(None);
     }
     stats.count(|t| &mut t.tiles_nonempty, 1);
-    stats.count(|t| &mut t.sigma_visible, visible);
+    stats.count(|t| &mut t.sigma_visible, matched);
 
     let parts = SelectionParts::new(&parts);
-    let selected = Selection::of(mask, &parts, params, visible);
+    // Anchored on `matched`, not `visible`: selection's cap and tier decisions are about the set
+    // it draws from. θ's *threshold* anchor is separate and stays unfiltered — `visible_total()`.
+    let selected = Selection::of(mask, &parts, params, matched);
     stats.lap(|t| &mut t.select_ns);
     // Counted by `Selection::of` itself, inside the loops that do the reading — not from
     // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
@@ -1502,9 +1577,11 @@ fn tile_result(
 
     let count = TileCount {
         tile: tile.prefix,
+        // The **composed** count, never the filtered one: `visible` answers "how many items here
+        // may this principal see", which a filter does not change. §7.1 discloses it exactly.
         visible,
-        // There is no filter contract yet (⊘): matched == visible everywhere.
-        matched: visible,
+        // How many of those the filter admits. Equal to `visible` on an unfiltered request.
+        matched,
         served: selected.rows.len() as u64,
     };
 

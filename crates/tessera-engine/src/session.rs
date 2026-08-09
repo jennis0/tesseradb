@@ -296,6 +296,13 @@ pub struct SliceSegments {
 /// hand back a partial or best-effort result.
 #[derive(Debug)]
 pub enum EngineError {
+    /// An attribute filter could not be answered. The message names why — an undeclared column, or
+    /// a candidate reaching past the artefact's coverage (`filter::FilterError`).
+    ///
+    /// **A refusal, never an empty result.** An empty answer is a real one — it is what a principal
+    /// who can see no matching item is given — so serving it for a filter that could not be
+    /// computed would make an underived answer indistinguishable from a derived one.
+    FilterRefused(String),
     Store(StoreError),
     Wal(WalError),
     Plugin(PluginError),
@@ -427,6 +434,7 @@ pub enum EngineError {
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EngineError::FilterRefused(why) => write!(f, "filter refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
@@ -828,6 +836,27 @@ impl Engine {
         let bundle = Arc::new(bundle);
         let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
+        // The filter artefact belongs to the published prefix, so it is opened here with the
+        // bundle and carried forward by every generation successor. `covered` is the build's entity
+        // high-water: entities allocated since carry no filter values, and a request reaching one
+        // is refused rather than answered short (`filter::FilterError::CoverageEndsAtBuild`).
+        let filter_columns = {
+            let partition_dir = prefix_dir
+                .join("partitions")
+                .join(bundle.partitions.keys().next().cloned().unwrap_or_default());
+            Arc::new(
+                crate::filter::FilterColumns::open(
+                    &partition_dir,
+                    &bundle.manifest.declared_scalars,
+                    u32::try_from(bundle.manifest.entity_id_high_water).unwrap_or(u32::MAX),
+                )
+                .map_err(|e| EngineError::Store(tessera_store::StoreError::Io {
+                    path: partition_dir.clone(),
+                    source: e,
+                }))?,
+            )
+        };
+
         let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
             prefix,
             segments_version,
@@ -842,6 +871,7 @@ impl Engine {
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
             vocabularies: Arc::new(vocabularies),
+            filter_columns,
             denied,
         })));
 
