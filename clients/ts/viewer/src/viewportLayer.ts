@@ -268,7 +268,9 @@ export class ViewportController {
       mTarget,
       maxTiles: meta.maxTilesPerRequest,
       visibleInView: lastVisibleInView ?? undefined,
-      velocity: this.velocity
+      velocity: this.velocity,
+      heldBytes: this.replica.bytes,
+      budgetBytes: this.replica.budgetBytes
     });
     const ring = planned.background.find((b) => b.kind === 'ring');
     if (!ring) return;
@@ -320,7 +322,9 @@ export class ViewportController {
       mTarget,
       maxTiles: meta.maxTilesPerRequest,
       visibleInView: lastVisibleInView ?? undefined,
-      velocity: this.velocity
+      velocity: this.velocity,
+      heldBytes: this.replica.bytes,
+      budgetBytes: this.replica.budgetBytes
     };
     const planned = plan(inputs);
     const choice = planned.choice;
@@ -378,6 +382,8 @@ export class ViewportController {
           s.lastBytes = frame.response.bytes;
         }
         s.replicaBytes = this.replica.bytes;
+        s.replicaPoints = this.replica.points;
+        s.replicaBands = this.replica.bandCount;
         s.lastPlan = {omitted: frame.plan.wanted - frame.plan.novel, fetched: frame.plan.novel};
         s.lastVisibleInView = visible;
         s.mTarget = calibrate(

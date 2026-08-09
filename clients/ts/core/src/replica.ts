@@ -123,6 +123,20 @@ export class Replica {
     return this.cache.bytes;
   }
 
+  /** Points held, and over how many bands — see {@link BandCache.points}. */
+  get points(): number {
+    return this.cache.points;
+  }
+
+  get bandCount(): number {
+    return this.cache.bandCount;
+  }
+
+  /** The byte budget the store was given, so a caller can size its look-ahead against it. */
+  get budgetBytes(): number {
+    return this.opts.cacheBytes ?? 512 * 1024 * 1024;
+  }
+
   /** The content coordinate last observed, for a caller that wants to stale-mark against it. */
   get currentContentKey(): string {
     return this.contentKey;

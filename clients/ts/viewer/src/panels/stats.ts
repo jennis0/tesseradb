@@ -67,6 +67,9 @@ export function renderStats(state: AppState): string {
      ${row('marks drawn', drawn.toLocaleString('en-GB'))}
      ${row('— of which provisional', provisional.toLocaleString('en-GB'))}
      ${row('replica held', `${((state.replicaBytes ?? 0) / 1e6).toFixed(1)} MB`)}
+     ${row('— points', (state.replicaPoints ?? 0).toLocaleString('en-GB'))}
+     ${row('— bands', (state.replicaBands ?? 0).toLocaleString('en-GB'))}
+     ${row('— bytes/point', state.replicaPoints ? Math.round((state.replicaBytes ?? 0) / state.replicaPoints) + ' B' : '—')}
      ${row('tiles from cache', state.lastPlan ? `${state.lastPlan.omitted} of ${state.lastPlan.omitted + state.lastPlan.fetched}` : '—')}
      ${row('prefetched ahead', String(state.prefetched ?? 0))}
      ${stage}`

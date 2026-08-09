@@ -240,6 +240,21 @@ export class BandCache {
     return this.held;
   }
 
+  /**
+   * Points held, which is the figure to size a replica against — bytes hide how much of the budget
+   * is per-band overhead rather than payload, and bands here are small (`m_target` is single
+   * digits, so a band is ~10 points) so that overhead is not a rounding error.
+   */
+  get points(): number {
+    let n = 0;
+    for (const band of this.bands.values()) n += band.ids.length;
+    return n;
+  }
+
+  get bandCount(): number {
+    return this.bands.size;
+  }
+
   get size(): number {
     return this.bands.size;
   }

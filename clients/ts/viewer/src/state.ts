@@ -46,6 +46,9 @@ export type AppState = {
   lastBytes: number;
   /** Bytes the replica holds, so the cache's cost is visible rather than implicit. */
   replicaBytes: number;
+  /** Points held and bands holding them — the figure a cache budget should be argued from. */
+  replicaPoints: number;
+  replicaBands: number;
   /** Tiles the anticipatory ring fetched on the last idle pause — look-ahead, made visible. */
   prefetched: number;
   /** How the last ask split between held tiles and asked-for ones — the cache's effectiveness. */

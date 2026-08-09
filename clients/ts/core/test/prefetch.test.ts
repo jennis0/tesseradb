@@ -1,5 +1,14 @@
 import {describe, expect, it} from 'vitest';
-import {MARGIN, RING_MARGIN, deeperFetch, plan, worldBbox, type PlannerInputs} from '../src/prefetch.js';
+import {
+  MARGIN,
+  RING_MARGIN,
+  RING_MARGIN_MAX,
+  deeperFetch,
+  plan,
+  ringMargin,
+  worldBbox,
+  type PlannerInputs
+} from '../src/prefetch.js';
 import {tileOfCode} from '../src/coords.js';
 import {rectArea, rectContains} from '../src/rects.js';
 
@@ -59,6 +68,23 @@ describe('plan', () => {
     const movingRing = plan({...BASE, velocity: [1, 0]}).background.find((b) => b.kind === 'ring')!;
     expect(rectArea(movingRing.rect)).toBe(rectArea(stillRing.rect)); // same cost...
     expect(movingRing.rect.x1).toBeGreaterThan(stillRing.rect.x1); // ...different place
+  });
+
+  it('reaches further while the replica is empty, and pulls in as it fills', () => {
+    const empty = plan({...BASE, heldBytes: 0, budgetBytes: 512e6});
+    const half = plan({...BASE, heldBytes: 154e6, budgetBytes: 512e6}); // half of the fill target
+    const full = plan({...BASE, heldBytes: 512e6, budgetBytes: 512e6});
+    const area = (p: ReturnType<typeof plan>) =>
+      rectArea(p.background.find((b) => b.kind === 'ring')!.rect);
+    expect(area(empty)).toBeGreaterThan(area(half));
+    expect(area(half)).toBeGreaterThan(area(full));
+  });
+
+  it('never reaches past the fixed floor, however full', () => {
+    expect(ringMargin(1e12, 512e6)).toBe(RING_MARGIN);
+    expect(ringMargin(0, 512e6)).toBe(RING_MARGIN_MAX);
+    // No budget declared is the conservative answer, not the aggressive one.
+    expect(ringMargin(0, 0)).toBe(RING_MARGIN);
   });
 
   it('drops the ring rather than breaching the tile ceiling', () => {

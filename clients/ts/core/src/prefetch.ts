@@ -43,6 +43,9 @@ export type PlannerInputs = {
   visibleInView?: number;
   /** World units per millisecond, signed, from recent movement. Biases the ring downwind. */
   velocity?: [number, number];
+  /** What the replica holds and what it may hold — sizes the ring. See {@link ringMargin}. */
+  heldBytes?: number;
+  budgetBytes?: number;
 };
 
 /** One region to ask about, in tile-index space at `depth`. */
@@ -68,8 +71,49 @@ export type Plan = {
  * visible box — guarantees a round trip for every pixel of movement.
  */
 export const MARGIN = 1.3;
-/** How far the anticipatory ring reaches. Costs `RING_MARGIN²` in tiles over the visible box. */
+/**
+ * How far the anticipatory ring reaches when the replica is nearly full.
+ *
+ * The floor, not the figure: see {@link ringMargin}.
+ */
 export const RING_MARGIN = 2.2;
+
+/** How far it reaches when the replica is empty. */
+export const RING_MARGIN_MAX = 6;
+
+/**
+ * Fill the replica to this fraction of its budget before the ring stops growing.
+ *
+ * Below it the cache is not the scarce resource and a wider ring is close to free — the marks are
+ * held either way, and the only extra cost is fetching ground the user may not reach. Above it a
+ * wider ring would evict what it just bought.
+ */
+export const RING_FILL_TARGET = 0.6;
+
+/**
+ * How far the ring should reach, given how full the replica already is.
+ *
+ * **Sized against the cache budget rather than fixed**, because a fixed multiple is wrong at both
+ * ends. Measured on the demo corpus at the broad principal: points cost ~48 B each, so a 512 MB
+ * budget holds ~10.7 × 10^6 of them — and a 2.2× ring left the replica at 41 MB and 8 × 10^5 points
+ * after a dozen pans, 8% of what it was given. The cache was never the constraint; the ring was,
+ * and it was fetching a thin margin and then waiting to be asked again.
+ *
+ * Grows as `RING_MARGIN_MAX` down to `RING_MARGIN` as the replica fills, so an empty cache is
+ * aggressive and a full one stops buying what it would have to evict.
+ *
+ * **It is bought with server work, and the exchange rate is steep.** Measured over six pans on the
+ * demo corpus, against the fixed 2.2× ring: four of six pans needing no request instead of three,
+ * and 2.5 × 10^6 points held instead of 8 × 10^5 — for **6× the server CPU** (33 ms → 207 ms) and
+ * **4× the bytes** (9.1 MB → 35.7 MB). Worth it for one principal on a dedicated box; against
+ * `caching.md` §4's ceiling of a handful of concurrently active broad principals it is not
+ * obviously worth it at all, and `RING_MARGIN_MAX` is the dial.
+ */
+export function ringMargin(heldBytes: number, budgetBytes: number): number {
+  if (budgetBytes <= 0) return RING_MARGIN;
+  const fullness = Math.min(1, heldBytes / (budgetBytes * RING_FILL_TARGET));
+  return RING_MARGIN_MAX - (RING_MARGIN_MAX - RING_MARGIN) * fullness;
+}
 /**
  * How far a velocity of one viewport-width per second shifts the ring, as a fraction of the
  * viewport. Bounded well under 1 so a fast flick biases rather than abandons the current view.
@@ -124,8 +168,9 @@ export function plan(inputs: PlannerInputs): Plan {
   // The bias is the part whose value is unmeasured. A symmetric ring fetches ahead in every
   // direction at once and so costs the same whether the guess was right or not; shifting it is
   // what would make the cost depend on predicting correctly.
+  const margin = ringMargin(inputs.heldBytes ?? 0, inputs.budgetBytes ?? 0);
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
-  const ring = tileRectOfBbox(worldBbox(viewport, RING_MARGIN, shift), choice.depth);
+  const ring = tileRectOfBbox(worldBbox(viewport, margin, shift), choice.depth);
   if (rectArea(ring) <= maxTiles) {
     background.push({kind: 'ring', depth: choice.depth, rect: ring});
   }

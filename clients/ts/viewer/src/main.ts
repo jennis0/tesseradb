@@ -51,6 +51,8 @@ const store = createStore({
   latency: null,
   lastBytes: 0,
   replicaBytes: 0,
+  replicaPoints: 0,
+  replicaBands: 0,
   prefetched: 0,
   lastPlan: null,
   inFlight: 0,

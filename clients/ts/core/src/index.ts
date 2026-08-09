@@ -29,6 +29,6 @@ export type {
   TileAddress
 } from './bands.js';
 export {Replica} from './replica.js';
-export {plan, deeperFetch, worldBbox, MARGIN, RING_MARGIN, VELOCITY_BIAS} from './prefetch.js';
+export {plan, deeperFetch, worldBbox, ringMargin, MARGIN, RING_MARGIN, RING_MARGIN_MAX, VELOCITY_BIAS} from './prefetch.js';
 export type {Plan, PlannedFetch, PlannerInputs, Viewport} from './prefetch.js';
 export type {ReplicaFrame, ReplicaOptions} from './replica.js';
