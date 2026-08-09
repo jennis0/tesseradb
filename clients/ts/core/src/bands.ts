@@ -1,4 +1,4 @@
-import {CELLS_PER_WORLD_UNIT, WORLD_SIZE, tileContains, tileOfCode, tileXY} from './coords.js';
+import {CELLS_PER_WORLD_UNIT, WORLD_SIZE, tileContains, tileXY} from './coords.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
 import {
   coverageAdd,
@@ -65,7 +65,6 @@ export type Band = {
   x: number;
   y: number;
   ids: BigUint64Array;
-  codes: BigUint64Array;
   /**
    * Interleaved x,y in **deck.gl world space**, `f32` — two entries per point.
    *
@@ -114,11 +113,10 @@ export function isComplete(band: Band, contentKey: string, k: number): boolean {
 /** How many bytes a band's buffers occupy, for the ledger eviction runs against. */
 function bandBytes(
   ids: BigUint64Array,
-  codes: BigUint64Array,
   positions: Float32Array,
   scalars: Record<string, ScalarColumn>
 ): number {
-  let bytes = ids.byteLength + codes.byteLength + positions.byteLength;
+  let bytes = ids.byteLength + positions.byteLength;
   for (const column of Object.values(scalars)) {
     bytes += scalarBytes(column);
   }
@@ -172,9 +170,9 @@ export function bandsOfResult(
     if (served === 0) continue;
     const end = offset + served;
     const ids = result.ids.slice(offset, end);
-    const codes = result.codes.slice(offset, end);
-    // Cell space to world space, once. `Float32Array.set` from an `f64` source converts in native
-    // code, so the only per-element work left is the scale.
+    // Cell space to the renderer's world `f32`, once per band. Not done in the decoder because a
+    // cell coordinate needs an `f64` mantissa to round-trip (see `decode.ts`), and not done per
+    // redraw because it produces the same numbers every time.
     const cells = result.positions.subarray(offset * 2, end * 2);
     const positions = new Float32Array(cells.length);
     for (let i = 0; i < cells.length; i++) positions[i] = cells[i]! / CELLS_PER_WORLD_UNIT;
@@ -186,7 +184,6 @@ export function bandsOfResult(
       x,
       y,
       ids,
-      codes,
       positions,
       scalars,
       served,
@@ -196,7 +193,7 @@ export function bandsOfResult(
       heldBelow: ids.length === 0 ? 0n : ids[ids.length - 1]! + 1n,
       identityKey: meta.identityKey,
       contentKey: meta.contentKey,
-      bytes: bandBytes(ids, codes, positions, scalars),
+      bytes: bandBytes(ids, positions, scalars),
       touchedAt: meta.now
     });
     offset = end;
@@ -426,22 +423,6 @@ export class BandCache {
   }
 
   /**
-   * The points of `band` that fall inside a deeper tile — the zoom-in fallback.
-   *
-   * Because the parent's band is a prefix of its own visible set in identity order, its restriction
-   * to a child is a prefix of the *child's* visible set: the smallest identities of a subset are
-   * the subset's own smallest. That is why an ancestor band may be drawn at all, and why the count
-   * it yields is a sound declaration for the child.
-   */
-  static restrict(band: Band, depth: number, prefix: bigint): number[] {
-    const indices: number[] = [];
-    for (let i = 0; i < band.codes.length; i++) {
-      if (tileOfCode(band.codes[i]!, depth) === prefix) indices.push(i);
-    }
-    return indices;
-  }
-
-  /**
    * The same, to a *region* rather than a single tile — what a zoom-in fallback actually needs.
    *
    * **Tested in world space, not in identity space.** A tile rectangle at a depth is a world-space
@@ -520,15 +501,13 @@ export class BandCache {
   private truncate(band: Band, keep: number): void {
     this.retractCoverage(band.depth, band.x, band.y);
     const ids = band.ids.slice(0, keep);
-    const codes = band.codes.slice(0, keep);
     const positions = band.positions.slice(0, keep * 2);
     const scalars = sliceScalars(band.scalars, 0, keep);
-    const bytes = bandBytes(ids, codes, positions, scalars);
+    const bytes = bandBytes(ids, positions, scalars);
     this.held += bytes - band.bytes;
     this.bands.set(bandKey(band.depth, band.prefix), {
       ...band,
       ids,
-      codes,
       positions,
       scalars,
       heldBelow: ids[keep - 1]! + 1n,

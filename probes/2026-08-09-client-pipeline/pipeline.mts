@@ -11,6 +11,7 @@ import {Replica} from '../../clients/ts/core/src/replica.js';
 import {plan} from '../../clients/ts/core/src/prefetch.js';
 import {inlineDecoder} from '../../clients/ts/core/src/decoder.js';
 import {assemble} from '../../clients/ts/viewer/src/assemble.js';
+import {buildColourAttribute} from '../../clients/ts/viewer/src/colour.js';
 
 const arg = (n: string, d: number) => {
   const i = process.argv.indexOf(`--${n}`);
@@ -82,22 +83,44 @@ for (let step = 0; step < STEPS; step++) {
 
   // The redraw path on its own: what a *frame* costs when nothing is fetched. This is what runs on
   // every animation frame of a drag, so it is the number that decides whether panning is smooth.
-  const tc = performance.now();
-  for (let i = 0; i < 5; i++) {
-    const f = replica.frameFromCache(p.render, p.choice.depth, meta.selection.kMaxMarks);
-    assemble(f, ['primary_category']);
+  const phase = (label: string, fn: () => void) => {
+    fn();
+    const t = performance.now();
+    for (let i = 0; i < 5; i++) fn();
+    return {label, ms: (performance.now() - t) / 5};
+  };
+  const selectP = phase('select', () => {
+    replica.frameFromCache(p.render, p.choice.depth, meta.selection.kMaxMarks);
+  });
+  const f = replica.frameFromCache(p.render, p.choice.depth, meta.selection.kMaxMarks);
+  const asmNoCols = phase('asm(0col)', () => void assemble(f, []));
+  const asmCols = phase('asm(1col)', () => void assemble(f, ['primary_category']));
+  const a = assemble(f, ['primary_category']);
+  const colourP = phase('colour', () =>
+    void buildColourAttribute(a.ids.length, a.scalars, {kind: 'uniform'})
+  );
+  const redrawMs = selectP.ms + asmCols.ms + colourP.ms;
+  if (step === STEPS - 1) {
+    console.log(
+      `\n  breakdown at ${a.ids.length} marks / ${replica.bandCount} bands: ` +
+        `select ${selectP.ms.toFixed(1)} | assemble ${asmCols.ms.toFixed(1)} ` +
+        `(without scalars ${asmNoCols.ms.toFixed(1)}) | colour ${colourP.ms.toFixed(1)} ms`
+    );
   }
-  const redrawMs = (performance.now() - tc) / 5;
 
   // The anticipatory ring, as the viewer schedules it: the nearest band with novel work, one
   // bounded bite, up to a budget per still period.
   if (process.argv.includes('--ring')) {
+    let spent = 0;
     for (let bite = 0; bite < arg('bites', 3); bite++) {
+      if (spent >= arg('bitebytes', 2_000_000)) break;
       const band = p.background.find(
         (b) => replica.novelIn(b.rect, b.depth, meta.selection.kMaxMarks) > 0
       );
       if (!band) break;
+      const b0 = bytes;
       await replica.fetchRegion(band.rect, band.depth, meta.selection.kMaxMarks, undefined, undefined, 1);
+      spent += bytes - b0;
     }
   }
   visibleInView = frame.exact.reduce((n, b) => n + Number(b.visible), 0) || visibleInView;

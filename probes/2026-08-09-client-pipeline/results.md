@@ -48,6 +48,17 @@ nothing, and a broad principal — which fills the cache fastest — was the wor
 Bands now remember their own tile index, and the cost scales with what is drawn: 211,900 marks cost
 6.0 ms and 5,700 cost 0.4 ms.
 
+## Anticipation, bounded in bytes
+
+With three bites per still period the ring moved **7.6–12.7 MB per pan at a 5 × 10⁴ mark budget** —
+an order more than the view itself needed, on a corpus of 2.4M items. Decode is in a worker, but
+splitting a response into bands is not, and that scales with points rather than with responses.
+
+Bounding the budget in bytes instead of in requests: **24 requests / 86.5 MB → 12 / 31.5 MB** over
+the same six pans, reaching the same 3.3 × 10⁵ points held. A request-count budget spends wildly
+different effort on a dense corpus and a sparse one; a byte budget spends the same, and bytes are
+what the interaction feels.
+
 ## What this corrects
 
 Earlier the same interaction measured 8–29 s of "fetch + decode" in headless Chromium, which led to

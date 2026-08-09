@@ -116,6 +116,11 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   const pointTable = tableFromIPC(parts.points);
   const ids = u64Column(pointTable, 'tessera_id');
   const codes = u64Column(pointTable, 'code');
+  // **`f64`, and not because it is convenient.** A cell coordinate is 32 bits per axis, so the
+  // de-interleaved value needs a 32-bit mantissa to round-trip; `f32` has 24 and loses the
+  // sub-cell part. `decode.test.ts` re-interleaves these back into the server's `code` and would
+  // catch it. The narrowing to the renderer's `f32` world space happens later, per band, where the
+  // precision is no longer needed.
   const positions = new Float64Array(ids.length * 2);
   // **The halves are read as `u32`s over the same bytes, never as `BigInt`s.** Arrow's `u64` column
   // is little-endian, so each code is already two 32-bit words in the order this loop wants them,

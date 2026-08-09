@@ -56,6 +56,20 @@ const IDLE_MS = 250;
  */
 const MAX_PREFETCH_PER_PAUSE = 3;
 
+/**
+ * Bytes anticipation may absorb between one movement and the next.
+ *
+ * **Bounded in bytes rather than in requests, because bytes are what costs.** Decode is in a worker,
+ * but splitting a response into bands — the slicing and the cell-to-world pass — is on this thread,
+ * and it scales with points rather than with responses. A request-count budget lets one pause pull
+ * 12 MB on a dense corpus and 200 KB on a sparse one; a byte budget spends the same effort either
+ * way and is what the user feels.
+ *
+ * Measured on the demo corpus at a 5 × 10^4 mark budget, three bites per pause moved 7.6–12.7 MB
+ * per pan — an order more than the view itself needed.
+ */
+const MAX_PREFETCH_BYTES_PER_PAUSE = 2_000_000;
+
 /** Floor on the interval between leading-edge requests. Trailing debounce still applies between. */
 const LEADING_EDGE_MIN_GAP_MS = 400;
 /** The server sends `Retry-After: 1`. Bounded, because an unbounded retry amplifies saturation. */
@@ -136,6 +150,7 @@ export class ViewportController {
    * anticipate has changed.
    */
   private prefetchesSinceMove = 0;
+  private prefetchBytesSinceMove = 0;
   /** The newest view awaiting a cache redraw, and the frame callback that will draw it. */
   private pendingRedraw: {view: ViewState; width: number; height: number} | null = null;
   private redrawHandle: number | null = null;
@@ -162,6 +177,7 @@ export class ViewportController {
     this.lastTarget = target;
     this.lastScheduleAt = now;
     this.prefetchesSinceMove = 0;
+    this.prefetchBytesSinceMove = 0;
 
     // A fresh still period, so anticipation may spend again.
     // Movement cancels *pending* anticipatory work — it was chosen for a view that no longer
@@ -345,6 +361,7 @@ export class ViewportController {
     // the user is waiting for, and anticipation must not queue ahead of it at the admission gate.
     if (!meta || !session || this.inFlight || this.background) return;
     if (this.prefetchesSinceMove >= MAX_PREFETCH_PER_PAUSE) return;
+    if (this.prefetchBytesSinceMove >= MAX_PREFETCH_BYTES_PER_PAUSE) return;
 
     const viewport = {
       target: [view.target[0], view.target[1]] as [number, number],
@@ -405,6 +422,7 @@ export class ViewportController {
       );
       // The ring never draws and never calibrates. It is at a margin the user is not looking at,
       // so folding it into either would report a view that is not on screen.
+      this.prefetchBytesSinceMove += frame.response?.bytes ?? 0;
       this.store.update((s) => {
         s.replicaBytes = this.replica.bytes;
         s.prefetched = frame.plan.novel;
