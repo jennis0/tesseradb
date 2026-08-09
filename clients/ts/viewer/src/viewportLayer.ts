@@ -35,6 +35,21 @@ export const INITIAL_VIEW_STATE = {
 const DEBOUNCE_MS = 140;
 
 /**
+ * The wait when the store cannot answer the view at all.
+ *
+ * **A debounce is for suppressing redundant requests, and this request is not redundant.** The 140 ms
+ * above assumes the next frame may make the pending request pointless — true while the view is
+ * still inside ground the replica holds, false the moment it is not. An aggressive pan of a third
+ * to a half of a viewport escapes both the drawn buffer and the fetched margin, and then the client
+ * spends 140 ms deciding to ask for something it already knows it needs, against a fetch that
+ * measures 14-45 ms. The delay was the larger half of the gap.
+ *
+ * Not zero: a drag still emits per frame, and at most one request is in flight with the previous
+ * aborted, so this bounds how many the server is asked to start and then cancel.
+ */
+const UNCACHED_DEBOUNCE_MS = 30;
+
+/**
  * How still the view must be before anticipatory work starts.
  *
  * Long enough that a continuous drag never triggers it — every frame of a drag cancels and re-arms
@@ -222,7 +237,30 @@ export class ViewportController {
       void this.request(view, width, height);
       return;
     }
-    this.timer = setTimeout(() => void this.request(view, width, height), DEBOUNCE_MS);
+    // Planning is a rectangle subtraction, so asking whether the store can answer this view costs
+    // microseconds and can be done on the way past.
+    this.timer = setTimeout(
+      () => void this.request(view, width, height),
+      this.storeCanAnswer(view, width, height) ? DEBOUNCE_MS : UNCACHED_DEBOUNCE_MS
+    );
+  }
+
+  /** Can the replica draw this view without asking for anything? */
+  private storeCanAnswer(view: ViewState, width: number, height: number): boolean {
+    const {meta, budget, mTarget, lastVisibleInView} = this.store.state;
+    if (!meta) return true;
+    const planned = plan({
+      viewport: {target: [view.target[0], view.target[1]], zoom: view.zoom, width, height},
+      budget,
+      mTarget,
+      maxTiles: meta.maxTilesPerRequest,
+      visibleInView: lastVisibleInView ?? undefined,
+      heldBytes: this.replica.bytes,
+      budgetBytes: this.replica.budgetBytes
+    });
+    return (
+      this.replica.novelIn(planned.visible.rect, planned.choice.depth, meta.selection.kMaxMarks) === 0
+    );
   }
 
   /**

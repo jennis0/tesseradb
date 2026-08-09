@@ -89,12 +89,18 @@ export const MARGIN = 1.3;
  * Costs `RENDER_MARGIN²` in marks drawn, and deck.gl takes binary attributes so the marks are a
  * buffer upload rather than per-mark work.
  *
- * **Modest, because it is no longer hiding a delay.** A wider buffer was worth a great deal while
- * escaping it meant waiting on the fetch debounce; now that escaping it redraws from the store
- * synchronously, this only has to keep small pans from redrawing at all. Widening it further trades
- * marks drawn for redraws avoided, and the redraw is cheap.
+ * **Sized against the gesture, not against the screen.** Escaping the buffer costs a full rebuild
+ * and a fresh upload of every mark; staying inside it costs nothing at all, because deck re-projects
+ * what is already there. So the question is how far a gesture travels: an aggressive pan moves a
+ * third to a half of a viewport, and at 1.8 the buffer reached only 0.4 widths beyond the screen —
+ * exactly short of it, which put a rebuild on the interaction users make most deliberately. At 2.6
+ * it reaches 0.8.
+ *
+ * The trade is marks drawn against rebuilds avoided: `RENDER_MARGIN²` more marks in the buffer, and
+ * the rebuild happens less often. The redraw itself is ~1 ms at 6 × 10^4 marks, so the cost that
+ * matters is the GPU upload, which is paid per rebuild rather than per frame.
  */
-export const RENDER_MARGIN = 1.8;
+export const RENDER_MARGIN = 2.6;
 /**
  * How far the anticipatory ring reaches when the replica is nearly full.
  *
