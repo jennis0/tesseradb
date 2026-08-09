@@ -442,7 +442,7 @@ impl DecodeSource<'_> {
 /// unsuppress now removes the id from the suppression bitmap, so a still-buffered entity falls
 /// through to the buffer rule and its own terms decide — which is what lifecycle §3.1 always said
 /// ("unsuppress removes the entry") and what the previous representation did not do.
-fn verdict(
+pub(crate) fn verdict(
     overlay: &Overlay,
     buffer: &IngestBuffer,
     satisfied: &FxHashSet<TermId>,

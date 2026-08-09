@@ -23,6 +23,9 @@ tessera-authz = { path = "../tessera-authz" }
 tessera-store = { path = "../tessera-store" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
+# The filter artefact's reader. Entity-space only — it never sees a `RowId`, which is what
+# `check-layers.sh` pins by denying it `tessera-store` and `tessera-spatial`.
+tessera-filter = { path = "../tessera-filter" }
 tessera-plugin = { path = "../tessera-plugin" }
 croaring = { workspace = true }
 arc-swap = { workspace = true }

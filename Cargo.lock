@@ -2368,6 +2368,7 @@ dependencies = [
  "tessera-authz",
  "tessera-build",
  "tessera-engine",
+ "tessera-filter",
  "tessera-lifecycle",
  "tessera-plugin",
  "tessera-spatial",

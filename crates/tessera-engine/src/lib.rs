@@ -12,6 +12,7 @@ mod categories;
 mod coalesce;
 mod compact;
 pub mod compose;
+pub mod filter;
 mod flush;
 mod geometry;
 mod merge;
