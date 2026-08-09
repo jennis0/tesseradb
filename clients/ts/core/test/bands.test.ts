@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {BandCache, bandsOfResult, isComplete, type Band} from '../src/bands.js';
+import {BandCache, bandSplitter, bandsOfResult, isComplete, type Band} from '../src/bands.js';
 import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
 import type {ScalarColumn, ViewportResult} from '../src/types.js';
 
@@ -326,5 +326,115 @@ describe('BandCache identity partition', () => {
     expect(cache.get(4, 1n)).toBeUndefined();
     expect(cache.get(4, 2n)).toBeDefined();
     expect(cache.bytes).toBe(cache.get(4, 2n)!.bytes);
+  });
+});
+
+describe('BandCache.version', () => {
+  const WHOLE = {x0: 0, y0: 0, x1: 3, y1: 3};
+
+  it('moves on every change to what is held or covered', () => {
+    const cache = new BandCache();
+    const start = cache.version;
+
+    cache.put(band({depth: 2, prefix: 0n, n: 2}));
+    const afterPut = cache.version;
+    expect(afterPut).not.toBe(start);
+
+    cache.markCovered(WHOLE, 2, 'ck', 500);
+    const afterCover = cache.version;
+    expect(afterCover).not.toBe(afterPut);
+
+    cache.dropIdentity();
+    expect(cache.version).not.toBe(afterCover);
+  });
+
+  it('does not move when the cache is only read', () => {
+    const cache = new BandCache();
+    cache.put(band({depth: 2, prefix: 0n, n: 2}));
+    cache.markCovered(WHOLE, 2, 'ck', 500);
+    const held = cache.version;
+
+    // A redraw skips re-deriving a frame precisely when this holds still, so a read that bumped it
+    // would silently reinstate the per-frame cost the counter exists to remove.
+    cache.planRegion(WHOLE, 2, 'ck', 500);
+    cache.bandsForRegion(WHOLE, 2, 'ck', 500);
+    cache.coverageFor(2, 'ck', 500);
+    expect(cache.version).toBe(held);
+  });
+});
+
+describe('BandCache.bandsForRegion at scale', () => {
+  /** A band at `(x, y)`, with the Morton prefix that addresses it. */
+  function tile(depth: number, x: number, y: number): Band {
+    let prefix = 0n;
+    for (let b = 0; b < depth; b++) {
+      prefix |= BigInt((x >> b) & 1) << BigInt(2 * b);
+      prefix |= BigInt((y >> b) & 1) << BigInt(2 * b + 1);
+    }
+    return band({depth, prefix, n: 2});
+  }
+
+  it('does not scan the store to find one depth', () => {
+    const cache = new BandCache();
+    // A deep working set, as a session reaches after a few zoom-ins, plus a little at depth 8.
+    for (let x = 0; x < 120; x++) for (let y = 0; y < 120; y++) cache.put(tile(11, x, y));
+    for (let x = 0; x < 4; x++) for (let y = 0; y < 4; y++) cache.put(tile(8, x, y));
+    const want = {x0: 0, y0: 0, x1: 3, y1: 3};
+    cache.markCovered(want, 8, 'ck', 500);
+
+    const {exact, fallback} = cache.bandsForRegion(want, 8, 'ck', 500);
+    expect(exact).toHaveLength(16);
+    // The region is wholly held at the drawn depth, so the 14,400 deeper bands are never consulted.
+    expect(fallback).toHaveLength(0);
+  });
+
+  it('collects a large stand-in set without exceeding the call stack', () => {
+    const cache = new BandCache();
+    // `push(...bucket)` passes one argument per entry and throws a RangeError somewhere near 10^5.
+    for (let x = 0; x < 400; x++) for (let y = 0; y < 400; y++) cache.put(tile(11, x, y));
+    const {fallback} = cache.bandsForRegion({x0: 0, y0: 0, x1: 63, y1: 63}, 8, 'ck', 500);
+    expect(fallback.length).toBeGreaterThan(100_000);
+  });
+});
+
+describe('bandSplitter', () => {
+  it('reassembles exactly what the one-call split produces, however it is sliced', () => {
+    const tiles = Array.from({length: 200}, (_, i) => ({
+      tile: BigInt(i),
+      visible: 3n,
+      matched: 3n,
+      served: 3n
+    }));
+    const n = 200 * 3;
+    const result: ViewportResult = {
+      tiles,
+      ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i)),
+      codes: new BigUint64Array(n),
+      positions: new Float64Array(n * 2),
+      world: Float32Array.from({length: n * 2}, (_, i) => i),
+      scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
+      subCells: null
+    };
+    const meta = {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0};
+
+    const whole = bandsOfResult(result, 4, meta);
+
+    // A deadline already in the past forces the smallest slices the splitter will make; every
+    // slice must still make progress, or an arrival would spin forever without absorbing.
+    const splitter = bandSplitter(result, 4, meta);
+    const sliced: Band[] = [];
+    let steps = 0;
+    while (!splitter.done()) {
+      const slice = splitter.step(0);
+      expect(slice.length).toBeGreaterThan(0);
+      for (const band of slice) sliced.push(band);
+      steps++;
+    }
+    expect(steps).toBeGreaterThan(1);
+    expect(sliced.map((b) => b.prefix)).toEqual(whole.map((b) => b.prefix));
+    expect(sliced.map((b) => [...b.ids])).toEqual(whole.map((b) => [...b.ids]));
+    expect(sliced.map((b) => [...(b.scalars.w!.values as Uint32Array)])).toEqual(
+      whole.map((b) => [...(b.scalars.w!.values as Uint32Array)])
+    );
   });
 });

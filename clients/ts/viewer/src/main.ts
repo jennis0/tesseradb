@@ -9,17 +9,29 @@ import {renderPrincipal, type Preset} from './panels/principal.js';
 import {renderLegend} from './panels/legend.js';
 import {renderStats} from './panels/stats.js';
 import {renderBudget, renderCounts} from './panels/view.js';
-import {countCodes, extendRanks, widenDomain} from './colour.js';
+import {foldBandColumn} from './assemble.js';
+import {countCodesCached, extendRanks, widenDomain} from './colour.js';
+import {MarkSlab} from './slab.js';
+import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore, type Store} from './state.js';
 import {
   INITIAL_VIEW_STATE,
   VIEW,
   ViewportController,
   buildViewportLayers,
+  encodingSignature,
   type ViewState
 } from './viewportLayer.js';
 
 const config = readConfig();
+/**
+ * The persistent mark buffer, owned here because it outlives every frame and every response.
+ *
+ * One per document: it is GPU-facing storage, not view state, and putting it in the store would
+ * make every subscriber think a redraw had changed something when the whole point is that it
+ * usually has not.
+ */
+const markSlab = new MarkSlab();
 // Counted here rather than in the controller: a driver needs to attribute a paint to whether it
 // cost a request, and the two are updated from different places.
 let requestCount = 0;
@@ -30,7 +42,20 @@ const client = new TesseraClient({
 });
 
 const presets = presetsJson as Preset[];
-const first = presets[0]!;
+/**
+ * The demo opens on its **hardest** case, not its gentlest: the broadest principal, the largest
+ * mark budget, and a category encoding.
+ *
+ * The narrow default it replaces saturates at almost any depth, so the budget never binds, the
+ * cache has nothing to do and the render path is never loaded — which made every session start by
+ * changing three controls before anything under measurement was running. A demo whose defaults
+ * exercise none of the machinery it exists to show is a demo of the controls.
+ */
+const first = presets.find((p) => p.label.startsWith('everything')) ?? presets.at(-1) ?? presets[0]!;
+/** The slider's own maximum — see `panels/view.ts`. */
+const DEFAULT_BUDGET = 500_000;
+/** A declared category column, so the palette, the legend and `/v1/categories` are all live. */
+const DEFAULT_COLOUR_BY = 'archive';
 
 const store = createStore({
   meta: null,
@@ -44,7 +69,7 @@ const store = createStore({
   status: 'idle',
   lastError: null,
   view: null,
-  budget: 50_000,
+  budget: DEFAULT_BUDGET,
   mTarget: 16,
   lastVisibleInView: null,
   lastTimings: null,
@@ -60,7 +85,7 @@ const store = createStore({
   selected: null,
   selectedWorldXY: null,
   itemError: null,
-  colourBy: null,
+  colourBy: DEFAULT_COLOUR_BY,
   categories: {},
   categoryErrors: {},
   ranks: {},
@@ -81,6 +106,29 @@ let currentView: ViewState = {target: INITIAL_VIEW_STATE.target, zoom: INITIAL_V
 
 const deck = new Deck({
   parent: mapEl,
+  /**
+   * deck.gl's own accounting, once a second, and the only view of what happens after `setProps`.
+   *
+   * `painted` — the gap from handing deck the layers to the next frame — has held at ~50% of every
+   * recorded session and ~80 ms mean while every client cost around it was halved. It bounds the
+   * work but cannot attribute it: GPU draw, deck's attribute upload and the wait for vsync are all
+   * inside it. `gpuTime` and `updateAttributesTime` split the first two apart, and
+   * `updateAttributesCount` says directly whether the binary-descriptor skip is firing — which is
+   * currently argued from deck's source rather than measured here.
+   */
+  _onMetrics: trace.enabled
+    ? (m) =>
+        trace.event('deck', {
+          fps: Math.round(m.fps),
+          gpu: Math.round(m.gpuTime),
+          cpu: Math.round(m.cpuTime),
+          attrs: Math.round(m.updateAttributesTime),
+          attrCount: m.updateAttributesCount,
+          redrawn: m.framesRedrawn,
+          setProps: Math.round(m.setPropsTime),
+          gpuMemory: m.gpuMemory
+        })
+    : null,
   views: VIEW,
   initialViewState: INITIAL_VIEW_STATE,
   controller: true,
@@ -159,13 +207,24 @@ async function resolveCategoryCodes(column: string) {
   const declared = meta.declaredScalars.find((c) => c.name === column);
   if (!declared?.category) return;
 
-  const values = assembled.scalars[column];
-  if (!values) return;
-
   // Counted before anything is fetched, because frequency is what decides which values get one of
   // the palette's colours — and it must be measured over the marks on screen, not over whatever
-  // order the server happened to return values in.
-  const counts = countCodes(values);
+  // order the server happened to return values in. Folded band by band: a count is a sum, so it
+  // never needed the concatenated column the exact bands no longer build.
+  // Exact bands only, each memoised. The stand-in column is rebuilt per derive, so folding it
+  // defeated the memo on precisely the largest column — measured at 51 ms per count *after* the
+  // per-band cache landed, which is what gave it away. A code visible only through stand-ins
+  // renders grey until its own bands arrive, and they are already on their way.
+  const counts = trace.phase('legend', () => {
+    const held = new Map<number, number>();
+    for (const band of assembled.bands) {
+      const values = band.scalars[column];
+      if (!values) continue;
+      for (const [code, n] of countCodesCached(values)) held.set(code, (held.get(code) ?? 0) + n);
+    }
+    return held;
+  });
+  if (counts.size === 0 && assembled.bands.length === 0) return;
   store.update((s) => {
     s.ranks[column] = extendRanks(s.ranks[column] ?? {}, counts);
   });
@@ -211,12 +270,13 @@ function render() {
     (store.state.itemError
       ? renderItemError(store.state.itemError.code, store.state.itemError.detail)
       : renderItem(store.state)) +
-    renderStats(store.state) +
+    renderStats(store.state, {drawn: markSlab.drawn, departed: markSlab.departed}) +
     renderErrors(store.state);
 
   const select = document.getElementById('principal') as HTMLSelectElement | null;
   select?.addEventListener('change', () => {
     const preset = presets[Number(select.value)]!;
+    trace.event('principal', {label: preset.label, n: preset.terms.length});
     // A different principal is a different mask: abort anything in flight for the old token, and
     // drop the calibration, which was measured against a different visible set.
     controller?.cancel();
@@ -266,8 +326,10 @@ function render() {
       if (column?.category) {
         void resolveCategoryCodes(chosen);
       } else {
-        const values = store.state.assembled?.scalars[chosen];
-        const widened = values ? widenDomain(store.state.domains[chosen] ?? null, values) : null;
+        const assembled = store.state.assembled;
+        const widened = assembled
+          ? foldBandColumn(assembled, chosen, store.state.domains[chosen] ?? null, widenDomain)
+          : null;
         store.update((s) => {
           if (widened) s.domains[chosen] = widened;
         });
@@ -277,6 +339,7 @@ function render() {
 
   const budgetInput = document.getElementById('budget') as HTMLInputElement | null;
   budgetInput?.addEventListener('change', () => {
+    trace.event('budget', {n: Number(budgetInput.value)});
     store.update((s) => {
       s.budget = Number(budgetInput.value);
     });
@@ -284,7 +347,14 @@ function render() {
   });
 }
 
-const rerender = coalesce(render);
+installTrace(mapEl);
+installTraceBar();
+
+/**
+ * The panels are rebuilt by writing `innerHTML`, and that happens inside the window `painted`
+ * measures — so until it is timed it is indistinguishable from GPU cost in every trace so far.
+ */
+const rerender = coalesce(() => trace.phase('panels', render));
 /**
  * The measurement surface: when marks last reached the screen, and what they cost to get there.
  *
@@ -298,14 +368,45 @@ declare global {
   }
 }
 let paints = 0;
+/**
+ * What the last paint actually drew.
+ *
+ * **The store changes far more often than the picture does.** Latency, timings, held bytes, the
+ * in-flight count — every panel row is a store update, and each one was rebuilding the layers and
+ * handing deck.gl a fresh `data` object, which it can only read as "everything changed". Measured
+ * in a browser: 54 of 144 paints handed deck an identical drawn set, costing 2.3 s of a 22.8 s
+ * session. The panels still re-render; only the marks are spared.
+ */
+let painted = '';
 store.subscribe(
   coalesce(() => {
-    deck.setProps({layers: buildViewportLayers(store)});
+    const view = store.state;
+    const drawing = `${view.status}|${view.assembled?.version ?? -1}|${
+      view.assembled?.depth ?? -1
+    }|${markSlab.drawn}|${view.assembled?.provisional ?? 0}|${encodingSignature(store)}|${
+      view.selectedWorldXY?.join(',') ?? ''
+    }`;
+    if (drawing === painted) return;
+    painted = drawing;
+
+    const built = trace.phase('layers', () => buildViewportLayers(store, markSlab));
+    const handed = performance.now();
+    deck.setProps({layers: built});
+    // **The gap from handing deck the layers to the next frame is the upload.** It is the one cost
+    // the browser-free harness cannot reach, and the reason the slab's remaining gap — a re-upload
+    // of the live range whenever a band arrives — is still an open question rather than a settled
+    // one. Measured here by the frame that follows, not by `setProps`, which returns before any of
+    // it has happened.
+    if (trace.enabled) {
+      requestAnimationFrame(() =>
+        trace.event('painted', {ms: performance.now() - handed, n: markSlab.drawn})
+      );
+    }
     paints += 1;
     window.__tesseraProbe = {
       paints,
       at: performance.now(),
-      marks: store.state.assembled?.ids.length ?? 0,
+      marks: markSlab.drawn + (store.state.assembled?.provisional ?? 0),
       requests: requestCount
     };
   })
@@ -317,16 +418,36 @@ panels.addEventListener('focusout', () => setTimeout(rerender, 0));
 // rather than only on a response is deliberate: the coloured column can also change without one,
 // and `resolveCategoryCodes` is a no-op once every drawn code is held, so the common case costs a
 // set walk and no request.
-let lastResolved: {column: string; result: unknown} | null = null;
-store.subscribe(
-  coalesce(() => {
-    const {colourBy, assembled} = store.state;
-    if (!colourBy || !assembled) return;
-    if (lastResolved?.column === colourBy && lastResolved.result === assembled) return;
-    lastResolved = {column: colourBy, result: assembled};
-    void resolveCategoryCodes(colourBy);
-  })
-);
+//
+// **Throttled, because the counting is a fold over every held band.** Keying the memo on the
+// assembled object re-counted on every arrival and every fold — measured in a Firefox profile at
+// 2.16 s of a 12.9 s recording, 24% of the main thread's entire CPU, none of it visible to the
+// trace because this subscription had no phase. A new code can only appear when new bands arrive,
+// and a legend that gains a colour half a second late is imperceptible; a frame spent counting is
+// not.
+// **And deferred to a quiet moment, not merely rate-limited.** The memo only helps re-counts;
+// during arrival-heavy zooming most bands are being counted for the first time, so a throttled
+// count still lands a 25-70 ms scan inside a gesture frame. The count feeds nothing but the
+// palette, so it runs when the store has been quiet for a beat — the legend gains its colours as
+// the gesture ends, which is also when anyone looks at it.
+const LEGEND_RECOUNT_MS = 500;
+let lastResolved: {column: string; version: number} | null = null;
+let legendTimer: ReturnType<typeof setTimeout> | null = null;
+store.subscribe(() => {
+  const {colourBy, assembled} = store.state;
+  if (!colourBy || !assembled) return;
+  if (lastResolved && lastResolved.column === colourBy && lastResolved.version === assembled.version)
+    return;
+  // Re-armed on every change, so it fires once things settle rather than mid-stream.
+  if (legendTimer) clearTimeout(legendTimer);
+  legendTimer = setTimeout(() => {
+    legendTimer = null;
+    const now = store.state;
+    if (!now.colourBy || !now.assembled) return;
+    lastResolved = {column: now.colourBy, version: now.assembled.version};
+    void resolveCategoryCodes(now.colourBy);
+  }, LEGEND_RECOUNT_MS);
+});
 
 async function start() {
   const session = await client.authorise(store.state.terms);
@@ -343,12 +464,21 @@ async function start() {
       return client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal);
     },
     meta.quantisation,
-    {slice: meta.slices[0]!.id}
+    {
+      slice: meta.slices[0]!.id,
+      onPhase: trace.enabled ? (kind, ms, n) => trace.event(kind, {ms, n}) : undefined
+    }
   );
   // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement
   // wants, and the switch an operator watching aggregate select CPU would reach for.
   const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
   controller = new ViewportController(store, replica, prefetch);
+  trace.event('session', {
+    prefetch: prefetch ? 1 : 0,
+    kMaxMarks: meta.selection.kMaxMarks,
+    budget: store.state.budget,
+    maxTiles: meta.maxTilesPerRequest
+  });
   controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 

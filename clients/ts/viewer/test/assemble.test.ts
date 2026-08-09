@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tessera/client';
 import type {ScalarColumn, ViewportResult} from '@tessera/client';
-import {assemble, assertDrawsEveryServedMark} from '../src/assemble.js';
+import {assemble, assembledMarks, assertAssemblyMatchesServed, foldBandColumn, refreshExact} from '../src/assemble.js';
 
 /** A band at `depth`/`prefix` whose points all sit in cell `(cx, cy)`. */
 function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 0, cy: 0}): Band {
@@ -54,27 +54,25 @@ function frame(
 }
 
 describe('assemble', () => {
-  it('packs exact tiles and reports the served total against them', () => {
+  it('hands exact bands on without copying them, and counts against them', () => {
     const a = band(2, 0n, 3);
     const b = band(2, 1n, 2);
     const out = assemble(frame(2, [a, b]));
 
-    expect(out.ids.length).toBe(5);
+    // The bands themselves, by reference — the copy is the slab's job and happens once per band.
+    expect(out.bands).toEqual([a, b]);
     expect(out.exactDrawn).toBe(5);
     expect(out.exactServed).toBe(5);
     expect(out.provisional).toBe(0);
-    expect(out.tiles.map((t) => [t.from, t.to])).toEqual([
-      [0, 3],
-      [3, 5]
-    ]);
+    expect(out.standIn.ids.length).toBe(0);
     expect(out.visibleInView).toBe(15);
-    assertDrawsEveryServedMark(out);
+    expect(assembledMarks(out)).toBe(5);
+    assertAssemblyMatchesServed(out);
   });
 
-  it('carries the already-converted world positions through untouched', () => {
-    const out = assemble(frame(2, [band(2, 0n, 1, 1, {cx: 256, cy: 128})]));
-    expect(out.positions[0]).toBeCloseTo(2, 6); // 256 cells / 128 cells-per-world-unit
-    expect(out.positions[1]).toBeCloseTo(1, 6);
+  it('drops an empty band rather than giving the slab a zero-length slot', () => {
+    const out = assemble(frame(2, [band(2, 0n, 0, 0), band(2, 1n, 2)]));
+    expect(out.bands).toHaveLength(1);
   });
 
   it('restricts an ancestor band to the region asked for, and marks it provisional', () => {
@@ -93,24 +91,24 @@ describe('assemble', () => {
 
     const out = assemble(frame(6, [], [enriched], {x0: 1, y0: 0, x1: 1, y1: 0}), ['w']);
 
-    expect(out.ids.length).toBe(2); // only the two points inside that region
-    expect([...out.ids]).toEqual([1n, 2n]);
-    expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([7, 8]);
+    expect(out.standIn.ids.length).toBe(2); // only the two points inside that region
+    expect([...out.standIn.ids]).toEqual([1n, 2n]);
+    expect([...(out.standIn.scalars.w!.values as Uint32Array)]).toEqual([7, 8]);
     expect(out.provisional).toBe(2);
     expect(out.exactDrawn).toBe(0);
     expect(out.tiles[0]!.exact).toBe(false);
     expect(out.tiles[0]!.counts).toBeNull(); // the number channel is suppressed
-    assertDrawsEveryServedMark(out);
+    assertAssemblyMatchesServed(out);
   });
 
   it('unions descendant bands on zoom-out, marked provisional', () => {
     const kids = [band(5, 0n, 2), band(5, 1n, 3)];
     const out = assemble(frame(3, [], kids));
-    expect(out.ids.length).toBe(5);
+    expect(out.standIn.ids.length).toBe(5);
     expect(out.provisional).toBe(5);
     expect(out.exactServed).toBe(0); // no exact tile contributed, so nothing to assert against
     expect(out.tiles[0]!.counts).toBeNull();
-    assertDrawsEveryServedMark(out);
+    assertAssemblyMatchesServed(out);
   });
 
   it('mixes exact and provisional tiles without conflating their counts', () => {
@@ -118,22 +116,32 @@ describe('assemble', () => {
     const kids = [band(6, 40n, 2)];
     const out = assemble(frame(4, [exact], kids));
 
-    expect(out.ids.length).toBe(5);
+    expect(assembledMarks(out)).toBe(5);
     expect(out.exactDrawn).toBe(3);
     expect(out.exactServed).toBe(3);
     expect(out.provisional).toBe(2);
     expect(out.visibleInView).toBe(9); // the exact tile alone
-    assertDrawsEveryServedMark(out);
+    assertAssemblyMatchesServed(out);
   });
 
-  it('carries scalars through a mixed assembly in point order', () => {
-    const a = band(2, 0n, 2);
-    const b = band(2, 1n, 3);
-    const out = assemble(frame(2, [a, b]), ['w']);
-    expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([0, 1, 0, 1, 2]);
+  it('folds a column across exact bands and stand-ins alike', () => {
+    // The colour domain and the category ranks are accumulators, so they fold rather than needing
+    // the concatenated column exact bands no longer build.
+    const out = assemble(frame(2, [band(2, 0n, 2), band(2, 1n, 3)], [band(4, 8n, 1)]), ['w']);
+    const seen = foldBandColumn(out, 'w', [] as number[], (held, values) => [
+      ...held,
+      ...(values.values as Uint32Array)
+    ]);
+    expect(seen).toEqual([0, 1, 0, 1, 2, 0]);
   });
 
-  it('splits a real response into bands and reassembles it identically', () => {
+  it('folds nothing for a column no band carries, rather than throwing', () => {
+    const out = assemble(frame(2, [band(2, 0n, 2)]));
+    expect(foldBandColumn(out, 'absent', 0, (n) => n + 1)).toBe(0);
+    expect(foldBandColumn(out, null, 7, (n) => n + 1)).toBe(7);
+  });
+
+  it('splits a real response into bands and keeps every served mark', () => {
     const result: ViewportResult = {
       tiles: [
         {tile: 0n, visible: 9n, matched: 9n, served: 3n},
@@ -150,23 +158,54 @@ describe('assemble', () => {
 
     const out = assemble(frame(2, bands), ['w']);
 
-    expect([...out.ids]).toEqual([...result.ids]);
-    expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([10, 11, 12, 13, 14]);
+    expect(out.bands.flatMap((b) => [...b.ids])).toEqual([...result.ids]);
+    expect(
+      out.bands.flatMap((b) => [...(b.scalars.w!.values as Uint32Array)])
+    ).toEqual([10, 11, 12, 13, 14]);
     expect(out.exactDrawn).toBe(5);
-    assertDrawsEveryServedMark(out);
+    assertAssemblyMatchesServed(out);
   });
 });
 
-describe('assertDrawsEveryServedMark', () => {
+describe('assertAssemblyMatchesServed', () => {
   it('throws when an exact tile draws fewer marks than were served', () => {
     const short = band(2, 0n, 2, 3); // holds 2, server said it served 3
     const out = assemble(frame(2, [short]));
-    expect(() => assertDrawsEveryServedMark(out)).toThrow(/I7: drawing 2 marks/);
+    expect(() => assertAssemblyMatchesServed(out)).toThrow(/assembly: drawing 2 marks/);
   });
 
   it('throws when a provisional tile carries counts', () => {
     const out = assemble(frame(2, [], [band(4, 0n, 2)]));
     out.tiles[0]!.counts = {visible: 1n, matched: 1n, served: 1};
-    expect(() => assertDrawsEveryServedMark(out)).toThrow(/superset of marks must never be read as density/);
+    expect(() => assertAssemblyMatchesServed(out)).toThrow(/superset of marks must never be read as density/);
+  });
+});
+
+describe('refreshExact', () => {
+  it('folds fresh exact bands in while keeping the stand-ins by reference', () => {
+    const held = assemble(frame(2, [band(2, 0n, 3)], [band(4, 8n, 2)]), ['w']);
+    const fresh = [band(2, 0n, 3), band(2, 1n, 2)];
+
+    const out = refreshExact(held, fresh, 7);
+
+    expect(out.version).toBe(7);
+    expect(out.exactDrawn).toBe(5);
+    expect(out.exactServed).toBe(5);
+    expect(out.visibleInView).toBe(15);
+    // The stand-in buffers ride along untouched — same object, so the memoised binary descriptors
+    // and colour buffer stay valid and nothing re-uploads.
+    expect(out.standIn).toBe(held.standIn);
+    expect(out.provisional).toBe(held.provisional);
+    // Non-exact tile entries survive; exact ones are rebuilt from the fresh bands.
+    expect(out.tiles.filter((t) => !t.exact)).toEqual(held.tiles.filter((t) => !t.exact));
+    expect(out.tiles.filter((t) => t.exact)).toHaveLength(2);
+    assertAssemblyMatchesServed(out);
+  });
+
+  it('drops an empty band rather than counting a zero-length slot', () => {
+    const held = assemble(frame(2, [band(2, 0n, 2)]));
+    const out = refreshExact(held, [band(2, 0n, 0, 0), band(2, 1n, 2)], 1);
+    expect(out.bands).toHaveLength(1);
+    expect(out.exactDrawn).toBe(2);
   });
 });

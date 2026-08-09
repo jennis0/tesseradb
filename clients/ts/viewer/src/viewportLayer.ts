@@ -4,6 +4,7 @@ import {
   MARGIN,
   RENDER_MARGIN,
   tileRectOfBbox,
+  rectContains,
   RING_MARGIN,
   MAX_DEPTH,
   WORLD_SIZE,
@@ -14,9 +15,22 @@ import {
   TesseraError,
   type Replica
 } from '@tessera/client';
-import {assemble, assertDrawsEveryServedMark, type Assembled} from './assemble.js';
+import {
+  assemble,
+  assembledMarks,
+  assertAssemblyMatchesServed,
+  foldBandColumn,
+  refreshExact,
+  type Assembled
+} from './assemble.js';
 import {buildColourAttribute, widenDomain, type Encoding} from './colour.js';
+import {readConfig} from './config.js';
+import {MarkSlab} from './slab.js';
+import {trace} from './trace.js';
 import type {Store} from './state.js';
+
+/** The two debug knobs — see {@link ViewerConfig}. Read once: neither changes within a session. */
+const RENDER = readConfig();
 
 export const VIEW = new OrthographicView({id: 'ortho', flipY: true});
 
@@ -86,6 +100,32 @@ const MAX_PREFETCH_PER_PAUSE = 3;
  */
 const MAX_PREFETCH_BYTES_PER_PAUSE = 2_000_000;
 
+/**
+ * How long after the last arrival the full stand-in derivation runs.
+ *
+ * An arrival folds its exact bands into the drawn frame at once and leaves the stand-ins one
+ * arrival stale — drawable, since a stale stand-in is a superset of the same served points. The
+ * settle pass is the real derivation, run when arrivals pause rather than inside their frames.
+ */
+const SETTLE_MS = 150;
+/**
+ * The most a stream of arrivals may defer the settle. A hard deadline, because during a continuous
+ * drag every arrival re-arms the timer and stand-ins would otherwise stay stale for the whole
+ * gesture — one derivation frame per this interval is the bounded cost of that.
+ */
+const SETTLE_MAX_MS = 700;
+/**
+ * The least time between two full derivations on the gesture path.
+ *
+ * A zoom changes depth on every frame it emits, and a depth change fails the covered test — so a
+ * wheel gesture was paying the full derive (the walk, the stand-in concat, the colour build) once
+ * per animation frame: 118 of the 122 derives in a zoom-heavy session, stacked into exactly the
+ * frames that missed p95. Marks are in world space, so between derivations the drawn frame
+ * re-projects correctly under the moving camera; re-deriving at ~8 Hz swaps in the new depth's
+ * marks faster than a viewer can track, and the trailing settle catches the final state.
+ */
+const DERIVE_MIN_GAP_MS = 120;
+
 /** Floor on the interval between leading-edge requests. Trailing debounce still applies between. */
 const LEADING_EDGE_MIN_GAP_MS = 400;
 /** The server sends `Retry-After: 1`. Bounded, because an unbounded retry amplifies saturation. */
@@ -113,8 +153,9 @@ export type ViewState = {
  *   of the coalescing story at this layer, and it relies on the server's D-C cancellation
  *   (`viewer.rs`: a `CancelGuard` flips a `CancelToken` when axum drops the handler), without which
  *   an abandoned pan would still cost the server a full request.
- * - **Marks render as one binary attribute buffer**, assembled across bands. See `assemble.ts` for
- *   why this is a concat rather than a slab, and at what mark budget that stops being true.
+ * - **Marks render from a persistent slab**, one binary attribute buffer with a stable slot per
+ *   band, so a frame that adds nothing re-uploads nothing. See `slab.ts` for what that buys and for
+ *   the one thing it still does not do.
  */
 export class ViewportController {
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -152,6 +193,13 @@ export class ViewportController {
    */
   private velocity: [number, number] | undefined;
   private lastTarget: [number, number] | null = null;
+  /** The deferred full derivation — see {@link SETTLE_MS}. Latest view wins on re-arm. */
+  private settleTimer: ReturnType<typeof setTimeout> | null = null;
+  private settleDeadline = 0;
+  /** When the gesture path last paid a full derivation — see {@link DERIVE_MIN_GAP_MS}. */
+  private lastFullDeriveAt = 0;
+  /** The most recent view the controller was asked about — what a deferred settle derives for. */
+  private lastSchedule: {view: ViewState; width: number; height: number} | null = null;
   /** The idle timer that starts anticipatory work, and the request it started. */
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private background: AbortController | null = null;
@@ -180,6 +228,7 @@ export class ViewportController {
    */
   schedule(view: ViewState, width: number, height: number) {
     const now = performance.now();
+    this.lastSchedule = {view, width, height};
     // Measured from the LAST movement, so it answers "how long after I stopped did it appear"
     // rather than accumulating an entire abandoned interaction.
     this.movedAt = now;
@@ -279,7 +328,25 @@ export class ViewportController {
    * blank the view — a redraw with nothing held leaves the previous marks up, because an empty
    * cache is not an empty region and the two must not look alike (client-interaction §9).
    */
-  private redrawFromCache(view: ViewState, width: number, height: number) {
+  /**
+   * Fold what the store now holds into the drawn frame at the smallest cost that is correct, and
+   * schedule the full derivation for when things go quiet.
+   */
+  private scheduleSettle(view: ViewState, width: number, height: number): void {
+    const now = performance.now();
+    if (this.settleTimer) clearTimeout(this.settleTimer);
+    else this.settleDeadline = now + SETTLE_MAX_MS;
+    const wait = Math.min(SETTLE_MS, Math.max(0, this.settleDeadline - now));
+    this.settleTimer = setTimeout(() => {
+      this.settleTimer = null;
+      // The view the user is looking at NOW, not the one captured when the settle was scheduled —
+      // a drag between the two would derive a region the screen has already left.
+      const at = this.lastSchedule ?? {view, width, height};
+      this.redrawFromCache(at.view, at.width, at.height, true);
+    }, wait);
+  }
+
+  private redrawFromCache(view: ViewState, width: number, height: number, settle = false) {
     const {meta, session, budget, mTarget, lastVisibleInView} = this.store.state;
     if (!meta || !session) return;
 
@@ -298,14 +365,62 @@ export class ViewportController {
       heldBytes: this.replica.bytes,
       budgetBytes: this.replica.budgetBytes
     });
-    const frame = this.replica.frameFromCache(
-      planned.render,
-      planned.choice.depth,
-      meta.selection.kMaxMarks
+    // **The frame already on screen may still be the answer, and re-deriving one is not free.**
+    // Deriving a frame is per-band work — a region query, then a restriction and a column fold per
+    // stand-in band — and it measured ~35 ms at 3.9 × 10^4 stand-in bands, on every animation frame
+    // of a drag. Three things decide it, and all three are exact rather than approximate: the depth
+    // must be the one being drawn, the store must not have changed under it, and the region wanted
+    // must lie inside the region the held frame was built for. Marks are in world space, so a pan
+    // inside that region is a deck.gl re-projection and needs nothing from this client at all.
+    const held = this.store.state.assembled;
+    const covered =
+      held && held.depth === planned.choice.depth && rectContains(held.want, planned.render);
+    // A settle may reuse too — but only a frame whose stand-ins were actually derived for it. A
+    // folded frame matches the store's version while carrying stale stand-ins, which is the very
+    // thing a settle repairs; a fully derived one leaves it nothing to do, and re-deriving it was
+    // measured as two full derives in a single 327 ms frame.
+    if (covered && held.version === this.replica.version && (!settle || !held.standInStale)) {
+      trace.event('reuse', {depth: held.depth, n: held.bands.length});
+      return;
+    }
+    // **An arrival folds in; it does not re-derive.** The store changed under a frame that still
+    // covers this view, which before this meant the full derivation — the stand-in walk and concat,
+    // 10^4 bands of it — inside the arrival's own frame. The exact half is recomputed from the
+    // depth index (cheap and exact); the stand-ins ride along one arrival stale, and the settle
+    // pass rebuilds them once arrivals pause.
+    if (covered && !settle) {
+      const refreshed = trace.phase(
+        'refresh',
+        () => refreshExact(held, this.replica.exactIn(held.want, held.depth), this.replica.version),
+        {depth: held.depth}
+      );
+      assertAssemblyMatchesServed(refreshed);
+      this.store.update((s) => {
+        s.assembled = refreshed;
+      });
+      this.scheduleSettle(view, width, height);
+      return;
+    }
+
+    // The floor between full derivations — see {@link DERIVE_MIN_GAP_MS}. The frame on screen
+    // re-projects meanwhile, and the trailing settle guarantees the final state is derived.
+    const now = performance.now();
+    if (!settle && now - this.lastFullDeriveAt < DERIVE_MIN_GAP_MS) {
+      this.scheduleSettle(view, width, height);
+      return;
+    }
+    this.lastFullDeriveAt = now;
+
+    const frame = trace.phase('select', () =>
+      this.replica.frameFromCache(planned.render, planned.choice.depth, meta.selection.kMaxMarks)
     );
-    const assembled = assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []);
-    if (assembled.ids.length === 0) return;
-    assertDrawsEveryServedMark(assembled);
+    const assembled = trace.phase(
+      'derive',
+      () => assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []),
+      {depth: frame.depth, n: frame.exact.length, standIn: frame.fallback.length, from: 'cache'}
+    );
+    if (assembledMarks(assembled) === 0) return;
+    assertAssemblyMatchesServed(assembled);
 
     this.held = {bbox: worldBbox(viewport, RENDER_MARGIN), depth: planned.choice.depth};
     this.store.update((s) => {
@@ -364,6 +479,12 @@ export class ViewportController {
   /** Abort anything outstanding — used on principal change, where the token itself changes. */
   cancel() {
     if (this.timer) clearTimeout(this.timer);
+    if (this.settleTimer) {
+      // A settle for the old principal would derive against the new one's store — drop it; the
+      // next arrival schedules its own.
+      clearTimeout(this.settleTimer);
+      this.settleTimer = null;
+    }
     this.cancelRedraw();
     this.cancelBackground();
     this.inFlight?.abort();
@@ -463,13 +584,16 @@ export class ViewportController {
       // the rest for the next pause. The region still fills; it stops doing it in one block that
       // freezes the view.
       this.prefetchesSinceMove += 1;
+      // `standIns: false` — the ring never draws its frame (next comment), so deriving the
+      // stand-in set for it was a walk of the held store per bite, paid for a value nobody read.
       const frame = await this.replica.fetchRegion(
         ring.rect,
         ring.depth,
         meta.selection.kMaxMarks,
         controller.signal,
         undefined,
-        1
+        1,
+        false
       );
       // The ring never draws and never calibrates. It is at a margin the user is not looking at,
       // so folding it into either would report a view that is not on screen.
@@ -513,35 +637,79 @@ export class ViewportController {
     const movedAt = this.movedAt || performance.now();
     const startedAt = performance.now();
     this.lastRequestAt = startedAt;
+    trace.event('request', {depth: choice.depth, n: choice.tiles, waited: startedAt - movedAt});
     this.store.update((s) => {
       s.view = {...choice, requestedAt: Date.now()};
       s.status = 'loading';
       s.inFlight = 1;
     });
 
+    // Whether the drawn frame can absorb this response by folding — in which case the stand-in
+    // walk is skipped at the source rather than paid and discarded.
+    const foldable = (): Assembled | null => {
+      const held = this.store.state.assembled;
+      return held && held.depth === choice.depth && rectContains(held.want, planned.render)
+        ? held
+        : null;
+    };
+
     try {
       // **Two fetches, screen first.** The visible box is what the user is waiting for; the margin
       // exists so the *next* pan costs nothing. Asking for both at once makes the screen wait for
       // 1.69× the marks it will show. The second call subtracts the first's coverage, so it fetches
       // the annulus and nothing more.
+      const light = foldable() !== null;
       const frame = await this.replica.fetchRegion(
         planned.visible.rect,
         choice.depth,
         meta.selection.kMaxMarks,
         controller.signal,
-        planned.render
+        planned.render,
+        undefined,
+        !light
       );
       if (generation !== this.generation) return; // a newer request won; drop this one
 
       const arrivedAt = performance.now();
+      trace.event('arrived', {
+        ms: arrivedAt - startedAt,
+        n: frame.response?.bytes ?? 0,
+        server: Math.round((frame.response?.timings.serverUs ?? 0) / 1000),
+        depth: choice.depth
+      });
       // **The covered-view test is against what was DRAWN, not what was fetched.** Panning inside
       // the drawn buffer is a deck re-projection and costs nothing; testing against the fetched box
       // instead sends every pan beyond 15% of the viewport through the debounce and a re-assembly
       // for marks that were already on screen.
       this.held = {bbox: worldBbox(inputs.viewport, RENDER_MARGIN), depth: choice.depth};
-      const assembled = assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []);
-      // The one place a client could violate I7 by omission, so it throws rather than warns.
-      assertDrawsEveryServedMark(assembled);
+      // Fold if the drawn frame still covers; derive in full otherwise. The choice is re-made here
+      // rather than trusted from before the await, because a margin arrival can have replaced the
+      // frame while this one was in flight — and a frame fetched without stand-ins must never be
+      // assembled as though it had them, which would pop every provisional mark off the screen.
+      const heldNow = foldable();
+      const assembled = heldNow
+        ? trace.phase(
+            'refresh',
+            () =>
+              refreshExact(
+                heldNow,
+                this.replica.exactIn(heldNow.want, choice.depth),
+                this.replica.version
+              ),
+            {depth: choice.depth, from: 'response'}
+          )
+        : trace.phase(
+            'derive',
+            () => {
+              const full = light
+                ? this.replica.frameFromCache(planned.render, choice.depth, meta.selection.kMaxMarks)
+                : frame;
+              return assemble(full, this.store.state.colourBy ? [this.store.state.colourBy] : []);
+            },
+            {depth: frame.depth, n: frame.exact.length, standIn: frame.fallback.length, from: 'response'}
+          );
+      assertAssemblyMatchesServed(assembled);
+      if (heldNow) this.scheduleSettle(view, width, height);
 
       // **Calibration reads `served`, not the drawn count.** They agree today, but a drawn count
       // also carries provisional marks from other depths and would, under elision, be the delta
@@ -555,9 +723,15 @@ export class ViewportController {
         // Widened for the coloured column only. Widening every column would walk eighteen arrays
         // per response to build ramps nothing is displaying; the cost is paid when a column is
         // chosen, which is also when the domain first has a reader.
-        if (s.colourBy) {
-          const column = assembled.scalars[s.colourBy];
-          const widened = column ? widenDomain(s.domains[s.colourBy] ?? null, column) : null;
+        // Numeric columns only: a category's codes read as numbers, so folding them would scan
+        // every mark of every band per arrival to widen a domain no encoding reads.
+        if (s.colourBy && !meta.declaredScalars.find((c) => c.name === s.colourBy)?.category) {
+          const widened = foldBandColumn(
+            assembled,
+            s.colourBy,
+            s.domains[s.colourBy] ?? null,
+            widenDomain
+          );
           if (widened) s.domains[s.colourBy] = widened;
         }
         if (frame.response) {
@@ -576,7 +750,7 @@ export class ViewportController {
         );
         s.inFlight = 0;
         // Empty and loaded are different answers, and both differ from refused.
-        s.status = assembled.ids.length === 0 && visible === 0 ? 'empty' : 'shown';
+        s.status = assembledMarks(assembled) === 0 && visible === 0 ? 'empty' : 'shown';
         s.lastError = null;
         // The breakdown a user's "it feels laggy" actually decomposes into. `waited` is time the
         // client chose to spend before asking; `server` is the server's own figure; the remainder
@@ -598,23 +772,39 @@ export class ViewportController {
       // shed ring is — the user has their view either way.
       if (planned.foreground.rect !== planned.visible.rect) {
         try {
+          const lightMargin = foldable() !== null;
           const margin = await this.replica.fetchRegion(
             planned.foreground.rect,
             choice.depth,
             meta.selection.kMaxMarks,
             controller.signal,
-            planned.render
+            planned.render,
+            undefined,
+            !lightMargin
           );
           if (generation !== this.generation) return;
-          const widened = assemble(margin, s0 ? [s0] : []);
-          if (widened.ids.length > 0) {
-            assertDrawsEveryServedMark(widened);
+          const heldMargin = foldable();
+          const widened = heldMargin
+            ? refreshExact(
+                heldMargin,
+                this.replica.exactIn(heldMargin.want, choice.depth),
+                this.replica.version
+              )
+            : assemble(
+                lightMargin
+                  ? this.replica.frameFromCache(planned.render, choice.depth, meta.selection.kMaxMarks)
+                  : margin,
+                s0 ? [s0] : []
+              );
+          if (assembledMarks(widened) > 0) {
+            assertAssemblyMatchesServed(widened);
             this.store.update((s) => {
               s.assembled = widened;
               s.replicaBytes = this.replica.bytes;
               s.replicaPoints = this.replica.points;
               s.replicaBands = this.replica.bandCount;
             });
+            if (heldMargin) this.scheduleSettle(view, width, height);
           }
         } catch {
           // Already drawn; the margin is an optimisation for the next gesture.
@@ -686,6 +876,30 @@ function worldToDataBbox(
  * a column chosen before its values have resolved, a refused `/v1/categories`. Colour is
  * presentation, so an incomplete encoding must degrade to a drawn map, never to no map.
  */
+/**
+ * What the current colouring *is*, as a string — the paint key's colour half.
+ *
+ * **The encoding changes without anything else changing.** Resolving `/v1/categories` moves the
+ * ranks and nothing else: same marks, same depth, same store version. A repaint condition that
+ * omitted this skipped the paint that would have applied the palette, so the map stayed uniform
+ * until an unrelated change forced a redraw — which is what a zoom is.
+ *
+ * Sizes rather than contents, for the reason {@link MarkSlab} compares them that way: ranks and
+ * domains are sticky accumulators that only ever grow.
+ */
+export function encodingSignature(store: Store): string {
+  const encoding = encodingOf(store);
+  switch (encoding.kind) {
+    case 'uniform':
+    case 'unmapped':
+      return encoding.kind;
+    case 'category':
+      return `category|${encoding.column}|${Object.keys(encoding.rankOfCode).length}`;
+    case 'numeric':
+      return `numeric|${encoding.column}|${encoding.domain.min}|${encoding.domain.max}`;
+  }
+}
+
 function encodingOf(store: Store): Encoding {
   const {colourBy, meta, categories, categoryErrors, ranks, domains} = store.state;
   if (!colourBy || !meta) return {kind: 'uniform'};
@@ -710,68 +924,214 @@ function encodingOf(store: Store): Encoding {
 }
 
 /**
- * Fade the marks a tile borrowed from another depth.
+ * **Stand-in marks are drawn at full alpha, like any other mark.**
  *
- * Provisional marks are drawn — that is the whole point of best-available rendering, and it is what
- * makes a zoom feel instant — but they must be visibly *not* the answer, because they are a
- * superset of what the definition serves for that tile. Alpha in the existing RGBA buffer rather
- * than a second layer, which would double the assembly the concat exists to keep cheap.
+ * They were faded to 45% so that a superset of what the definition serves could not be mistaken for
+ * the answer. Measured against the thing being optimised for, that was the wrong trade: the fade is
+ * the *main remaining signature of pop-in*, because the transition a reader notices is not marks
+ * appearing — the stand-in already put them there — but the same marks jumping from half to full
+ * opacity when the exact band lands. Removing it removes the visible event.
+ *
+ * What guards the reading is unchanged, and it is the part that was ever normative: **no
+ * number-channel value is shown against a non-exact tile** (`delta-serving.md` §7). The count
+ * channel, not the alpha channel, is what stops a superset being read as density; the panel reports
+ * how many marks are provisional, and nothing displays a figure derived from them. The alpha was a
+ * courtesy, and it cost more than it bought.
  */
-const PROVISIONAL_ALPHA = 0.45;
 
-function fadeProvisional(colours: Uint8Array, assembled: Assembled): void {
-  if (assembled.provisional === 0) return;
-  for (const tile of assembled.tiles) {
-    if (tile.exact) continue;
-    for (let i = tile.from; i < tile.to; i++) {
-      colours[i * 4 + 3] = Math.round((colours[i * 4 + 3] ?? 255) * PROVISIONAL_ALPHA);
-    }
-  }
+/**
+ * The stand-in colour buffer, reused while the stand-ins and the encoding are the same.
+ *
+ * The layers are rebuilt on every paint, and a paint happens per store change — arrivals, absorb
+ * slices, panel updates. The stand-in *marks* survive most of those by reference (`refreshExact`
+ * keeps `standIn` whole for exactly this reason), but their colour buffer was rebuilt from scratch
+ * each time: 5.8 x 10^5 marks at the median and 2.7 x 10^6 at worst, measured at 50–70 ms of the
+ * very frames that missed p95. Keyed on the stand-in object and the encoding signature — the same
+ * two things that decide its contents — with a `WeakMap` so a departed frame frees its buffer.
+ */
+const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
+
+/** Frames whose fidelity checks have run — once per frame object, see the call site. */
+const checkedFrames = new WeakSet<object>();
+
+function standInColours(assembled: Assembled, encoding: Encoding, key: string): Uint8Array {
+  const held = heldStandInColours.get(assembled.standIn);
+  if (held && held.key === key) return held.colours;
+  const colours = buildColourAttribute(assembled.provisional, assembled.standIn.scalars, encoding);
+  heldStandInColours.set(assembled.standIn, {key, colours});
+  return colours;
 }
 
 /**
- * The mark layer.
+ * A binary attribute descriptor, reused for as long as its buffer is the same object.
  *
- * **Every served mark is drawn.** The length handed to deck.gl is the served count, unconditionally
- * — no budget, no cap, no filter applies here. `buildViewportLayers` is the only place that could
- * violate I7 by omission, so the invariant is asserted rather than assumed.
+ * **deck.gl's skip check is reference equality on this descriptor, not on the array inside it.**
+ * `Attribute.setBinaryValue` returns early on `state.binaryValue === buffer` — where `buffer` is
+ * this `{value, size}` object — so building a fresh literal each paint misses the check every time
+ * and re-uploads an attribute whose bytes have not changed. That defeated the slab entirely at the
+ * last step: measured at the WebGL call level, one pan uploaded 32.9 MB where 16.4 MB was needed,
+ * and 121 of 144 paints in a recorded session re-uploaded a 1.4 x 10^6-mark buffer they had not
+ * touched.
+ *
+ * **Keyed on the array, so a republished buffer always uploads.** The slab returns a *new* subarray
+ * whenever its contents or extent change and the identical one when they have not, which is exactly
+ * the signal wanted here — a `WeakMap` turns that into descriptor identity without keeping a buffer
+ * alive or needing an invalidation rule of its own.
+ *
+ * This is narrower than memoising the whole `data` object, which is the change that rendered
+ * rectangles of the view black: `data` identity suppresses `dataChanged` and with it every
+ * downstream invalidation, including the picking colours. Here `dataChanged` still fires and only
+ * the two binary attributes take deck's own documented skip.
  */
-export function buildViewportLayers(store: Store): Layer[] {
+type BinaryAttribute<T extends ArrayBufferView> = {value: T; size: number; normalized?: boolean};
+const descriptors = new WeakMap<ArrayBufferView, BinaryAttribute<ArrayBufferView>>();
+
+function binary<T extends ArrayBufferView>(
+  value: T,
+  size: number,
+  normalized?: boolean
+): BinaryAttribute<T> {
+  let held = descriptors.get(value);
+  if (!held) {
+    held = normalized === undefined ? {value, size} : {value, size, normalized};
+    descriptors.set(value, held);
+  }
+  return held as BinaryAttribute<T>;
+}
+
+/**
+ * The mark layers: served marks from the slab, stand-in marks beside them.
+ *
+ * **Every served mark is drawn.** The length handed to deck.gl is the resident count,
+ * unconditionally — no budget, no cap, no filter applies here.
+ *
+ * **Two layers, not one, and not one per tile.** They exist because the two sets have different
+ * lifetimes, not because they are drawn differently: exact bands accumulate and are retained across
+ * frames, while stand-ins are re-clipped whenever a response lands. Splitting them is what lets the
+ * first be written once. It also makes the fade uniform over a whole buffer rather than a per-tile
+ * walk over ranges the slab no longer has.
+ */
+export function buildViewportLayers(store: Store, slab: MarkSlab): Layer[] {
   const {assembled, selectedWorldXY, status} = store.state;
   const layers: Layer[] = [];
 
-  if (assembled && assembled.ids.length > 0 && status !== 'refused') {
-    assertDrawsEveryServedMark(assembled);
-    // One entry per drawn mark by construction — see `buildColourAttribute`. Asserted anyway,
-    // because a short buffer is the one way colour could silently drop marks: deck.gl reads
-    // `length` from `data`, so a short attribute renders garbage rather than failing.
-    const colours = buildColourAttribute(assembled.ids.length, assembled.scalars, encodingOf(store));
-    if (colours.length !== assembled.ids.length * 4) {
-      throw new Error(
-        `I7: colour buffer covers ${colours.length / 4} of ${assembled.ids.length} marks. ` +
-          `Colour is presentation and must never decide what is drawn.`
-      );
+  // A refusal draws no marks but keeps the slab: the held bands are still the answer to the last
+  // view that succeeded, and discarding them would make recovery pay for a full rewrite.
+  if (status === 'refused') return selectionLayers(selectedWorldXY);
+  if (!assembled) {
+    slab.clear();
+    return selectionLayers(selectedWorldXY);
+  }
+
+  const encoding = encodingOf(store);
+  const before = slab.drawn;
+  const marks = trace.phase(
+    'slab',
+    () => slab.sync(assembled.bands, assembled.depth, encoding, store.state.colourBy),
+    {n: assembled.bands.length}
+  );
+  // Whether deck.gl is handed the same buffers it already holds is the whole question for upload
+  // cost, and it is invisible from outside — so it is recorded rather than inferred.
+  trace.event('marks', {n: marks.length, added: marks.length - before, standIn: assembled.provisional});
+  // **The fidelity checks run once per frame, not once per paint.** Both walk every band —
+  // O(10^4-10^5) — and a paint happens on every store change, most of which change no band: the
+  // pair measured as a real share of `layers` time doing the same arithmetic on the same objects.
+  // A frame is immutable once assembled, and the slab was synced against it in the line above, so
+  // one pass per frame object is the same guarantee at a fraction of the cost.
+  if (!checkedFrames.has(assembled)) {
+    checkedFrames.add(assembled);
+    assertAssemblyMatchesServed(assembled);
+    // Every exact band the frame draws must have reached the slab: a band written outside its slot,
+    // or a slot gone stale under a partition change, would otherwise thin the picture in a way
+    // nothing else notices.
+    for (const band of assembled.bands) {
+      if (!slab.holds(band)) {
+        throw new Error(
+          `assembly: exact band ${band.prefix} at depth ${band.depth} is drawn but has no slab slot.`
+        );
+      }
     }
-    fadeProvisional(colours, assembled);
+  }
+
+  // **Layers toggle `visible`; they are never omitted.** deck.gl retains a layer's buffers across
+  // renders by matching `id` — a layer absent from one render is destroyed, and re-adding it
+  // regenerates and re-uploads everything it held. The stand-in layer flips between empty and not
+  // on every coverage change, which made each flip a full re-upload of up to 2.7 x 10^6 marks.
+  // (deck.gl performance guide: "favor layer visibility over addition/removal".)
+  //
+  // **One layer per retained slab partition, addressed by slot.** A depth flip swaps which
+  // partition is visible; the other keeps its layer, its buffers and its GPU residency, so
+  // flipping back uploads nothing. The slot number is the layer id precisely because it is stable
+  // for a partition's whole life — an id derived from the depth would make eviction reshuffle
+  // identities and re-upload both.
+  for (const held of slab.layers()) {
     layers.push(
       new ScatterplotLayer({
-        id: 'marks',
+        id: `marks-p${held.slot}`,
+        visible: held.active && held.draw.length > 0,
         data: {
-          length: assembled.ids.length,
+          length: held.draw.length,
           attributes: {
-            getPosition: {value: assembled.positions, size: 2},
-            getFillColor: {value: colours, size: 4, normalized: true}
+            getPosition: binary(held.draw.positions, 2),
+            getFillColor: binary(held.draw.colours, 4, true)
           }
         },
-        tesseraIds: assembled.ids,
+        tesseraIds: held.draw.ids,
         radiusUnits: 'pixels' as const,
-        getRadius: 1.6,
+        getRadius: RENDER.radius,
         radiusMinPixels: 1,
-        pickable: true,
+        pickable: RENDER.pickable && held.active,
         parameters: {depthCompare: 'always' as const}
       })
     );
   }
+
+  {
+    // One entry per drawn mark by construction — see `buildColourAttribute`. Asserted anyway,
+    // because a short buffer is the one way colour could silently drop marks: deck.gl reads
+    // `length` from `data`, so a short attribute renders garbage rather than failing.
+    const colours = standInColours(assembled, encoding, encodingSignature(store));
+    if (colours.length !== assembled.provisional * 4) {
+      throw new Error(
+        `colour buffer covers ${colours.length / 4} of ${assembled.provisional} stand-in marks. ` +
+          `Colour is presentation and must never decide what is drawn.`
+      );
+    }
+    layers.push(
+      new ScatterplotLayer({
+        id: 'marks-standin',
+        visible: assembled.provisional > 0,
+        data: {
+          length: assembled.provisional,
+          attributes: {
+            getPosition: binary(assembled.standIn.positions, 2),
+            getFillColor: binary(colours, 4, true)
+          }
+        },
+        tesseraIds: assembled.standIn.ids,
+        radiusUnits: 'pixels' as const,
+        getRadius: RENDER.radius,
+        radiusMinPixels: 1,
+        pickable: RENDER.pickable,
+        parameters: {depthCompare: 'always' as const}
+      })
+    );
+  }
+
+  layers.push(...selectionLayers(selectedWorldXY));
+  return layers;
+}
+
+/**
+ * **Reusing the `data` object across paints was tried and reverted.** The slab hands back identical
+ * typed arrays when nothing moved, so wrapping them in a stable object looked like the last step
+ * needed to stop deck.gl re-uploading — but a fresh `ScatterplotLayer` instance carrying a `data`
+ * object deck considers unchanged rendered large rectangles of the view black until something else
+ * forced them to refill. Whatever deck does with layer state in that case, it is not what the
+ * reasoning assumed, and the reasoning is not worth another try without knowing which.
+ */
+function selectionLayers(selectedWorldXY: [number, number] | null): Layer[] {
+  const layers: Layer[] = [];
 
   if (selectedWorldXY) {
     layers.push(

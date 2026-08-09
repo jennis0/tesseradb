@@ -1,4 +1,4 @@
-import {BandCache, type Band, type ReplicaFrame} from '@tessera/client';
+import {BandCache, type Band, type ReplicaFrame, type TileRect} from '@tessera/client';
 import type {ScalarColumn} from '@tessera/client';
 
 /**
@@ -9,18 +9,19 @@ import type {ScalarColumn} from '@tessera/client';
  * hundreds to thousands. It also derives depth from zoom, which is exactly the coupling the depth
  * budget exists to break. So deck.gl stays a renderer and the tile lifecycle lives in the replica.
  *
- * **A plain concat, not a slab allocator.** Measured: assembling one packed buffer costs 0.4–2.5 ms
- * at the 5 × 10^4-mark budget in force, which is inside a frame — but 17.8 ms at `caching.md`'s
- * 1–2 × 10^6-mark target, which is not. The slab (stable per-band slot ranges, dirty-span uploads)
- * is what that target needs, and it is not needed until the budget rises.
+ * **Exact bands are not copied here.** They go to `slab.ts`, which writes each band once into a slot
+ * it keeps, so a frame that adds nothing costs nothing. What is left for this file is the part that
+ * genuinely cannot be retained: the **stand-in** bands, whose extent is clipped to whatever ground is
+ * not yet held at the requested depth and therefore changes every time a response lands. Those are
+ * concatenated per frame, as everything used to be.
+ *
+ * So this file's output is two things that were previously one — the accounting over exact bands
+ * (counts, calibration, the fidelity check), and the buffers for the stand-in layer.
  */
 
 /** One tile's contribution to the draw, and the authority it rests on. */
 export type AssembledTile = {
   prefix: bigint;
-  /** `[from, to)` into the assembled buffers. */
-  from: number;
-  to: number;
   /**
    * False where the marks came from an ancestor or from descendants, in which case they are a
    * superset of what the definition serves for this tile. Presentation only: no count may be shown
@@ -32,19 +33,100 @@ export type AssembledTile = {
 };
 
 export type Assembled = {
-  ids: BigUint64Array;
-  /** Interleaved x,y in deck.gl world units, narrowed to the f32 a binary attribute takes. */
-  positions: Float32Array;
-  scalars: Record<string, ScalarColumn>;
+  /** The depth every exact band sits at — the slab's partition, with the identity key. */
+  depth: number;
+  /**
+   * The region this was derived for, and the store's change counter at the time.
+   *
+   * Together they say when it stops being the answer: a view wanting ground inside `want`, at the
+   * same depth, against an unchanged store, is answered by exactly these marks — so the redraw can
+   * be skipped rather than repeated. See `viewportLayer.ts`.
+   */
+  want: TileRect;
+  version: number;
+  /**
+   * The exact bands this frame draws — handed to the slab, never copied.
+   *
+   * Held as a list rather than as concatenated columns because everything downstream of it either
+   * folds over bands (the colour domain, the category ranks) or wants the slab's own buffers (the
+   * layer, picking). Concatenating was the cost this file existed to pay and no longer does.
+   */
+  bands: Band[];
+  /** Marks from an ancestor or descendants, concatenated — every one of them stale-marked. */
+  standIn: {
+    ids: BigUint64Array;
+    /** Interleaved x,y in deck.gl world units, narrowed to the f32 a binary attribute takes. */
+    positions: Float32Array;
+    scalars: Record<string, ScalarColumn>;
+  };
   tiles: AssembledTile[];
-  /** Marks drawn from exact bands, and what the server said it served for those same tiles. */
+  /** Marks the exact bands carry, and what the server said it served for those same tiles. */
   exactDrawn: number;
   exactServed: number;
-  /** Marks drawn from an ancestor or descendants — every one of them stale-marked. */
+  /** How many stand-in marks — `standIn.ids.length`, named for the panels that report it. */
   provisional: number;
   /** Σ visible over exact tiles: the number channel, and `calibrate`'s saturation term. */
   visibleInView: number;
+  /**
+   * True where the stand-ins rode along from an older frame (`refreshExact`) rather than being
+   * derived for this one. What the settle pass exists to repair — and, when false on a frame whose
+   * version still matches the store, proof there is nothing left for a settle to do.
+   */
+  standInStale: boolean;
 };
+
+/** Everything drawn for this frame, before the slab's retained marks are added. */
+export function assembledMarks(assembled: Assembled): number {
+  return assembled.exactDrawn + assembled.provisional;
+}
+
+/**
+ * Fold fresh exact bands into a frame already on screen, keeping its stand-ins.
+ *
+ * **The stand-in walk is the expensive half of deriving a frame, and an arrival does not need it.**
+ * New bands only ever add exact ground; the held stand-ins become one arrival stale — some of their
+ * marks now sit over ground that has exact bands, which draws a few marks twice until the settle
+ * pass rebuilds them properly. That is a superset of the same served points for a bounded moment
+ * (§7.2's nesting: a coarser band's marks restricted to a tile contain the tile's own served set),
+ * traded against re-deriving 10^4 stand-in bands inside the arrival's own frame.
+ *
+ * The exact half is fully recomputed — bands, counts, tiles — so the fidelity check and the number
+ * channel stay exact. Only the presentation layer is stale, and the count channel never reads from
+ * it.
+ */
+export function refreshExact(held: Assembled, bands: Band[], version: number): Assembled {
+  const tiles: AssembledTile[] = [];
+  let exactDrawn = 0;
+  let exactServed = 0;
+  let visibleInView = 0;
+  for (const band of bands) {
+    if (band.ids.length === 0) continue;
+    exactDrawn += band.ids.length;
+    exactServed += band.served;
+    visibleInView += Number(band.visible);
+    tiles.push({
+      prefix: band.prefix,
+      exact: true,
+      counts: {visible: band.visible, matched: band.matched, served: band.served}
+    });
+  }
+  for (const tile of held.tiles) {
+    if (!tile.exact) tiles.push(tile);
+  }
+  return {
+    depth: held.depth,
+    want: held.want,
+    version,
+    standInStale: true,
+    bands: bands.filter((band) => band.ids.length > 0),
+    standIn: held.standIn,
+    tiles,
+    exactDrawn,
+    exactServed,
+    provisional: held.provisional,
+    visibleInView
+  };
+}
 
 type Piece = {band: Band; indices: number[] | null};
 
@@ -111,29 +193,24 @@ function assembleScalar(name: string, pieces: Piece[], total: number): ScalarCol
  */
 export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assembled {
   const tiles: AssembledTile[] = [];
+  const bands: Band[] = [];
   const pieces: Piece[] = [];
   let total = 0;
   let exactDrawn = 0;
   let exactServed = 0;
-  let provisional = 0;
   let visibleInView = 0;
 
   // **Walks the bands the replica holds, not the tiles the viewport spans.** A settled view spans
   // ~16.5k tiles of which ~450 carry anything, so iterating what is held is two orders of magnitude
   // less work than iterating what was asked about — and it is the same list either way.
   for (const band of frame.exact) {
-    const length = band.ids.length;
-    if (length === 0) continue;
-    const from = total;
-    pieces.push({band, indices: null});
-    total += length;
-    exactDrawn += length;
+    if (band.ids.length === 0) continue;
+    bands.push(band);
+    exactDrawn += band.ids.length;
     exactServed += band.served;
     visibleInView += Number(band.visible);
     tiles.push({
       prefix: band.prefix,
-      from,
-      to: total,
       exact: true,
       counts: {visible: band.visible, matched: band.matched, served: band.served}
     });
@@ -147,11 +224,9 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
     const indices = BandCache.restrictToRect(band, frame.depth, clip);
     const length = indices ? indices.length : band.ids.length;
     if (length === 0) continue;
-    const from = total;
     pieces.push({band, indices});
     total += length;
-    provisional += length;
-    tiles.push({prefix: band.prefix, from, to: total, exact: false, counts: null});
+    tiles.push({prefix: band.prefix, exact: false, counts: null});
   }
 
   const ids = new BigUint64Array(total);
@@ -183,30 +258,74 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
     if (column) scalars[name] = column;
   }
 
-  return {ids, positions, scalars, tiles, exactDrawn, exactServed, provisional, visibleInView};
+  return {
+    depth: frame.depth,
+    want: frame.want,
+    version: frame.version,
+    standInStale: false,
+    bands,
+    standIn: {ids, positions, scalars},
+    tiles,
+    exactDrawn,
+    exactServed,
+    provisional: total,
+    visibleInView
+  };
 }
 
 /**
- * The I7 check, over the domain it is actually true on.
+ * Fold one column's values across the exact bands, for a reader that needs the whole frame.
+ *
+ * The colour domain and the category ranks are both **accumulators** — widened, never narrowed — so
+ * they can be folded band by band and never need the concatenated column that used to be built for
+ * them. That is the only thing the concat was still doing for exact marks.
+ */
+export function foldBandColumn<T>(
+  assembled: Assembled,
+  column: string | null,
+  seed: T,
+  step: (held: T, values: ScalarColumn) => T
+): T {
+  if (!column) return seed;
+  let held = seed;
+  for (const band of assembled.bands) {
+    const values = band.scalars[column];
+    if (values) held = step(held, values);
+  }
+  const standIn = assembled.standIn.scalars[column];
+  if (standIn) held = step(held, standIn);
+  return held;
+}
+
+/**
+ * That the picture matches what was served — a fidelity check, **not an invariant check**.
+ *
+ * **Dropping a mark fails in the safe direction.** Every mark the client holds is masked output the
+ * server chose to serve, so a thinner picture discloses nothing; the invariants bind the server's
+ * selection, and "which marks a client declines to draw is presentation, which marks it is served is
+ * I7" (`client-interaction.md`; `caching.md` §11 the same). What a lost mark costs is quality, and
+ * that is worth throwing over because it has been the signature of every assembly bug so far — a
+ * band written outside its clip, a slot range that went stale — none of which announce themselves.
  *
  * **Exact tiles only.** An ancestor or descendant band draws a superset of what the definition
  * serves, so ranging the equality over them would either fail on correct output or, if loosened to
- * an inequality, stop catching the thing it exists to catch. The complement is asserted separately:
- * every non-exact tile must be marked provisional, which is what suppresses its number channel.
+ * an inequality, stop catching the thing it exists to catch.
  *
- * This is the one place a client could violate I7 by omission, so it throws rather than warns.
+ * The second clause is the one nearest to load-bearing: a superset read as density **overstates**,
+ * so no non-exact tile may carry a count. That is `delta-serving.md`'s rule, and unlike the first it
+ * is about what the viewer is told, not about how much of it is drawn.
  */
-export function assertDrawsEveryServedMark(assembled: Assembled): void {
+export function assertAssemblyMatchesServed(assembled: Assembled): void {
   if (assembled.exactDrawn !== assembled.exactServed) {
     throw new Error(
-      `I7: drawing ${assembled.exactDrawn} marks across exact tiles but the server served ` +
-        `${assembled.exactServed}. The client must draw every mark it is served.`
+      `assembly: drawing ${assembled.exactDrawn} marks across exact tiles but the server served ` +
+        `${assembled.exactServed}. A mark was lost between the replica and the buffers.`
     );
   }
   for (const tile of assembled.tiles) {
     if (!tile.exact && tile.counts !== null) {
       throw new Error(
-        `I7: tile ${tile.prefix} draws a superset of its served set but carries counts. ` +
+        `tile ${tile.prefix} draws a superset of its served set but carries counts. ` +
           `A superset of marks must never be read as density.`
       );
     }

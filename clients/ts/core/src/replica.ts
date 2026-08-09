@@ -1,4 +1,4 @@
-import {BandCache, bandsOfResult, type Band, type Resolved} from './bands.js';
+import {BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
 import type {Quantisation, ViewportResponse} from './types.js';
@@ -43,6 +43,17 @@ export type ReplicaOptions = {
    */
   revalidateAfterMs?: number;
   now?: () => number;
+  /**
+   * Observability hook: how long a named phase inside the replica took, and over how many items.
+   *
+   * **Here because absorbing a response cannot be timed from outside.** Splitting a response into
+   * bands runs between the fetch resolving and the frame returning, on the calling thread, and it is
+   * the largest single block of main-thread work this client does — 41–119 ms per response at a 10^6
+   * mark budget. A consumer that wants to see it has nowhere else to stand.
+   *
+   * Never called when absent, and nothing here changes behaviour.
+   */
+  onPhase?: (kind: string, ms: number, n: number) => void;
 };
 
 /** What one {@link Replica.fetchRegion} call resolved to. */
@@ -58,6 +69,14 @@ export type ReplicaFrame = {
    * and never counted.
    */
   fallback: {band: Band; clip: TileRect}[];
+  /**
+   * The store's change counter when this frame was derived.
+   *
+   * A caller redrawing from the cache can compare it against `Replica.version` to know whether a
+   * frame it already has still answers, and skip re-deriving one — which is per-band work over
+   * every stand-in band, on every animation frame.
+   */
+  version: number;
   /** Null when the region was answered entirely from the store. */
   response: ViewportResponse | null;
   /**
@@ -83,6 +102,19 @@ export type ReplicaFrame = {
  * at the demo corpus's density this is ~2 × 10^5 points, a few hundred milliseconds of decode.
  */
 const MAX_TILES_PER_REQUEST = 25_000;
+
+/**
+ * How long one absorb slice may hold the thread before a queued frame gets to draw.
+ *
+ * Half a 60 Hz frame: a slice never costs more than it leaves, so an arrival mid-drag degrades the
+ * frame it lands in rather than owning it.
+ */
+const ABSORB_SLICE_MS = 6;
+
+/** A macrotask, which is what lets a pending `requestAnimationFrame` run. A microtask would not. */
+function yieldToFrame(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 /** Split a rectangle into row-strips of at most `maxTiles`, preserving full width. */
 function splitRect(rect: TileRect, maxTiles: number): TileRect[] {
@@ -153,6 +185,16 @@ export class Replica {
     return this.cache.bandCount;
   }
 
+  /** See {@link BandCache.exactIn} — the fast half of a frame, for folding an arrival into one. */
+  exactIn(want: TileRect, depth: number): Band[] {
+    return this.cache.exactIn(want, depth);
+  }
+
+  /** See {@link BandCache.version} — the store's change counter, for reusing a derived frame. */
+  get version(): number {
+    return this.cache.version;
+  }
+
   /**
    * How many tiles of a region are not yet held — without fetching anything.
    *
@@ -204,13 +246,24 @@ export class Replica {
    * answered at once. That is pop-in with a warm cache and nothing to fetch.
    */
   frameFromCache(want: TileRect, depth: number, k: number): ReplicaFrame {
+    // Split, because deriving a frame became the second-largest cost in a recorded session (mean
+    // 42.6 ms, growing from 4 ms to 111 ms as the cache filled, and 14.7x worse on a zoom out than
+    // a zoom in) and its two halves fail differently: the coverage subtraction is bounded by how
+    // fragmented the held region is, the band walk by how much is held at all. A synthetic at
+    // 6.6 x 10^4 bands and 800 coverage rectangles reproduced neither, so this is measured where it
+    // actually happens rather than modelled.
+    const started = this.opts.onPhase ? performance.now() : 0;
     const plan = this.cache.planRegion(want, depth, this.contentKey, k);
+    const planned = this.opts.onPhase ? performance.now() : 0;
+    this.opts.onPhase?.('plan', planned - started, plan.wanted);
     const {exact, fallback} = this.cache.bandsForRegion(want, depth, this.contentKey, k);
+    this.opts.onPhase?.('walk', performance.now() - planned, this.cache.bandCount);
     return {
       depth,
       want,
       exact,
       fallback,
+      version: this.cache.version,
       response: null,
       plan: {wanted: plan.wanted, novel: plan.novel, requests: 0}
     };
@@ -244,7 +297,16 @@ export class Replica {
      * So a background caller takes one bite per idle pause and the region fills over several. The
      * cache still reaches its target; it just stops doing it all at once.
      */
-    maxRequests = Infinity
+    maxRequests = Infinity,
+    /**
+     * Whether to derive the stand-in set for the returned frame.
+     *
+     * The stand-in walk is the expensive half of deriving a frame, and a caller holding an
+     * already-drawn frame for this region does not need it again to fold in an arrival — the held
+     * stand-ins are one arrival stale, which is drawable, and the full derivation runs when the
+     * gesture pauses. `false` returns `fallback: []`; it never changes what is fetched or stored.
+     */
+    standIns = true
   ): Promise<ReplicaFrame> {
     const plan =
       this.opts.cache === false
@@ -268,7 +330,7 @@ export class Replica {
     for (const rect of pieces.slice(0, maxRequests)) {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
       response = await this.fetchViewport({slice: this.opts.slice, zoom: depth, bbox, k}, signal);
-      fetched = fetched.concat(this.absorb(response, depth, k));
+      fetched = fetched.concat(await this.absorb(response, depth, k));
       // Marked only after the bands are in. A region marked covered before its points are held
       // would let the next plan subtract ground whose data never arrived.
       if (this.opts.cache !== false && k > 0) {
@@ -293,13 +355,16 @@ export class Replica {
     const {exact, fallback} =
       this.opts.cache === false
         ? {exact: fetched, fallback: [] as {band: Band; clip: TileRect}[]}
-        : this.cache.bandsForRegion(render, depth, this.contentKey, k);
+        : standIns
+          ? this.cache.bandsForRegion(render, depth, this.contentKey, k)
+          : {exact: this.cache.exactIn(render, depth), fallback: [] as {band: Band; clip: TileRect}[]};
 
     return {
       depth,
       want: render,
       exact,
       fallback,
+      version: this.cache.version,
       response,
       plan: {wanted: plan.wanted, novel: plan.novel, requests: plan.fetch.length}
     };
@@ -337,20 +402,52 @@ export class Replica {
     this.validatedAt = this.now();
   }
 
-  private absorb(response: ViewportResponse, depth: number, k: number): Band[] {
+  /**
+   * Split a response into bands and store them — in slices, so a frame can paint in between.
+   *
+   * Splitting was the last big block of per-response main-thread work: 18.5 ms mean, 49 ms max,
+   * landing in the same frame as deriving and uploading — which is where the p95 frame time lived.
+   * The work cannot leave this thread (bands must be copies, and 10^4 of them will not transfer to
+   * a worker cheaply), but nothing requires it to happen in one frame: each slice runs for
+   * {@link ABSORB_SLICE_MS}, then yields a macrotask so a queued animation frame draws.
+   *
+   * The coverage invariant is unchanged: the caller marks a region covered only after this
+   * resolves, so a redraw between slices sees the arriving bands as extra exact ground and the rest
+   * still answered by stand-ins — never a hole.
+   */
+  private async absorb(response: ViewportResponse, depth: number, k: number): Promise<Band[]> {
     this.observe(response);
     const contentKey = this.contentKey;
 
-    const bands = bandsOfResult(response.result, depth, {
+    const splitter = bandSplitter(response.result, depth, {
       identityKey: this.identityKey,
       contentKey,
       capUsed: k,
       now: this.now()
     });
-    if (this.opts.cache === false) return bands;
+    const bands: Band[] = [];
+    let splitMs = 0;
+    let storeMs = 0;
+    let slices = 0;
+    while (!splitter.done()) {
+      const started = performance.now();
+      const slice = splitter.step(started + ABSORB_SLICE_MS);
+      splitMs += performance.now() - started;
+      // Stored slice by slice: a redraw between slices then draws what has arrived so far, which
+      // is strictly more picture, not less.
+      const stored = performance.now();
+      if (this.opts.cache !== false) {
+        for (const band of slice) this.cache.put(band);
+      }
+      for (const band of slice) bands.push(band);
+      storeMs += performance.now() - stored;
+      slices++;
+      if (!splitter.done()) await yieldToFrame();
+    }
+    this.opts.onPhase?.('split', splitMs, bands.length);
+    this.opts.onPhase?.('store', storeMs, slices);
 
-    for (const band of bands) this.cache.put(band);
-    if (bands.length > 0) {
+    if (this.opts.cache !== false && bands.length > 0) {
       this.cache.evict({depth, prefix: bands[0]!.prefix});
     }
     return bands;

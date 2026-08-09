@@ -1,4 +1,4 @@
-import {WORLD_SIZE, tileContains, tileXY} from './coords.js';
+import {MAX_DEPTH, WORLD_SIZE, tileContains, tileXY} from './coords.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
 import {
   coverageAdd,
@@ -158,43 +158,77 @@ function sliceScalars(
  * Tiles reporting no served points yield no band: an empty band would declare a bound of zero,
  * which is what a client with nothing declares anyway.
  */
+/**
+ * A resumable split, so a large response need not block the thread that draws.
+ *
+ * Splitting is the last big block of main-thread work per response — measured at 18.5 ms mean and
+ * 49 ms max per response, landing in the same frame as deriving and uploading, which is the p95
+ * hitch. The work itself cannot move (bands must be copies, and 10^4 of them will not transfer to a
+ * worker cheaply), but it slices: each {@link BandSplitter.step} builds bands until its deadline
+ * and returns, and the caller yields to the frame loop between steps.
+ */
+export type BandSplitter = {
+  done(): boolean;
+  /** Build bands until `performance.now()` passes `deadline`. Never returns an empty array early. */
+  step(deadline: number): Band[];
+};
+
+export function bandSplitter(
+  result: ViewportResult,
+  depth: number,
+  meta: {identityKey: string; contentKey: string; capUsed: number; now: number}
+): BandSplitter {
+  let offset = 0;
+  let i = 0;
+  return {
+    done: () => i >= result.tiles.length,
+    step(deadline: number): Band[] {
+      const bands: Band[] = [];
+      // The clock every 64 tiles, not every tile: a `performance.now()` per band would be a
+      // meaningful share of the work being sliced.
+      while (i < result.tiles.length) {
+        if ((i & 63) === 0 && bands.length > 0 && performance.now() >= deadline) break;
+        const tile = result.tiles[i++]!;
+        const served = Number(tile.served);
+        if (served === 0) continue;
+        const end = offset + served;
+        const ids = result.ids.slice(offset, end);
+        // Already in world space — the decoder produced it, which in a browser means a worker did.
+        const positions = result.world.slice(offset * 2, end * 2);
+        const scalars = sliceScalars(result.scalars, offset, end);
+        const {x, y} = tileXY(tile.tile, depth);
+        bands.push({
+          depth,
+          prefix: tile.tile,
+          x,
+          y,
+          ids,
+          positions,
+          scalars,
+          served,
+          capUsed: meta.capUsed,
+          visible: tile.visible,
+          matched: tile.matched,
+          heldBelow: ids.length === 0 ? 0n : ids[ids.length - 1]! + 1n,
+          identityKey: meta.identityKey,
+          contentKey: meta.contentKey,
+          bytes: bandBytes(ids, positions, scalars),
+          touchedAt: meta.now
+        });
+        offset = end;
+      }
+      return bands;
+    }
+  };
+}
+
+/** {@link bandSplitter}, drained in one call — the form every synchronous caller wants. */
 export function bandsOfResult(
   result: ViewportResult,
   depth: number,
   meta: {identityKey: string; contentKey: string; capUsed: number; now: number}
 ): Band[] {
-  const bands: Band[] = [];
-  let offset = 0;
-  for (const tile of result.tiles) {
-    const served = Number(tile.served);
-    if (served === 0) continue;
-    const end = offset + served;
-    const ids = result.ids.slice(offset, end);
-    // Already in world space — the decoder produced it, which in a browser means a worker did.
-    const positions = result.world.slice(offset * 2, end * 2);
-    const scalars = sliceScalars(result.scalars, offset, end);
-    const {x, y} = tileXY(tile.tile, depth);
-    bands.push({
-      depth,
-      prefix: tile.tile,
-      x,
-      y,
-      ids,
-      positions,
-      scalars,
-      served,
-      capUsed: meta.capUsed,
-      visible: tile.visible,
-      matched: tile.matched,
-      heldBelow: ids.length === 0 ? 0n : ids[ids.length - 1]! + 1n,
-      identityKey: meta.identityKey,
-      contentKey: meta.contentKey,
-      bytes: bandBytes(ids, positions, scalars),
-      touchedAt: meta.now
-    });
-    offset = end;
-  }
-  return bands;
+  return bandSplitter(result, depth, meta).step(Infinity);
 }
 
 /** What a band contributes to a render, and on what authority. */
@@ -232,6 +266,32 @@ export type EvictionFocus = {depth: number; prefix: bigint};
  */
 export class BandCache {
   private bands = new Map<BandKey, Band>();
+  /**
+   * The same bands, grouped by depth.
+   *
+   * **A frame needs one depth's bands and a walk over every band was finding them.** Deriving a
+   * frame scanned the whole store — measured at 2.3 x 10^5 held bands, 0.09 us each rising to
+   * 0.43 us as the store filled, so 7 ms early in a session and 98–148 ms late in one, on every
+   * derive. It scaled with what is *held*, which a mark budget cannot bound and which panning only
+   * makes worse: the second time this exact shape of fault has been measured in this file.
+   *
+   * Stand-ins still need the other depths, so this does not remove the walk — it removes the
+   * majority of it, because the working depth holds the bulk of the store, and it makes a frame
+   * whose region is fully held cost one depth's bands rather than all of them.
+   */
+  private byDepth = new Map<number, Map<BandKey, Band>>();
+  /**
+   * Bumped by every change to what is held or covered.
+   *
+   * **A frame derived from this cache stays valid exactly as long as this does not move**, which is
+   * what lets a redraw skip re-deriving one. Deriving a frame is per-band work — restricting stand-in
+   * bands, concatenating them, folding their columns — and at 3.9 × 10^4 stand-in bands it measured
+   * ~35 ms, on every animation frame of a drag, for a result that could not have changed. A counter
+   * is the whole of the fix: it is exact rather than heuristic, and a missed bump would draw a
+   * stand-in over ground that has since been covered, which is a fault this client has had once
+   * already.
+   */
+  private changes = 0;
   /**
    * The regions this client has asked for and absorbed the answer to.
    *
@@ -273,6 +333,41 @@ export class BandCache {
     return this.bands.size;
   }
 
+  /** Keep {@link byDepth} in step with a `bands` write. The only place either is inserted into. */
+  private index(band: Band, key: BandKey): void {
+    let atDepth = this.byDepth.get(band.depth);
+    if (!atDepth) {
+      atDepth = new Map();
+      this.byDepth.set(band.depth, atDepth);
+    }
+    atDepth.set(key, band);
+  }
+
+  /** Held bands at one depth, or nothing — never the whole store. */
+  private atDepth(depth: number): Iterable<Band> {
+    return this.byDepth.get(depth)?.values() ?? [];
+  }
+
+  /**
+   * The exact bands inside a region — the fast half of {@link bandsForRegion} on its own.
+   *
+   * For the caller that already has a drawn frame and needs only to fold a fresh arrival into it:
+   * the stand-in walk is the expensive half, and a frame whose stand-ins are one arrival stale is
+   * drawable while the full derivation waits for a quiet moment.
+   */
+  exactIn(want: TileRect, depth: number): Band[] {
+    const exact: Band[] = [];
+    for (const band of this.atDepth(depth)) {
+      if (rectContainsTile(want, band.x, band.y)) exact.push(band);
+    }
+    return exact;
+  }
+
+  /** See {@link changes}. Opaque and monotonic — compare for equality, never for order. */
+  get version(): number {
+    return this.changes;
+  }
+
   get size(): number {
     return this.bands.size;
   }
@@ -299,7 +394,9 @@ export class BandCache {
     const previous = this.bands.get(key);
     if (previous) this.held -= previous.bytes;
     this.bands.set(key, band);
+    this.index(band, key);
     this.held += band.bytes;
+    this.changes++;
   }
 
   /**
@@ -310,6 +407,7 @@ export class BandCache {
    */
   markCovered(rect: TileRect, depth: number, contentKey: string, capUsed: number): void {
     this.covered = coverageAdd(this.covered, {rect, depth, contentKey, capUsed});
+    this.changes++;
   }
 
   /** Regions held at this depth, content key and cap — the holes a plan subtracts. */
@@ -320,7 +418,9 @@ export class BandCache {
   /** Drop everything. Called on a token change, where the whole partition becomes unrenderable. */
   dropIdentity(): void {
     this.bands.clear();
+    this.byDepth.clear();
     this.covered = [];
+    this.changes++;
     this.identityKey = null;
     this.held = 0;
   }
@@ -369,16 +469,17 @@ export class BandCache {
     k: number
   ): {exact: Band[]; fallback: {band: Band; clip: TileRect}[]} {
     const uncovered = rectSubtractAll(want, this.coverageFor(depth, contentKey, k));
-    const exact: Band[] = [];
-    const fallback: {band: Band; clip: TileRect}[] = [];
+    // The requested depth, by index rather than by scan.
+    const exact = this.exactIn(want, depth);
+    /** Candidate stand-ins, bucketed by how far their depth is from the one being drawn. */
+    const byRank: {band: Band; clip: TileRect}[][] = [];
+
+    // **Nothing else is needed when the region is wholly held**, which is the settled case and now
+    // costs one depth's bands rather than every band in the store.
+    if (uncovered.length === 0) return {exact, fallback: []};
 
     for (const band of this.bands.values()) {
-      if (band.depth === depth) {
-        if (rectContainsTile(want, band.x, band.y)) exact.push(band);
-        continue;
-      }
-      if (uncovered.length === 0) continue; // the view is wholly held; nothing to fall back for
-
+      if (band.depth === depth) continue;
       // Project the band's tile onto this depth's grid and admit it only where the view is not
       // already answered. An ancestor covers a block; a descendant collapses to a single tile.
       const shift = Math.abs(band.depth - depth);
@@ -391,10 +492,25 @@ export class BandCache {
       // ground that has no exact band; drawn across the rest it overlays coarse marks on fine ones,
       // and a frame that is mostly stand-in reads as a lower-density patch that never refines —
       // because as far as the plan is concerned that ground is answered, and it is.
+      // Ordered coarsest-first by depth distance, bucketed rather than sorted because a settled
+      // broad view offers up to 1.5 x 10^5 candidates. **Bounding the total was tried and
+      // reverted**: capping marks drops whole bands, and a stand-in exists to cover ground, so what
+      // the cap produced was bare background in the shape of the coverage subtraction that asked
+      // for it — black rectangles that filled in only when real data arrived. Density is not what a
+      // stand-in spends marks on.
+      const rank = band.depth < depth ? depth - band.depth : MAX_DEPTH + (band.depth - depth);
       for (const r of uncovered) {
         const clip = rectIntersection(r, box);
-        if (clip) fallback.push({band, clip});
+        if (clip) (byRank[rank] ??= []).push({band, clip});
       }
+    }
+
+    // Appended rather than spread: `push(...bucket)` passes one argument per entry, and a settled
+    // broad view offers upwards of 10^5 of them — which is a `RangeError`, not a slow path.
+    const fallback: {band: Band; clip: TileRect}[] = [];
+    for (const bucket of byRank) {
+      if (!bucket) continue;
+      for (const entry of bucket) fallback.push(entry);
     }
     return {exact, fallback};
   }
@@ -416,9 +532,10 @@ export class BandCache {
     }
 
     const descendants: Band[] = [];
-    for (const band of this.bands.values()) {
-      if (band.depth > depth && tileContains(prefix, depth, band.prefix, band.depth)) {
-        descendants.push(band);
+    for (const [held, atDepth] of this.byDepth) {
+      if (held <= depth) continue;
+      for (const band of atDepth.values()) {
+        if (tileContains(prefix, depth, band.prefix, band.depth)) descendants.push(band);
       }
     }
     if (descendants.length > 0) return {provenance: 'descendants', bands: descendants, exact: false};
@@ -435,12 +552,31 @@ export class BandCache {
    * between a redraw and a two-second freeze. This is the zoom path, so it runs on exactly the
    * interaction least able to afford it.
    */
-  static restrictToRect(band: Band, depth: number, rect: TileRect): number[] {
+  static restrictToRect(band: Band, depth: number, rect: TileRect): number[] | null {
     const span = WORLD_SIZE / 2 ** depth;
     const x0 = rect.x0 * span;
     const x1 = (rect.x1 + 1) * span;
     const y0 = rect.y0 * span;
     const y1 = (rect.y1 + 1) * span;
+
+    // **A band wholly inside the rectangle needs no restriction at all**, and saying so is the
+    // difference between a memcpy and a per-point loop with an index array behind it. It is also
+    // the common case rather than an optimisation for a corner: a descendant band drawn on zoom-out
+    // occupies a tile far smaller than the region, and an ancestor drawn on zoom-in is clipped to
+    // ground that is uncovered precisely because nothing finer has arrived, so the parent's whole
+    // tile usually falls inside it. Measured with 39,121 stand-in bands carrying 203,547 marks
+    // between them — five marks each — where the per-band overhead, not the per-mark work, was the
+    // whole 29.8 ms of a frame.
+    const own = WORLD_SIZE / 2 ** band.depth;
+    if (
+      band.x * own >= x0 &&
+      (band.x + 1) * own <= x1 &&
+      band.y * own >= y0 &&
+      (band.y + 1) * own <= y1
+    ) {
+      return null;
+    }
+
     const indices: number[] = [];
     const p = band.positions;
     for (let i = 0; i < band.ids.length; i++) {
@@ -499,6 +635,7 @@ export class BandCache {
     this.covered = this.covered.filter(
       (c) => c.depth !== depth || !rectContainsTile(c.rect, x, y)
     );
+    this.changes++;
   }
 
   private truncate(band: Band, keep: number): void {
@@ -508,14 +645,11 @@ export class BandCache {
     const scalars = sliceScalars(band.scalars, 0, keep);
     const bytes = bandBytes(ids, positions, scalars);
     this.held += bytes - band.bytes;
-    this.bands.set(bandKey(band.depth, band.prefix), {
-      ...band,
-      ids,
-      positions,
-      scalars,
-      heldBelow: ids[keep - 1]! + 1n,
-      bytes
-    });
+    this.changes++;
+    const truncated = bandKey(band.depth, band.prefix);
+    const kept: Band = {...band, ids, positions, scalars, heldBelow: ids[keep - 1]! + 1n, bytes};
+    this.bands.set(truncated, kept);
+    this.index(kept, truncated);
   }
 }
 

@@ -33,10 +33,15 @@ const STAGE_FIELDS = [
 
 const INTERESTING = ['count_ns', 'select_ns', 'gather_ns', 'arrow_serialise_ns', 'total_ns'];
 
-export function renderStats(state: AppState): string {
+/**
+ * `residency` comes from the slab rather than from the store: it is GPU-facing storage that outlives
+ * every frame, and routing it through state would make a redraw look like a state change on exactly
+ * the frames whose whole point is that nothing changed.
+ */
+export function renderStats(state: AppState, residency: {drawn: number; departed: number}): string {
   const t = state.lastTimings;
-  const drawn = state.assembled?.ids.length ?? 0;
   const provisional = state.assembled?.provisional ?? 0;
+  const drawn = residency.drawn + provisional;
 
   const stage = t?.stageNs
     ? INTERESTING.map((name) => {
@@ -66,6 +71,7 @@ export function renderStats(state: AppState): string {
      ${row('tiles in view', String(state.assembled?.tiles.length ?? 0))}
      ${row('marks drawn', drawn.toLocaleString('en-GB'))}
      ${row('— of which provisional', provisional.toLocaleString('en-GB'))}
+     ${row('— retained off-view', residency.departed.toLocaleString('en-GB'))}
      ${row('replica held', `${((state.replicaBytes ?? 0) / 1e6).toFixed(1)} MB`)}
      ${row('— points', (state.replicaPoints ?? 0).toLocaleString('en-GB'))}
      ${row('— bands', (state.replicaBands ?? 0).toLocaleString('en-GB'))}
