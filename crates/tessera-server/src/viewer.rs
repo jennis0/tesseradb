@@ -336,10 +336,13 @@ async fn categories(
 /// A filterable column's family — **one derivation, used by both `/v1/meta` and the parser**, so
 /// the operator list a client is published cannot differ from the one it is held to.
 fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Family {
+    use tessera_engine::filter::Family;
     if d.vocabulary.is_some() {
-        tessera_engine::filter::Family::Category
+        Family::Category
+    } else if d.arrow_type == tessera_engine::ScalarType::Utf8 {
+        Family::Text
     } else {
-        tessera_engine::filter::Family::Text
+        Family::Numeric
     }
 }
 

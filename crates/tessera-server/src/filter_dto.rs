@@ -30,7 +30,7 @@
 
 use serde_json::Value;
 
-use tessera_engine::filter::{Family, FilterExpr, FilterOperand};
+use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, Scalar};
 use tessera_types::AttrLocalId;
 
 use crate::error::ApiError;
@@ -182,11 +182,98 @@ fn parse_operand(
         }
         (Family::Text, "prefix") => Ok(FilterOperand::TextPrefix(text_value(column, op, value)?)),
         (Family::Text, "contains") => Ok(FilterOperand::TextContains(text_value(column, op, value)?)),
+        (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value)?)),
+        (Family::Numeric, "in") => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| bad(format!("column '{column}': `in` takes an array")))?;
+            Ok(FilterOperand::NumIn(
+                arr.iter()
+                    .map(|v| numeric_value(column, v))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Family::Numeric, "range") => parse_range(column, value),
         // `applies` above is derived from the same table this matches on, so every accepted
         // (family, operator) pair has an arm. Unreachable rather than a fallback: a new operator
         // added to `Family::operands` without an arm here should fail loudly in test, not parse
         // into some other operator's meaning.
         (family, op) => unreachable!("{} accepts '{op}' with no arm to build it", family.as_str()),
+    }
+}
+
+/// A range's endpoints: `gte`/`gt` below, `lte`/`lt` above, any subset.
+///
+/// **One operator carrying a bounds object, rather than two operator keys.** A leaf carries exactly
+/// one operator by construction (a two-key node would need an implicit conjunction between them),
+/// and a range is one predicate with two sides rather than two predicates.
+///
+/// At least one bound is required. An empty `range` is refused rather than read as "no constraint":
+/// a client that meant no constraint omits the leaf, and one that sent an empty object more likely
+/// built it from an unpopulated form.
+fn parse_range(column: &str, value: &Value) -> Result<FilterOperand, ApiError> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| bad(format!("column '{column}': `range` takes a bounds object")))?;
+
+    let mut lo: Option<Endpoint> = None;
+    let mut hi: Option<Endpoint> = None;
+    for (key, v) in obj {
+        let endpoint = |inclusive: bool| -> Result<Endpoint, ApiError> {
+            Ok(Endpoint {
+                value: numeric_value(column, v)?,
+                inclusive,
+            })
+        };
+        let (slot, e) = match key.as_str() {
+            "gte" => (&mut lo, endpoint(true)?),
+            "gt" => (&mut lo, endpoint(false)?),
+            "lte" => (&mut hi, endpoint(true)?),
+            "lt" => (&mut hi, endpoint(false)?),
+            other => {
+                return Err(bad(format!(
+                    "column '{column}': unknown range bound '{other}'. A range takes gte, gt, lte \
+                     and lt"
+                )))
+            }
+        };
+        // Refused rather than resolved by precedence: `{gte: 3, gt: 5}` has no reading a caller
+        // could have intended and every reading loses one of the two numbers they wrote.
+        if slot.is_some() {
+            return Err(bad(format!(
+                "column '{column}': `range` carries two bounds on the same side"
+            )));
+        }
+        *slot = Some(e);
+    }
+    if lo.is_none() && hi.is_none() {
+        return Err(bad(format!(
+            "column '{column}': `range` needs at least one of gte, gt, lte, lt. A leaf with no \
+             constraint is an omitted leaf"
+        )));
+    }
+    Ok(FilterOperand::Range { lo, hi })
+}
+
+/// A numeric comparand. An integer is carried exactly as `i128`; a fractional or out-of-range
+/// number becomes `f64`. A JSON boolean is accepted for a `bool` column, which stores as 0/1.
+fn numeric_value(column: &str, value: &Value) -> Result<Scalar, ApiError> {
+    match value {
+        Value::Bool(b) => Ok(Scalar::Int(i128::from(*b))),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Scalar::Int(i as i128))
+            } else if let Some(u) = n.as_u64() {
+                Ok(Scalar::Int(u as i128))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Scalar::Float(f))
+            } else {
+                Err(bad(format!("column '{column}': '{n}' is not a number this build can compare")))
+            }
+        }
+        _ => Err(bad(format!(
+            "column '{column}': a numeric comparand must be a number"
+        ))),
     }
 }
 
@@ -233,6 +320,8 @@ mod tests {
                 Some(Family::Category)
             } else if c == "title" {
                 Some(Family::Text)
+            } else if c == "score" {
+                Some(Family::Numeric)
             } else {
                 None
             }
@@ -346,6 +435,64 @@ mod tests {
         let err = parse_str(r#"{"department": {"prefix": "al"}}"#).unwrap_err();
         assert!(format!("{err:?}").contains("category column"), "{err:?}");
         assert!(format!("{err:?}").contains("does not take 'prefix'"), "{err:?}");
+    }
+
+    #[test]
+    fn a_range_carries_both_endpoints_with_their_inclusivity() {
+        let expr = parse_str(r#"{"score": {"range": {"gte": 30, "lt": 40}}}"#).unwrap();
+        let FilterExpr::Leaf { operand, .. } = expr else {
+            panic!("expected a leaf")
+        };
+        assert_eq!(
+            operand,
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(30),
+                    inclusive: true
+                }),
+                hi: Some(Endpoint {
+                    value: Scalar::Int(40),
+                    inclusive: false
+                }),
+            }
+        );
+    }
+
+    /// An open side is one bound. An *empty* range is refused: a client meaning "no constraint"
+    /// omits the leaf, and one that sent `{}` more likely built it from an unpopulated form.
+    #[test]
+    fn a_range_needs_at_least_one_bound() {
+        assert!(parse_str(r#"{"score": {"range": {"gte": 30}}}"#).is_ok());
+        let err = parse_str(r#"{"score": {"range": {}}}"#).unwrap_err();
+        assert!(format!("{err:?}").contains("at least one of"), "{err:?}");
+    }
+
+    /// Two bounds on one side are refused rather than resolved by precedence: every reading
+    /// discards one of the two numbers the caller wrote.
+    #[test]
+    fn a_range_refuses_two_bounds_on_one_side() {
+        let err = parse_str(r#"{"score": {"range": {"gte": 3, "gt": 5}}}"#).unwrap_err();
+        assert!(format!("{err:?}").contains("same side"), "{err:?}");
+    }
+
+    /// A 64-bit integer bound survives the parse exactly — the parser must not route it through
+    /// `f64` any more than the scan does.
+    #[test]
+    fn a_large_integer_bound_is_carried_exactly() {
+        let big = (1u64 << 53) + 1;
+        let expr = parse_str(&format!(r#"{{"score": {{"eq": {big}}}}}"#)).unwrap();
+        let FilterExpr::Leaf { operand, .. } = expr else {
+            panic!("expected a leaf")
+        };
+        assert_eq!(operand, FilterOperand::NumEquals(Scalar::Int(big as i128)));
+    }
+
+    /// `range` is a numeric operator; a string column does not take it, and the family check says
+    /// so rather than answering empty.
+    #[test]
+    fn range_on_a_string_column_is_refused() {
+        let err = parse_str(r#"{"title": {"range": {"gte": 3}}}"#).unwrap_err();
+        assert!(format!("{err:?}").contains("does not take 'range'"), "{err:?}");
     }
 
     #[test]

@@ -1452,13 +1452,14 @@ pub(crate) fn write_filter_postings(
             paths.push(presence_path);
         }
 
-        // **Only a category earns an accelerator.** Its values already carry a vocabulary code and
-        // repeat heavily, so one bitmap replaces millions of repeated codes; a string's values
-        // carry no such identity and do not repeat densely enough for a posting per value to be
-        // anything but a second copy of the column. So a string column is the value column and
-        // nothing else (filter-index §2.3), which is also what makes its scan the whole operation
-        // rather than a verification step behind an index.
-        if attribute.ty == ScalarType::Utf8 {
+        // **Only a category earns an accelerator**, and the test is *has a vocabulary* rather than
+        // *is not a string*: its values already carry a code and repeat heavily, so one bitmap
+        // replaces millions of repeated codes. A string's values carry no such identity, and a
+        // numeric's are typically near-unique — for either, a posting per value is a second copy of
+        // the column and nothing more. Both are the value column alone (filter-index §2.3, §3),
+        // which is also what makes the scan the whole operation rather than a verification step
+        // behind an index.
+        if attribute.vocabulary.is_none() {
             continue;
         }
 
@@ -1532,7 +1533,7 @@ fn write_column_values(
             }
         }
         Codes::text(held)
-    } else {
+    } else if attribute.vocabulary.is_some() {
         let mut held: Vec<u32> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
             let code = category_code(value, &attribute.name)?;
@@ -1551,6 +1552,16 @@ fn write_column_values(
             ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect()),
             _ => Codes::U32(held),
         }
+    } else {
+        // **A plain numeric has no absent representation, and that is a real gap rather than a
+        // simplification.** A category spends the reserved code 0 and a string carries a null; an
+        // integer column's every bit pattern is a legal value, so nothing distinguishes "carries
+        // no score" from "carries 0". The attribute reader initialises unset slots to the type's
+        // zero, so every entity is treated as present with whatever it holds. The consequence is
+        // bounded and stated rather than hidden: an item with no value for a numeric column
+        // matches a range containing zero. Fixing it needs the same null-aware attribute reader
+        // the string column's ⊘ names, and the presence bitmap is already there to receive it.
+        numeric_codes(attribute, values)?
     };
     let presence = (!universal).then_some(&present);
     write_value_column(values_path, presence_path, &codes, presence)
@@ -1586,6 +1597,60 @@ fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::
         .as_ref()
         .and_then(|name| schema.vocabularies.get(name))
         .is_some_and(|v| v.listing == crate::schema::Listing::PerViewer)
+}
+
+/// One numeric column's values, at the declared width.
+///
+/// Every entity is present: see the caller's note on why a plain numeric has no absent
+/// representation yet. `bool` stores as `u8` and `timestamp_us` as the `i64` it is — the *type*
+/// carries the unit into the manifest, and the storage and the comparison are an `i64`'s.
+fn numeric_codes(attribute: &crate::schema::Attribute, values: &[ScalarValue]) -> Result<Codes> {
+    macro_rules! gather {
+        ($variant:ident, $ctor:expr) => {{
+            let mut out = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    ScalarValue::$variant(x) => out.push(*x),
+                    other => {
+                        return Err(BuildError::Invalid(format!(
+                            "attribute '{}' is declared {:?} but carries {other:?}",
+                            attribute.name, attribute.ty
+                        )))
+                    }
+                }
+            }
+            $ctor(out)
+        }};
+    }
+    Ok(match attribute.ty {
+        ScalarType::Bool => {
+            let mut out = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    ScalarValue::Bool(b) => out.push(u8::from(*b)),
+                    other => {
+                        return Err(BuildError::Invalid(format!(
+                            "attribute '{}' is declared bool but carries {other:?}",
+                            attribute.name
+                        )))
+                    }
+                }
+            }
+            Codes::U8(out)
+        }
+        ScalarType::U8 => gather!(U8, Codes::U8),
+        ScalarType::U16 => gather!(U16, Codes::U16),
+        ScalarType::U32 => gather!(U32, Codes::U32),
+        ScalarType::U64 => gather!(U64, Codes::U64),
+        ScalarType::I8 => gather!(I8, Codes::I8),
+        ScalarType::I16 => gather!(I16, Codes::I16),
+        ScalarType::I32 => gather!(I32, Codes::I32),
+        ScalarType::I64 => gather!(I64, Codes::I64),
+        ScalarType::F32 => gather!(F32, Codes::F32),
+        ScalarType::F64 => gather!(F64, Codes::F64),
+        ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
+        ScalarType::Utf8 => unreachable!("the caller handles utf8 before reaching here"),
+    })
 }
 
 /// The vocabulary code a category column's value carries.

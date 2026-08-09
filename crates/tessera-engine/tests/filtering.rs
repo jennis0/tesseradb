@@ -27,7 +27,9 @@ use common::*;
 use croaring::Bitmap;
 use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{candidate, FilterColumns, FilterError, FilterExpr, FilterOperand};
+use tessera_engine::filter::{
+    candidate, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand, Scalar,
+};
 use tessera_engine::ViewportRequest;
 use tessera_store::read::open_bundle;
 use tessera_lifecycle::command::UnallocatedRow;
@@ -57,6 +59,11 @@ listing    = "per_viewer"
 name     = "title"
 type     = "utf8"
 used_for = ["filter"]
+
+[[attribute]]
+name     = "score"
+type     = "i32"
+used_for = ["render", "filter"]
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -75,6 +82,11 @@ fn department_of(e: u64) -> Option<&'static str> {
     }
 }
 
+/// A numeric column, decorrelated from both the term model and the department cycle.
+fn score_of(e: u64) -> i32 {
+    (e as i32 * 7) % 100
+}
+
 fn title_of(e: u64) -> String {
     format!("paper-{e:02}")
 }
@@ -86,6 +98,7 @@ fn write_points(path: &Path) {
         Field::new("y", DataType::Float64, false),
         Field::new("department", DataType::Utf8, true),
         Field::new("title", DataType::Utf8, true),
+        Field::new("score", DataType::Int32, false),
     ]));
     let ids: Vec<u64> = (0..N).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
@@ -95,6 +108,7 @@ fn write_points(path: &Path) {
         .map(|&e| department_of(e).map(|s| s.to_string()))
         .collect();
     let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
+    let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -103,6 +117,7 @@ fn write_points(path: &Path) {
             Arc::new(Float64Array::from(ys)),
             Arc::new(StringArray::from(departments)),
             Arc::new(StringArray::from(titles)),
+            Arc::new(arrow::array::Int32Array::from(scores)),
         ],
     )
     .unwrap();
@@ -464,6 +479,7 @@ fn a_filter_refuses_rather_than_answering_short_after_a_flush() {
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("paper-99".to_string()),
+            WalScalar::I32(42),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -529,7 +545,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares two columns.
+        // The schema declares three columns.
         scalars: vec![WalScalar::Utf8("eng".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -537,7 +553,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
         .expect_err("a short row is refused");
     assert!(
-        format!("{err}").contains("carries 1 scalars, but the schema declares 2"),
+        format!("{err}").contains("carries 1 scalars, but the schema declares 3"),
         "{err}"
     );
 
@@ -552,6 +568,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("paper-98".to_string()),
+            WalScalar::I32(43),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -791,4 +808,86 @@ fn a_disjunction_stays_inside_a_narrow_principals_mask() {
         ))
     );
     assert!(got.andnot(&narrow).is_empty());
+}
+
+/// **A range is a scan, and it agrees with the corpus under a real mask.** No level tree, no bit
+/// slicing, no zone map — `filter-index.md` §3 declines all three, zone maps outright because their
+/// block skip consults unmasked extrema.
+#[test]
+fn a_numeric_range_agrees_with_the_corpus() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+
+    // [40, 70)
+    let expr = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(40),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(70),
+                inclusive: false,
+            }),
+        },
+    );
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[SUBSET_TERM], |e| (40..70).contains(&score_of(e)))
+    );
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// An open side is a bound on one end only.
+#[test]
+fn an_open_ended_range_bounds_one_side() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    let expr = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(90),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    );
+    assert_eq!(
+        as_vec(&fx.columns.evaluate(&expr, &cand).unwrap()),
+        expected(&fx, &[ALL_TERM], |e| score_of(e) >= 90)
+    );
+}
+
+/// A range composes with the other families by the same combinators.
+#[test]
+fn a_range_composes_with_a_category_and_a_string() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    let expr = FilterExpr::AllOf(vec![
+        leaf(
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(50),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+        FilterExpr::AnyOf(vec![
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            ),
+            leaf("title", FilterOperand::TextPrefix("paper-1".into())),
+        ]),
+    ]);
+    assert_eq!(
+        as_vec(&fx.columns.evaluate(&expr, &cand).unwrap()),
+        expected(&fx, &[ALL_TERM], |e| score_of(e) >= 50
+            && (department_of(e) == Some("eng") || title_of(e).starts_with("paper-1")))
+    );
 }

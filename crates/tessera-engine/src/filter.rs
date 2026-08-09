@@ -33,6 +33,12 @@ use std::path::Path;
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 use tessera_filter::ValueColumn;
+
+/// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
+/// dependency on the filter crate — `check-layers.sh` denies `tessera-server` that edge, to keep the
+/// server on engine API types only, and an operand's *values* are part of this crate's API surface
+/// even though the column they are compared against is not.
+pub use tessera_filter::{Endpoint, Scalar};
 use tessera_types::{AttrLocalId, TermId};
 
 use crate::compose::verdict;
@@ -52,6 +58,10 @@ pub enum Family {
     Category,
     /// Values are row data: `eq`, `in`, `prefix`, `contains`, over the stored bytes.
     Text,
+    /// Values are numbers — every integer width, both floats, `timestamp_us` and `bool`. A range
+    /// is a scan like everything else: no level tree, no bit slicing, no zone map
+    /// (`filter-index.md` §3).
+    Numeric,
 }
 
 impl Family {
@@ -60,6 +70,7 @@ impl Family {
         match self {
             Family::Category => &["eq", "in"],
             Family::Text => &["eq", "in", "prefix", "contains"],
+            Family::Numeric => &["eq", "in", "range"],
         }
     }
 
@@ -67,17 +78,22 @@ impl Family {
         match self {
             Family::Category => "category",
             Family::Text => "string",
+            Family::Numeric => "numeric",
         }
     }
 }
 
 /// What a request may ask of one column.
 ///
+/// `PartialEq` but not `Eq`: a float bound may be NaN, which is not equal to itself. That is the
+/// same IEEE rule that makes NaN match no range, so the type reflects it rather than papering over
+/// it with a total-equality shim.
+///
 /// **Narrow on purpose.** The leak register is exhaustive because the query surface is enumerable
 /// (§8.2), so a new operand is a design change with a per-family soundness statement, not an
 /// addition here. Negation is absent for that reason and not by oversight: no corpus document
 /// defines it, it is principal-dependent by construction, and it inverts a superset into a subset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FilterOperand {
     /// A category code. One value.
     Equals(AttrLocalId),
@@ -94,6 +110,16 @@ pub enum FilterOperand {
     /// Stored value contains this. Needs no trigram index: the value column *is* the verification
     /// route a trigram superset would have had to be checked against.
     TextContains(String),
+    /// Numeric equality.
+    NumEquals(Scalar),
+    /// Numeric set membership.
+    NumIn(Vec<Scalar>),
+    /// A numeric range. Either endpoint may be absent, which is an open side; both absent matches
+    /// every entity **carrying a value**, which is not every entity.
+    Range {
+        lo: Option<Endpoint>,
+        hi: Option<Endpoint>,
+    },
 }
 
 /// The code a predicate names when its value does not resolve.
@@ -117,7 +143,7 @@ pub const UNRESOLVABLE_VALUE: AttrLocalId = AttrLocalId::new(0);
 /// `NoneOf` is deliberately absent: it needs the `per_viewer` rule decision 0059 records — negation
 /// over a gated category must be evaluated *within the visible vocabulary*, or it becomes an
 /// existence oracle over the values `listing` hides.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FilterExpr {
     /// One column's predicate.
     Leaf {
@@ -269,6 +295,9 @@ impl FilterColumns {
             FilterOperand::TextIn(ss) => values.scan_text_in(candidate, ss),
             FilterOperand::TextPrefix(s) => values.scan_text_prefix(candidate, s),
             FilterOperand::TextContains(s) => values.scan_text_contains(candidate, s),
+            FilterOperand::NumEquals(n) => values.scan_num_eq(candidate, *n),
+            FilterOperand::NumIn(ns) => values.scan_num_in(candidate, ns),
+            FilterOperand::Range { lo, hi } => values.scan_range(candidate, *lo, *hi),
         })
     }
 

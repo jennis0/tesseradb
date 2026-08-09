@@ -56,6 +56,16 @@ pub enum Codes {
     U8(Vec<u8>),
     U16(Vec<u16>),
     U32(Vec<u32>),
+    U64(Vec<u64>),
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    /// Also `timestamp_us` — microseconds since the epoch, stored as the `i64` it is. The *type*
+    /// exists so the unit is in the manifest rather than a convention between a schema author and
+    /// their client; the storage and the comparison are an `i64`'s.
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
     /// UTF-8 values, concatenated, with `offsets[k]..offsets[k+1]` delimiting slot `k`.
     ///
     /// **A string column carries no dictionary and no index, and that is the design rather than a
@@ -79,6 +89,13 @@ impl Codes {
             Codes::U8(v) => v.len(),
             Codes::U16(v) => v.len(),
             Codes::U32(v) => v.len(),
+            Codes::U64(v) => v.len(),
+            Codes::I8(v) => v.len(),
+            Codes::I16(v) => v.len(),
+            Codes::I32(v) => v.len(),
+            Codes::I64(v) => v.len(),
+            Codes::F32(v) => v.len(),
+            Codes::F64(v) => v.len(),
             Codes::Text { offsets, .. } => offsets.len().saturating_sub(1),
         }
     }
@@ -117,12 +134,57 @@ impl Codes {
             Codes::U8(v) => v[slot] as u32,
             Codes::U16(v) => v[slot] as u32,
             Codes::U32(v) => v[slot],
-            // A text column has no code. Callers reach it through `text_at`; this arm exists so
-            // that a numeric predicate applied to a text column matches nothing rather than
-            // panicking or, worse, comparing an offset to a code.
-            Codes::Text { .. } => u32::MAX,
+            // Only a *category* has a code, and a category is one of the three widths above. Every
+            // other column answers `u32::MAX` so that a code predicate applied to it matches
+            // nothing, rather than panicking or — worse — comparing an offset or a signed value to
+            // a code. The operator/family check at the parse means this is unreachable through the
+            // API; it is the second line of defence, not the first.
+            _ => u32::MAX,
         }
     }
+}
+
+/// A numeric bound or comparand, carried in a form that does not lose the column's precision.
+///
+/// **`i128` rather than `f64` for integers, and that is not fussiness.** `u64` and `i64` both
+/// exceed `f64`'s 2⁵³ exactly-representable range, so comparing a `u64` column through `f64` would
+/// silently equate distinct values near the top of the range — an identifier column being the
+/// obvious case, and `timestamp_us` sitting only an order of magnitude below the cliff. `i128`
+/// holds every `u64` and every `i64` exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Scalar {
+    Int(i128),
+    Float(f64),
+}
+
+impl Scalar {
+    /// Order two scalars, `None` where no order exists.
+    ///
+    /// **`None` is NaN, and NaN matching nothing is the intended semantic**, inherited from IEEE
+    /// rather than implemented: every comparison with NaN is false, so a NaN value satisfies no
+    /// bound and no equality, including `= NaN`. That is SQL's treatment of an unknown, and it is
+    /// why the design needs no order-preserving key — the sign-flip trick exists to make IEEE bits
+    /// sort as unsigned bytes in a byte-ordered store, and nothing here compares bytes.
+    ///
+    /// A mixed Int/Float comparison goes through `f64`, which is lossy above 2⁵³ on the integer
+    /// side. That is reachable only by a caller giving a fractional bound for a 64-bit integer
+    /// column — `score >= 1e18.5` — where the alternative is refusing a request that plainly means
+    /// something. Stated rather than hidden.
+    fn partial_cmp(self, other: Scalar) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Scalar::Int(a), Scalar::Int(b)) => Some(a.cmp(&b)),
+            (Scalar::Float(a), Scalar::Float(b)) => a.partial_cmp(&b),
+            (Scalar::Int(a), Scalar::Float(b)) => (a as f64).partial_cmp(&b),
+            (Scalar::Float(a), Scalar::Int(b)) => a.partial_cmp(&(b as f64)),
+        }
+    }
+}
+
+/// One endpoint of a range: a value and whether it is included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Endpoint {
+    pub value: Scalar,
+    pub inclusive: bool,
 }
 
 /// One filterable column: its values in entity order, and how an entity id reaches one.
@@ -221,6 +283,92 @@ impl ValueColumn {
     pub fn scan_text_eq(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
         self.walk(candidate, |codes, slot| {
             codes.text_at(slot) == Some(needle)
+        })
+    }
+
+    /// The numeric value at `slot`, or `None` for a text column.
+    #[inline]
+    fn numeric_at(codes: &Codes, slot: usize) -> Option<Scalar> {
+        Some(match codes {
+            Codes::U8(v) => Scalar::Int(v[slot] as i128),
+            Codes::U16(v) => Scalar::Int(v[slot] as i128),
+            Codes::U32(v) => Scalar::Int(v[slot] as i128),
+            Codes::U64(v) => Scalar::Int(v[slot] as i128),
+            Codes::I8(v) => Scalar::Int(v[slot] as i128),
+            Codes::I16(v) => Scalar::Int(v[slot] as i128),
+            Codes::I32(v) => Scalar::Int(v[slot] as i128),
+            Codes::I64(v) => Scalar::Int(v[slot] as i128),
+            Codes::F32(v) => Scalar::Float(v[slot] as f64),
+            Codes::F64(v) => Scalar::Float(v[slot]),
+            Codes::Text { .. } => return None,
+        })
+    }
+
+    /// Entities whose numeric value lies within the given bounds, restricted to `candidate`.
+    ///
+    /// Either endpoint may be absent, which is an open side — `{gte: 30}` is everything from 30 up.
+    /// Both absent matches every entity carrying *any* value, which is the honest reading of "no
+    /// constraint" and is distinct from matching every entity: an item with no value has nothing to
+    /// compare, so it matches no range, exactly as it matches no equality.
+    ///
+    /// **A range is a scan, and that is the whole numeric design.** No level tree, no bit slicing,
+    /// no zone map: measured, a 25%-coverage range at 10⁹ costs 730 ms against a 0.5–1 s filter
+    /// budget (`probes/2026-08-08-filter-layout/`). Zone maps were declined outright rather than
+    /// deferred, because their block skip consults *unmasked* extrema — timing would reveal whether
+    /// invisible rows fall in the queried range, a C4-shape channel bought for latency the budget
+    /// already affords (`filter-index.md` §3).
+    pub fn scan_range(
+        &self,
+        candidate: &Bitmap,
+        lo: Option<Endpoint>,
+        hi: Option<Endpoint>,
+    ) -> Bitmap {
+        use std::cmp::Ordering;
+        self.walk(candidate, |codes, slot| {
+            let Some(v) = Self::numeric_at(codes, slot) else {
+                return false;
+            };
+            let above = match lo {
+                None => true,
+                Some(e) => match v.partial_cmp(e.value) {
+                    Some(Ordering::Greater) => true,
+                    Some(Ordering::Equal) => e.inclusive,
+                    // Less, or None — the NaN case, which satisfies nothing.
+                    _ => false,
+                },
+            };
+            above
+                && match hi {
+                    None => true,
+                    Some(e) => match v.partial_cmp(e.value) {
+                        Some(Ordering::Less) => true,
+                        Some(Ordering::Equal) => e.inclusive,
+                        _ => false,
+                    },
+                }
+        })
+    }
+
+    /// Entities whose numeric value equals `needle`. A degenerate range, kept separate because a
+    /// client writing `eq` means equality and should not have to spell it as two bounds.
+    pub fn scan_num_eq(&self, candidate: &Bitmap, needle: Scalar) -> Bitmap {
+        self.walk(candidate, |codes, slot| {
+            Self::numeric_at(codes, slot)
+                .and_then(|v| v.partial_cmp(needle))
+                .is_some_and(|o| o == std::cmp::Ordering::Equal)
+        })
+    }
+
+    /// Entities whose numeric value equals any of `needles` — `eq` over a list, as for the other
+    /// two families.
+    pub fn scan_num_in(&self, candidate: &Bitmap, needles: &[Scalar]) -> Bitmap {
+        self.walk(candidate, |codes, slot| {
+            let Some(v) = Self::numeric_at(codes, slot) else {
+                return false;
+            };
+            needles
+                .iter()
+                .any(|n| v.partial_cmp(*n) == Some(std::cmp::Ordering::Equal))
         })
     }
 
@@ -375,62 +523,86 @@ impl ValueColumn {
 }
 
 fn read_values(path: &Path) -> io::Result<Codes> {
-    use arrow::array::{Array, StringArray, UInt16Array, UInt32Array, UInt8Array};
+    use arrow::array::{Array, StringArray};
+    use arrow::datatypes::DataType;
+
     let file = std::fs::File::open(path)?;
     let reader = arrow::ipc::reader::FileReader::try_new(file, None)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let mut u8s: Vec<u8> = Vec::new();
-    let mut u16s: Vec<u16> = Vec::new();
-    let mut u32s: Vec<u32> = Vec::new();
-    let mut text_bytes: Vec<u8> = Vec::new();
-    let mut text_offsets: Vec<u32> = vec![0];
-    let mut kind: Option<u8> = None;
-    for batch in reader {
-        let batch = batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        let col = batch.column(0);
-        if let Some(a) = col.as_any().downcast_ref::<UInt8Array>() {
-            kind = Some(1);
-            u8s.extend(a.values().iter().copied());
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-            kind = Some(2);
-            u16s.extend(a.values().iter().copied());
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-            kind = Some(4);
-            u32s.extend(a.values().iter().copied());
-        } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            kind = Some(8);
-            // Materialised rather than borrowed from the mapped file: `Codes::Text` owns its bytes,
-            // and a text column read on a request path must be valid UTF-8 *before* any predicate
-            // sees it — `StringArray` has already checked that, which is why the concatenation here
-            // needs no second validation pass.
-            for k in 0..a.len() {
-                let v = a.value(k);
-                text_bytes.extend_from_slice(v.as_bytes());
-                text_offsets.push(text_bytes.len() as u32);
+
+    // Accumulated per width rather than through one widened buffer: the declared width *is* the
+    // storage width (Appendix A prices it at 1 GB per byte per 10⁹ per column), so reading a `u8`
+    // column into `i64`s and narrowing afterwards would cost eight times the memory this exists to
+    // avoid.
+    macro_rules! collect {
+        ($batches:expr, $arr:ty, $ctor:expr) => {{
+            let mut out = Vec::new();
+            for batch in $batches {
+                let batch =
+                    batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                let a = batch.column(0).as_any().downcast_ref::<$arr>().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("value column at {}: batches disagree on type", path.display()),
+                    )
+                })?;
+                out.extend(a.values().iter().copied());
             }
-        } else {
+            $ctor(out)
+        }};
+    }
+
+    let schema = reader.schema();
+    let ty = schema
+        .fields()
+        .first()
+        .map(|f| f.data_type().clone())
+        // An empty file is an empty column, not an error: a schema may declare a filterable column
+        // a corpus has no values for.
+        .unwrap_or(DataType::UInt8);
+
+    Ok(match ty {
+        DataType::UInt8 => collect!(reader, arrow::array::UInt8Array, Codes::U8),
+        DataType::UInt16 => collect!(reader, arrow::array::UInt16Array, Codes::U16),
+        DataType::UInt32 => collect!(reader, arrow::array::UInt32Array, Codes::U32),
+        DataType::UInt64 => collect!(reader, arrow::array::UInt64Array, Codes::U64),
+        DataType::Int8 => collect!(reader, arrow::array::Int8Array, Codes::I8),
+        DataType::Int16 => collect!(reader, arrow::array::Int16Array, Codes::I16),
+        DataType::Int32 => collect!(reader, arrow::array::Int32Array, Codes::I32),
+        DataType::Int64 => collect!(reader, arrow::array::Int64Array, Codes::I64),
+        DataType::Float32 => collect!(reader, arrow::array::Float32Array, Codes::F32),
+        DataType::Float64 => collect!(reader, arrow::array::Float64Array, Codes::F64),
+        DataType::Utf8 => {
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut offsets: Vec<u32> = vec![0];
+            for batch in reader {
+                let batch =
+                    batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                let a = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("schema says utf8");
+                // Materialised rather than borrowed: `Codes::Text` owns its bytes, and
+                // `StringArray` has already validated UTF-8, so the concatenation needs no second
+                // validation pass.
+                for k in 0..a.len() {
+                    bytes.extend_from_slice(a.value(k).as_bytes());
+                    offsets.push(bytes.len() as u32);
+                }
+            }
+            Codes::Text { bytes, offsets }
+        }
+        other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "value column at {}: unsupported arrow type {:?}",
-                    path.display(),
-                    col.data_type()
+                    "value column at {}: unsupported arrow type {other:?}",
+                    path.display()
                 ),
-            ));
+            ))
         }
-    }
-    match kind {
-        Some(1) => Ok(Codes::U8(u8s)),
-        Some(2) => Ok(Codes::U16(u16s)),
-        Some(4) => Ok(Codes::U32(u32s)),
-        Some(8) => Ok(Codes::Text {
-            bytes: text_bytes,
-            offsets: text_offsets,
-        }),
-        // An empty file is an empty column, not an error: a schema may declare a filterable
-        // column a corpus has no values for.
-        _ => Ok(Codes::U8(Vec::new())),
-    }
+    })
 }
 
 /// Write a value column, and its presence bitmap where presence is partial.
@@ -453,6 +625,34 @@ pub fn write_value_column(
         Codes::U8(v) => (Arc::new(UInt8Array::from(v.clone())), DataType::UInt8),
         Codes::U16(v) => (Arc::new(UInt16Array::from(v.clone())), DataType::UInt16),
         Codes::U32(v) => (Arc::new(UInt32Array::from(v.clone())), DataType::UInt32),
+        Codes::U64(v) => (
+            Arc::new(arrow::array::UInt64Array::from(v.clone())),
+            DataType::UInt64,
+        ),
+        Codes::I8(v) => (
+            Arc::new(arrow::array::Int8Array::from(v.clone())),
+            DataType::Int8,
+        ),
+        Codes::I16(v) => (
+            Arc::new(arrow::array::Int16Array::from(v.clone())),
+            DataType::Int16,
+        ),
+        Codes::I32(v) => (
+            Arc::new(arrow::array::Int32Array::from(v.clone())),
+            DataType::Int32,
+        ),
+        Codes::I64(v) => (
+            Arc::new(arrow::array::Int64Array::from(v.clone())),
+            DataType::Int64,
+        ),
+        Codes::F32(v) => (
+            Arc::new(arrow::array::Float32Array::from(v.clone())),
+            DataType::Float32,
+        ),
+        Codes::F64(v) => (
+            Arc::new(arrow::array::Float64Array::from(v.clone())),
+            DataType::Float64,
+        ),
         Codes::Text { .. } => {
             let n = codes.len();
             let values: Vec<&str> = (0..n).map(|k| codes.text_at(k).unwrap_or("")).collect();
@@ -558,6 +758,120 @@ mod tests {
     /// Prefix needs no FST: the FST existed to order *distinct values* so a prefix could be turned
     /// into a set of identifiers to look up, and nothing here looks a value up.
     /// `in` over strings is `eq` over a list — the same generalisation a category gets.
+    fn num_column(codes: Codes) -> ValueColumn {
+        ValueColumn::universal(codes)
+    }
+
+    fn at(v: i128, inclusive: bool) -> Endpoint {
+        Endpoint {
+            value: Scalar::Int(v),
+            inclusive,
+        }
+    }
+
+    #[test]
+    fn a_range_honours_each_endpoints_inclusivity() {
+        let column = num_column(Codes::I32(vec![10, 20, 30, 40]));
+        let all = candidate(0..4);
+        // [20, 40]
+        assert_eq!(
+            column
+                .scan_range(&all, Some(at(20, true)), Some(at(40, true)))
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        // (20, 40)
+        assert_eq!(
+            column
+                .scan_range(&all, Some(at(20, false)), Some(at(40, false)))
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        // Open above.
+        assert_eq!(
+            column
+                .scan_range(&all, Some(at(30, true)), None)
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    /// **64-bit integers are compared exactly.** Two `u64`s a `f64` cannot tell apart must not be
+    /// equated by a range — an identifier column is the obvious case, and `timestamp_us` sits one
+    /// order of magnitude below the same cliff.
+    #[test]
+    fn a_u64_range_does_not_lose_precision_through_f64() {
+        // 2⁵³ and 2⁵³+1 are the adjacent pair `f64` cannot separate: both round to 2⁵³. (2⁵³+2 is
+        // representable, which is why the naive "+1, +3" fixture does *not* exercise this.)
+        let lo = 1u64 << 53;
+        let column = num_column(Codes::U64(vec![lo, lo + 1]));
+        assert_eq!(
+            lo as f64,
+            (lo + 1) as f64,
+            "the fixture must be a pair f64 cannot separate, or this proves nothing"
+        );
+        let hits = column.scan_range(
+            &candidate(0..2),
+            Some(at(lo as i128, true)),
+            Some(at(lo as i128, true)),
+        );
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0]);
+    }
+
+    /// NaN satisfies no bound and no equality — inherited from IEEE rather than implemented, and
+    /// the reason this design needs no order-preserving key.
+    #[test]
+    fn a_nan_matches_no_range_and_no_equality() {
+        let column = num_column(Codes::F64(vec![1.0, f64::NAN, 3.0]));
+        let all = candidate(0..3);
+        let wide = column.scan_range(
+            &all,
+            Some(Endpoint {
+                value: Scalar::Float(f64::NEG_INFINITY),
+                inclusive: true,
+            }),
+            Some(Endpoint {
+                value: Scalar::Float(f64::INFINITY),
+                inclusive: true,
+            }),
+        );
+        assert_eq!(wide.iter().collect::<Vec<_>>(), vec![0, 2], "NaN is absent");
+        assert!(column
+            .scan_num_eq(&all, Scalar::Float(f64::NAN))
+            .is_empty());
+    }
+
+    /// An unbounded range matches every entity **carrying a value** — not every entity. An item
+    /// with no value has nothing to compare, exactly as for equality.
+    #[test]
+    fn an_unbounded_range_still_excludes_absent_values() {
+        let column = ValueColumn::partial(Codes::I32(vec![5, 7]), candidate([1, 4])).unwrap();
+        let hits = column.scan_range(&candidate(0..6), None, None);
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 4]);
+    }
+
+    /// A range over a text column matches nothing rather than comparing an offset to a bound.
+    #[test]
+    fn a_range_on_text_matches_nothing() {
+        let column = text_column(&["1", "2"]);
+        assert!(column
+            .scan_range(&candidate(0..2), Some(at(0, true)), Some(at(9, true)))
+            .is_empty());
+    }
+
+    #[test]
+    fn numeric_set_membership_is_exact() {
+        let column = num_column(Codes::I64(vec![1, 2, 3]));
+        let hits = column.scan_num_in(
+            &candidate(0..3),
+            &[Scalar::Int(1), Scalar::Int(3), Scalar::Int(99)],
+        );
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
+    }
+
     #[test]
     fn a_string_column_answers_set_membership() {
         let column = text_column(&["smith", "smythe", "jones", "smith"]);

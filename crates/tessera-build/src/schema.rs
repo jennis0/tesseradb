@@ -314,15 +314,12 @@ impl Schema {
             // column that parsed as filterable and emitted nothing would serve an empty operand for
             // every value it holds, indistinguishable from a correctly-computed empty answer
             // (decision 0013).
-            if placement.filter && decl.ty != "category" && decl.ty != "utf8" {
-                return Err(schema_error(format!(
-                    "attribute '{}': `filter` is built for `type = \"category\"` and \
-                     `type = \"utf8\"`. This column is `{}`, whose range predicate is specified \
-                     (filter-index §3) and not built — the column would store correctly and answer \
-                     nothing",
-                    decl.name, decl.ty
-                )));
-            }
+            // `filter` is built for every declarable type: a category (flat code column plus
+            // derived postings), a string, and every numeric width including `timestamp_us` and
+            // `bool` — all of them a flat entity-indexed value column scanned under the candidate
+            // mask. The refusal that stood here named the numeric families' absent range
+            // predicate; it is built (filter-index §3), so the refusal is gone rather than
+            // narrowed.
 
             let attribute = match decl.ty.as_str() {
                 "category" => {
@@ -1008,20 +1005,25 @@ listing = "public"
     /// `filter` is built for categories only, and the refusal says which machinery is missing
     /// rather than "unsupported" (decision 0013). A plain numeric accepted-and-ignored here would
     /// serve an empty operand for every value it holds, indistinguishable from a correct empty.
+    /// Every declarable type is filterable — a numeric is a value column and nothing else, so
+    /// there is no structure left for it to be waiting on.
     #[test]
-    fn filter_on_a_non_category_names_what_is_absent() {
-        const SCORE: &str = r#"
+    fn filter_is_accepted_on_every_declarable_type() {
+        for ty in [
+            "bool", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64",
+            "timestamp_us",
+        ] {
+            let text = format!(
+                r#"
 [[attribute]]
-name = "score"
-type = "u16"
+name = "measure"
+type = "{ty}"
 used_for = ["render", "filter"]
-"#;
-        let message = err(SCORE);
-        assert!(message.contains("category"), "{message}");
-        // What is absent is the range **predicate**, not a structure. An earlier revision asserted
-        // the message named a per-column dictionary; the flat value column removed the dictionary
-        // from the design, so an assertion on that word would now pin a claim that is false.
-        assert!(message.contains("range predicate"), "{message}");
+"#
+            );
+            let schema = parse_str(&text).unwrap_or_else(|e| panic!("{ty} must filter: {e}"));
+            assert!(schema.attributes[0].filter, "{ty}");
+        }
     }
 
     /// Decision 0013: absent machinery names itself rather than refusing generically.
