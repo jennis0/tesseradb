@@ -466,6 +466,9 @@ impl Engine {
                 .map(|s| (s.id.clone(), s.display_name.clone()))
                 .collect(),
             quantisation: manifest.quantisation,
+            // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes
+            // what a caller may declare and supply on the ingest plane, not what occupies a row.
+            // The segment-facing readers narrow to `render_scalars` at their own sites.
             declared_scalars: manifest.declared_scalars.clone(),
             vocabularies: Arc::clone(&generation.vocabularies),
             idset: manifest.identity.idset,
@@ -580,7 +583,16 @@ impl Engine {
 
         // Visible. Now — and only now — find the row, so the cost below is never reachable by
         // an identifier the principal may not see.
-        let declared_scalars = &generation.bundle.manifest.declared_scalars;
+        // **Render columns only.** `declared_scalars` is the compiled schema and includes
+        // `filter`-only columns, which are entity-space and absent from `columns.arrow` by design;
+        // taking the full list here would publish a column of nulls under a name a client can see
+        // and would make the two read paths disagree with the writer about the tail's shape.
+        let declared_scalars: Vec<_> = generation
+            .bundle
+            .manifest
+            .render_scalars()
+            .cloned()
+            .collect();
         for partition in generation.bundle.partitions.values() {
             for (slice, slice_data) in &partition.slices {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
@@ -602,7 +614,7 @@ impl Engine {
                 // One row, so this resolves for one row — the same `resolve_scalars` the
                 // viewport gather uses, so the two read paths cannot disagree about what a
                 // stored type decodes to.
-                let resolved = resolve_scalars(segment, declared_scalars);
+                let resolved = resolve_scalars(segment, &declared_scalars);
                 return Ok(Some(ItemOut {
                     scalars: row_scalars(row.raw() - row_base, &resolved),
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
@@ -891,7 +903,17 @@ impl Engine {
         probe.lap(|t| &mut t.tiles_for_bbox_ns);
         probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
 
-        let declared_scalars = &generation.bundle.manifest.declared_scalars;
+        // **Render columns only.** `declared_scalars` is the compiled schema and includes
+        // `filter`-only columns, which are entity-space and absent from `columns.arrow` by design;
+        // taking the full list here would publish a column of nulls under a name a client can see
+        // and would make the two read paths disagree with the writer about the tail's shape.
+        let declared_scalars: Vec<_> = generation
+            .bundle
+            .manifest
+            .render_scalars()
+            .cloned()
+            .collect();
+        let declared_scalars = &declared_scalars[..];
 
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any

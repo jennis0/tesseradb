@@ -424,6 +424,24 @@ pub struct Manifest {
     pub files: BTreeMap<String, FileDigest>,
 }
 
+impl Manifest {
+    /// The declared scalars that occupy a slot in every row — `columns.arrow`'s tail, in order.
+    ///
+    /// **Every segment-facing consumer must use this rather than `declared_scalars` directly.** The
+    /// full list is the compiled schema and includes `filter`-only columns, which live in entity
+    /// space and are deliberately absent from the hot column. A flush or merge taking its writer
+    /// schema from the full list would give a per-query column a slot in every row; worse,
+    /// `gather_scalars` refuses a segment missing a declared column, so a schema built from the full
+    /// list would make a merge refuse the **build's own** segment for correctly omitting one.
+    ///
+    /// The ingest plane is the deliberate exception and uses the full list: a caller supplies values
+    /// for every declared column, filterable ones included.
+    pub fn render_scalars(&self) -> impl Iterator<Item = &DeclaredScalar> {
+        self.declared_scalars.iter().filter(|d| d.render)
+    }
+}
+
+
 /// One entry of `SEGMENTS-<n>.json`'s `segments` array — one build (or streamed) segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
@@ -720,6 +738,40 @@ mod tests {
     /// always refusal; the only question was where. Refusing at the parse makes it one refusal
     /// instead of the four the fallible spelling needed, and makes the *whole* manifest
     /// unavailable rather than one field, which is what makes a caller's refusal total.
+    /// **The tail is the render columns, and a segment-facing consumer that took the full list
+    /// would refuse the build's own segment.** `gather_scalars` refuses a segment missing a
+    /// declared column, so a merge or fold whose writer schema named a `filter`-only column would
+    /// fail against a correctly-built bundle — a hard break between the build and the serving path,
+    /// with nothing wrong at either end.
+    #[test]
+    fn render_scalars_excludes_a_filter_only_column() {
+        let declared = [
+            DeclaredScalar {
+                name: "department".to_string(),
+                arrow_type: ScalarType::U16,
+                vocabulary: Some("departments".to_string()),
+                filter: true,
+                render: true,
+            },
+            DeclaredScalar {
+                name: "title".to_string(),
+                arrow_type: ScalarType::Utf8,
+                vocabulary: None,
+                filter: true,
+                render: false,
+            },
+        ];
+        let tail: Vec<&str> = declared
+            .iter()
+            .filter(|d| d.render)
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(tail, vec!["department"]);
+        // The full list is unchanged: the ingest plane supplies values for every declared column,
+        // filterable ones included.
+        assert_eq!(declared.len(), 2);
+    }
+
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar =

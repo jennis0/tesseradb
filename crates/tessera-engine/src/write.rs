@@ -2776,9 +2776,12 @@ pub(crate) struct MaintenanceDeps {
 pub(crate) fn scalar_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<(String, ScalarType)> {
+    // **Render columns only.** A `filter`-only column is entity-space; giving it a slot in every
+    // row is the cost §10.3's routing exists to avoid, and — since `gather_scalars` refuses a
+    // segment missing a declared column — a schema built from the full list would make a merge
+    // refuse the build's own segment for correctly omitting one.
     manifest
-        .declared_scalars
-        .iter()
+        .render_scalars()
         .map(|d| (d.name.clone(), d.arrow_type))
         .collect()
 }
