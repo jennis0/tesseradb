@@ -556,6 +556,42 @@ which carries the tables; this section is the pointer, not the record.
   candidate's `contains` is 2.9–3.9 s shipped — also outside the filter budget, correcting §2.2's
   "one cell" reading — and the region search brings it to 410 ms.
 
+## Arm 13 (2026-08-09) — what layer accumulation costs: N per-flush extents between folds
+
+A column on the read path is base + one layer per live extent (`filter-index.md` §5), and nothing
+removes a layer until the fold — so per-request cost and open cost both grow at flush rate. `layers`
+([`layoutprobe/src/bin/layers.rs`](layoutprobe/src/bin/layers.rs), raw
+[`run-layers-1e9.csv`](run-layers-1e9.csv)) times the shipped `ValueColumn` in exactly
+`FilterColumns::resolve`'s loop — base scan plus one scan per extent, unioned — over a 10⁹ `u32`
+base and up to 960 contiguous 25,000-entity extents, which is a day of continuous ingest at the
+90 s flush tick. Medians of three; extents are the single-slice contiguous shape, so the per-layer
+floor is a floor rather than a ceiling.
+
+**The per-layer cost is microseconds, and a layer the candidate never reaches costs nothing
+measurable.** At 10⁹, one `eq` operand:
+
+| Candidate | 0 layers | 960 layers | per layer |
+|---|---|---|---|
+| broad 25% (misses every extent) | 72.6 ms | 70.9 ms | **~0** — inside run-to-run drift |
+| full corpus (meets every extent) | 270.9 ms | 286.2 ms | **~16 µs** gross, **~9 µs** net |
+| scattered 1% | 101.3 ms | 105.4 ms | ~4 µs |
+
+"Net" subtracts what the 24×10⁶ tail entities would cost inside a folded base (~7 ms at 0.28 ns):
+the *layering* overhead — the per-layer `candidate ∧ presence` and scan setup — is ~9 ms of the
+15.3 ms gross at 960 layers. The zero in the broad row is the `and` short-circuiting on container
+keys: a layer whose entities the candidate does not include is a key-list merge and nothing more.
+
+**The open path is per-file, not per-byte, at these sizes.** Opening and composing 960 extents
+(mmap both files, disjointness-check against accumulated coverage) costs **28 ms per column**;
+reading every byte back — the IO half of the open-time digest sweep — 15 ms for the ~100 MB the 960
+extents hold. Both linear in N. What actually accumulates is the *file count*: 2 files × 16 columns
+× 960 flushes ≈ **31,000 files per day** of manifest entries and digest-sweep members.
+
+**So layer accumulation never threatens the 0.5–1 s filter budget at a daily fold cadence** —
++15 ms on the worst operand shape is ~5% over a folded single build — and modelled linearly, even a
+week without a fold (~6,700 layers) adds ~110 ms. The pressure that forces the fold is the file
+count and open-time sweep, not the scan.
+
 ## Method
 
 `layoutprobe` builds one synthetic column of 1,000 distinct `u32` values under three presence

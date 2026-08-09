@@ -1,30 +1,34 @@
 # The filter index — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r4, rewritten on measurement and owner rulings.** The category case is
+**Status:** **Provisional — r5, the fold and start-up designed on measurement.** The category case is
 built to this design; see the ⊘ notes for exactly what. The organising rule
-changed: the flat value column is the artefact of record and every accelerator is derived from it
+changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
-width other than `u32` and on a string column, and a ruling on surface §4's measured
-project-vs-per-tile rule. Measured input:
+width other than `u32` and on a string column, a ruling on surface §4's measured
+project-vs-per-tile rule, and **§6.3's three fold rulings**. Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
 wire surface (`/v1/meta`'s operand list, the viewport's filter expression, the boolean tree) — and
 the **flush's half of the write side**: a flush appends one extent per filterable column and the
 reader composes base with extents, so an entity ingested since the build answers a filter on its own
-value (§5). What remains unbuilt is **deletion and the fold**, which touch no attribute artefact, and
-two operands: lists, `none_of` and `match` are specified and refuse by name; and the derived category
+value (§5). What remains unbuilt is **deletion and the fold's attribute pass** — and today's fold
+*destroys* the artefact rather than leaving it alone (§6) — plus two operands: lists, `none_of` and
+`match` are specified and refuse by name; and the derived category
 postings are emitted, digested and **not read at serving**. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
-§5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4;
+§5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4, §6, §9;
 [`per-point-attributes.md`](per-point-attributes.md) §2–§3; design memo 2026-07-29 (secondary
 attribute indexing); decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
 [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
 [0042](../decisions/0042-a-dictionary-extent-never-repeats-a-descriptor.md),
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
-[0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md);
+[0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md),
+[0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
+[0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
+[0060](../decisions/0060-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **index §n**. The companion read-side design is
@@ -60,8 +64,9 @@ of it (§7).
 > the masked scan behind every operator each family declares, and `entity → value` all exist for
 > categories, strings and numerics, in both build implementations and under the manifest digest; a
 > category's derived per-value postings are emitted and digested but not read at serving. A flush
-> appends an extent per column and a generation composes them (§5). **Deletion and the fold touch no
-> attribute artefact**, and neither are lists, `none_of` or `match`; each is marked at its claim.
+> appends an extent per column and a generation composes them (§5). **Deletion is not implemented,
+> and the fold's attribute pass is not either — today's fold destroys the artefact** (§6); lists,
+> `none_of` and `match` are likewise unbuilt; each is marked at its claim.
 > Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows nothing, a
 > value set that cannot be gated is withheld entirely, and an extent that will not open refuses
 > rather than reading as "those entities carry no value".
@@ -562,6 +567,27 @@ coverage cliff, which is what makes it a design rather than a gap.
 > scanned and unioned in**: they are not read at serving at all (§2.3), so nothing depends on it
 > yet, and the scan over base ∪ extents is the whole answer.
 
+### 5.1 What layer accumulation costs, and what bounds it
+
+Every flush adds a layer and only the fold removes one, so between folds a query scans a growing
+list and a generation open maps one. Both costs are now **measured** rather than argued
+(probe arm 13, at 10⁹ over the shipped scan, medians of three): a layer the candidate's entities
+never reach costs nothing measurable — the per-layer `candidate ∧ presence` short-circuits on
+container keys — and a layer the candidate does meet costs **~9 µs of layering overhead** on top of
+its entities' own scan cost, which a folded base would pay anyway. At 960 layers — a day of
+continuous ingest at the 90 s flush tick — the worst operand shape measured (full-corpus candidate)
+pays +15.3 ms over a zero-layer column, ~5% over the folded equivalent and far inside §2.2's
+0.5–1 s budget. Modelled linearly from that constant, a week without a fold (~6,700 layers) adds
+~110 ms per operand.
+
+**What accumulates fastest is files, not scan time.** Two files per column per flush is ~31,000
+files a day at sixteen columns: manifest entries, digest-sweep members (§8), and 28 ms per column
+of open-and-compose at 960 extents (measured, arm 13). So the axis is bounded the same way the
+segment axis is, and by the same events — **every flush adds exactly one segment and one extent per
+column, so the extent count moves one-for-one with the axis compaction §9's segment gauge already
+watches**, and the fold that pays the segment axis down folds the extents with it (§6.2). No
+separate extent gauge is proposed; §6.3 puts that to the owner alongside the fold's other rulings.
+
 
 ## 6. Deletion, suppression and retirement
 
@@ -581,8 +607,9 @@ lost twice in this project's review history, which is why it is restated at ever
 > anything about attribute data. What is *not* true is that a fold leaves the artefact alone: it
 > carries forward exactly the files its new manifest names, `attrs/` is in neither list, and the old
 > prefix is then reclaimed — so a folded bundle has no filter artefact at all and an engine restarting
-> onto one fails to open. Pre-existing, and stated here rather than at the fold because this is where
-> a reader looks for what the fold does to a column.
+> onto one fails to open. Pre-existing, and fail-closed — §6.2 specifies what the fold owes each
+> artefact, and why the gap is closed by building that pass rather than by patching openability back
+> (decision 0048: nothing is deployed, so there is no folded bundle to rescue).
 
 **Why the fold blanks a deleted entity's slot, and it is not Rule F's reason.** Decision 0050 requires a
 deleted entity to be gone from the *authorisation* term index, and its argument is a fail-open: leave the
@@ -597,14 +624,9 @@ renumbering it away. Blanking removes that asymmetry. It is a weaker obligation 
 be described as one — this project's deny model depends on the two retirement routes never being
 conflated, and borrowing Rule F's authority for a retention decision is how that starts.
 
-**What the fold does per column:** the value column is rewritten sequentially with deleted slots blanked
-and appended extents concatenated; the presence bitmap is rebuilt; a category's postings are rebuilt from
-the folded column. A 4 GB `u32` column re-copies sequentially in seconds (*modelled* at disk bandwidth).
-Entity ranges never renumber, so an extent no deletion touched can be carried forward unchanged rather
-than re-copied — an option the implementation may take, not a requirement.
-
-**Nothing here is a third retirement rule.** Every derived structure is rebuilt from the column at the
-fold, so derivation self-retires, and Rules S and F remain the whole of the removal model.
+What the fold does to each artefact, and what it costs, is §6.2. **Nothing there is a third
+retirement rule.** Every derived structure is rebuilt from the column at the fold, so derivation
+self-retires, and Rules S and F remain the whole of the removal model.
 
 ### 6.1 Why a filter result is intersected against the composed verdict
 
@@ -627,21 +649,159 @@ rules. A maintained union of members' term signatures would be monotone under in
 under deletion, needing a third rule beside S and F — one of which is itself unbuilt. Derivation
 self-retires.
 
-### 6.2 What a fold costs
+### 6.2 The fold's attribute pass
 
-The fold reads and rewrites every filterable column plus its derived structures. Sizing it against P3's
-measurement — a corpus-scale streaming read costing a concurrent viewport up to **2.03×** — is the
-constraint that matters, not the wall-clock: the fold runs in decision 0056's gated window precisely so
-that cost lands where a viewport is not competing for it.
+**The objective is the owner's, verbatim: after a fold, a bundle should cost what a freshly built
+one costs — to open, to hold resident, and to query — without disrupting serving to get there.**
+For this artefact both halves are now quantified. The layered column's *query* cost is already
+within ~5% of a single build's at a day of layers (measured, §5.1), so what the fold restores is
+the open path — one mapping per column instead of ~31,000 files a day of extents — and the
+retention property below. The non-disruption half is the pass's own cost, sized at the end of this
+section.
 
-Two things the flat design removes from this budget. There is no level-tree accelerator to rebuild, which
-an earlier revision priced at ~30–50 min *modelled* for a high-cardinality attribute at 10⁹ **on every
-fold**, because delta tiers carried level-0 postings the tree could not see. And there is no dictionary
-to carry forward, so no ordinal-preservation obligation and no never-shrink rule to honour across it.
+⊘ **Specified, not implemented — none of this pass exists.** What happens instead today is that a
+fold drops `attrs/` entirely and a node restarting onto the folded bundle refuses to open. That is
+the fail-closed shape of unbuilt machinery, and it is **not patched into a working-looking state**:
+no deployment holds a folded bundle that needs rescuing, so under
+[decision 0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md) the only
+thing that closes this gap is the pass itself. A carry-forward that made folded bundles open without
+folding anything would be machinery whose sole justification is a state nothing is in.
 
-What remains is proportional to the columns themselves: one sequential read and one sequential write per
-column, plus a rebuild of each category's postings from the folded column. Decision 0056's fold gauges
-gain attribute-bytes terms so the cost is visible rather than inferred.
+One pass on the fold's dedicated thread, before the manifests, mirroring compaction §2's
+snapshot/publication split:
+
+| | At the snapshot | At publication |
+|---|---|---|
+| **base value column + presence** | folded: one new base per column, snapshot extents in, `D₀`'s entities out | — |
+| **per-flush extents** | consumed by the fold | post-snapshot extents carried forward, listed in the new `attr_extents` |
+| **category postings** | rebuilt whole from the folded column | — |
+| `suppressed` | **untouched — no attribute artefact ever changes for a suppression** (Rule S) | the live set, exactly as compaction §2 already publishes it |
+
+**Per column, the fold streams base + snapshot extents in entity order and emits one new base.**
+The layers partition entity space and each is entity-ascending, and a flush's entities sit above
+every earlier layer's (**I9**), so the concatenation is a linear merge with no sort. An entity in
+`D₀` — the plan's tombstone clone, never `executed`, exactly as compaction's passes 1 and 3 take it
+— is skipped. The new presence bitmap is `(∪ layers' present) ∖ D₀`, written whenever it is not
+universal over the snapshot's entity space; **blanking a deleted entity's slot means removing it
+from presence and emitting no value bytes**, not overwriting them — a sentinel would keep the bytes
+the retention argument exists to remove, and every family would need a reserved value it does not
+have. A previously universal column therefore becomes partial at its first folded deletion, which
+moves it from the bare-array constants to the partial ones (§2.2) — both measured, both inside
+budget, and the partial path was faster in every broad cell measured (probe arm 4).
+
+**Every snapshot extent folds in; carrying an untouched one forward is declined.** An earlier
+revision offered it as an implementation option. It trades the objective — zero extents after a
+fold — for IO the fold can afford under decision 0056's window, and it makes the folded state a
+function of deletion history rather than of the schema. The extents that *are* carried forward are
+the post-snapshot ones, published during the fold's flight: hard-linked, digests carried, listed in
+the new `SEGMENTS-<n>.json`'s `attr_extents`, and composed onto the new base at the flip exactly as
+a flush composes them — their entities sit above the snapshot bound, so the disjointness check
+holds unchanged.
+
+**A category's postings are rebuilt whole from the folded column** — the self-retiring derivation
+§2.3 requires, and after the rebuild they cover the new `fold_watermark`, closing the un-folded
+tail the flush marker in §5 records. The rebuild reuses the build's emit, so there is one postings
+writer, not two that happen to agree; the build's existing column-vs-postings agreement test is the
+equivalence check, applied to the fold's output as it is to the build's. That sharing is also the
+equivalence argument in general: the pass emits through `write_value_column` and the postings
+writer the build uses, so a folded column and a freshly built one over the same live entities are
+the same bytes, and "as close as possible to the single build" is byte-identity rather than a
+tolerance.
+
+**The timing property survives untouched.** The folded artefact is the same shape the scan already
+reads — a value column with optional presence — so per-request work remains a function of
+`(candidate, column)` and never of the value sought (§2.2). The pass adds no per-request structure,
+and presence is membership, not values, so its post-fold shape discloses nothing a candidate does
+not already encode.
+
+**Slice invariance holds through the fold**: the pass is per partition in entity space, reads
+nothing per-slice, and emits nothing per-slice. §7's statement is unchanged by it.
+
+**Deliberately not designed here.** An *incremental* extent coalesce between folds — a mini-merge
+for attribute layers, by analogy with the segment merge — because §5.1 measured the axis it would
+bound at microseconds per layer, so it would be mechanism without a cost to remove. A resumable
+attribute pass — the fold has no resume anywhere, deliberately (compaction §3), and this pass
+inherits that. And any change to *when* folds run: decision 0056's schedule is taken as given, and
+nothing here adds a trigger.
+
+#### What the pass costs, against non-disruption
+
+Per `u32` column at 10⁹: ~4 GB read, ~4 GB written, and ~4 GB re-read for the digest — the fold
+digests by reading back (compaction §3, pass 5) — so **~12 GB of streaming IO per column,
+*modelled* at minutes per column at disk bandwidth; ~16 columns adds tens of minutes to an
+operation already minutes-to-hours**. That lands inside the constraint that matters: P3 measured a
+corpus-scale streaming read costing a concurrent viewport up to 2.03×, P4 measured a *real* fold at
+1.05–1.18× because it interleaves passes and computation, and the attribute pass has P4's shape,
+not P3's. It extends the fold's duration — free under the owner's slower-is-gentler ruling
+(compaction §6.1) — rather than its intensity. The pass opens its **own** mappings and takes
+`MADV_SEQUENTIAL` on them, per decision 0052's rule that the hint belongs to mappings the fold
+owns; it must not advise the live generation's `FilterColumns` maps, which are the request path's,
+for exactly pass 2's reason. The pass is single-threaded like the rest of the fold; parallelism is
+excluded by owner ruling and not further discussed.
+
+**Memory: streaming except one term.** The merge holds cursors; the writers spool. The exception is
+postings assembly — every value's bitmap grows until the column's scan completes — bounded by the
+measured serialised sizes (probe arm 9): 2.0 B per present entity for a fully scattered category,
+**~2 GB per such column at 10⁹**, kilobytes when the values correlate with entity order. That term
+joins compaction §3's pre-flight budget or silently consumes its ×2 headroom; §6.3 puts the choice
+to the owner, because the budget is normative and an OOM-killed node is the failure it exists to
+prevent.
+
+**No new gauge.** The fold's free-space precondition already covers `attrs/` — its estimate is the
+bytes the manifests name, which these files are — and §5.1's measurement makes a layer-count
+trigger unnecessary: the extent axis moves one-for-one with the segment axis compaction §9 already
+gauges, and costs microseconds per layer where a segment costs a binary search per tile. What the
+pass owes instead is *visibility*: attribute bytes read and written in the fold's dispatch log line
+and `/control/status`'s fold block, beside the figures already there. (An earlier revision of this
+section promised the *gauges* attribute-bytes terms; that was a trigger where only reporting is
+warranted, and it is withdrawn.)
+
+#### Start-up
+
+Opening a **folded** bundle costs what opening a built one costs, which is the objective: one
+`values.arrow` map per declared column, presence and postings where they exist, plus any
+carried-forward flight extents — and the digest sweep at O(bytes), dominated by the columns
+themselves (4 GB per `u32` column at 10⁹), whose first-touch deferral is §8's owed contracts
+amendment and not re-argued here. The fail-closed rules are already built and stay: a declared
+column whose files are missing refuses to open, an extent named but absent or short refuses, a
+digest mismatch refuses — never "those entities carry no value", the wrong answer in a right
+answer's clothes (§2.5). A fold changes which files those rules bind, never the rules.
+
+**Publishing an attribute artefact is two obligations, and doing one is worse than doing neither.**
+A column's layers are composed at open from the manifest's `attr_extents` list, so the files and the
+list are independent halves: hard-linking or writing the bytes while leaving the list empty produces
+a bundle that opens cleanly and **silently answers filters without every post-build entity's value**
+— a wrong answer with no symptom, strictly worse than a refusal to open. `execute_compaction` writes
+an empty `attr_extents` today, which is why the gap above is currently loud rather than silent. The
+pass must publish both halves in the same manifest write, and a test that a folded bundle still
+answers over post-build entities is what keeps that true.
+
+### 6.3 What needs an owner ruling
+
+Two questions, each rulable from this section alone.
+
+**An interim carry-forward was offered here and is withdrawn** (owner, 2026-08-09): nothing is
+deployed, so there is no folded bundle to rescue and no reason to build a state whose only
+justification is the absence of the pass — decision 0048's rule, applied. The gap stays loud until
+the pass closes it.
+
+1. **Where does the postings-assembly memory term go?** The fold's pre-flight budget (compaction
+   §3, normative) estimates three computable terms and doubles them. The attribute pass adds a term
+   measured at up to ~2 GB per fully scattered category column at 10⁹. *Explicit term*
+   (recommended): the estimate gains `Σ per category column: 2 B × present entities` — computable
+   from the presence bitmaps at plan time, and the doubling keeps meaning what it means. *Absorb in
+   the doubling*: no amendment, but several scattered categories silently consume the headroom that
+   stands in for the widest term's encode, and the pre-flight passes on a box the fold then
+   OOMs — the exact failure the check exists to prevent.
+2. **No attribute gauge, and the earlier promise of one is withdrawn** — §6.2's argument: the
+   extent axis moves one-for-one with the gauged segment axis and costs microseconds per layer
+   (measured, §5.1); the pass reports its bytes rather than triggering on them. Ruling this
+   confirms a narrowing of what this document previously said against decision 0056's surface.
+   Cost if wrong: an axis nobody triggers on — bounded regardless by the segment ceiling at 64.
+
+Amendments this design owes elsewhere, none of which it makes itself: compaction §2's table and §3's
+pass list gain the attribute pass and the budget term (normative — its own review), and §8's
+first-touch digest deferral remains contracts §2.4's owed amendment.
 
 
 ## 7. Slices
@@ -757,6 +917,19 @@ the same two edges the authorisation crate is denied, for the same reason.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-09 (r5) — the fold and start-up designed, on a new measurement.** §5.1 and §6.2 are new
+and §6.3 lists what the owner must rule; probe arm 13 measured layer accumulation — ~9 µs per layer
+net on the worst operand shape, +15 ms at a day of 90 s flushes, so the fold's pressure is the
+open-path file count rather than the scan. Three earlier statements are corrected at their sites:
+the option of carrying an untouched extent through a fold is withdrawn (it defeats the
+single-build-equivalence objective for IO the fold can afford); "the fold gauges gain
+attribute-bytes terms" is narrowed to reporting, since the extent axis moves one-for-one with the
+gauged segment axis; and "deletion and the fold touch no attribute artefact" is replaced by the
+truth §6's marker already carried — the fold destroys the artefact, and §6.2 specifies the pass that
+closes it. An interim carry-forward was drafted into §6.2 and §6.3 and **withdrawn by the owner the
+same day**: with nothing deployed there is no folded bundle to rescue, so a state whose only
+justification is the pass's absence is the shape decision 0048 forbids.
 
 **2026-08-09 — the flush's half of the write side landed, and one measurement is worth carrying.**
 §5's extent is built and §1's and §5's markers move with it; §2.5 gains the extent's presence file,
