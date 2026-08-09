@@ -495,6 +495,35 @@ quote a flat one.**
 - **The build's peak resident set, per family.** The current emit holds a `u32` per non-absent entity
   per column on top of an attribute tail already priced as outside the memory plan at 10⁹.
 
+## Arms 8–10 (2026-08-09) — the unselective gap closed, the accelerator priced, the offsets priced
+
+Measured after the campaign above, and written up in
+[`docs/evidence/memos/2026-08-09-filter-performance-options.md`](../../docs/evidence/memos/2026-08-09-filter-performance-options.md),
+which carries the tables; this section is the pointer, not the record.
+
+- **Arm 8, `resultbuild`** ([`src/bin/resultbuild.rs`](layoutprobe/src/bin/resultbuild.rs), raw
+  [`run-resultbuild-1e9-{1,2,3}.csv`](run-resultbuild-1e9-1.csv)) — builds the result's Roaring
+  containers directly (branchless/SWAR bit-packing into 2¹⁶ blocks, hand-assembled portable stream,
+  `try_deserialize`) instead of inserting entities. **Arm 7's binding gap closes**: 25%-of-corpus
+  match 3,384 → 200 ms, 50% 5,919 → 127 ms, with the selective cells improved rather than taxed.
+  The "safe" alternative — `add_range` plus `remove_many` of the misses — is **refuted** at
+  middling selectivity (worse than the shipped scan at 50%), and the plain branchless pack loop
+  does **not** autovectorise (~0.8 ns/value against SWAR's ~0.10).
+- **Arm 9, `unionsel`** ([`src/bin/unionsel.rs`](layoutprobe/src/bin/unionsel.rs), raw
+  [`run-unionsel-1e9-{1,2,3}.csv`](run-unionsel-1e9-1.csv)) — the category postings against the
+  **unselective** `in` arm 2 never measured, plus the hidden-value case arm 2 left open: a
+  scattered posting whose containers the candidate meets while no bits match **does** cost
+  measurably more than an absent value (~2 ms per operand at 10⁹ against ~0) — the residual is
+  real, and per-viewer columns must not take the postings route. Serialized postings for a fully
+  scattered 100-value `u8` column measure 2.0 B/present entity — twice the column.
+- **Arm 10, `textwidth`** ([`src/bin/textwidth.rs`](layoutprobe/src/bin/textwidth.rs), raw
+  [`run-textwidth-1e8-{1,2,3}.csv`](run-textwidth-1e8-1.csv)) — `i32` against `i64` text offsets,
+  same walk, same bytes. **Arm 6's projected ~20% saving: NOT confirmed by measurement** — equality
+  ran 5–15% *slower* at `i32` in all three runs, `contains` within noise. The capacity bound is
+  also Arrow `Utf8`'s **2 GiB** (signed offsets), not the 4 GiB arm 6 assumed. The recorded "next
+  thing to try if text needs to be faster" is hereby retired; the remaining lever is the value
+  bytes, not the offsets.
+
 ## Method
 
 `layoutprobe` builds one synthetic column of 1,000 distinct `u32` values under three presence

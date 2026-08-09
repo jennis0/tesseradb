@@ -1,0 +1,2 @@
+# correlated: 100 postings, 217412 serialized bytes total (column is 1000000000 bytes at u8)
+# scattered: 100 postings, 2012208000 serialized bytes total (column is 1000000000 bytes at u8)
