@@ -27,8 +27,10 @@ use common::*;
 use croaring::Bitmap;
 use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{candidate, FilterColumns, FilterOperand};
+use tessera_engine::filter::{candidate, FilterColumns, FilterError, FilterOperand};
 use tessera_store::read::open_bundle;
+use tessera_lifecycle::command::UnallocatedRow;
+use tessera_lifecycle::wal::WalScalar;
 use tessera_types::AttrLocalId;
 
 const N: u64 = 60;
@@ -183,8 +185,12 @@ fn fixture() -> Fixture {
     let opened = open_bundle(&bundle).unwrap();
     let phash = opened.partitions.keys().next().unwrap().clone();
     let partition_dir = bundle.join(&prefix).join("partitions").join(&phash);
-    let columns = FilterColumns::open(&partition_dir, &opened.manifest.declared_scalars)
-        .expect("declared filter columns open");
+    let columns = FilterColumns::open(
+        &partition_dir,
+        &opened.manifest.declared_scalars,
+        opened.manifest.entity_id_high_water as u32,
+    )
+    .expect("declared filter columns open");
     let codes = opened
         .manifest
         .vocabularies
@@ -405,12 +411,88 @@ fn an_item_with_no_category_matches_no_category_operand() {
 fn an_undeclared_column_is_distinguishable_from_an_empty_result() {
     let fx = fixture();
     let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
-    assert!(fx
-        .columns
-        .resolve("no_such_column", &FilterOperand::TextPrefix("x".into()), &cand)
-        .is_none());
+    assert!(matches!(
+        fx.columns
+            .resolve("no_such_column", &FilterOperand::TextPrefix("x".into()), &cand),
+        Err(FilterError::UndeclaredColumn(ref c)) if c == "no_such_column"
+    ));
     assert!(fx
         .columns
         .resolve("title", &FilterOperand::TextPrefix("zzz".into()), &cand)
-        .is_some_and(|b| b.is_empty()));
+        .is_ok_and(|b| b.is_empty()));
+}
+
+/// **⊘ A filter refuses once the candidate reaches entities the artefact does not cover.**
+///
+/// A flush appends entities. `filter-index.md` §2.1 specifies a value-column extent per flush and
+/// nothing emits one, so an entity allocated since the build carries no filter values at all.
+/// Answering anyway would omit it — safe under I12, since it only narrows `M_sel`, and *wrong* in a
+/// way the caller cannot detect, because a short result looks exactly like a correct one.
+///
+/// The refusal is as narrow as the gap: a principal whose visible set predates the build is still
+/// answered normally, which the second half of this test pins so the guard cannot quietly become
+/// "refuse everything once anything has flushed".
+#[test]
+fn a_filter_refuses_rather_than_answering_short_after_a_flush() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-flush");
+    let wal = fx._dir.path().join("wal-flush");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let row = UnallocatedRow {
+        external_id: Some(b"post-build".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        // One per declared column, positionally — including the `filter`-only `title`, which is
+        // why `declared_scalars` keeps the full list while the *segment* narrows to render columns.
+        // A category arrives as its **key**, never a code (contracts §2.4).
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("paper-99".to_string()),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    };
+    let allocated = engine
+        .accept_ingest(vec![row], "batch-1".to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0];
+    assert!(
+        allocated.raw() >= N,
+        "the new entity is above the build's high-water"
+    );
+
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("credential resolves");
+    let generation = engine.generation();
+    let cand = candidate(
+        &session.fragment,
+        &session.satisfied,
+        &generation.overlay,
+        &generation.buffer,
+    );
+    assert!(
+        cand.contains(allocated.raw() as u32),
+        "the ingested entity is in the candidate — it is visible, it simply has no filter values"
+    );
+
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let err = fx
+        .columns
+        .resolve("department", &FilterOperand::Equals(eng), &cand)
+        .expect_err("a candidate past the artefact must be refused");
+    assert!(
+        matches!(err, FilterError::CoverageEndsAtBuild { .. }),
+        "{err:?}"
+    );
+    // The message names what is absent rather than refusing generically (decision 0013).
+    assert!(format!("{err}").contains("specified and not built"));
+
+    // And the guard is narrow: a candidate entirely below the build's high-water still answers.
+    let below = cand.and(&Bitmap::from_range(0..N as u32));
+    assert!(fx
+        .columns
+        .resolve("department", &FilterOperand::Equals(eng), &below)
+        .is_ok());
 }

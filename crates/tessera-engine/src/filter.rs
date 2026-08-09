@@ -71,32 +71,88 @@ pub enum FilterOperand {
 #[derive(Debug, Default)]
 pub struct FilterColumns {
     columns: BTreeMap<String, ValueColumn>,
+    /// Entities `[0, covered)` have values in these columns. Entities at or above it were
+    /// allocated after the build and **have no filter data at all** — see [`FilterError`].
+    covered: u32,
 }
+
+/// Why a filter could not be answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterError {
+    /// The column is not declared filterable. A caller error, distinguishable from an empty
+    /// result, which an undeclared column must never be served as.
+    UndeclaredColumn(String),
+    /// ⊘ The candidate reaches entities the filter artefact does not cover.
+    ///
+    /// **Refused rather than answered short.** A flush appends entities; `filter-index.md` §2.1
+    /// specifies a value-column extent per flush, and nothing emits one, so entities allocated
+    /// since the build carry no values. Answering anyway would omit them — which narrows `M_sel`
+    /// and is safe under **I12**, but produces a result *indistinguishable from a correct one*.
+    /// That is the same reason `/v1/categories` refuses a `per_viewer` column rather than serving
+    /// it empty (per-point-attributes §3.3): an underived answer must not wear a derived one's
+    /// clothes (decision 0013).
+    CoverageEndsAtBuild { covered: u32, requested: u32 },
+}
+
+impl std::fmt::Display for FilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterError::UndeclaredColumn(name) => {
+                write!(f, "column '{name}' is not declared filterable")
+            }
+            FilterError::CoverageEndsAtBuild { covered, requested } => write!(
+                f,
+                "the filter index covers entities below {covered}; this request reaches {requested}. \
+                 Entities allocated since the build carry no filter values, because the per-flush \
+                 value-column extent (filter-index §2.1) is specified and not built. Refused rather \
+                 than answered short: a short result is indistinguishable from a correct one"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FilterError {}
 
 impl FilterColumns {
     /// Open every filter column the manifest declares, under `partition_dir`.
     ///
     /// A declared column whose files are missing is an **error**, not an absence: the manifest
     /// digests them, so a missing one means the bundle is not what its manifest says it is.
+    /// `covered` is the build's entity high-water: the columns hold values for `[0, covered)` and
+    /// nothing above it.
     pub fn open(
         partition_dir: &Path,
         declared: &[tessera_store::manifest::DeclaredScalar],
+        covered: u32,
     ) -> std::io::Result<Self> {
         let mut columns = BTreeMap::new();
         for scalar in declared.iter().filter(|d| d.filter) {
             let dir = partition_dir.join("attrs").join(&scalar.name);
             columns.insert(scalar.name.clone(), ValueColumn::open_dir(&dir)?);
         }
-        Ok(FilterColumns { columns })
+        Ok(FilterColumns { columns, covered })
     }
 
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
     }
 
+    /// Refuse a candidate that reaches past the artefact. Checked on the candidate's **maximum**,
+    /// so a principal whose visible set predates the build is answered normally — the refusal is as
+    /// narrow as the gap is.
+    fn check_coverage(&self, candidate: &Bitmap) -> Result<(), FilterError> {
+        match candidate.maximum() {
+            Some(max) if max >= self.covered => Err(FilterError::CoverageEndsAtBuild {
+                covered: self.covered,
+                requested: max,
+            }),
+            _ => Ok(()),
+        }
+    }
+
     /// Entities in `candidate` whose value for `column` satisfies `operand`.
     ///
-    /// `None` iff the column is not declared filterable. The result is a subset of `candidate` by
+    /// The result is a subset of `candidate` by
     /// construction, so it is already inside the composed verdict — **I12**'s "a filter narrows
     /// `M_sel` and never widens it" is a property of the shape here rather than a check.
     pub fn resolve(
@@ -104,9 +160,13 @@ impl FilterColumns {
         column: &str,
         operand: &FilterOperand,
         candidate: &Bitmap,
-    ) -> Option<Bitmap> {
-        let values = self.columns.get(column)?;
-        Some(match operand {
+    ) -> Result<Bitmap, FilterError> {
+        self.check_coverage(candidate)?;
+        let values = self
+            .columns
+            .get(column)
+            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        Ok(match operand {
             FilterOperand::Equals(v) => values.scan_eq(candidate, *v),
             FilterOperand::In(vs) => values.scan_in(candidate, vs),
             FilterOperand::TextEquals(s) => values.scan_text_eq(candidate, s),
@@ -124,7 +184,8 @@ impl FilterColumns {
         &self,
         operands: impl IntoIterator<Item = (&'a str, &'a FilterOperand)>,
         candidate: &Bitmap,
-    ) -> Option<Bitmap> {
+    ) -> Result<Bitmap, FilterError> {
+        self.check_coverage(candidate)?;
         let mut live = candidate.clone();
         for (column, operand) in operands {
             live = self.resolve(column, operand, &live)?;
@@ -132,7 +193,7 @@ impl FilterColumns {
                 break;
             }
         }
-        Some(live)
+        Ok(live)
     }
 }
 
