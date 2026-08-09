@@ -7,7 +7,7 @@ import {
   MAX_DEPTH,
   WORLD_SIZE,
   calibrate,
-  chooseDepth,
+
   plan,
   worldBbox,
   TesseraError,
@@ -333,19 +333,16 @@ export class ViewportController {
     const [hx0, hy0, hx1, hy1] = this.held.bbox;
     const inside = want[0] >= hx0 && want[1] >= hy0 && want[2] <= hx1 && want[3] <= hy1;
     if (!inside) return false;
-    // **Asymmetric, and the asymmetry is the point.** If the view now wants a DEEPER depth than
-    // what is held, the user has zoomed in and is looking at fewer marks than the budget promises
-    // — refetch. If it wants a SHALLOWER one, what is held is a superset of what was asked for
-    // (§7.2's nesting), so it is strictly better than the request would be: keep it, and spend no
-    // round trip discovering that.
-    const choice = chooseDepth({
-      budget: this.store.state.budget,
-      mTarget: this.store.state.mTarget,
-      worldBbox: want,
-      maxTiles: this.store.state.meta?.maxTilesPerRequest ?? 262_144,
-      visibleInView: this.store.state.lastVisibleInView ?? undefined
-    });
-    return choice.depth <= this.held.depth;
+    // **Being drawn is not the same as being answered, and conflating them stalls the refinement.**
+    // A redraw paints whatever the store holds, including coarse bands standing in for ground never
+    // fetched at this depth — legitimately, as a superset (§7.2's nesting). But if that satisfies
+    // the covered test, no request is ever scheduled and the provisional patch stays provisional
+    // for the rest of the session. A pan that exposes one, and a zoom out that lands on a depth
+    // nothing is keyed to, both did exactly that.
+    //
+    // So the store is asked whether it can actually answer the visible box. It is a rectangle
+    // subtraction and costs microseconds.
+    return this.storeCanAnswer(view, width, height);
   }
 
   /** Abort anything outstanding — used on principal change, where the token itself changes. */
