@@ -1,13 +1,14 @@
 # The filter index — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r6, the fold, the extent coalesce and start-up designed on measurement.**
-The category case is
+**Status:** **Provisional — r7, reviewed under two lenses and dispositioned in one pass** (Appendix
+R). The category case is
 built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
 width other than `u32` and on a string column, a ruling on surface §4's measured
-project-vs-per-tile rule. **§6.3's rulings are all made** (owner, 2026-08-10). Measured input:
+project-vs-per-tile rule, and decision 0060's leak-register row landing (in flight on the postings
+track; §6.2 names the dependency). **§6.3's rulings are all made** (owner, 2026-08-10). Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
@@ -90,7 +91,9 @@ manufacture a value set for a type that has none. §2.5 argues the distinction.
 
 **Negation is not an operand.** §8.2 composes by intersection, and `NOT` is a different shape: its
 result is principal-dependent by construction, so it can never share a cached projection, and it
-inverts a superset into a subset — the unsafe direction for any family producing one.
+inverts a superset into a subset — the unsafe direction for any family producing one. It also
+inverts the failure arithmetic every safety argument here leans on: §5's positivity property, which
+any design lifting the fence must revisit first.
 
 ---
 
@@ -322,10 +325,12 @@ short-circuits on container keys and a posting whose containers do not meet the 
 key-list merge and nothing more. The candidate-driven form costs a ~1.1 ms floor on every operand and
 buys nothing, so it is not adopted.
 
-> **⊘ One case is unmeasured.** A *scattered* posting whose containers the candidate meets while no bits
-> match does container-proportional work for an empty result. A uniformly scattered value cannot be
-> fully hidden from a broad principal in the first place, so the case is narrow — but it is where a
-> residual channel would live, and it has not been measured.
+> **The case an earlier revision marked unmeasured is now measured, and the residual is real**
+> (probe arm 9): a scattered posting whose containers the candidate meets while no bits match costs
+> ~2 ms per operand at 10⁹ against ~0 for an absent value — container-proportional work for an
+> empty result. That measurement is what decision 0060 is built on: a `per_viewer` column never
+> takes the postings route, because under that control the ~2 ms *is* the disclosure, while under
+> `listing = "public"` what the timing distinguishes is a fact `/v1/categories` already serves.
 
 ### 2.4 Separate files, separate types, and a shared format core
 
@@ -397,10 +402,14 @@ forbids the repair. Per-column files remove the arithmetic rather than defending
 | **Numeric / timestamp** | flat column in the native encoding | equality, range | none built; §3 states the open corner |
 | **List** | flat list column | as the element family | as the element family |
 
-`bool` is the degenerate numeric. **Lists cost no format work**: a multi-valued attribute is the same
-column with more than one value per entity. Lifting the parse refusal is a schema change and a build
-change, and it lifts **for `filter` only** — `inspect` has no sidecar to place data in, and decision
-0013 requires an unimplemented placement to stay refused naming itself.
+`bool` is the degenerate numeric. **Lists cost no new value storage but do cost addressing work,
+and an earlier revision claimed otherwise**: "more than one value per entity" breaks §2.1's
+one-presence-bit-one-slot rule, on which the affine-rank traversal, §6.2's blanking and §5.2's
+merge are all built — so the list family needs its own addressing (a per-entity value count or
+offset beside presence) before any of those specifications extend to it, and none of them claims
+to cover it meanwhile. Lifting the parse refusal is therefore an addressing design plus a schema
+and build change, and it lifts **for `filter` only** — `inspect` has no sidecar to place data in,
+and decision 0013 requires an unimplemented placement to stay refused naming itself.
 
 Decision 0039's fence stands, restated because this is where someone will look for permission to cross
 it: a multi-valued attribute is **never** `render`, and **no projection, derived value or summary of one
@@ -568,6 +577,17 @@ row, so no row-space verb sees it; the entity-space verbs under-report until flu
 narrows `M_sel`, which is safe under **I12** — and it is a lag of one flush interval rather than a
 coverage cliff, which is what makes it a design rather than a gap.
 
+**Every "degrades safely" argument in this document rests on one property, named here so it cannot
+be lost silently: every shipped operand is positive.** An entity whose value is unreachable — not
+yet flushed, in a layer that failed to compose, blanked at the fold — matches *no* positive
+predicate, so any failure that loses values under-reports, under-reporting narrows `M_sel`, and
+**I12** absorbs it. A negative operand inverts that arithmetic: under `none_of`, an entity with no
+reachable value *matches*, so the same failures — a lost layer, a lagging flush, a blanked slot —
+**widen** the result instead of narrowing it. `none_of` is fenced today for a different reason
+(decision 0059's existence oracle over gated vocabularies), so nothing enforces this one; the
+review that ever lifts that fence must therefore revisit layer composition and every start-up
+failure mode in §6.2 under the inverted sign, and this paragraph is the tripwire that forces it.
+
 > **⊘ Built, except the accelerator's tail.** A flush writes one extent per filterable column —
 > including one for a column no flushed entity carries a value in, so the file set is a function of
 > the schema rather than of the data — names both files in the partition's side-manifest, digests
@@ -612,38 +632,62 @@ nothing**: a deleted entity's value rides through untouched, because removal is 
 
 The mechanics, against the pass's existing shape:
 
-- **The selection window is a window of flushes, taken across every column at once.** A flush
-  writes one extent per filterable column, and the file set being a function of the schema rather
-  than of the data is a property §2.5 already establishes — so the pass consumes the same
-  contiguous window of flushes for every column and emits **one coalesced extent per column**,
-  keeping that property through the coalesce. Any contiguous window qualifies, for the tier
-  axis's reason: a union has no order. (Extent entity ranges are in fact ascending across flushes
-  under **I9**, so the merge is a concatenation in practice; the design requires only
-  disjointness, which is checked at composition, not assumed here.)
-- **The policy's knobs carry over with their meanings intact.** `width` (8) is how many flushes'
-  extents collapse into one; the size `floor` (1 MiB) does for extents exactly what it does for
-  tiers — a flush's extent is ~100 KB at the owner's stated rates, so without the floor every
-  tick would mint its own size class and the pass would silently never fire; and the input cap
-  (256 MiB) bounds the pass transient, which for this axis is the input extents' values and
-  presence bitmaps held during the merge. At measured category widths the cap is inert — a
-  width-8 window across sixteen `u32` columns is ~13 MB — and it is kept because a **text**
-  column's extent is its values' bytes, which nothing bounds per flush.
+- **Selection is per column, over that column's own extents in list order.** `AttrExtent` carries
+  the column's declared name, so each column's extents are a subsequence of `attr_extents` with no
+  path parsed and no flush identity needed — the selection unit is the column, which exists in the
+  format today, where "a window of flushes" did not (an `AttrExtent` records no flush, and §2.5
+  forbids recovering one from the path). Any contiguous window of the column's subsequence
+  qualifies, for the tier axis's reason: a union has no order. The recursion is free — a coalesced
+  extent is an entry in the same per-column subsequence and is selected at the next rung
+  identically. One pass may take windows in several columns and publish them together; a coalesce's
+  file set is therefore data-driven, and deliberately so — §2.5's file-set-is-a-function-of-schema
+  property belongs to the *flush*, where an operator predicts what ingest produces, not to a
+  maintenance pass that fires where the policy says there is work.
+- **The policy's knobs carry over per column, which is what keeps one heavy column from starving
+  the rest.** `width` (8) is how many of a column's extents collapse into one; the size `floor`
+  (1 MiB) does for extents exactly what it does for tiers — a flush's extent is ~100 KB at the
+  owner's stated rates, so without the floor every tick would mint its own size class and the pass
+  would silently never fire; the size tier is computed over the *column's own window*, so the
+  ladder is per column and well defined. The input cap (256 MiB) bounds the pass transient —
+  the input extents' values and presence held during the merge — and applies per column: a text
+  column whose values outgrow it stalls **itself**, never its neighbours, and for that column the
+  window narrows to the widest `width ≥ 2` that fits the cap rather than silently reverting to
+  unbounded file growth. A column one extent of which alone exceeds the cap is genuinely
+  uncoalesceable and waits for the fold; that is a statement, not an oversight.
+- **The merge is `coalesce_attr_extents`, per family, and it refuses overlap itself** — the
+  composition check cannot: `compose` tests disjointness *between* layers, so once eight extents
+  become one file an overlap among the inputs is internal to a single layer and invisible to it
+  forever. The merge therefore carries the axis's own guard, as the dictionary axis carries its
+  never-repeat guard: the output presence is the union of the inputs', refused unless the union's
+  cardinality equals the sum of the inputs' — O(containers), checked before any value is written.
+  Values merge by family: a fixed-width column concatenates its inputs' slices in entity order; a
+  text column concatenates value bytes and rebases offsets. **Lists are excluded** until §2.6's
+  addressing for them exists — they refuse at parse today, so nothing is fail-open — and the
+  output is the one record batch §2.5 requires, via the streaming writer §6.2 makes a deliverable.
 - **Output lands under `coalesced/<id>/attrs/<column>/`**, on contracts §2.1's existing precedent
   for entity-space output that belongs to no segment — the coalesced tier and run already live
   there, and the never-reused `<id>` rule is what stops two passes truncating each other's mapped
   files. No format change follows: `attr_extents` names paths, never a path convention (§2.5's
-  own rule), so the manifest edit is remove-consumed, insert-one-per-column, exactly the tier
-  axis's edit.
-- **Disjointness at composition survives, and is still checked rather than assumed.** A coalesced
-  layer covers the union of its inputs' entity sets. The inputs were pairwise disjoint and
-  disjoint from every other layer, so their union is too — and the composition check is
-  set-intersection against accumulated coverage, not a range test, so a layer covering a union of
-  ranges satisfies it identically. The check keeps its job: if I9 ever failed, two layers
-  claiming one entity is still a refusal at compose, coalesced or not.
-- **Publication recomposes the affected columns** from the manifest it just wrote — the
-  generation's filter columns are rebuilt with the coalesced layer replacing the consumed ones,
-  a pointer-clone plus one `mmap` per column, on the executor exactly as a flush's composition
-  is. Nothing row-space moves, so decision 0043 is satisfied by construction.
+  own rule), so the manifest edit is remove-consumed, insert-coalesced, exactly the tier axis's
+  edit. A failed pass leaves the directory an orphan nothing references, the tier axis's posture —
+  ⊘ and, like the tier axis's orphans, it waits on an in-prefix orphan sweep that is **not
+  built**; this axis makes that debt heavier by up to a column-count multiple per failure, stated
+  here rather than discovered.
+- **Composition needs a replace operation, which does not exist: `compose` is append-only.** The
+  successor generation's column replaces the consumed layers with the coalesced one, and its
+  correctness condition is *different* from append's: the coalesced layer's presence must **equal**
+  the union of the consumed layers' — tested as a bitmap equality, refused on mismatch — or
+  `covered` drifts silently and every later disjointness check tests against the wrong coverage.
+  Checked at the same register as the rest of this section: the merge's own guard (above) makes
+  the equality unreachable, which is exactly why it is cheap to verify and wrong to assume.
+- **The publication order is the flush's, for the flush's stated reason: compose first, manifest
+  second, swap third.** The completed pass carries the **opened** coalesced column per window —
+  `FlushedExtent`'s precedent, so publication cannot fail on IO after the manifest edit — and the
+  executor builds the successor `FilterColumns` by the replace operation *before* writing the
+  manifest: a composition that refuses must not leave a published manifest naming layers this
+  process cannot serve, and the reverse order commits a manifest whose own writer then refuses it.
+  A refusal discards the pass — files become orphans, the consumed entries stand, the next tick
+  re-plans. Nothing row-space moves at the swap, so decision 0043 is satisfied by construction.
 
 **What this bounds, modelled from arm 13's constants.** Repeated width-8 coalescing walks the same
 size-tier ladder the segment merge does, so the steady-state layer count per column is tens rather
@@ -749,13 +793,16 @@ snapshot/publication split:
 The layers partition entity space and each is entity-ascending, and a flush's entities sit above
 every earlier layer's (**I9**), so the concatenation is a linear merge with no sort. An entity in
 `D₀` — the plan's tombstone clone, never `executed`, exactly as compaction's passes 1 and 3 take it
-— is skipped. The new presence bitmap is `(∪ layers' present) ∖ D₀`, written whenever it is not
-universal over the snapshot's entity space; **blanking a deleted entity's slot means removing it
+— is skipped. The new presence bitmap is `(∪ layers' present) ∖ D₀`, omitted only when every
+entity from 0 to the snapshot bound is present — the reader's dense-from-zero convention, "the
+entity id is the array index" (§2.1, §2.5), and nothing looser; **blanking a deleted entity's slot means removing it
 from presence and emitting no value bytes**, not overwriting them — a sentinel would keep the bytes
 the retention argument exists to remove, and every family would need a reserved value it does not
 have. A previously universal column therefore becomes partial at its first folded deletion, which
 moves it from the bare-array constants to the partial ones (§2.2) — both measured, both inside
-budget, and the partial path was faster in every broad cell measured (probe arm 4).
+budget, and the partial path was faster in every broad cell measured (probe arm 4). The merge is
+specified for the shipped families — fixed-width and text, one value per present entity — and
+**not for lists**, whose storage §2.6 leaves unaddressed and whose parse refusal stands meanwhile.
 
 **Every snapshot extent folds in; carrying an untouched one forward is declined.** An earlier
 revision offered it as an implementation option. It trades the objective — zero extents after a
@@ -768,7 +815,11 @@ holds unchanged.
 
 **A category's postings are rebuilt whole from the folded column** — the self-retiring derivation
 §2.3 requires, and after the rebuild they cover the new `fold_watermark`, closing the un-folded
-tail the flush marker in §5 records. The rebuild reuses the build's emit, so there is one postings
+tail the flush marker in §5 records. Where the rebuilt postings serve a *filter* — a `public`
+listing's route under decision 0060 — this rests on the leak-register row 0060 names as a
+condition of itself, **which does not exist yet in Appendix C and is being registered on the
+postings track**; until that row lands, 0060's condition is unmet and this paragraph inherits the
+dependency. The rebuild reuses the build's emit, so there is one postings
 writer, not two that happen to agree; the build's existing column-vs-postings agreement test is the
 equivalence check, applied to the fold's output as it is to the build's. That sharing is also the
 equivalence argument in general: the pass emits through `write_value_column` and the postings
@@ -782,6 +833,16 @@ reads — a value column with optional presence — so per-request work remains 
 and presence is membership, not values, so its post-fold shape discloses nothing a candidate does
 not already encode.
 
+**At the flip, the filter columns are opened from the new prefix — never cloned from the live
+generation.** The rotation's swap today clones the previous generation's `filter_columns`, which
+are mappings of the *old* prefix's files (the code's own comment records the gap): correct only
+while a rotation carries the same artefact, which is precisely the premise this pass breaks — a
+clone would serve pre-fold values, missing the blanking and the folded extents, from files the
+reclamation is about to unlink (safe to hold on POSIX, wrong to serve). So the filter columns join
+the rotation the way the postings reader and the external-id sidecar already did, for decision
+0050's reason: the swap carries a `FilterColumns::open` over the new prefix — the folded bases
+plus the carried-forward flight extents — and the old mappings die with their last holder.
+
 **Slice invariance holds through the fold**: the pass is per partition in entity space, reads
 nothing per-slice, and emits nothing per-slice. §7's statement is unchanged by it.
 
@@ -794,37 +855,45 @@ is files and open time; it is now designed at §5.2.)
 #### What the pass costs, against non-disruption
 
 Per `u32` column at 10⁹: ~4 GB read, ~4 GB written, and ~4 GB re-read for the digest — the fold
-digests by reading back (compaction §3, pass 5) — so **~12 GB of streaming IO per column,
-*modelled* at minutes per column at disk bandwidth; ~16 columns adds tens of minutes to an
-operation already minutes-to-hours**. That lands inside the constraint that matters: P3 measured a
-corpus-scale streaming read costing a concurrent viewport up to 2.03×, P4 measured a *real* fold at
-1.05–1.18× because it interleaves passes and computation, and the attribute pass has P4's shape,
-not P3's. It extends the fold's duration — free under the owner's slower-is-gentler ruling
+digests by reading back (compaction §3, pass 5) — so **~12 GB of streaming IO per column:
+*modelled*, seconds per column at raw NVMe bandwidth, minutes only under the fold's own gentled,
+interleaved regime, which is the regime it runs in; ~16 columns adds minutes to tens of minutes to
+an operation already minutes-to-hours**. That lands inside the constraint that matters: P3
+measured a corpus-scale streaming read costing a concurrent viewport up to 2.03×, and P4 measured
+a *real* fold at 1.05–1.18× because it interleaves passes and computation. That the attribute pass
+behaves like P4's fold rather than P3's reader is **reasoning from its shape, not a
+measurement** — it interleaves reads, writes and encoding the same way — and is marked as such.
+It extends the fold's duration — free under the owner's slower-is-gentler ruling
 (compaction §6.1) — rather than its intensity. The pass opens its **own** mappings and takes
 `MADV_SEQUENTIAL` on them, per decision 0052's rule that the hint belongs to mappings the fold
 owns; it must not advise the live generation's `FilterColumns` maps, which are the request path's,
 for exactly pass 2's reason. The pass is single-threaded like the rest of the fold; parallelism is
 excluded by owner ruling and not further discussed.
 
-**Memory: streaming everywhere, and the postings emit is banded to keep it so.** The merge holds
-cursors; the writers spool. The one construction that would not stream is the obvious postings
-emit — every code's entity list accumulated until the column's scan completes — and its in-flight
-cost is the **raw entity ids, 4 B per present entity, ~4 GB per fully covered category column at
-10⁹**. (An earlier revision quoted ~2 GB from probe arm 9; that is the *serialised* size, and the
-correction matters — the transient is the ids, not the bitmaps.) The build's authorisation emit
-already solved this shape and the attribute emit takes the same construction: **band the code
-space**, a code never split across a band, a counting pass over the column sizing each band from a
-memory budget, then per band one column scan cursor-scattering into a flat buffer laid out by
-prefix sums and appended to the keyed postings file — bands partition ascending code space, so the
-writer's ascending-order check holds across them unchanged. The cost is one column scan per band at
-§2.2's measured ~280 ms per 10⁹, so even sixteen bands is a few seconds per column inside an
-operation of minutes to hours; the memory is the band budget, **a constant the planner chooses**,
-not a corpus-dependent figure — which is what dissolves the pre-flight ruling an earlier revision
-put to the owner (§6.3). The counting pass's own residue is one count per distinct code, and a
-category's distinct codes are vocabulary-sized by definition (§2.3) — kilobytes, not a term.
-**The build owes itself the same fix**: its shipped emit is the unbanded shape (§4's finding), so
-the banded emit is written once and both producers call it, which is also what keeps them one
-writer rather than two that agree.
+**Memory: banding bounds the transient only if the writers stream, and today they do not — the
+streaming writers are a deliverable of this design, not an assumption.** The shipped
+`write_value_column` takes a fully materialised `Codes`, and the keyed postings writer takes its
+complete entries slice and holds every encoded posting before writing; the format's reader refuses
+a second record batch, so incremental append is no escape. Banding the *ids* against unbanded
+writers merely moves the resident gigabytes from the ids to the values array or the serialised
+postings. So the pass owes two writers on the repo's own spool-then-assemble discipline (the
+`SegmentWriter`/`PostingsSpool` construction, applied to this format): a **value-column writer**
+that spools value bytes and assembles the single record batch at `finish` with the spool mapped as
+its values buffer, and a **keyed-postings writer** that appends encoded records band by band and
+assembles the same way. With those in place the emit **bands the code space**: a code never split
+across a band, a counting pass over the column sizing each band from a memory budget, then per
+band one column scan cursor-scattering into a flat buffer laid out by prefix sums and appended
+through the spool — bands partition ascending code space, so the writer's ascending-order check
+holds across them unchanged. The in-flight cost the banding bounds is the **raw entity ids, 4 B
+per present entity, ~4 GB per fully covered category column at 10⁹** (an earlier revision quoted
+~2 GB from probe arm 9 — the *serialised* size; the transient is the ids). The cost is one column
+scan per band at §2.2's measured ~280 ms per 10⁹ — seconds per column even at sixteen bands — and
+the memory is the band budget, **a constant the planner chooses**, which is what dissolves the
+pre-flight ruling an earlier revision put to the owner (§6.3). The counting pass's residue is one
+count per distinct code, vocabulary-sized by definition (§2.3) — kilobytes, not a term. **The
+build owes itself the same fix**: its shipped emit is the unbanded shape (§4's finding), so the
+banded emit and both writers are written once and both producers call them, which is also what
+keeps them one writer rather than two that agree.
 
 **No new gauge.** The fold's free-space precondition already covers `attrs/` — its estimate is the
 bytes the manifests name, which these files are — and the extent axis needs no trigger of its own
@@ -1004,6 +1073,30 @@ the same two edges the authorisation crate is denied, for the same reason.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-10 (r7) — adversarial review, two lenses, dispositioned in one pass.** Both lenses held
+the shape and attacked load-bearing claims; every finding was accepted except one whose *remedy*
+was declined for a cheaper one. What changed: **selection is per column** over that column's own
+`attr_extents` subsequence — which dissolves the missing selection unit (the reviewed draft
+selected "a window of flushes", an identity the format does not record; the suggested group-key
+format change is declined because the column, which the format does record, is the better unit and
+also survives the second rung), confines cap starvation to the offending column with a
+narrow-to-`width ≥ 2` fallback, and gives the size tier a well-defined base. **The merge carries
+its own overlap refusal** — after coalescing, an input overlap is internal to one layer and
+invisible to `compose` forever, so the union-equals-sum-of-cardinalities guard lives in
+`coalesce_attr_extents`, as the dictionary axis's guard lives in its merge; composition gains the
+**replace** operation `compose` cannot express, refusing unless the coalesced presence *equals*
+the consumed union. **Publication order is fixed to the flush's** — compose, manifest, swap, with
+the completed unit carrying opened columns. **"The writers spool" was false** and the two
+spool-then-assemble writers (value column, keyed postings) are now explicit deliverables — banding
+bounds nothing without them. **The flip must open filter columns from the new prefix**, joining
+the rotation as postings and the sidecar did. And three properties are now recorded at their
+sites: **positivity** — every "degrades safely under I12" argument holds only while every operand
+is positive, so lifting `none_of`'s fence must revisit §5.2/§6.2 under the inverted sign (§5, the
+review's most valuable finding); **lists break one-bit-one-slot addressing** and are excluded from
+the merge and blanking specifications until §2.6's addressing exists; and §2.3's "unmeasured"
+marker was stale — arm 9 measured the residual and 0060 is built on it. §6.2 also now names its
+dependency on 0060's leak-register row, which is registered on the postings track, not here.
 
 **2026-08-10 — the fold's rulings are closed** (owner). The attribute axis is **reported, never
 triggered on**: compaction §9's OR over four gauges gains no fifth, and this document's earlier
