@@ -13,6 +13,33 @@
 #   ./run_demo.sh --no-viewer     # server only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundle
 #
+# ## Watching the replica work
+#
+# The viewer holds what it has fetched, and buys a margin beyond the screen while the view is
+# still. Four rows in the **Last request** panel report it: `tiles from cache` (of the region the
+# view wanted, how much needed no request), `replica held`, `prefetched ahead`, and
+# `— of which provisional` (marks borrowed from another zoom level while this one loads — drawn
+# faded, and deliberately carrying no counts).
+#
+# `http://localhost:5173/?prefetch=0` turns look-ahead off and leaves the cache on. That is the A/B
+# the measurements use: the cache decides what a request is *answered from*, look-ahead decides
+# what is *asked for*, and they are worth judging separately.
+#
+# Three things that will otherwise waste your time:
+#
+#   - **Zoom in before panning.** At zoom 0 the whole world is on screen and the view box clamps,
+#     so panning changes nothing and every gesture is answered without a request. Nothing is wrong;
+#     there is just nothing to fetch.
+#   - **Switch off the default principal.** It is the narrow one — 1,366 visible items — which
+#     saturates at almost any depth, so the budget never binds and the cache has little to do. Pick
+#     `everything` or a broad term to see it work.
+#   - **Let the depth budget settle.** Marks-per-tile calibrates over the first few interactions
+#     and only ever goes deeper; while it is moving, each view lands at a depth nothing is held at,
+#     so the cache reads cold for reasons that have nothing to do with the cache.
+#
+# `clients/ts/viewer/smoke-cache.mjs` and `smoke-lookahead.mjs` do all of the above headlessly and
+# print the numbers, against a server this script has already started.
+#
 # **Colour needs a bundle with a schema**, so this cannot default to `data/bench-fixtures/2m4`:
 # that carries no attribute tail and would leave the colour-by control with nothing to offer. It
 # builds from `data/scaled/attrs/schema.toml` — two categories and three numerics, which is every
@@ -200,4 +227,8 @@ say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop both"
 echo "Pick a column in the Colour panel: primary_category for the palette, submitted_at for the"
 echo "ramp. --wide adds every other declared type, including a per_viewer category (refused:"
 echo "its gate is specified and not built)."
+echo
+echo "To watch the replica: pick a broad principal, zoom in a few notches, then pan away and back."
+echo "The return trip should need no request — see 'tiles from cache' under Last request."
+echo "http://localhost:$VITE_PORT/?prefetch=0 turns look-ahead off, cache still on, for comparison."
 npm run dev -w @tessera/viewer
