@@ -120,9 +120,19 @@ whole-corpus scan at 10⁹ is ~280 ms.
 An unselective predicate — a range over most of a domain, a set with every value ticked — is priced
 by the size of its **result** instead, because the answer has to be built: measured at 10⁹, a
 predicate matching a quarter of a whole-corpus candidate costs 3.4 s and one matching half of it
-6.0 s, against ~280 ms to scan the same column selectively. Almost all of that is Roaring assembling
-a 250–500 million-entity bitmap, so **no accelerator over the column would touch it** — it is not the
-scan. This is the largest known gap in the filter path and it is stated here rather than in the probe
+6.0 s, against ~280 ms to scan the same column selectively. It decomposes, measured, into roughly **40% mispredicted
+branches** — the predicate is a coin flip at middling selectivity and perfectly predictable at both
+extremes, so counting matches alone costs 4.6× more at 25% than at 100% over identical work — **30%
+Roaring assembling a 250–500 million-entity bitmap**, and **30% buffer traffic**. So **no accelerator
+over the column would touch it**: it is not the scan finding the matches, and no single one of the
+three terms is a majority.
+
+Removing the branch is the obvious fix and **was measured and refused**: in isolation it makes the
+cost flat at ~445 ms across the whole selectivity range, a 10× improvement at its worst, but built
+into the scan it cost the *selective* arms 1.5–2.1× to buy 1.3–1.6× here, leaving the case outside
+the budget anyway. A viewer filtering to one category value is the common case and it is selective.
+It becomes attractive only alongside a cheaper result representation, since it is the combination
+that reaches the budget (probe arm 7). This is the largest known gap in the filter path and it is stated here rather than in the probe
 alone, because a reader sizing against the constants above would not otherwise meet it.
 
 Two things bound it rather than close it. Consecutive matches are added as **ranges**, which takes

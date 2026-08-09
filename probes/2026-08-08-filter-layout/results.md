@@ -361,6 +361,50 @@ building a 250–500 million-entity bitmap — `add_many` already uses CRoaring'
 is no cheap win left in it. **This is the largest known gap in the filter path**, it is a property of
 the result's size rather than of the scan, and no accelerator over the *column* would touch it.
 
+### Where the unselective time actually goes — and a fix that measured well and was still refused
+
+`ceiling` ([`layoutprobe/src/bin/ceiling.rs`](layoutprobe/src/bin/ceiling.rs), raw
+[`run-ceiling.csv`](run-ceiling.csv)) times the same traversal over the same 10⁹ column three ways:
+counting matches without building anything, collecting them into a flat buffer, and folding that
+buffer into a bitmap. The first is the floor — no result representation can beat not building one.
+
+| Selectivity | count only | collect | `add_many` |
+|---|---|---|---|
+| 1% | 340 ms | 535 ms | 58 ms |
+| 25% | **1,504 ms** | 2,569 ms | 1,076 ms |
+| 50% | **2,515 ms** | 4,127 ms | 1,947 ms |
+| 100% | **328 ms** | 3,089 ms | 3,883 ms |
+
+**Counting alone is 4.6× dearer at 25% than at 100%, over identical work.** That is branch
+misprediction: the predicate is a coin flip at middling selectivity and perfectly predictable at
+both extremes. So a large share of the unselective cost is not croaring at all and not the memory
+traffic — it is the `if` in the inner loop.
+
+The standard fix is to remove the branch: store the entity unconditionally and advance the cursor by
+the predicate. In isolation it works exactly as advertised — **flat at ~445 ms across the whole
+selectivity range**, against 332 ms at 1% and 4,330 ms at 50%, a 10× improvement where it is worst
+and a crossover at ~3%:
+
+| Selectivity | 1% | 5% | 10% | 30% | 50% | 90% | 100% |
+|---|---|---|---|---|---|---|---|
+| branchy | 332 | 660 | 1,040 | 2,729 | 4,330 | 3,246 | 3,569 |
+| branchless | 448 | 440 | 432 | 441 | 449 | 448 | 490 |
+
+**Built into the real scan it was a bad trade, and is not taken.** Measured end to end, it cost the
+selective arms 1.5–2.1× (arm 4's contiguous cell 2.82 → 4.22 ms, the 1%-selectivity whole-corpus
+scan 768 → 1,647 ms) and bought only 1.3–1.6× on the unselective ones (25%: 3,390 → 2,637 ms; 50%:
+6,037 → 3,677 ms) — which remain far outside the budget either way. The isolated 10× does not
+survive contact because `add_many` is 1.0–1.9 s of the unselective total and branchlessness does
+nothing for it, while the extra 4 bytes written per *candidate* entity is pure added traffic for a
+selective predicate. A viewer filtering to one category value is the common case and it is
+selective.
+
+Two things follow for whoever revisits this. The measurement stands even though the change did not:
+**the unselective cost decomposes into ~40% mispredicted branches, ~30% `add_many`, ~30% buffer
+traffic**, and any fix has to address more than one of them to matter. And branchless would become
+attractive alongside a cheaper result representation, since it is the *combination* — not either
+alone — that reaches the budget.
+
 ### Three regressions on the way, all caught by re-running arms 4 and 6
 
 None of this was visible in the arm being optimised, and each cost more than the change was worth:
