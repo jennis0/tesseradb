@@ -44,12 +44,14 @@ In-memory, single-threaded, `u32` column, 12-core WSL2 host.
 
 | Quantity | Value | Standing |
 |---|---|---|
-| Masked scan, contiguous candidate | **~0.24 ns per candidate entity** | measured on the shipped code, stable 10⁶→10⁹ (was ~2.9 ns against a reimplementation, and 3.10 ns shipped, before run-based iteration and typed traversal — probe arm 4) |
-| Masked scan, scattered candidate | **~10 ns per candidate entity** | measured on the shipped code; the ~40× penalty is cache misses, not bandwidth. The noisiest cell measured: 98–110 ms across three runs at 10⁹ |
-| 25% principal, 10⁹, bare column | **61 ms** | measured on the shipped code (900 ms originally; 730 ms was a reimplementation) |
+| Masked scan, contiguous candidate | **~0.25 ns per candidate entity** | category/numeric, measured on the shipped code, stable 10⁶→10⁹ (was ~2.9 ns against a reimplementation, and 3.10 ns shipped, before run-based iteration and typed traversal — probe arm 4) |
+| Masked scan, scattered candidate | **~11 ns per candidate entity** | measured on the shipped code; the ~40× penalty is cache misses, not bandwidth. The noisiest cell measured: 95–110 ms across runs at 10⁹ |
+| **Text scan** | **3.5 ns `eq` / 4.3 `prefix` / 8.2 `in` / 9.7 `contains`**, contiguous; 30–96 ns scattered | measured at 10⁸ (probe arm 6). ~14× a category, because a value streams ~22 bytes against 4 — equality is at memory bandwidth for the shape |
+| **Category `in`, k values** | **flat in k at `u8`/`u16`** (0.43–0.44 ns at k = 2, 8, 32); O(log k) at `u32` | measured at 10⁸ (arm 6). A narrow domain fits a bit table, which also makes the work independent of which codes are named |
+| 25% principal, 10⁹, bare column | **66 ms** | measured on the shipped code (900 ms originally; 730 ms was a reimplementation) |
 | Scale behaviour | linear, 9.5–11.2× per decade, no cliffs | measured across three decades |
-| Affordable coverage at the ruled 1 s filter budget | ~4×10⁹ contiguous (four times the whole corpus at 10⁹), ~1×10⁸ scattered | derived from the two constants |
-| Full-corpus scan at 10⁹ | **~240 ms** — inside the band, so no coverage is now unaffordable on a contiguous candidate | measured (was ~3.0 s) |
+| Affordable coverage at the ruled 1 s filter budget | category: ~4×10⁹ contiguous (four times the whole corpus at 10⁹), ~9×10⁷ scattered. Text `contains`: ~10⁸ contiguous, ~10⁷ scattered | derived from the constants above |
+| Full-corpus scan at 10⁹ | **~250 ms** for a category — inside the band, so no coverage is unaffordable on a contiguous candidate. A **scattered text `contains`** is the one cell that is not: ~1 s per 10⁷ candidate entities | measured (was ~3.0 s) |
 
 Addressing structure, bytes per present entity at 10⁹ (totals in parentheses below 1 B):
 
@@ -77,15 +79,18 @@ never assumed. Category membership postings cost **0.31–1.01×** the render co
 projection is **cardinality-dependent**: 127 ns/set-bit at 69M (`probes/results.md` §6), 10.7 ns/item
 at 10⁹ (§10.4) — quote the range, never a flat constant.
 
-**Refuted by measurement.** The structural memo's first revision assumed 5–10 GB/s and derived
-40–80 ms for a 25% principal at 10⁹. Measured is 730 ms, an effective ~1.4 GB/s. **The masked scan
-is bound by per-candidate work and cache misses, not memory bandwidth.** Any sizing that treats it
-as a bandwidth problem runs ~5–7× optimistic.
+**Refuted by measurement, and the refutation cuts both ways now.** The structural memo's first
+revision assumed 5–10 GB/s and derived 40–80 ms for a 25% principal at 10⁹, against a then-measured
+730 ms — ~5–7× optimistic. The same cell now measures 66 ms, which that model would have called
+*pessimistic*: a fixed-width column at 0.25 ns per 4-byte value is ~16 GB/s, because a contiguous
+candidate walks the array sequentially and prefetches. **A text column, at ~6 GB/s, is the one family
+the bandwidth model describes.** So the fixed-width bound is per-candidate work and moves with the
+loop; the text bound is the bytes and moves only if the storage does.
 
-**Not measured, and material.** Value widths other than `u32`; strings and variable-width values;
-parallel scan; cold/on-disk scan (all of the above is RAM-resident); and the row-space projection
-curve between the corpus's two disagreeing measured points, which the filter budget promotes to the
-binding term (§6).
+**Not measured, and material.** Parallel scan; **cold/on-disk scan** (everything above is
+RAM-resident, and arm 5's mapped figures are warm-page-cache); and the row-space projection curve
+between the corpus's two disagreeing measured points, which the filter budget promotes to the
+binding term (§6). Value widths and strings *were* the gap here and are now measured (arm 6).
 
 ---
 

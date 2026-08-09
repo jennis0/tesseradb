@@ -41,6 +41,121 @@ use arrow::buffer::{Buffer, ScalarBuffer};
 use croaring::{Bitmap, Portable};
 use tessera_types::AttrLocalId;
 
+/// A membership test over a narrow code domain: one bit per code point.
+///
+/// Built once per scan and tested in constant time, which is what keeps a set-membership filter the
+/// same cost as an equality one however many values it names. A code outside the domain is dropped
+/// at construction — it can be carried by no entity, so it changes no answer — and dropping it
+/// costs nothing that a caller could time, because the table is built and consulted identically
+/// either way.
+struct CodeSet {
+    bits: Vec<u64>,
+}
+
+impl CodeSet {
+    fn new(values: &[AttrLocalId], max: u32) -> Self {
+        let mut bits = vec![0u64; (max as usize / 64) + 1];
+        for v in values {
+            let code = v.raw();
+            if code <= max {
+                bits[code as usize / 64] |= 1 << (code % 64);
+            }
+        }
+        CodeSet { bits }
+    }
+
+    #[inline]
+    fn contains(&self, code: u32) -> bool {
+        // The caller only ever passes a value read from a column of the width this was built for,
+        // so the index is in range by construction; `get` keeps that a wrong answer rather than a
+        // panic if that ever stops being true.
+        self.bits
+            .get(code as usize / 64)
+            .is_some_and(|w| w & (1 << (code % 64)) != 0)
+    }
+}
+
+/// A membership test over a set of byte strings, bucketed by first byte.
+///
+/// **The bucket is what makes `in` cost about what `eq` costs.** Searching a sorted needle list
+/// compares whole values, and a text column's values share long prefixes by nature — names, paths,
+/// identifiers — so each comparison runs deep before it fails. Measured at 10⁸ that made a
+/// five-value `in` cost 16 ns per candidate entity against equality's 3.4. Dispatching on the first
+/// byte reduces the usual case to zero or one full comparison, and the length check in front of
+/// that rejects most of what survives.
+///
+/// The buckets are a CSR index — one allocation and a 257-entry offset table — rather than 256
+/// vectors, because the table is built once per scan and then read once per candidate entity.
+struct ByteSet<'a> {
+    /// Needles sorted by first byte. `needles[starts[b]..starts[b + 1]]` all begin with byte `b`.
+    needles: Vec<&'a [u8]>,
+    starts: [u32; 257],
+    /// The empty needle matches the empty value, and has no first byte to bucket on.
+    empty: bool,
+}
+
+impl<'a> ByteSet<'a> {
+    fn new(values: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        let mut needles: Vec<&[u8]> = values.into_iter().collect();
+        needles.sort_unstable();
+        needles.dedup();
+        let empty = needles.first().is_some_and(|n| n.is_empty());
+        needles.retain(|n| !n.is_empty());
+
+        // Sorting by whole value already sorts by first byte, so the counts can be taken in one
+        // pass over the sorted list rather than by a second sort.
+        let mut starts = [0u32; 257];
+        for n in &needles {
+            starts[n[0] as usize + 1] += 1;
+        }
+        for b in 1..257 {
+            starts[b] += starts[b - 1];
+        }
+        ByteSet {
+            needles,
+            starts,
+            empty,
+        }
+    }
+
+    #[inline]
+    fn contains(&self, v: &[u8]) -> bool {
+        let Some(&first) = v.first() else {
+            return self.empty;
+        };
+        let lo = self.starts[first as usize] as usize;
+        let hi = self.starts[first as usize + 1] as usize;
+        self.needles[lo..hi]
+            .iter()
+            .any(|n| n.len() == v.len() && *n == v)
+    }
+}
+
+/// Does `haystack` contain `needle` as a byte substring?
+///
+/// **Byte-wise, and that agrees with `str::contains` on validated UTF-8** — UTF-8 is
+/// self-synchronising, so a valid needle cannot match starting part-way through a character: every
+/// continuation byte is `10xxxxxx` and no lead byte is. Working in bytes is what lets a text scan
+/// skip the per-value UTF-8 validation that dominated it.
+///
+/// The first-byte scan before each comparison is what makes this cheap on the shape a text column
+/// actually holds — short values, most of which do not contain the needle at all.
+#[inline]
+fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let first = needle[0];
+    let last_start = haystack.len() - needle.len();
+    haystack[..=last_start]
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == first && &haystack[i..i + needle.len()] == needle)
+}
+
 /// Visit `bitmap`'s set values as ascending, non-overlapping, **inclusive** runs.
 ///
 /// Bulk-read through the cursor rather than one value at a time: a contiguous candidate collapses
@@ -362,10 +477,80 @@ impl ValueColumn {
         })
     }
 
+    /// Visit the candidate as **contiguous slot ranges**: `(slot0, count, entity0)`, meaning slots
+    /// `slot0..slot0 + count` hold the values of entities `entity0..entity0 + count`.
+    ///
+    /// **This is the whole traversal, and it exists once.** Every predicate over every family
+    /// reaches its values through this function, which is what makes the timing property a property
+    /// of the module rather than of each scan: the ranges are a function of `(candidate, presence)`
+    /// alone and never of what is being sought, so a predicate cannot skip work whatever it tests
+    /// for. Adding a family adds a comparison and cannot add a channel.
+    ///
+    /// It hands out *ranges* rather than single slots so that each family can walk its own storage
+    /// without a bounds check per element — a fixed-width column iterates a slice of values, a text
+    /// column iterates a slice of offsets. Handing out one slot at a time would force both into
+    /// indexed access and cost the fixed-width case the property it goes fast on.
+    #[inline]
+    fn for_each_slot_run(&self, candidate: &Bitmap, len: usize, mut f: impl FnMut(usize, usize, u32)) {
+        match &self.presence {
+            // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
+            // array. The run structure is the *candidate's*, so a scattered candidate degenerates
+            // to one run per entity and pays what a per-value walk paid — the honest outcome rather
+            // than a regression.
+            None => {
+                let bound = len as u32;
+                for_each_run(candidate, |start, last| {
+                    let last = last.min(bound.saturating_sub(1));
+                    if start > last {
+                        return;
+                    }
+                    f(start as usize, (last - start) as usize + 1, start);
+                });
+            }
+            // Slot *k* is the *k*-th set bit of the presence bitmap, and rank is **affine inside a
+            // run**: entity `e` in a presence run from `ps` with `base` bits before it is at slot
+            // `base + (e − ps)`. Merging the two bitmaps' runs therefore gives every slot by
+            // arithmetic, at O(runs) — where stepping the bitmap a bit at a time would cost
+            // O(present) however small the candidate was.
+            Some(presence) => {
+                let live = candidate.and(presence);
+                let mut pres = RunIter::new(presence);
+                let mut liv = RunIter::new(&live);
+                let mut base: u64 = 0;
+                let mut p = pres.next();
+                let mut l = liv.next();
+                while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
+                    if pl < ls {
+                        base += u64::from(pl - ps) + 1;
+                        p = pres.next();
+                        continue;
+                    }
+                    if ll < ps {
+                        l = liv.next();
+                        continue;
+                    }
+                    let lo = ls.max(ps);
+                    let hi = ll.min(pl);
+                    let slot0 = (base + u64::from(lo - ps)) as usize;
+                    let count = (hi - lo) as usize + 1;
+                    if slot0 < len {
+                        f(slot0, count.min(len - slot0), lo);
+                    }
+                    if ll <= pl {
+                        l = liv.next();
+                    } else {
+                        base += u64::from(pl - ps) + 1;
+                        p = pres.next();
+                    }
+                }
+            }
+        }
+    }
+
     /// Walk the candidate over a **typed slice**, keeping entities whose value satisfies `pred`.
     ///
-    /// **The column's type is matched once per scan, not once per entity.** [`Self::walk`] passes
-    /// `(&Codes, slot)` to its predicate, so every element pays a match on the storage enum and a
+    /// **The column's type is matched once per scan, not once per entity.** An untyped walk passing
+    /// `(&Codes, slot)` to its predicate makes every element pay a match on the storage enum and a
     /// call through a closure that cannot be specialised. This takes the slice directly, so the
     /// inner loop is a monomorphic index and comparison over `&[T]` — which is what a fixed-width
     /// column can actually go fast on.
@@ -378,158 +563,64 @@ impl ValueColumn {
         F: FnMut(&T) -> bool,
     {
         let mut hits: Vec<u32> = Vec::new();
-        match &self.presence {
-            None => {
-                let bound = values.len() as u32;
-                for_each_run(candidate, |start, last| {
-                    let last = last.min(bound.saturating_sub(1));
-                    if start > last {
-                        return;
-                    }
-                    // **A scattered candidate is one-element runs**, and building a slice iterator
-                    // for each costs more than the direct index it replaces — measured as a 20%
-                    // regression on the scattered arm before this branch existed. The contiguous
-                    // case is where the slice walk pays, so it is the branch that gets it.
-                    if start == last {
-                        if pred(&values[start as usize]) {
-                            hits.push(start);
-                        }
-                        return;
-                    }
-                    let base = start;
-                    for (i, v) in values[start as usize..=last as usize].iter().enumerate() {
-                        if pred(v) {
-                            hits.push(base + i as u32);
-                        }
-                    }
-                });
+        self.for_each_slot_run(candidate, values.len(), |slot0, count, entity0| {
+            // **A scattered candidate is one-element runs**, and building a slice iterator for each
+            // costs more than the direct index it replaces — measured as a 20% regression on the
+            // scattered arm before this branch existed. The contiguous case is where the slice walk
+            // pays, so it is the branch that gets it.
+            if count == 1 {
+                if pred(&values[slot0]) {
+                    hits.push(entity0);
+                }
+                return;
             }
-            Some(presence) => {
-                let live = candidate.and(presence);
-                let mut pres = RunIter::new(presence);
-                let mut liv = RunIter::new(&live);
-                let mut base: u64 = 0;
-                let mut p = pres.next();
-                let mut l = liv.next();
-                while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
-                    if pl < ls {
-                        base += u64::from(pl - ps) + 1;
-                        p = pres.next();
-                        continue;
-                    }
-                    if ll < ps {
-                        l = liv.next();
-                        continue;
-                    }
-                    let lo = ls.max(ps);
-                    let hi = ll.min(pl);
-                    // Rank is affine inside a presence run, so the overlap maps to a contiguous
-                    // slice of the value array — the same property the universal arm gets for free.
-                    let slot0 = (base + u64::from(lo - ps)) as usize;
-                    let len = (hi - lo) as usize + 1;
-                    for (i, v) in values[slot0..slot0 + len].iter().enumerate() {
-                        if pred(v) {
-                            hits.push(lo + i as u32);
-                        }
-                    }
-                    if ll <= pl {
-                        l = liv.next();
-                    } else {
-                        base += u64::from(pl - ps) + 1;
-                        p = pres.next();
-                    }
+            for (i, v) in values[slot0..slot0 + count].iter().enumerate() {
+                if pred(v) {
+                    hits.push(entity0 + i as u32);
                 }
             }
-        }
+        });
         let mut out = Bitmap::new();
         out.add_many(&hits);
         out
     }
 
-    /// Walk the candidate, resolving each entity to its slot, and keep the entities whose value
-    /// satisfies `keep`.
+    /// Walk the candidate over a **text column**, keeping entities whose bytes satisfy `pred`.
     ///
-    /// **Every predicate goes through this one loop**, which is what makes the timing property a
-    /// property of the module rather than of each function: the traversal is a function of
-    /// `(candidate, presence)` alone, and `keep` sees a slot only after the traversal has already
-    /// decided to visit it. A predicate cannot skip work no matter what it is testing for, so
-    /// adding a family adds a comparison and cannot add a channel.
+    /// **The predicate sees bytes, not `&str`, and that is where the cost went.** Resolving a slot
+    /// to a `&str` runs a UTF-8 validation over the value — for every candidate entity, on every
+    /// request, over bytes Arrow already validated when the column was opened. Measured at 10⁸ that
+    /// was the dominant term in every text predicate: equality cost 11.2 ns per candidate entity
+    /// against a category's 0.24 ns, and `contains` 40 ns.
+    ///
+    /// **A byte comparison answers the same question**, because UTF-8 is self-synchronising: a
+    /// valid UTF-8 needle cannot occur in a valid UTF-8 haystack starting part-way through a
+    /// character, since every continuation byte is `10xxxxxx` and no lead byte is. So byte equality,
+    /// byte prefix and byte substring agree with their `str` counterparts on validated input, and
+    /// the validation is what the file format already guarantees.
     #[inline]
-    fn walk(&self, candidate: &Bitmap, mut keep: impl FnMut(&Codes, usize) -> bool) -> Bitmap {
+    fn walk_text<F>(&self, candidate: &Bitmap, mut pred: F) -> Bitmap
+    where
+        F: FnMut(&[u8]) -> bool,
+    {
+        let Codes::Text { bytes, offsets } = &self.codes else {
+            // A byte predicate against a numeric column matches nothing, which is the same answer
+            // the operator/family check at the parse already gives. This is the second line of
+            // defence, not the first.
+            return Bitmap::new();
+        };
         let mut hits: Vec<u32> = Vec::new();
-        match &self.presence {
-            // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
-            // array — walked as an integer range rather than stepped through the bitmap one value
-            // at a time. That is the same trade `compose::for_each_run_in` makes for the mask, and
-            // for the same reason: the per-value cursor step, not the comparison, is where the time
-            // goes on a contiguous candidate.
-            //
-            // The run structure is the *candidate's*, so this is still work as a function of
-            // `(candidate, column)` — a scattered candidate degenerates to one run per entity and
-            // pays what it paid before, which is the honest outcome rather than a regression.
-            None => {
-                let bound = self.codes.len() as u32;
-                for_each_run(candidate, |start, last| {
-                    // Inclusive `last`, and clamped rather than incremented: a run ending at
-                    // `u32::MAX` would overflow on `last + 1`, which is the edge
-                    // `compose::for_each_run_in` also carries a test for.
-                    let last = last.min(bound.saturating_sub(1));
-                    for e in start..=last {
-                        if keep(&self.codes, e as usize) {
-                            hits.push(e);
-                        }
-                    }
-                });
-            }
-            // Container arithmetic first, so blocks the candidate does not touch are never visited,
-            // then a **run-merge** to turn entity ids into slots.
-            //
-            // Rank is what makes this path expensive: slot *k* is the *k*-th set bit of `presence`,
-            // so a naive walk steps `presence` one bit at a time and costs O(present) however small
-            // the candidate is — measured at 1,078 ms against a bare array's 28.7 ms at 10⁹. But
-            // rank is *affine inside a run*: within one presence run starting at `ps` with `base`
-            // set bits before it, entity `e` is at slot `base + (e - ps)`. So walking both bitmaps
-            // as runs gives every slot by arithmetic, at O(runs) rather than O(entities).
-            //
-            // It degrades to the old cost rather than past it: a scattered presence has one run per
-            // entity, which is the case the naive walk was already paying for.
-            Some(presence) => {
-                let live = candidate.and(presence);
-                let mut pres = RunIter::new(presence);
-                let mut liv = RunIter::new(&live);
-                // Set bits before the current presence run — the run's base slot.
-                let mut base: u64 = 0;
-                let mut p = pres.next();
-                let mut l = liv.next();
-                while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
-                    if pl < ls {
-                        base += u64::from(pl - ps) + 1;
-                        p = pres.next();
-                        continue;
-                    }
-                    if ll < ps {
-                        // `live ⊆ presence`, so this cannot happen for a well-formed column; the
-                        // arm keeps the merge total rather than looping forever if it ever does.
-                        l = liv.next();
-                        continue;
-                    }
-                    let lo = ls.max(ps);
-                    let hi = ll.min(pl);
-                    for e in lo..=hi {
-                        let slot = base + u64::from(e - ps);
-                        if keep(&self.codes, slot as usize) {
-                            hits.push(e);
-                        }
-                    }
-                    if ll <= pl {
-                        l = liv.next();
-                    } else {
-                        base += u64::from(pl - ps) + 1;
-                        p = pres.next();
-                    }
+        self.for_each_slot_run(candidate, self.codes.len(), |slot0, count, entity0| {
+            // `offsets` has one more element than there are values, so a run of `count` values
+            // needs `count + 1` offsets — walked as overlapping pairs, which is the text-shaped
+            // equivalent of the fixed-width arm's slice walk and avoids a bounds check per value.
+            for (i, w) in offsets[slot0..=slot0 + count].windows(2).enumerate() {
+                let (lo, hi) = (w[0] as usize, w[1] as usize);
+                if pred(&bytes[lo..hi]) {
+                    hits.push(entity0 + i as u32);
                 }
             }
-        }
+        });
         let mut out = Bitmap::new();
         out.add_many(&hits);
         out
@@ -540,9 +631,8 @@ impl ValueColumn {
     /// A string column needs no dictionary to answer this: the comparison is against the stored
     /// bytes (`Codes::Text`).
     pub fn scan_text_eq(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
-        self.walk(candidate, |codes, slot| {
-            codes.text_at(slot) == Some(needle)
-        })
+        let needle = needle.as_bytes();
+        self.walk_text(candidate, |v| v == needle)
     }
 
     /// Entities whose numeric value lies within the given bounds, restricted to `candidate`.
@@ -627,17 +717,32 @@ impl ValueColumn {
             ($v:expr, $t:ty) => {{
                 // Values outside the column's type match nothing and are dropped here rather than
                 // compared away per element.
-                let w: Vec<$t> = needles
+                let mut w: Vec<$t> = needles
                     .iter()
                     .filter_map(|n| match n {
                         Scalar::Int(i) => <$t>::try_from(*i).ok(),
                         Scalar::Float(_) => None,
                     })
                     .collect();
+                // **Returning early here is not the channel it resembles.** The scan is otherwise
+                // careful never to let its running time depend on what is sought — a value the
+                // principal cannot see must cost what a value that does not exist costs
+                // (per-point-attributes §3.8). This branch fires only when *every* needle is
+                // unrepresentable in the column's declared width, and that width is published to
+                // every principal alike in `/v1/meta`'s `declared_scalars.arrow_type`. So what the
+                // timing reveals is a fact the client was handed before it asked, and no
+                // *vocabulary* question — which codes exist, which are held, which are visible —
+                // is answerable through it.
                 if w.is_empty() {
                     return Bitmap::new();
                 }
-                self.walk_typed(candidate, $v, move |x| w.contains(x))
+                // Sorted and searched rather than scanned: a linear `contains` costs O(k) per
+                // *candidate entity*, which measured 5.5 ns against equality's 0.26 for a 32-value
+                // set at 10⁸ — the set-membership cost that made a tick-box filter more expensive
+                // than the budget allows.
+                w.sort_unstable();
+                w.dedup();
+                self.walk_typed(candidate, $v, move |x| w.binary_search(x).is_ok())
             }};
         }
         macro_rules! float_in {
@@ -676,14 +781,8 @@ impl ValueColumn {
     /// loop would make the running time proportional to how many needles *match*, which is the
     /// channel this module's candidate-first discipline exists to deny.
     pub fn scan_text_in(&self, candidate: &Bitmap, needles: &[String]) -> Bitmap {
-        let mut wanted: Vec<&str> = needles.iter().map(String::as_str).collect();
-        wanted.sort_unstable();
-        wanted.dedup();
-        self.walk(candidate, |codes, slot| {
-            codes
-                .text_at(slot)
-                .is_some_and(|v| wanted.binary_search(&v).is_ok())
-        })
+        let wanted = ByteSet::new(needles.iter().map(|n| n.as_bytes()));
+        self.walk_text(candidate, |v| wanted.contains(v))
     }
 
     /// Entities whose UTF-8 value starts with `prefix`, restricted to `candidate`.
@@ -692,9 +791,8 @@ impl ValueColumn {
     /// only necessary when a prefix has to be turned into a set of value identifiers to look up.
     /// Testing a stored value directly needs no ordering at all.
     pub fn scan_text_prefix(&self, candidate: &Bitmap, prefix: &str) -> Bitmap {
-        self.walk(candidate, |codes, slot| {
-            codes.text_at(slot).is_some_and(|v| v.starts_with(prefix))
-        })
+        let prefix = prefix.as_bytes();
+        self.walk_text(candidate, |v| v.starts_with(prefix))
     }
 
     /// Entities whose UTF-8 value contains `needle`, restricted to `candidate`.
@@ -705,9 +803,8 @@ impl ValueColumn {
     /// route, and with it the verification step *is* the whole operation — there is nothing left for
     /// the trigram index to accelerate that the budget does not already afford.
     pub fn scan_text_contains(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
-        self.walk(candidate, |codes, slot| {
-            codes.text_at(slot).is_some_and(|v| v.contains(needle))
-        })
+        let needle = needle.as_bytes();
+        self.walk_text(candidate, |v| byte_contains(v, needle))
     }
 
     /// The UTF-8 value an entity carries, or `None` where it carries none or the column is numeric.
@@ -751,15 +848,34 @@ impl ValueColumn {
     /// costs. A per-value loop would make the running time proportional to the number of *matching*
     /// values, which is the channel [`Self::scan_eq`]'s doc comment exists to deny.
     pub fn scan_in(&self, candidate: &Bitmap, values: &[AttrLocalId]) -> Bitmap {
-        let mut w: Vec<u32> = values.iter().map(|v| v.raw()).collect();
-        w.sort_unstable();
-        w.dedup();
         match &self.codes {
-            Codes::U8(v) => self.walk_typed(candidate, v, |x| w.binary_search(&u32::from(*x)).is_ok()),
-            Codes::U16(v) => {
-                self.walk_typed(candidate, v, |x| w.binary_search(&u32::from(*x)).is_ok())
+            // **A bit per code point, built once per scan.** A `u8` category's domain is 256 codes
+            // and a `u16`'s is 65,536, so the whole membership question fits in 32 bytes or 8 KB —
+            // small enough to stay in cache and answer in constant time however many values the set
+            // names. Searching a sorted needle list instead made the scan cost O(log k) per
+            // *candidate entity*: measured at 10⁸, a 32-value set cost 5.5 ns per candidate against
+            // equality's 0.26, which at 10⁹ and 25% coverage is 1.4 s — outside the filter budget
+            // for a filter a viewer builds by ticking boxes.
+            //
+            // The table also makes the work **independent of which codes are asked for**, which is
+            // stronger than the sorted list it replaces: an unheld code and a heavily-held one cost
+            // the same table build and the same per-element lookup.
+            Codes::U8(v) => {
+                let set = CodeSet::new(values, u8::MAX as u32);
+                self.walk_typed(candidate, v, |x| set.contains(u32::from(*x)))
             }
-            Codes::U32(v) => self.walk_typed(candidate, v, |x| w.binary_search(x).is_ok()),
+            Codes::U16(v) => {
+                let set = CodeSet::new(values, u16::MAX as u32);
+                self.walk_typed(candidate, v, |x| set.contains(u32::from(*x)))
+            }
+            // A `u32` domain is 4×10⁹ codes, which is not a table. Sorted and searched, which is
+            // O(log k) — and k is the number of values a client named, not a corpus quantity.
+            Codes::U32(v) => {
+                let mut w: Vec<u32> = values.iter().map(|v| v.raw()).collect();
+                w.sort_unstable();
+                w.dedup();
+                self.walk_typed(candidate, v, |x| w.binary_search(x).is_ok())
+            }
             _ => Bitmap::new(),
         }
     }
@@ -1393,6 +1509,119 @@ mod tests {
         let column = text_column(&["blacksmith", "smythe", "goldsmith", "jones"]);
         let hits = column.scan_text_contains(&candidate(0..4), "smith");
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    /// **A value's bytes are concatenated with its neighbours', and a match must not span them.**
+    /// The predicate sees one value's slice, so "bc" cannot be found across "ab" ++ "cd" — the case
+    /// a mis-sliced offset pair would produce, silently and with plausible-looking results.
+    #[test]
+    fn a_substring_does_not_match_across_two_values() {
+        let column = text_column(&["ab", "cd", "bc"]);
+        assert_eq!(
+            column
+                .scan_text_contains(&candidate(0..3), "bc")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![2],
+            "only the value that actually contains it"
+        );
+        assert_eq!(
+            column
+                .scan_text_prefix(&candidate(0..3), "bc")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    /// The text predicates compare **bytes**, which agrees with the `str` semantics they replaced
+    /// because UTF-8 is self-synchronising — no valid needle can match starting inside a character.
+    /// Multi-byte values are where a byte comparison would show it if that reasoning were wrong.
+    #[test]
+    fn multibyte_values_compare_by_bytes_and_agree_with_str() {
+        let column = text_column(&["naïve", "日本語", "naive", "café"]);
+        let all = candidate(0..4);
+
+        assert_eq!(
+            column.scan_text_eq(&all, "naïve").iter().collect::<Vec<_>>(),
+            vec![0],
+            "the two-byte ï does not equate to the one-byte i"
+        );
+        assert_eq!(
+            column.scan_text_prefix(&all, "na").iter().collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(
+            column.scan_text_contains(&all, "本").iter().collect::<Vec<_>>(),
+            vec![1],
+            "a multi-byte needle inside a multi-byte value"
+        );
+        assert_eq!(
+            column.scan_text_in(&all, &["café".into(), "日本語".into()]).iter().collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        // The empty needle is contained in everything, as `str::contains` also holds.
+        assert_eq!(column.scan_text_contains(&all, "").cardinality(), 4);
+    }
+
+    /// The needle set buckets on a value's first byte, so the empty string — which has none — is
+    /// the case that has to be carried separately, and a corpus may legitimately hold it (an empty
+    /// string is a value; absence is a null, which `an_absent_string_is_not_an_empty_string`
+    /// covers).
+    #[test]
+    fn a_needle_set_handles_the_empty_string_and_repeats() {
+        let column = text_column(&["", "a", "bb", ""]);
+        let all = candidate(0..4);
+
+        assert_eq!(
+            column
+                .scan_text_in(&all, &["".into(), "bb".into()])
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3],
+            "the empty needle matches the empty values and nothing else"
+        );
+        assert!(column.scan_text_in(&all, &["a".into(), "a".into()]).iter().eq([1]),
+            "a repeated needle is one needle");
+        assert!(column.scan_text_in(&all, &[]).is_empty(), "no needle, no match");
+    }
+
+    /// The code table is built over the column's declared width, so its extremes must be members
+    /// and anything past them must be dropped rather than wrapped into a neighbour's bit.
+    #[test]
+    fn a_code_set_covers_its_domains_extremes_and_drops_what_is_past_them() {
+        let column = ValueColumn::universal(Codes::U8(vec![0, 42, 255].into()));
+        let all = candidate(0..3);
+
+        assert_eq!(
+            column
+                .scan_in(&all, &[AttrLocalId::new(0), AttrLocalId::new(255)])
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+            "both ends of a u8 domain are members"
+        );
+        // 256 is not representable in the column and 511 differs from 255 only above the width —
+        // the case a table indexed without a range check would fold onto a real code.
+        assert!(column
+            .scan_in(&all, &[AttrLocalId::new(256), AttrLocalId::new(511)])
+            .is_empty());
+        assert_eq!(
+            column
+                .scan_in(&all, &[AttrLocalId::new(511), AttrLocalId::new(42)])
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![1],
+            "an out-of-domain needle drops without disturbing the rest of the set"
+        );
+
+        let wide = ValueColumn::universal(Codes::U16(vec![0, 65_535].into()));
+        assert_eq!(
+            wide.scan_in(&candidate(0..2), &[AttrLocalId::new(65_535)])
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     /// The mask still goes in first for text, by the same shared walker every other family uses.

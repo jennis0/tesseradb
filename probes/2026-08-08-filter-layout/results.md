@@ -183,12 +183,15 @@ fractional bound on an integer column rounds outward.
 
 | Presence | Candidate | Original | + runs | + typed | Total |
 |---|---|---|---|---|---|
-| universal | 1% contiguous | 30.97 ms (3.10 ns) | 9.81 ms | **2.37 ms (0.24 ns)** | **13×** |
-| universal | 25% broad | 900.51 ms (3.60 ns) | 201.55 ms | **60.84 ms (0.24 ns)** | **15×** |
-| universal | 1% scattered | 276.75 ms (27.67 ns) | 161.90 ms | **101.18 ms (10.12 ns)** | 2.7× |
-| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.46 ms (0.05 ns)** | **272×** |
-| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **11.50 ms (0.05 ns)** | 15× |
-| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **17.82 ms (1.78 ns)** | 23× |
+| universal | 1% contiguous | 30.97 ms (3.10 ns) | 9.81 ms | **2.46 ms (0.25 ns)** | **13×** |
+| universal | 25% broad | 900.51 ms (3.60 ns) | 201.55 ms | **66.48 ms (0.27 ns)** | **14×** |
+| universal | 1% scattered | 276.75 ms (27.67 ns) | 161.90 ms | **109.85 ms (10.98 ns)** | 2.5× |
+| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.30 ms (0.03 ns)** | **416×** |
+| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **6.23 ms (0.02 ns)** | 28× |
+| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **17.32 ms (1.73 ns)** | 23× |
+
+(The "+ typed" column carries arm 6's shared-traversal figures, which superseded the typed pass's
+own: the universal arms are unchanged within noise and the partial-presence arms improved again.)
 
 Results are identical throughout; only the timings move.
 
@@ -255,6 +258,70 @@ sixteen times over for columns nobody asked about.
 **This is why `FilterColumns::open` takes an `mmap` flag and the engine passes `true`** — the same
 construction and the same argument as `PostingsReader::open`, which the auth index has used since it
 was built.
+
+## Arm 6 — the two families the other arms never measured
+
+Arms 1–4 all measure `scan_eq` over a fixed-width column, which is a category's *equality* case and
+nothing else. `textscan`
+([`layoutprobe/src/bin/textscan.rs`](layoutprobe/src/bin/textscan.rs), raw
+[`run-textscan.csv`](run-textscan.csv), 10⁸, medians of three) covers what a filter surface actually
+issues: the four **text** predicates, and **category set membership** at each declared width. Values
+are surname-shaped — a small stem vocabulary with a numeric tail — so they share long prefixes,
+which is the adversarial case for a byte comparison and also what a real string column looks like.
+
+**Both families were substantially slower than equality, and both for fixable reasons.**
+
+| Predicate | Before | After | |
+|---|---|---|---|
+| `text eq` | 11.05 ns | **3.49 ns** | 3.2× |
+| `text prefix` | 14.31 ns | **4.26 ns** | 3.4× |
+| `text in` (5 values) | 25.23 ns | **8.16 ns** | 3.1× |
+| `text contains` | 40.35 ns | **9.73 ns** | 4.1× |
+| `u8 in` (32 values) | 5.52 ns | **2.04 ns** | 2.7× |
+| `u16 in` (32 values) | 2.97 ns | **0.44 ns** | 6.8× |
+| `u32 in` (32 values) | 3.08 ns | 2.91 ns | unchanged |
+
+(ns per candidate entity, 25% broad candidate. `category eq` is 0.22–0.30 ns and did not move.)
+
+**The text cost was UTF-8 validation, run per value per request.** Resolving a slot to a `&str` ran
+`std::str::from_utf8` over the value — for every candidate entity, on every request, over bytes
+Arrow had already validated when the column was opened. The predicates now compare bytes, which
+answers the same question: UTF-8 is self-synchronising, so a valid needle cannot match starting
+part-way through a character. Text also never received arm 4's typed traversal, because its values
+are not a slice of anything; giving the traversal a *slot-range* interface rather than a
+*single-slot* one let text walk offset pairs with the same freedom from bounds checks that the
+fixed-width arm walks values with.
+
+**`in` cost was a search per candidate entity, and the fix differs by width.** A `u8` or `u16`
+category's whole domain fits in a bit table — 32 bytes or 8 KB, built once per scan — so membership
+becomes a constant-time lookup and a 32-value set costs what a 2-value set costs. That is visible in
+the `u16` row above: 0.43, 0.44 and 0.44 ns at k = 2, 8 and 32. A `u32` domain is 4×10⁹ codes and is
+not a table, so it keeps a sorted list and stays O(log k); text keeps a first-byte bucket index,
+which turns a set membership into zero or one full comparison.
+
+**The bit table is also the better security property, not merely the faster one.** Its work does not
+depend on *which* codes are asked for, so a code no entity carries and a code the principal cannot
+see cost the same table build and the same lookup — which is what per-point-attributes §3.8 requires,
+arrived at by construction rather than by care.
+
+**Text remains ~14× a category's equality cost, and that is now close to a floor.** Per value the
+scan streams two 8-byte offsets and the value's bytes — about 22 bytes against a `u32` column's 4 —
+so 3.4 ns is roughly memory bandwidth for the shape. Halving the offset width when a column's bytes
+fit in 4 GiB would take about a fifth of the remaining traffic; it is not taken here, and is
+recorded as the next thing to try if text ever needs to be faster.
+
+**A scattered candidate is the worst case for text by a wide margin** — 30 ns for equality against
+3.5 contiguous, and 96 ns for `contains` — because each value is a separate random access into the
+byte array rather than a stride through it. At 10⁹ a scattered 1% `contains` is ~1 s: at the edge of
+the budget, and the one cell in this campaign where a text filter and a poorly-correlated principal
+together would exceed it.
+
+### What the fix cost the other arms: nothing, and it helped one
+
+Sharing the traversal meant re-running arm 4. The universal-presence figures are unchanged within
+noise (0.25 / 0.27 / 10.98 ns), and the **partial-presence arms improved** — 0.46 → 0.30 ms
+contiguous and 11.50 → 6.23 ms broad at 10⁹ — because the merged run bound is now computed once per
+range rather than per slot. The recorded arm 4 table carries these figures.
 
 ## Arm 3 — getting the result into row space
 

@@ -112,15 +112,41 @@ where a column genuinely covers everything.
 
 A filter operand is evaluated by scanning the value column **under the candidate mask** — `M_auth`
 pushed in first, as §8.2 requires — and the measured cost is per candidate entity rather than per
-corpus byte: **~0.24 ns** with a contiguous candidate, **~10 ns** with a scattered one, stable across
-three orders of magnitude and linear in *n*. A whole-corpus scan at 10⁹ is ~240 ms.
+corpus byte: for a **category or numeric** column, **~0.25 ns** with a contiguous candidate and
+**~11 ns** with a scattered one, stable across three orders of magnitude and linear in *n*. A
+whole-corpus scan at 10⁹ is ~250 ms.
+
+**A text column costs about fourteen times that, and the design must size against its own number**
+rather than borrowing the fixed-width one (probe arm 6, at 10⁸):
+
+| | contiguous | scattered |
+|---|---|---|
+| `eq` | 3.5 ns | 30 ns |
+| `prefix` | 4.3 ns | 47–56 ns |
+| `in` (5 values) | 8.2 ns | 61 ns |
+| `contains` | 9.7 ns | 96 ns |
+
+The ratio is what the storage is: per value the scan streams two 8-byte offsets and the value's
+bytes, about 22 against a `u32` column's 4. Equality is therefore near memory bandwidth for the
+shape, and the remaining headroom is a narrower offset — not an index. **The one cell outside the
+budget is a scattered candidate over a text column**: `contains` at 96 ns is ~1 s per 10⁷ candidate
+entities, so a poorly-correlated principal issuing a substring filter at 10⁹ is at the edge of the
+ruled budget. That is the corner an accelerator would address if one is ever wanted, and it is a
+narrower corner than "broad coverage" or "text" alone.
+
+**Set membership costs what equality costs where the domain allows a table.** A `u8` or `u16`
+category's whole code domain fits in 32 bytes or 8 KB, so `in` is a constant-time lookup built once
+per scan — measured flat at 0.43–0.44 ns for 2, 8 and 32 values. That is also the stronger security
+property: the work does not depend on *which* codes are named, so an unheld code and a hidden one
+cost the same. A `u32` domain is not a table and keeps a sorted list at O(log k); a text set keeps a
+first-byte bucket index.
 
 Those are the **shipped scan's** figures, and the distinction earned its keep: the campaign's layout
 arms reimplement the loop, which is right for comparing storage shapes and wrong for sizing the code —
 the reimplementation was 23% optimistic against the scan as it then stood. Pointing the harness at
-`ValueColumn` and then optimising it took the contiguous case from 3.10 ns to 0.24 ns, with identical
-results throughout (probe arm 4). Two changes, and each is a property of the *shape* of the work
-rather than of the values:
+`ValueColumn` and then optimising it took the contiguous case from 3.10 ns to 0.25 ns, with identical
+results throughout (probe arms 4 and 6). Three changes, and each is a property of the *shape* of the
+work rather than of the values:
 
 - **Iterate runs, not values.** A candidate run is a contiguous slice of the value column, because
   the entity id *is* the index. This is worth more still on the **partial-presence** path, where
@@ -128,15 +154,26 @@ rather than of the values:
   O(present) however small the candidate is. Rank is affine *inside* a run — entity `e` in a run
   from `ps` with `base` bits before it is at slot `base + (e − ps)` — so merging the two bitmaps'
   runs gives every slot by arithmetic. A 1% candidate over a slice-blocked column went from
-  124.89 ms to **0.46 ms**. Arm 1 read that cell as a cost of the addressing structure; it was the
+  124.89 ms to **0.30 ms**. Arm 1 read that cell as a cost of the addressing structure; it was the
   rank algorithm, and the presence bitmap is now a filter on work rather than a tax on it.
 - **Traverse at the column's own type**, so the `Codes` dispatch and the widening to a common
   numeric leave the inner loop, and a numeric bound is narrowed to the column's native type once per
   scan. Narrowing also settles the degenerate cases once rather than per element: a bound below the
   type's floor constrains nothing, one above its ceiling excludes everything, a fractional bound on
   an integer column rounds outward.
+- **Compare bytes, not `&str`.** Resolving a text slot to a `&str` runs a UTF-8 validation per value
+  per request, over bytes the file format has already validated — which was the dominant term in
+  every text predicate. Byte comparison answers the same question because UTF-8 is
+  self-synchronising: a valid needle cannot match starting part-way through a character.
 
-The second change carries a caveat worth stating at the site, because the obvious form of it is a
+**One traversal serves every family, and that is a security property before it is a tidiness one.**
+It hands out contiguous *slot ranges* rather than single slots, which is what lets a fixed-width
+column walk a slice of values and a text column walk a slice of offset pairs, each without a bounds
+check per element. Because the ranges are a function of `(candidate, presence)` alone, a predicate
+cannot skip work whatever it is testing for — so adding a family adds a comparison and cannot add a
+channel.
+
+The typed change carries a caveat worth stating at the site, because the obvious form of it is a
 regression: **a scattered candidate is one-element runs**, and building a slice iterator per run
 costs more than the direct index it replaces — measured at +20% on the scattered arm before a
 length-1 fast path was added. Anything that revisits this traversal must measure both candidate
@@ -165,16 +202,19 @@ inverted-postings design achieved it — filter-surface §2.1 superseded the req
 could not meet it. That supersession is **withdrawn**: the requirement holds as originally written, for
 every scanned family.
 
-> **The scan is not bandwidth-bound, and sizing it as though it were misleads in both directions.** A
-> model assuming 5–10 GB/s predicted 40–80 ms for a 25% principal at 10⁹ against a then-measured
-> 730 ms — ~5–7× optimistic. Run-based iteration has since taken the same cell to **181 ms**, which a
-> bandwidth model would have called *pessimistic* by 2×. The bound is per-candidate work and cache
-> misses, and it moves with the loop rather than with the hardware.
+> **Sizing the scan as a bandwidth problem misleads in both directions, and which direction depends
+> on the family.** A model assuming 5–10 GB/s predicted 40–80 ms for a 25% principal at 10⁹ against a
+> then-measured 730 ms — ~5–7× optimistic. The same cell now measures **66 ms**, which that model
+> would have called *pessimistic*: a fixed-width column at 0.25 ns per 4-byte value is ~16 GB/s,
+> above what the model allowed, because a contiguous candidate walks the array sequentially and
+> prefetches. A **text** column at 3.5 ns per ~22 bytes is ~6 GB/s and *is* at bandwidth. So the
+> fixed-width bound is per-candidate work and moves with the loop; the text bound is the bytes and
+> moves only if the storage does.
 
 ### 2.3 The category accelerator
 
 **This is an optimisation for the privileged tail, not a requirement — with one exception.** Under
-§2.2's budget the scan alone serves every principal up to ~34% coverage; a category column *may* also
+§2.2's budget the scan alone serves a category at **any** coverage, contiguous or not; a category column *may* also
 carry **one Roaring posting per value**, derived from the column and rebuilt whole at the fold, to keep
 near-total coverage inside the band as well. Because it is derived, a deployment that builds it and one
 that does not answer identically and differ only in latency — so this is ordinarily a per-column build
