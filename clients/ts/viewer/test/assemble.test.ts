@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tessera/client';
+import {bandsOfResult, mortonOfTile, tileXY, type Band, type ReplicaFrame} from '@tessera/client';
 import type {ScalarColumn, ViewportResult} from '@tessera/client';
 import {assemble, assertDrawsEveryServedMark} from '../src/assemble.js';
 
@@ -32,20 +32,24 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
   };
 }
 
-function frame(depth: number, tiles: ReplicaFrame['tiles']): ReplicaFrame {
-  return {depth, tiles, missing: [], response: null};
+const WHOLE = {x0: 0, y0: 0, x1: 65535, y1: 65535};
+
+function frame(depth: number, exact: Band[], fallback: Band[] = [], want = WHOLE): ReplicaFrame {
+  return {
+    depth,
+    want,
+    exact,
+    fallback,
+    response: null,
+    plan: {wanted: 0, novel: 0, requests: 0}
+  };
 }
 
 describe('assemble', () => {
   it('packs exact tiles and reports the served total against them', () => {
     const a = band(2, 0n, 3);
     const b = band(2, 1n, 2);
-    const out = assemble(
-      frame(2, [
-        {prefix: 0n, resolved: {provenance: 'exact', bands: [a], exact: true}},
-        {prefix: 1n, resolved: {provenance: 'exact', bands: [b], exact: true}}
-      ])
-    );
+    const out = assemble(frame(2, [a, b]));
 
     expect(out.ids.length).toBe(5);
     expect(out.exactDrawn).toBe(5);
@@ -60,11 +64,7 @@ describe('assemble', () => {
   });
 
   it('narrows cell space to world units once', () => {
-    const out = assemble(
-      frame(2, [
-        {prefix: 0n, resolved: {provenance: 'exact', bands: [band(2, 0n, 1, 1, {cx: 256, cy: 128})], exact: true}}
-      ])
-    );
+    const out = assemble(frame(2, [band(2, 0n, 1, 1, {cx: 256, cy: 128})]));
     expect(out.positions[0]).toBeCloseTo(2, 6); // 256 cells / 128 cells-per-world-unit
     expect(out.positions[1]).toBeCloseTo(1, 6);
   });
@@ -84,13 +84,10 @@ describe('assemble', () => {
       served: 3
     };
 
-    const out = assemble(
-      frame(6, [
-        {prefix: inChild, resolved: {provenance: 'ancestor', bands: [enriched], exact: false}}
-      ])
-    );
+    const {x, y} = tileXY(inChild, 6);
+    const out = assemble(frame(6, [], [enriched], {x0: x, y0: y, x1: x, y1: y}));
 
-    expect(out.ids.length).toBe(2); // only the two points inside that child
+    expect(out.ids.length).toBe(2); // only the two points inside that region
     expect([...out.ids]).toEqual([1n, 2n]);
     expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([7, 8]);
     expect(out.provisional).toBe(2);
@@ -102,9 +99,7 @@ describe('assemble', () => {
 
   it('unions descendant bands on zoom-out, marked provisional', () => {
     const kids = [band(5, 0n, 2), band(5, 1n, 3)];
-    const out = assemble(
-      frame(3, [{prefix: 0n, resolved: {provenance: 'descendants', bands: kids, exact: false}}])
-    );
+    const out = assemble(frame(3, [], kids));
     expect(out.ids.length).toBe(5);
     expect(out.provisional).toBe(5);
     expect(out.exactServed).toBe(0); // no exact tile contributed, so nothing to assert against
@@ -115,12 +110,7 @@ describe('assemble', () => {
   it('mixes exact and provisional tiles without conflating their counts', () => {
     const exact = band(4, 0n, 3);
     const kids = [band(6, 40n, 2)];
-    const out = assemble(
-      frame(4, [
-        {prefix: 0n, resolved: {provenance: 'exact', bands: [exact], exact: true}},
-        {prefix: 9n, resolved: {provenance: 'descendants', bands: kids, exact: false}}
-      ])
-    );
+    const out = assemble(frame(4, [exact], kids));
 
     expect(out.ids.length).toBe(5);
     expect(out.exactDrawn).toBe(3);
@@ -133,12 +123,7 @@ describe('assemble', () => {
   it('carries scalars through a mixed assembly in point order', () => {
     const a = band(2, 0n, 2);
     const b = band(2, 1n, 3);
-    const out = assemble(
-      frame(2, [
-        {prefix: 0n, resolved: {provenance: 'exact', bands: [a], exact: true}},
-        {prefix: 1n, resolved: {provenance: 'exact', bands: [b], exact: true}}
-      ])
-    );
+    const out = assemble(frame(2, [a, b]));
     expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([0, 1, 0, 1, 2]);
   });
 
@@ -156,12 +141,7 @@ describe('assemble', () => {
     };
     const bands = bandsOfResult(result, 2, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 
-    const out = assemble(
-      frame(
-        2,
-        bands.map((b) => ({prefix: b.prefix, resolved: {provenance: 'exact' as const, bands: [b], exact: true}}))
-      )
-    );
+    const out = assemble(frame(2, bands));
 
     expect([...out.ids]).toEqual([...result.ids]);
     expect([...(out.scalars.w!.values as Uint32Array)]).toEqual([10, 11, 12, 13, 14]);
@@ -173,16 +153,12 @@ describe('assemble', () => {
 describe('assertDrawsEveryServedMark', () => {
   it('throws when an exact tile draws fewer marks than were served', () => {
     const short = band(2, 0n, 2, 3); // holds 2, server said it served 3
-    const out = assemble(
-      frame(2, [{prefix: 0n, resolved: {provenance: 'exact', bands: [short], exact: true}}])
-    );
+    const out = assemble(frame(2, [short]));
     expect(() => assertDrawsEveryServedMark(out)).toThrow(/I7: drawing 2 marks/);
   });
 
   it('throws when a provisional tile carries counts', () => {
-    const out = assemble(
-      frame(2, [{prefix: 0n, resolved: {provenance: 'descendants', bands: [band(4, 0n, 2)], exact: false}}])
-    );
+    const out = assemble(frame(2, [], [band(4, 0n, 2)]));
     out.tiles[0]!.counts = {visible: 1n, matched: 1n, served: 1};
     expect(() => assertDrawsEveryServedMark(out)).toThrow(/superset of marks must never be read as density/);
   });

@@ -2,10 +2,23 @@ export * from './types.js';
 export * from './coords.js';
 export {splitFramedStreams, streamLength, type FramedStreams} from './frame.js';
 export {decodeViewport} from './decode.js';
-export {chooseDepth, calibrate, tilesInBbox, tilesOfBbox, MIN_DEPTH} from './budget.js';
+export {chooseDepth, calibrate, tilesInBbox, tileRectOfBbox, MIN_DEPTH} from './budget.js';
 export type {BudgetInputs, DepthChoice, Observation} from './budget.js';
 export {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
 export {BandCache, bandKey, bandsOfResult, isComplete} from './bands.js';
+export {
+  coverageAdd,
+  coverageAt,
+  rectArea,
+  rectContains,
+  rectContainsTile,
+  rectIntersection,
+  rectSubtract,
+  rectSubtractAll,
+  rectsIntersect,
+  type Coverage,
+  type TileRect
+} from './rects.js';
 export type {
   Band,
   BandKey,

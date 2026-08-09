@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {BandCache, bandsOfResult, isComplete, type Band} from '../src/bands.js';
-import {tileContains, tileOfCode} from '../src/coords.js';
+import {mortonOfTile, tileContains, tileOfCode} from '../src/coords.js';
 import type {ScalarColumn, ViewportResult} from '../src/types.js';
 
 /**
@@ -115,46 +115,87 @@ describe('isComplete', () => {
   });
 });
 
-describe('BandCache.plan', () => {
-  it('omits proven-complete tiles and declares a bound for the rest', () => {
+describe('BandCache.planRegion', () => {
+  const R = (x0: number, y0: number, x1: number, y1: number) => ({x0, y0, x1, y1});
+
+  it('asks for the whole region when nothing is covered', () => {
     const cache = new BandCache(1e9);
-    cache.put(band({depth: 4, prefix: 1n, n: 10, served: 10}));
-    cache.put(band({depth: 4, prefix: 2n, n: 6, served: 9})); // partial
-    // tile 3 is not held at all
-
-    const plan = cache.plan([1n, 2n, 3n], 4, 'ck', 500);
-
-    expect(plan.omit).toEqual([1n]);
-    expect(plan.fetch).toEqual([
-      {prefix: 2n, below: 7n, count: 6},
-      {prefix: 3n, below: 0n, count: 0}
-    ]);
+    const plan = cache.planRegion(R(0, 0, 9, 9), 4, 'ck', 500);
+    expect(plan.fetch).toEqual([R(0, 0, 9, 9)]);
+    expect(plan.novel).toBe(100);
   });
 
-  it('omits nothing on a counts-only request', () => {
-    // At k = 0 the definition serves nothing, so every held band trivially holds all of served(T)
-    // and the completeness test goes vacuous. Applying it would omit every tile and refresh no
-    // counts — which is precisely what the counts-only request exists to do.
+  it('subtracts covered ground, leaving the strip a pan actually needs', () => {
     const cache = new BandCache(1e9);
-    cache.put(band({depth: 4, prefix: 1n, n: 10, served: 10}));
-    cache.put(band({depth: 4, prefix: 2n, n: 10, served: 10}));
-
-    const plan = cache.plan([1n, 2n], 4, 'ck', 0);
-
-    expect(plan.omit).toEqual([]);
-    expect(plan.fetch.map((f) => f.prefix)).toEqual([1n, 2n]);
+    cache.markCovered(R(0, 0, 9, 9), 4, 'ck', 500);
+    const plan = cache.planRegion(R(2, 0, 11, 9), 4, 'ck', 500);
+    expect(plan.fetch).toEqual([R(10, 0, 11, 9)]);
+    expect(plan.wanted).toBe(100);
+    expect(plan.novel).toBe(20);
   });
 
-  it('declares nothing from a band whose content key has rotated', () => {
+  it('asks for nothing when the region is wholly covered', () => {
     const cache = new BandCache(1e9);
-    cache.put(band({depth: 4, prefix: 1n, n: 10, served: 10, contentKey: 'old'}));
+    cache.markCovered(R(0, 0, 9, 9), 4, 'ck', 500);
+    expect(cache.planRegion(R(2, 2, 5, 5), 4, 'ck', 500).fetch).toEqual([]);
+  });
 
-    const plan = cache.plan([1n], 4, 'new', 500);
+  it('subtracts nothing on a counts-only request', () => {
+    // k=0 exists to refresh the number channel and the content key over ground already held, so
+    // subtracting coverage would make it a no-op and the staleness bound unreachable.
+    const cache = new BandCache(1e9);
+    cache.markCovered(R(0, 0, 9, 9), 4, 'ck', 500);
+    expect(cache.planRegion(R(0, 0, 9, 9), 4, 'ck', 0).fetch).toEqual([R(0, 0, 9, 9)]);
+  });
 
-    // Renderable, but not declarable: a rotation may have added identities below the bound.
-    expect(plan.omit).toEqual([]);
-    expect(plan.fetch).toEqual([{prefix: 1n, below: 0n, count: 0}]);
-    expect(cache.get(4, 1n)).toBeDefined();
+  it('ignores coverage under a rotated content key', () => {
+    const cache = new BandCache(1e9);
+    cache.markCovered(R(0, 0, 9, 9), 4, 'ck1', 500);
+    expect(cache.planRegion(R(0, 0, 9, 9), 4, 'ck2', 500).fetch).toEqual([R(0, 0, 9, 9)]);
+  });
+
+  it('ignores coverage at another depth', () => {
+    const cache = new BandCache(1e9);
+    cache.markCovered(R(0, 0, 9, 9), 4, 'ck', 500);
+    expect(cache.planRegion(R(0, 0, 9, 9), 5, 'ck', 500).fetch).toEqual([R(0, 0, 9, 9)]);
+  });
+});
+
+describe('BandCache.bandsForRegion', () => {
+  const R = (x0: number, y0: number, x1: number, y1: number) => ({x0, y0, x1, y1});
+
+  it('returns the bands inside the region and not those outside it', () => {
+    const cache = new BandCache(1e9);
+    // The depth-2 grid is only 4x4, so the region has to be smaller than the grid for "outside"
+    // to exist at all.
+    cache.markCovered(R(0, 0, 1, 1), 2, 'ck', 500);
+    cache.put(band({depth: 2, prefix: mortonOfTile(1, 1, 2), n: 2})); // inside
+    cache.put(band({depth: 2, prefix: mortonOfTile(3, 3, 2), n: 2})); // outside
+    const {exact, fallback} = cache.bandsForRegion(R(0, 0, 1, 1), 2, 'ck', 500);
+    expect(exact).toHaveLength(1);
+    expect(fallback).toHaveLength(0);
+  });
+
+  it('admits an ancestor only over ground not already covered', () => {
+    const cache = new BandCache(1e9);
+    cache.put(band({depth: 1, prefix: 0n, n: 4})); // a parent covering the whole area
+    // Nothing covered at depth 3: the parent is the best available.
+    const cold = cache.bandsForRegion(R(0, 0, 1, 1), 3, 'ck', 500);
+    expect(cold.fallback).toHaveLength(1);
+    expect(cold.exact).toHaveLength(0);
+
+    // Once the region is covered at depth 3, the parent must not be drawn over it as well.
+    cache.markCovered(R(0, 0, 1, 1), 3, 'ck', 500);
+    const warm = cache.bandsForRegion(R(0, 0, 1, 1), 3, 'ck', 500);
+    expect(warm.fallback).toHaveLength(0);
+  });
+
+  it('admits held descendants on zoom-out', () => {
+    const cache = new BandCache(1e9);
+    cache.put(band({depth: 4, prefix: mortonOfTile(2, 2, 4), n: 3}));
+    const {exact, fallback} = cache.bandsForRegion(R(0, 0, 1, 1), 2, 'ck', 500);
+    expect(exact).toHaveLength(0);
+    expect(fallback).toHaveLength(1);
   });
 });
 
@@ -238,6 +279,34 @@ describe('BandCache eviction', () => {
     cache.evict({depth: 5, prefix: 0n});
     expect(cache.size).toBe(4);
     expect(cache.bytes).toBeGreaterThan(1);
+  });
+});
+
+describe('BandCache eviction and coverage', () => {
+  const R = (x0: number, y0: number, x1: number, y1: number) => ({x0, y0, x1, y1});
+
+  it('retracts the coverage claim over a band it truncates', () => {
+    // Otherwise the region stays "held", the plan keeps subtracting it, and the points eviction
+    // discarded are never fetched again — the client draws short for the rest of the session.
+    // Bands first, then the claim — the order `fetchRegion` uses, and the only sound one: the
+    // first band establishes the identity partition, which drops any coverage recorded before it.
+    const cache = new BandCache(400);
+    cache.put(band({depth: 2, prefix: mortonOfTile(1, 1, 2), n: 40}));
+    cache.markCovered(R(0, 0, 3, 3), 2, 'ck', 500);
+    expect(cache.planRegion(R(0, 0, 3, 3), 2, 'ck', 500).novel).toBe(0);
+
+    cache.evict({depth: 2, prefix: 0n});
+
+    // The claim is gone, so the region is asked for again.
+    expect(cache.planRegion(R(0, 0, 3, 3), 2, 'ck', 500).novel).toBe(16);
+  });
+
+  it('leaves coverage alone when nothing is evicted', () => {
+    const cache = new BandCache(1e9);
+    cache.put(band({depth: 2, prefix: mortonOfTile(1, 1, 2), n: 4}));
+    cache.markCovered(R(0, 0, 3, 3), 2, 'ck', 500);
+    cache.evict({depth: 2, prefix: 0n});
+    expect(cache.planRegion(R(0, 0, 3, 3), 2, 'ck', 500).novel).toBe(0);
   });
 });
 

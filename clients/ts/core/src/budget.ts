@@ -1,4 +1,4 @@
-import {MAX_DEPTH, WORLD_SIZE, mortonOfTile} from './coords.js';
+import {MAX_DEPTH, WORLD_SIZE} from './coords.js';
 
 /**
  * Choosing which depth to request, so that the number of marks on screen is roughly constant
@@ -57,21 +57,17 @@ export function tilesInBbox(bbox: [number, number, number, number], depth: numbe
 }
 
 /**
- * The Morton prefixes of those tiles, in raster order.
+ * The tile-index rectangle a world-space bbox covers.
  *
- * The list rather than the count, because the replica addresses tiles individually: a tile it
- * already holds is answered without a request, which is the only mechanism that makes server work
- * scale with novelty rather than with viewport area (`delta-serving.md` §1). Bounded by the same
- * `maxTiles` a caller feeds {@link chooseDepth}, so enumerating cannot be larger than the request
- * that would have been made anyway.
+ * The rectangle rather than its tiles: the replica subtracts what it holds as rectangles, so no
+ * caller needs the enumeration and producing one costs O(tiles) to describe a shape four integers
+ * already carry.
  */
-export function tilesOfBbox(bbox: [number, number, number, number], depth: number): bigint[] {
-  const r = tileRange(bbox, depth);
-  const tiles: bigint[] = [];
-  for (let y = r.y0; y <= r.y1; y++) {
-    for (let x = r.x0; x <= r.x1; x++) tiles.push(mortonOfTile(x, y, depth));
-  }
-  return tiles;
+export function tileRectOfBbox(
+  bbox: [number, number, number, number],
+  depth: number
+): {x0: number; y0: number; x1: number; y1: number} {
+  return tileRange(bbox, depth);
 }
 
 /**

@@ -1,5 +1,6 @@
 import {WORLD_SIZE} from './coords.js';
-import {chooseDepth, tilesOfBbox, type DepthChoice} from './budget.js';
+import {chooseDepth, tileRectOfBbox, type DepthChoice} from './budget.js';
+import {rectArea, type TileRect} from './rects.js';
 
 /**
  * Layer 2: deciding *which* tiles to want.
@@ -9,6 +10,11 @@ import {chooseDepth, tilesOfBbox, type DepthChoice} from './budget.js';
  * tile scheduler — deck.gl's `TileLayer`, a MapLibre source — drops this layer entirely and keeps
  * the cache. Everything here is pure: no timers, no fetch, no clock. The scheduling that drives it
  * lives with the caller, which is what makes the policy testable at all.
+ *
+ * **Regions, not tile lists.** A viewport is a rectangle and a plan is a rectangle; enumerating the
+ * tiles inside one costs O(tiles) — measured at 181 ms for a 262 144-tile ring — to produce a shape
+ * four integers already describe. The replica subtracts what it holds as rectangles too, so no
+ * layer of this ever materialises a tile set.
  *
  * **Presentation, never selection.** Which tiles a client asks for is its own business; which marks
  * it is *served* for a tile is the engine's (I7). Requesting a deeper tile than the viewport
@@ -39,11 +45,11 @@ export type PlannerInputs = {
   velocity?: [number, number];
 };
 
-/** One thing to ask for, in priority order. */
+/** One region to ask about, in tile-index space at `depth`. */
 export type PlannedFetch = {
   kind: 'foreground' | 'ring' | 'deeper';
   depth: number;
-  tiles: bigint[];
+  rect: TileRect;
 };
 
 export type Plan = {
@@ -101,7 +107,7 @@ export function plan(inputs: PlannerInputs): Plan {
   const foreground: PlannedFetch = {
     kind: 'foreground',
     depth: choice.depth,
-    tiles: tilesOfBbox(worldBbox(viewport, MARGIN), choice.depth)
+    rect: tileRectOfBbox(worldBbox(viewport, MARGIN), choice.depth)
   };
 
   const background: PlannedFetch[] = [];
@@ -119,9 +125,9 @@ export function plan(inputs: PlannerInputs): Plan {
   // direction at once and so costs the same whether the guess was right or not; shifting it is
   // what would make the cost depend on predicting correctly.
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
-  const ring = tilesOfBbox(worldBbox(viewport, RING_MARGIN, shift), choice.depth);
-  if (ring.length <= maxTiles) {
-    background.push({kind: 'ring', depth: choice.depth, tiles: ring});
+  const ring = tileRectOfBbox(worldBbox(viewport, RING_MARGIN, shift), choice.depth);
+  if (rectArea(ring) <= maxTiles) {
+    background.push({kind: 'ring', depth: choice.depth, rect: ring});
   }
 
   return {choice, foreground, background};
@@ -145,10 +151,9 @@ export function deeperFetch(inputs: PlannerInputs, choice: DepthChoice): Planned
   const depth = choice.depth + 1;
   // The centre quadrant: half the linear extent, so four times the tile density over a quarter of
   // the area is the same tile count the foreground already pays for.
-  const centre = worldBbox(inputs.viewport, 0.5);
-  const tiles = tilesOfBbox(centre, depth);
-  if (tiles.length > inputs.maxTiles) return null;
-  return {kind: 'deeper', depth, tiles};
+  const rect = tileRectOfBbox(worldBbox(inputs.viewport, 0.5), depth);
+  if (rectArea(rect) > inputs.maxTiles) return null;
+  return {kind: 'deeper', depth, rect};
 }
 
 function ringShift(viewport: Viewport, velocity: [number, number]): [number, number] {

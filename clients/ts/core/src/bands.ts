@@ -1,5 +1,15 @@
-import {tileContains, tileOfCode} from './coords.js';
+import {tileContains, tileOfCode, tileXY} from './coords.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
+import {
+  coverageAdd,
+  coverageAt,
+  rectArea,
+  rectContainsTile,
+  rectSubtractAll,
+  rectsIntersect,
+  type Coverage,
+  type TileRect
+} from './rects.js';
 
 /**
  * The replica: what a client holds, as per-tile bands of points.
@@ -185,10 +195,11 @@ export type Resolved = {
 };
 
 export type PlannedRequest = {
-  /** Tiles proven complete client-side. Absent from the request entirely. */
-  omit: bigint[];
-  /** Tiles to request, with the identity bound already held for each. `0n` means nothing held. */
-  fetch: {prefix: bigint; below: bigint; count: number}[];
+  /** The novel regions, in tile-index space at the planned depth. Empty means nothing to ask for. */
+  fetch: TileRect[];
+  /** Tiles the wanted region spans, and how many of them the request covers — for reporting only. */
+  wanted: number;
+  novel: number;
 };
 
 export type EvictionFocus = {depth: number; prefix: bigint};
@@ -204,19 +215,22 @@ export type EvictionFocus = {depth: number; prefix: bigint};
 export class BandCache {
   private bands = new Map<BandKey, Band>();
   /**
-   * Tiles known to hold nothing, against the content key that established it.
+   * The regions this client has asked for and absorbed the answer to.
    *
-   * **Emptiness must be cached, or nothing else can be.** A response omits empty tiles entirely
-   * (the engine returns no row for a tile whose visible count is zero), so without this every empty
-   * tile is re-requested on every view — and a viewport is mostly empty tiles: measured on the 2.4M
-   * demo corpus, 454 of 16,524 tiles in a settled view carry any data at all. The other 16,070
-   * would put a request on the wire forever, and no amount of held marks would ever make a revisit
-   * free.
+   * **This is how emptiness is cached, and caching emptiness is what makes any of the rest work.**
+   * A response omits a tile whose visible count is zero, so without a record of having asked, every
+   * empty tile is re-requested on every view — and a viewport is overwhelmingly empty tiles:
+   * measured on the 2.4M demo corpus, 454 of 16,524 tiles in a settled view carry any data at all.
+   * The other 16,070 would put a request on the wire forever and no revisit would ever be free.
    *
-   * Costs a map entry rather than a band, and is invalidated by exactly what a band is: a content
-   * key rotation can add rows to a tile that had none.
+   * **Rectangles rather than one entry per tile**, which an earlier version of this did. That
+   * version was unbounded — one map entry per empty tile ever looked at, ~16k per viewport, never
+   * evicted and never counted against `budgetBytes` — and it forced planning to enumerate every
+   * tile in the viewport to consult it. A covered rectangle asserts the same thing over its whole
+   * area in four integers: *we asked here and absorbed the answer, so anything we were not sent is
+   * empty*.
    */
-  private empties = new Map<BandKey, string>();
+  private covered: Coverage[] = [];
   private identityKey: string | null = null;
   private held = 0;
 
@@ -255,19 +269,25 @@ export class BandCache {
     this.held += band.bytes;
   }
 
-  /** Record that a tile holds nothing under this content key. */
-  markEmpty(depth: number, prefix: bigint, contentKey: string): void {
-    this.empties.set(bandKey(depth, prefix), contentKey);
+  /**
+   * Record that a region was asked for and its answer absorbed.
+   *
+   * Called only *after* the response's bands are in, never before: a region marked covered before
+   * its points are held would let the next plan omit tiles whose data never arrived.
+   */
+  markCovered(rect: TileRect, depth: number, contentKey: string, capUsed: number): void {
+    this.covered = coverageAdd(this.covered, {rect, depth, contentKey, capUsed});
   }
 
-  isKnownEmpty(depth: number, prefix: bigint, contentKey: string): boolean {
-    return this.empties.get(bandKey(depth, prefix)) === contentKey;
+  /** Regions held at this depth, content key and cap — the holes a plan subtracts. */
+  coverageFor(depth: number, contentKey: string, k: number): TileRect[] {
+    return coverageAt(this.covered, depth, contentKey, k);
   }
 
   /** Drop everything. Called on a token change, where the whole partition becomes unrenderable. */
   dropIdentity(): void {
     this.bands.clear();
-    this.empties.clear();
+    this.covered = [];
     this.identityKey = null;
     this.held = 0;
   }
@@ -280,40 +300,64 @@ export class BandCache {
    * a silent hole (`caching.md` §7.1). Understating is safe in the other direction — it costs
    * bytes, never correctness.
    */
-  plan(tiles: bigint[], depth: number, contentKey: string, k: number): PlannedRequest {
-    const omit: bigint[] = [];
-    const fetch: PlannedRequest['fetch'] = [];
+  planRegion(want: TileRect, depth: number, contentKey: string, k: number): PlannedRequest {
+    const wanted = rectArea(want);
 
-    // A counts-only request (`k = 0`) omits nothing. Its whole purpose is to refresh the number
-    // channel and the content key over tiles the client already holds — which is what keeps the
+    // A counts-only request (`k = 0`) subtracts nothing. Its whole purpose is to refresh the number
+    // channel and the content key over ground the client already holds — which is what keeps the
     // staleness bound reachable once look-ahead has emptied the request (`delta-serving.md` §8).
-    // Left to the general rule below it would omit every tile, since at `k = 0` the definition
-    // serves nothing and so any band trivially holds all of it.
-    if (k === 0) {
-      for (const prefix of tiles) fetch.push({prefix, below: 0n, count: 0});
-      return {omit, fetch};
-    }
+    if (k === 0) return {fetch: [want], wanted, novel: wanted};
 
-    for (const prefix of tiles) {
-      // A tile known to be empty is complete in the only sense that matters: there is nothing the
-      // server could send for it. Checked first, because most tiles in a view are this.
-      if (this.isKnownEmpty(depth, prefix, contentKey)) {
-        omit.push(prefix);
+    // **At most two pieces, because each piece is a request.** The per-request floor is ~170 µs and
+    // a tile the client already holds costs the server essentially nothing to be asked for again —
+    // so past two, one slightly-too-large request beats four exact ones. Measured the wrong way
+    // round first: unbounded subtraction turned a single pan into six requests.
+    const fetch = rectSubtractAll(want, this.coverageFor(depth, contentKey, k), 2);
+    return {fetch, wanted, novel: fetch.reduce((n, r) => n + rectArea(r), 0)};
+  }
+
+  /**
+   * The bands to draw for a region, and on what authority.
+   *
+   * **Iterates what is held, not what is wanted**, which is the whole reason this is affordable: a
+   * settled viewport spans ~16.5k tiles of which ~450 carry any data, so walking the held bands is
+   * two orders of magnitude cheaper than walking the viewport and asking about each tile.
+   *
+   * Exact bands come from the region the client has covered at this depth. Fallbacks — an ancestor
+   * band restricted by prefix, or held descendants — are admitted **only over the part of the
+   * region that is not covered**, which is what keeps them from double-drawing ground an exact band
+   * already answers. Both are supersets of `served(T)` and are presentation, never selection
+   * (`caching.md` §6, I7): the caller stale-marks them and shows no count against them.
+   */
+  bandsForRegion(
+    want: TileRect,
+    depth: number,
+    contentKey: string,
+    k: number
+  ): {exact: Band[]; fallback: Band[]} {
+    const uncovered = rectSubtractAll(want, this.coverageFor(depth, contentKey, k));
+    const exact: Band[] = [];
+    const fallback: Band[] = [];
+
+    for (const band of this.bands.values()) {
+      if (band.depth === depth) {
+        const {x, y} = tileXY(band.prefix, depth);
+        if (rectContainsTile(want, x, y)) exact.push(band);
         continue;
       }
-      const band = this.get(depth, prefix);
-      if (band && isComplete(band, contentKey, k)) {
-        omit.push(prefix);
-        continue;
-      }
-      const usable = band && band.contentKey === contentKey ? band : undefined;
-      fetch.push({
-        prefix,
-        below: usable?.heldBelow ?? 0n,
-        count: usable?.ids.length ?? 0
-      });
+      if (uncovered.length === 0) continue; // the view is wholly held; nothing to fall back for
+
+      // Project the band's tile onto this depth's grid and admit it only where the view is not
+      // already answered. An ancestor covers a block; a descendant collapses to a single tile.
+      const shift = Math.abs(band.depth - depth);
+      const {x, y} = tileXY(band.prefix, band.depth);
+      const box: TileRect =
+        band.depth < depth
+          ? {x0: x << shift, y0: y << shift, x1: ((x + 1) << shift) - 1, y1: ((y + 1) << shift) - 1}
+          : {x0: x >> shift, y0: y >> shift, x1: x >> shift, y1: y >> shift};
+      if (uncovered.some((r) => rectsIntersect(r, box))) fallback.push(band);
     }
-    return {omit, fetch};
+    return {exact, fallback};
   }
 
   /**
@@ -359,6 +403,21 @@ export class BandCache {
   }
 
   /**
+   * The same, to a *region* rather than a single tile — what a zoom-in fallback actually needs.
+   *
+   * The prefix argument is the natural one for a tile; a fallback is admitted over a rectangle, and
+   * testing each point's tile against the rectangle avoids restricting once per tile in it.
+   */
+  static restrictToRect(band: Band, depth: number, rect: TileRect): number[] {
+    const indices: number[] = [];
+    for (let i = 0; i < band.codes.length; i++) {
+      const {x, y} = tileXY(tileOfCode(band.codes[i]!, depth), depth);
+      if (rectContainsTile(rect, x, y)) indices.push(i);
+    }
+    return indices;
+  }
+
+  /**
    * Evict to the budget by **truncating band tails**, deepest / least-recently-touched /
    * farthest-from-focus first.
    *
@@ -390,7 +449,27 @@ export class BandCache {
   }
 
   /** Cut a band to its first `keep` points, lowering its bound to match exactly. */
+  /**
+   * Withdraw the coverage claim over a tile.
+   *
+   * **Eviction must retract coverage or it becomes a silent hole.** A covered rectangle asserts
+   * *we asked here and hold the answer*; once a band inside it has been truncated that is no longer
+   * true, and a plan would go on subtracting the region so the discarded points were never fetched
+   * again. The client would draw short for the rest of the session and nothing would say so.
+   *
+   * The whole containing rectangle goes, not the tile's share of it — a rectangle minus a point is
+   * not a rectangle, and the alternative is to start storing the holes. It is self-healing and it
+   * costs a refetch of ground the cache had already decided to give up.
+   */
+  private retractCoverage(depth: number, prefix: bigint): void {
+    const {x, y} = tileXY(prefix, depth);
+    this.covered = this.covered.filter(
+      (c) => c.depth !== depth || !rectContainsTile(c.rect, x, y)
+    );
+  }
+
   private truncate(band: Band, keep: number): void {
+    this.retractCoverage(band.depth, band.prefix);
     const ids = band.ids.slice(0, keep);
     const codes = band.codes.slice(0, keep);
     const positions = band.positions.slice(0, keep * 2);

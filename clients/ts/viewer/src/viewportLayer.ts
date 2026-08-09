@@ -290,8 +290,8 @@ export class ViewportController {
     const controller = new AbortController();
     this.background = controller;
     try {
-      const frame = await this.replica.fetchTiles(
-        ring.tiles,
+      const frame = await this.replica.fetchRegion(
+        ring.rect,
         ring.depth,
         meta.selection.kMaxMarks,
         controller.signal
@@ -301,7 +301,7 @@ export class ViewportController {
       this.ringAt = {x: viewport.target[0], y: viewport.target[1], depth: ring.depth};
       this.store.update((s) => {
         s.replicaBytes = this.replica.bytes;
-        s.prefetched = frame.plan.fetched;
+        s.prefetched = frame.plan.novel;
       });
     } catch {
       // Including a 429: the foreground's retry budget is the one that matters.
@@ -342,8 +342,8 @@ export class ViewportController {
     });
 
     try {
-      const frame = await this.replica.fetchTiles(
-        planned.foreground.tiles,
+      const frame = await this.replica.fetchRegion(
+        planned.foreground.rect,
         choice.depth,
         meta.selection.kMaxMarks,
         controller.signal
@@ -378,7 +378,7 @@ export class ViewportController {
           s.lastBytes = frame.response.bytes;
         }
         s.replicaBytes = this.replica.bytes;
-        s.lastPlan = frame.plan;
+        s.lastPlan = {omitted: frame.plan.wanted - frame.plan.novel, fetched: frame.plan.novel};
         s.lastVisibleInView = visible;
         s.mTarget = calibrate(
           {predictedMarks: choice.predictedMarks, actualMarks: actual, visibleInView: visible},

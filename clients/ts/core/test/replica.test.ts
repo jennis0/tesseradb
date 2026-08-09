@@ -1,9 +1,9 @@
 import {describe, expect, it} from 'vitest';
 import {Replica} from '../src/replica.js';
 import {mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
-import {tilesInBbox, tilesOfBbox} from '../src/budget.js';
+import type {Quantisation, ViewportResponse, ViewportResult} from '../src/types.js';
 
-import type {ViewportResponse, ViewportResult} from '../src/types.js';
+const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
 /** A response serving `n` points for each named tile, identities ascending across the whole batch. */
 function response(tiles: {tile: bigint; served: number; visible?: number}[], pin = 'p1'): ViewportResponse {
@@ -37,28 +37,27 @@ function response(tiles: {tile: bigint; served: number; visible?: number}[], pin
  * "requests only what it does not hold" test mean anything. A fixture answering for tiles nobody
  * asked about would seed the cache behind the replica's back.
  */
-function serveCovered(tiles: {tile: bigint; served: number}[], pin: () => string) {
-  return (req: {tiles: bigint[]}) => response(
-    tiles.filter(({tile}) => req.tiles.includes(tile)),
-    pin()
-  );
-}
-
 function replica(
-  serve: (req: {tiles: bigint[]; zoom: number; k?: number}) => ViewportResponse,
+  serve: (req: {bbox: [number, number, number, number]; zoom: number; k?: number}) => ViewportResponse,
   opts: {cache?: boolean; revalidateAfterMs?: number} = {}
 ) {
-  const calls: {tiles: bigint[]; zoom: number; k?: number}[] = [];
+  const calls: {bbox: [number, number, number, number]; zoom: number; k?: number}[] = [];
   const r = new Replica(
     async (req) => {
-      calls.push({tiles: req.tiles, zoom: req.zoom, k: req.k});
-      return serve(req);
+      const bbox = req.bbox as [number, number, number, number];
+      calls.push({bbox, zoom: req.zoom, k: req.k});
+      return serve({bbox, zoom: req.zoom, k: req.k});
     },
+    Q,
     {slice: 's', now: () => 0, revalidateAfterMs: Infinity, ...opts}
   );
   r.reset();
   return {r, calls};
 }
+
+/** The whole depth-`z` grid, as a region. */
+const world = (z: number) => ({x0: 0, y0: 0, x1: 2 ** z - 1, y1: 2 ** z - 1});
+const rect = (x0: number, y0: number, x1: number, y1: number) => ({x0, y0, x1, y1});
 
 describe('tileXY', () => {
   it('inverts the Morton interleave of a tile prefix', () => {
@@ -112,132 +111,104 @@ describe('tileXY', () => {
   });
 });
 
-describe('tilesOfBbox', () => {
-  it('enumerates exactly what tilesInBbox counts', () => {
-    for (const box of [
-      [0, 0, 512, 512],
-      [100, 100, 140, 260],
-      [0, 0, 1, 1],
-      [511, 511, 512, 512]
-    ] as [number, number, number, number][]) {
-      for (const z of [1, 3, 5]) {
-        const tiles = tilesOfBbox(box, z);
-        expect(tiles).toHaveLength(tilesInBbox(box, z));
-        expect(new Set(tiles).size).toBe(tiles.length); // no duplicates: a tile served twice doubles it
-      }
-    }
-  });
-});
-
-describe('Replica.fetchTiles', () => {
-  it('issues one request and answers every tile from it', async () => {
+describe('Replica.fetchRegion', () => {
+  it('issues one request and holds every band it returns', async () => {
     const {r, calls} = replica(() => response([{tile: 0n, served: 2}, {tile: 1n, served: 3}]));
 
-    const frame = await r.fetchTiles([0n, 1n], 1, 500);
+    const frame = await r.fetchRegion(world(1), 1, 500);
 
     expect(calls).toHaveLength(1);
-    expect(frame.missing).toEqual([]);
-    expect(frame.tiles.map((t) => t.prefix)).toEqual([0n, 1n]);
-    expect(frame.tiles[0]!.resolved.bands[0]!.ids.length).toBe(2);
-    expect(frame.tiles[1]!.resolved.bands[0]!.ids.length).toBe(3);
+    expect(calls[0]!.k).toBe(500);
+    expect(frame.exact.map((b) => b.ids.length).sort()).toEqual([2, 3]);
+    expect(frame.plan.novel).toBe(4); // the whole depth-1 grid
   });
 
   it('makes a revisit free', async () => {
     const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
 
-    await r.fetchTiles([0n], 1, 500);
-    const second = await r.fetchTiles([0n], 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
+    const second = await r.fetchRegion(world(1), 1, 500);
 
     expect(calls).toHaveLength(1); // the second ask never reached the wire
     expect(second.response).toBeNull();
-    expect(second.tiles[0]!.resolved.provenance).toBe('exact');
+    expect(second.plan.novel).toBe(0);
+    expect(second.exact).toHaveLength(1); // and it still draws
   });
 
-  it('revalidates an all-held ask, and re-fetches once the key has rotated', async () => {
+  it('asks only for the strip a pan actually exposes', async () => {
+    // The whole point: coverage is a rectangle, so a shifted viewport subtracts to one strip
+    // rather than to a per-tile diff over the viewport.
+    const {r, calls} = replica(() => response([{tile: 0n, served: 1}]));
+
+    await r.fetchRegion(rect(0, 0, 3, 3), 3, 500);
+    const second = await r.fetchRegion(rect(2, 0, 5, 3), 3, 500);
+
+    expect(calls).toHaveLength(2);
+    expect(second.plan.wanted).toBe(16);
+    expect(second.plan.novel).toBe(8); // columns 4 and 5 only
+    expect(second.plan.requests).toBe(1);
+  });
+
+  it('treats a covered region as answered, so empty ground is never re-asked', async () => {
+    // A response omits empty tiles entirely. Coverage is what records "we asked here", and without
+    // it a mostly-empty viewport re-requests its empty tiles forever.
+    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
+
+    await r.fetchRegion(world(3), 3, 500); // 64 tiles, one of which holds anything
+    expect(calls).toHaveLength(1);
+    const second = await r.fetchRegion(world(3), 3, 500);
+    expect(calls).toHaveLength(1);
+    expect(second.plan.novel).toBe(0);
+  });
+
+  it('re-asks once the content key rotates', async () => {
     let pin = 'p1';
-    const {r, calls} = replica(serveCovered([{tile: 0n, served: 2}], () => pin), {
+    const {r, calls} = replica(() => response([{tile: 0n, served: 2}], pin), {
       revalidateAfterMs: 0
     });
 
-    await r.fetchTiles([0n], 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
     expect(calls).toHaveLength(1);
 
-    // Everything is held, so this ask costs a counts-only request — and nothing more. That is what
-    // keeps an accepted change from staying invisible to a client that pans entirely from cache.
-    await r.fetchTiles([0n], 1, 500);
+    // Everything is held, so this costs a counts-only request and nothing more — which is what
+    // keeps an accepted change from staying invisible to a client panning from cache.
+    await r.fetchRegion(world(1), 1, 500);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.k).toBe(0);
 
     pin = 'p2'; // a flush moved geometry, and the revalidation observes it
-    await r.fetchTiles([0n], 1, 500);
-    // The held band still carries p1: renderable, but no longer declarable, so marks come again.
-    const marksAgain = await r.fetchTiles([0n], 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
+    const marksAgain = await r.fetchRegion(world(1), 1, 500);
     expect(marksAgain.response).not.toBeNull();
     expect(calls[calls.length - 1]!.k).toBe(500);
   });
 
-  it('remembers that a tile is empty, so a mostly-empty view stops re-asking', async () => {
-    // The view wants four tiles; only one holds anything. Without negative caching the other three
-    // are re-requested forever and no revisit is ever free.
-    const {r, calls} = replica(serveCovered([{tile: 0n, served: 2}], () => 'p1'));
-
-    const first = await r.fetchTiles([0n, 1n, 2n, 3n], 1, 500);
-    expect(first.plan).toEqual({omitted: 0, fetched: 4});
-    expect(calls).toHaveLength(1);
-
-    const second = await r.fetchTiles([0n, 1n, 2n, 3n], 1, 500);
-    expect(second.plan).toEqual({omitted: 4, fetched: 0});
-    expect(calls).toHaveLength(1); // nothing on the wire at all
-  });
-
-  it('re-asks about an empty tile once the content key rotates', async () => {
-    // A flush can put rows in a tile that had none, so emptiness expires exactly as a band does.
-    let pin = 'p1';
-    const {r, calls} = replica(serveCovered([{tile: 0n, served: 2}], () => pin));
-
-    await r.fetchTiles([0n, 1n], 1, 500);
-    expect(calls).toHaveLength(1);
-    await r.fetchTiles([0n, 1n], 1, 500);
-    expect(calls).toHaveLength(1);
-
-    pin = 'p2';
-    // Nothing observes the rotation until a request happens, so force one with a fresh tile.
-    await r.fetchTiles([0n, 1n, 2n], 1, 500);
-    const after = await r.fetchTiles([0n, 1n], 1, 500);
-    expect(after.plan.fetched).toBeGreaterThan(0);
-  });
-
   it('never touches the wire for an all-held ask inside the revalidation window', async () => {
-    const {r, calls} = replica(serveCovered([{tile: 0n, served: 2}], () => 'p1'));
+    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
 
-    await r.fetchTiles([0n], 1, 500);
-    await r.fetchTiles([0n], 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
 
     expect(calls).toHaveLength(1);
   });
 
-  it('requests only the tiles it does not hold', async () => {
-    const {r, calls} = replica(
-      serveCovered([{tile: 0n, served: 2}, {tile: 3n, served: 2}], () => 'p1')
-    );
+  it('will not reuse coverage bought at a smaller cap', async () => {
+    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
 
-    await r.fetchTiles([0n], 1, 500);
-    await r.fetchTiles([0n, 3n], 1, 500);
+    await r.fetchRegion(world(1), 1, 100);
+    await r.fetchRegion(world(1), 1, 500); // a larger k may yield more for the same tiles
 
     expect(calls).toHaveLength(2);
-    // The second request names tile 3 alone. Under a bbox it would have spanned the held tile 0 too
-    // and the server would have paid for it; naming the list is what makes the saving real.
-    expect(calls[1]!.tiles).toEqual([3n]);
   });
 
   it('serves bands but retains nothing when the cache is bypassed', async () => {
     const {r, calls} = replica(() => response([{tile: 0n, served: 2}]), {cache: false});
 
-    const first = await r.fetchTiles([0n], 1, 500);
-    const second = await r.fetchTiles([0n], 1, 500);
+    const first = await r.fetchRegion(world(1), 1, 500);
+    const second = await r.fetchRegion(world(1), 1, 500);
 
-    expect(first.tiles[0]!.resolved.bands[0]!.ids.length).toBe(2); // still renderable
-    expect(second.tiles[0]!.resolved.bands[0]!.ids.length).toBe(2);
+    expect(first.exact[0]!.ids.length).toBe(2); // still renderable
+    expect(second.exact[0]!.ids.length).toBe(2);
     expect(calls).toHaveLength(2); // and byte-for-byte the traffic of a client with no replica
     expect(r.bytes).toBe(0);
   });
@@ -245,31 +216,32 @@ describe('Replica.fetchTiles', () => {
   it('drops everything on an explicit reset', async () => {
     const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
 
-    await r.fetchTiles([0n], 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
     r.reset();
-    await r.fetchTiles([0n], 1, 500);
+    await r.fetchRegion(world(1), 1, 500);
 
     expect(calls).toHaveLength(2);
   });
 
   it('drops everything when the server reports a different identity coordinate', async () => {
-    // Belt to reset()'s braces: the partition key comes from the server, so a client cannot hold
-    // one principal's bands under another's by forgetting to call anything.
-    let identity = 'alice';
-    const {r, calls} = replica((req) => ({
-      ...serveCovered([{tile: 0n, served: 2}], () => 'p1')(req),
-      identityKey: identity
-    }));
+    // The rotation can only be observed on a response, so the second ask has to reach new ground —
+    // an all-held ask makes no request and would never learn of it.
+    let identity = 'i1';
+    const {r, calls} = replica(() => {
+      const res = response([{tile: 0n, served: 2}]);
+      return {...res, identityKey: identity};
+    });
 
-    await r.fetchTiles([0n], 1, 500);
-    expect(r.bytes).toBeGreaterThan(0);
+    await r.fetchRegion(rect(0, 0, 1, 1), 3, 500);
+    expect(calls).toHaveLength(1);
+    expect((await r.fetchRegion(rect(0, 0, 1, 1), 3, 500)).plan.novel).toBe(0); // held
 
-    identity = 'bob';
-    await r.fetchTiles([0n, 1n], 1, 500);
-    // Tile 0's band was dropped when the coordinate moved, so it is asked for again.
-    const after = await r.fetchTiles([0n], 1, 500);
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(after.tiles[0]?.resolved.bands[0]?.identityKey).toBe('bob');
+    identity = 'i2';
+    await r.fetchRegion(rect(4, 4, 5, 5), 3, 500); // new ground, and the response rotates identity
+
+    // The partition went with the rotation, so the originally-held region is cold again.
+    const back = await r.fetchRegion(rect(0, 0, 1, 1), 3, 500);
+    expect(back.plan.novel).toBe(4);
   });
 });
 
@@ -297,6 +269,7 @@ describe('Replica.tile coalescing', () => {
       async () => {
         throw new Error('transport');
       },
+      Q,
       {slice: 's', now: () => 0}
     );
     r.reset();

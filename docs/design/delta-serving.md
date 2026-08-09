@@ -2,8 +2,8 @@
 
 **Date:** 2026-08-08
 **Status:** Provisional r2 — under review. **⊘ Partially implemented.** Built: the two coordinates
-of §2, omission by explicit tile list (§3), emptiness caching, the client replica and its
-render-provenance rules (§7), the staleness bound (§8), and look-ahead's ring (§13). **Not built:**
+of §2, omission by region subtraction (§3), the client replica and its render-provenance rules
+(§7), the staleness bound (§8), and look-ahead's ring (§13). **Not built:**
 the server-side skip and band elision — the `declarations` operand of §6 does not exist, so no
 request carries a cut or a count and §5's failure directions describe a path with no traffic on it
 — and the next-depth fetch of §13. **To become normative:** owner sign-off on the two coordinates
@@ -449,14 +449,27 @@ that survives the trigger: checked after planning rather than before, the moveme
 the foreground and the ring on every view event, tens of thousands of Morton prefixes each at sixty
 events a second, which took the main thread out entirely.
 
-**Look-ahead does not scale to the target operating point as written, and the limit is the
-client.** Enumerating a tile set and planning it against the replica are both linear in tile count,
-measured at 5.9 ms and 4.1 ms for today's ~4k-tile foreground. At `caching.md` §3's 1–2 × 10⁶-mark
-target a view spans 60–125 × 10³ tiles and its ring three times that: **181 ms to enumerate and
-56 ms to plan, per idle pause**, on the thread that also draws. That is a visible freeze, and it
-arrives before any of the wire or server costs above. Three ways out, none built: enumerate
-incrementally, move enumeration off the main thread, or address the ring as a difference from the
-foreground rather than as a superset of it. The last is the most promising and the least designed.
+**A client plans in rectangles, not in tiles, and that is what makes look-ahead affordable at
+scale.** A viewport is a rectangle and so is what a client already holds, so the novel region is
+rectangle-minus-rectangle — at most four rectangles, computed in O(rectangles). Enumerating the
+tiles to rediscover that shape is O(tiles): measured at **181 ms to enumerate and 56 ms to diff** a
+262 144-tile ring, on the thread that also draws, against **1.6 µs** for the subtraction. The cost
+stops depending on the viewport at all — 4 × 10³ tiles and 2.6 × 10⁵ tiles both plan in ~2 µs.
+
+Three consequences beyond the speed. A region fetch is **one bbox**, not a list of tens of thousands
+of identifiers, so the first request of a session stops shipping ~130 KB of JSON for the server to
+parse and sort. Emptiness is recorded per *region* rather than per tile, which removes an unbounded
+map — one entry per empty tile ever looked at, ~16k per viewport, never evicted and never counted
+against the cache's byte budget. And **eviction must retract the covering rectangle**, or the region
+stays "held", the plan keeps subtracting it, and the discarded points are never fetched again: the
+client draws short for the rest of the session with nothing to say so.
+
+Two bounds keep it honest. Rectangles are fused only when their union is **exactly** a rectangle —
+a bounding box over an L-shaped union would claim emptiness for tiles nobody asked about — and
+without fusion a pan sequence lengthens a chain that shatters the next subtraction, measured at six
+requests for one pan. Subtraction stops at **two** pieces because each piece is a request: past
+that, one slightly-too-large request beats four exact ones, and giving up towards *more* is a
+superset, never a hole.
 
 **The next-depth fetch is specified and off.** Anticipating a zoom-*in* means requesting depth
 `d+1`, which the ring cannot help with — a zoom lands on tiles the replica has never seen. It is

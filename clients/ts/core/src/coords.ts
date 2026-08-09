@@ -121,15 +121,32 @@ export function tileToRequestBbox(
   index: TileIndex,
   q: Quantisation
 ): [number, number, number, number] {
-  const cells = tileToCellBox(index);
+  return rectToRequestBbox({x0: index.x, y0: index.y, x1: index.x, y1: index.y}, index.z, q);
+}
+
+/**
+ * The same, for a rectangle of tiles — the form a region fetch uses.
+ *
+ * Generalises {@link tileToRequestBbox} and inherits its whole argument: inset to the centre of the
+ * rectangle's first cell and of its last, so a closed bbox names exactly the tiles in the rectangle
+ * and not the neighbouring row and column. Sending a region as one bbox rather than as an explicit
+ * tile list is what keeps a request four numbers instead of tens of thousands of identifiers.
+ */
+export function rectToRequestBbox(
+  rect: {x0: number; y0: number; x1: number; y1: number},
+  depth: number,
+  q: Quantisation
+): [number, number, number, number] {
+  const span = CELL_GRID / 2 ** depth;
   const spanX = q.xMax - q.xMin;
   const spanY = q.yMax - q.yMin;
-  const centre = (cell: number) => cell + 0.5;
+  const toX = (cell: number) => q.xMin + (cell / CELL_GRID) * spanX;
+  const toY = (cell: number) => q.yMin + (cell / CELL_GRID) * spanY;
   return [
-    q.xMin + (centre(cells.cx0) / CELL_GRID) * spanX,
-    q.yMin + (centre(cells.cy0) / CELL_GRID) * spanY,
-    q.xMin + (centre(cells.cx1 - 1) / CELL_GRID) * spanX,
-    q.yMin + (centre(cells.cy1 - 1) / CELL_GRID) * spanY
+    toX(rect.x0 * span + 0.5),
+    toY(rect.y0 * span + 0.5),
+    toX((rect.x1 + 1) * span - 0.5),
+    toY((rect.y1 + 1) * span - 0.5)
   ];
 }
 

@@ -340,6 +340,7 @@ async function start() {
       requestCount += 1;
       return client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal);
     },
+    meta.quantisation,
     {slice: meta.slices[0]!.id}
   );
   // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement

@@ -48,22 +48,6 @@ export type Assembled = {
 
 type Piece = {band: Band; indices: number[] | null};
 
-/**
- * Which points of which bands a tile contributes.
- *
- * An ancestor band is restricted by Morton prefix — sound because the parent's band is a prefix of
- * its own visible set in identity order, so its restriction to a child is a prefix of the child's
- * visible set. Descendant bands contribute whole.
- */
-function piecesOf(frame: ReplicaFrame, prefix: bigint, resolved: ReplicaFrame['tiles'][number]['resolved']): Piece[] {
-  if (resolved.provenance === 'exact') return [{band: resolved.bands[0]!, indices: null}];
-  if (resolved.provenance === 'ancestor') {
-    const parent = resolved.bands[0]!;
-    return [{band: parent, indices: BandCache.restrict(parent, frame.depth, prefix)}];
-  }
-  return resolved.bands.map((band) => ({band, indices: null}));
-}
-
 function pieceLength(piece: Piece): number {
   return piece.indices ? piece.indices.length : piece.band.ids.length;
 }
@@ -121,31 +105,41 @@ export function assemble(frame: ReplicaFrame): Assembled {
   let provisional = 0;
   let visibleInView = 0;
 
-  for (const {prefix, resolved} of frame.tiles) {
-    const mine = piecesOf(frame, prefix, resolved);
-    const length = mine.reduce((sum, p) => sum + pieceLength(p), 0);
+  // **Walks the bands the replica holds, not the tiles the viewport spans.** A settled view spans
+  // ~16.5k tiles of which ~450 carry anything, so iterating what is held is two orders of magnitude
+  // less work than iterating what was asked about — and it is the same list either way.
+  for (const band of frame.exact) {
+    const length = band.ids.length;
     if (length === 0) continue;
-
     const from = total;
-    pieces.push(...mine);
+    pieces.push({band, indices: null});
     total += length;
+    exactDrawn += length;
+    exactServed += band.served;
+    visibleInView += Number(band.visible);
+    tiles.push({
+      prefix: band.prefix,
+      from,
+      to: total,
+      exact: true,
+      counts: {visible: band.visible, matched: band.matched, served: band.served}
+    });
+  }
 
-    if (resolved.exact) {
-      const band = resolved.bands[0]!;
-      exactDrawn += length;
-      exactServed += band.served;
-      visibleInView += Number(band.visible);
-      tiles.push({
-        prefix,
-        from,
-        to: total,
-        exact: true,
-        counts: {visible: band.visible, matched: band.matched, served: band.served}
-      });
-    } else {
-      provisional += length;
-      tiles.push({prefix, from, to: total, exact: false, counts: null});
-    }
+  // Bands from another depth, admitted by the replica only over ground not held at this one. An
+  // ancestor is restricted to the wanted region by Morton prefix — sound because a parent's band is
+  // a prefix of its own visible set in identity order, so its restriction is a prefix of the
+  // child's. Descendants contribute whole.
+  for (const band of frame.fallback) {
+    const indices =
+      band.depth < frame.depth ? BandCache.restrictToRect(band, frame.depth, frame.want) : null;
+    const length = indices ? indices.length : band.ids.length;
+    if (length === 0) continue;
+    const from = total;
+    pieces.push({band, indices});
+    total += length;
+    provisional += length;
+    tiles.push({prefix: band.prefix, from, to: total, exact: false, counts: null});
   }
 
   const ids = new BigUint64Array(total);

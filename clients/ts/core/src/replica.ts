@@ -1,5 +1,7 @@
 import {BandCache, bandsOfResult, type Band, type Resolved} from './bands.js';
-import type {ViewportResponse} from './types.js';
+import {rectArea, type TileRect} from './rects.js';
+import {rectToRequestBbox, tileXY} from './coords.js';
+import type {Quantisation, ViewportResponse} from './types.js';
 
 /**
  * Layer 1: the read-through replica.
@@ -43,13 +45,19 @@ export type ReplicaOptions = {
   now?: () => number;
 };
 
-/** What one `fetchTiles` call resolved to, tile by tile, with the provenance the renderer needs. */
+/** What one {@link Replica.fetchRegion} call resolved to. */
 export type ReplicaFrame = {
   depth: number;
-  tiles: {prefix: bigint; resolved: Resolved}[];
-  /** Tiles asked for that neither the store nor the response could answer. */
-  missing: bigint[];
-  /** Null when every tile was answered from the store. */
+  /** The region asked about, in tile-index space at `depth`. */
+  want: TileRect;
+  /** Bands at this depth inside the region — the served set, drawable with counts. */
+  exact: Band[];
+  /**
+   * Bands from another depth, admitted only over the part of the region not held at this one. A
+   * superset of what the definition serves there: drawn, stale-marked, and never counted.
+   */
+  fallback: Band[];
+  /** Null when the region was answered entirely from the store. */
   response: ViewportResponse | null;
   /**
    * How the ask was split — the cache's effectiveness, made visible rather than inferred.
@@ -58,7 +66,13 @@ export type ReplicaFrame = {
    * whole point of the replica, and a client showing marks while this stays at zero has a cache
    * that is costing memory and buying nothing.
    */
-  plan: {omitted: number; fetched: number};
+  plan: {
+    /** Tiles the region spans, and how many of them had to be asked for. */
+    wanted: number;
+    novel: number;
+    /** How many requests that took — one per novel rectangle. */
+    requests: number;
+  };
 };
 
 type PendingAsk = {
@@ -77,9 +91,16 @@ export class Replica {
 
   constructor(
     private readonly fetchViewport: (
-      req: {slice: string; zoom: number; tiles: bigint[]; k?: number},
+      req: {
+        slice: string;
+        zoom: number;
+        bbox?: [number, number, number, number];
+        tiles?: bigint[];
+        k?: number;
+      },
       signal?: AbortSignal
     ) => Promise<ViewportResponse>,
+    private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
   ) {
     this.cache = new BandCache(opts.cacheBytes ?? 512 * 1024 * 1024);
@@ -128,64 +149,60 @@ export class Replica {
    * discarded on arrival — it is never derived, counted, selected or gathered. That is what makes
    * server work scale with what is new rather than with the area on screen.
    */
-  async fetchTiles(
-    tiles: bigint[],
+  async fetchRegion(
+    want: TileRect,
     depth: number,
     k: number,
     signal?: AbortSignal
   ): Promise<ReplicaFrame> {
-    const plan = this.opts.cache === false
-      ? {omit: [], fetch: tiles.map((prefix) => ({prefix, below: 0n, count: 0}))}
-      : this.cache.plan(tiles, depth, this.contentKey, k);
+    const plan =
+      this.opts.cache === false
+        ? {fetch: [want], wanted: rectArea(want), novel: rectArea(want)}
+        : this.cache.planRegion(want, depth, this.contentKey, k);
 
     let response: ViewportResponse | null = null;
     let fetched: Band[] = [];
-    if (plan.fetch.length > 0) {
-      response = await this.fetchViewport(
-        {slice: this.opts.slice, zoom: depth, tiles: plan.fetch.map((f) => f.prefix), k},
-        signal
-      );
-      fetched = this.absorb(response, depth, k);
-      // Every tile asked for that did not come back holds nothing: the engine omits a tile whose
-      // visible count is zero. Recording that is what stops a mostly-empty viewport re-asking for
-      // its empty tiles on every single view.
-      if (this.opts.cache !== false) {
-        const returned = new Set(fetched.map((b) => b.prefix));
-        for (const {prefix} of plan.fetch) {
-          if (!returned.has(prefix)) this.cache.markEmpty(depth, prefix, this.contentKey);
-        }
+
+    // **One request per novel rectangle, not one per tile.** A pan yields a single strip, so this
+    // is one request in the common case and never more than a handful — `rectSubtractAll` bounds
+    // the fragmentation rather than letting it grow with the number of past fetches.
+    for (const rect of plan.fetch) {
+      const bbox = rectToRequestBbox(rect, depth, this.quantisation);
+      response = await this.fetchViewport({slice: this.opts.slice, zoom: depth, bbox, k}, signal);
+      fetched = fetched.concat(this.absorb(response, depth, k));
+      // Marked only after the bands are in. A region marked covered before its points are held
+      // would let the next plan subtract ground whose data never arrived.
+      if (this.opts.cache !== false && k > 0) {
+        this.cache.markCovered(rect, depth, this.contentKey, k);
       }
-    } else if (this.dueForRevalidation()) {
+    }
+
+    if (plan.fetch.length === 0 && this.dueForRevalidation()) {
+      // Everything is held, so the only thing left to refresh is the number channel and the content
+      // key — which is what keeps the staleness bound reachable for a client panning entirely from
+      // its replica (`delta-serving.md` §8).
+      const bbox = rectToRequestBbox(want, depth, this.quantisation);
       response = await this.fetchViewport(
-        {slice: this.opts.slice, zoom: depth, tiles, k: 0},
+        {slice: this.opts.slice, zoom: depth, bbox, k: 0},
         signal
       );
       this.observe(response);
     }
 
-    // With the store bypassed there is nothing to resolve against, so the frame is built from the
-    // response alone. The mode has to stay renderable — it is the measurement A/B, not a way to
-    // turn the client off.
-    const answer = this.opts.cache === false
-      ? (prefix: bigint): Resolved | null => {
-          const band = fetched.find((b) => b.prefix === prefix);
-          return band ? {provenance: 'exact', bands: [band], exact: true} : null;
-        }
-      : (prefix: bigint): Resolved | null => this.cache.resolve(depth, prefix);
+    // With the store bypassed there is nothing to draw from but this response. The mode has to stay
+    // renderable — it is the measurement A/B, not a way to turn the client off.
+    const {exact, fallback} =
+      this.opts.cache === false
+        ? {exact: fetched, fallback: [] as Band[]}
+        : this.cache.bandsForRegion(want, depth, this.contentKey, k);
 
-    const resolvedTiles: ReplicaFrame['tiles'] = [];
-    const missing: bigint[] = [];
-    for (const prefix of tiles) {
-      const resolved = answer(prefix);
-      if (resolved) resolvedTiles.push({prefix, resolved});
-      else missing.push(prefix);
-    }
     return {
       depth,
-      tiles: resolvedTiles,
-      missing,
+      want,
+      exact,
+      fallback,
       response,
-      plan: {omitted: plan.omit.length, fetched: plan.fetch.length}
+      plan: {wanted: plan.wanted, novel: plan.novel, requests: plan.fetch.length}
     };
   }
 
@@ -247,9 +264,24 @@ export class Replica {
       this.pending = [];
       this.flush = null;
       try {
-        const frame = await this.fetchTiles(batch.map((a) => a.prefix), depth, k);
-        const byPrefix = new Map(frame.tiles.map((t) => [t.prefix, t.resolved]));
-        for (const ask of batch) ask.resolve(byPrefix.get(ask.prefix) ?? null);
+        // **Coalesced into the bounding rectangle of the batch.** A tile-addressed consumer asks
+        // for a contiguous viewport, so the bound is tight; where it is not, the surplus is ground
+        // the consumer is about to ask for anyway. Answering each ask from the store afterwards is
+        // what keeps this a fetch of a region and a resolution per tile, rather than both per tile.
+        let rect: TileRect | null = null;
+        for (const ask of batch) {
+          const {x, y} = tileXY(ask.prefix, depth);
+          rect = rect
+            ? {
+                x0: Math.min(rect.x0, x),
+                y0: Math.min(rect.y0, y),
+                x1: Math.max(rect.x1, x),
+                y1: Math.max(rect.y1, y)
+              }
+            : {x0: x, y0: y, x1: x, y1: y};
+        }
+        if (rect) await this.fetchRegion(rect, depth, k);
+        for (const ask of batch) ask.resolve(this.cache.resolve(depth, ask.prefix));
       } catch {
         // A failed batch resolves every ask to null rather than rejecting each: a tile-addressed
         // consumer treats a null tile as "not yet", and rejecting would surface one transport

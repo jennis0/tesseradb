@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {MARGIN, RING_MARGIN, deeperFetch, plan, worldBbox, type PlannerInputs} from '../src/prefetch.js';
 import {tileOfCode} from '../src/coords.js';
+import {rectArea, rectContains} from '../src/rects.js';
 
 const BASE: PlannerInputs = {
   viewport: {target: [256, 256], zoom: 4, width: 1280, height: 800},
@@ -40,38 +41,38 @@ describe('plan', () => {
   it('fetches the margined box in the foreground', () => {
     const p = plan(BASE);
     const tight = plan({...BASE, viewport: {...BASE.viewport, width: 1, height: 1}});
-    expect(p.foreground.tiles.length).toBeGreaterThan(tight.foreground.tiles.length);
+    expect(rectArea(p.foreground.rect)).toBeGreaterThan(rectArea(tight.foreground.rect));
     expect(p.foreground.depth).toBe(p.choice.depth);
   });
 
-  it('rings wider than the foreground, at the same depth', () => {
+  it('rings wider than the foreground, at the same depth, and contains it', () => {
     const p = plan(BASE);
     const ring = p.background.find((b) => b.kind === 'ring')!;
     expect(ring.depth).toBe(p.foreground.depth);
-    expect(ring.tiles.length).toBeGreaterThan(p.foreground.tiles.length);
-    // Every foreground tile is inside the ring, so the ring only ever adds work, never replaces it.
-    const inRing = new Set(ring.tiles);
-    expect(p.foreground.tiles.every((t) => inRing.has(t))).toBe(true);
+    expect(rectArea(ring.rect)).toBeGreaterThan(rectArea(p.foreground.rect));
+    // The ring only ever adds ground, never replaces it.
+    expect(rectContains(ring.rect, p.foreground.rect)).toBe(true);
   });
 
   it('biases the ring downwind of recent movement', () => {
-    const still = plan(BASE);
-    // Panning right: the ring should reach further right than it does left.
-    const moving = plan({...BASE, velocity: [1, 0]});
-    const stillRing = still.background.find((b) => b.kind === 'ring')!;
-    const movingRing = moving.background.find((b) => b.kind === 'ring')!;
-
-    const maxX = (tiles: bigint[], depth: number) =>
-      Math.max(...tiles.map((t) => Number(t & ((1n << BigInt(2 * depth)) - 1n))));
-    expect(movingRing.tiles.length).toBe(stillRing.tiles.length); // same cost...
-    expect(maxX(movingRing.tiles, movingRing.depth)).toBeGreaterThan(
-      maxX(stillRing.tiles, stillRing.depth)
-    ); // ...different place
+    const stillRing = plan(BASE).background.find((b) => b.kind === 'ring')!;
+    const movingRing = plan({...BASE, velocity: [1, 0]}).background.find((b) => b.kind === 'ring')!;
+    expect(rectArea(movingRing.rect)).toBe(rectArea(stillRing.rect)); // same cost...
+    expect(movingRing.rect.x1).toBeGreaterThan(stillRing.rect.x1); // ...different place
   });
 
   it('drops the ring rather than breaching the tile ceiling', () => {
     const p = plan({...BASE, maxTiles: 4});
     expect(p.background.find((b) => b.kind === 'ring')).toBeUndefined();
+  });
+
+  it('costs the same whatever the viewport spans', () => {
+    // The point of planning in rectangles: a view covering a quarter of a million tiles plans in
+    // the same handful of arithmetic as one covering four.
+    const wide = {...BASE, viewport: {...BASE.viewport, zoom: 0}};
+    const t = performance.now();
+    for (let i = 0; i < 200; i++) plan(wide);
+    expect(performance.now() - t).toBeLessThan(100); // 200 plans, not 200 enumerations
   });
 
   it('is deterministic', () => {
@@ -86,18 +87,19 @@ describe('deeperFetch', () => {
     expect(deeper.depth).toBe(p.choice.depth + 1);
     // Four times the tile density over a quarter of the area: the same count, give or take the
     // rounding of a box onto a grid.
-    expect(deeper.tiles.length).toBeLessThanOrEqual(p.foreground.tiles.length * 2);
+    expect(rectArea(deeper.rect)).toBeLessThanOrEqual(rectArea(p.foreground.rect) * 2);
   });
 
-  it('covers the centre of the view', () => {
+  it('folds back inside the foreground one level up', () => {
     const p = plan(BASE);
     const deeper = deeperFetch(BASE, p.choice)!;
-    // The tile under the viewport centre, at the deeper depth, must be in the set.
-    const centreTiles = deeper.tiles;
-    expect(centreTiles.length).toBeGreaterThan(0);
-    // And every one of them sits inside the foreground's coverage when folded back up a level.
-    const foreground = new Set(p.foreground.tiles);
-    expect(centreTiles.every((t) => foreground.has(t >> 2n))).toBe(true);
+    const folded = {
+      x0: deeper.rect.x0 >> 1,
+      y0: deeper.rect.y0 >> 1,
+      x1: deeper.rect.x1 >> 1,
+      y1: deeper.rect.y1 >> 1
+    };
+    expect(rectContains(p.foreground.rect, folded)).toBe(true);
   });
 
   it('stops at the grid floor', () => {

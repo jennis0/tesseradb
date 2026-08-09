@@ -23,8 +23,19 @@ let requests = 0;
 const errors = [];
 page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
-page.on('response', (r) => {
-  if (new URL(r.url()).pathname === '/v1/viewport') requests++;
+// **Counts-only requests are counted apart.** A client panning entirely from its replica still
+// revalidates on a timer — one `k = 0` request that refreshes the counts and the content key and
+// fetches no marks (`delta-serving.md` §8). That is the staleness bound working, not a cache miss,
+// and conflating the two makes a correct revalidation look like a failed revisit.
+let revalidations = 0;
+page.on('request', (r) => {
+  if (new URL(r.url()).pathname !== '/v1/viewport') return;
+  try {
+    if (JSON.parse(r.postData() ?? '{}').k === 0) revalidations++;
+    else requests++;
+  } catch {
+    requests++;
+  }
 });
 
 const snap = async (tag) => {
@@ -85,13 +96,14 @@ await drag(600);
 const back = await snap('panned back');
 
 console.log('');
-console.log(`panning into new territory cost : ${away - base} request(s)  (expect >= 1)`);
+// **Only the revisit is asserted.** Whether panning *out* costs anything depends on how far the
+// anticipatory ring already reached, so a zero there is a success and not a broken probe; and
+// panning far enough to escape the ring lands in a different density, which moves the depth the
+// budget chooses and so measures depth churn rather than caching.
+console.log(`panning into new territory cost : ${away - base} request(s)  (0 means the ring had it)`);
 console.log(`panning back to what we held cost: ${back - away} request(s)  (expect 0)`);
+console.log(`counts-only revalidations over the run: ${revalidations}`);
 console.log(`console errors: ${errors.length ? errors.join(' | ') : 'none'}`);
-console.log(
-  away - base >= 1 && back - away === 0
-    ? 'REVISIT FREE, and new territory still costs a request'
-    : 'UNEXPECTED'
-);
+console.log(back - away === 0 ? 'REVISIT FREE' : 'REVISIT COST A REQUEST');
 
 await browser.close();
