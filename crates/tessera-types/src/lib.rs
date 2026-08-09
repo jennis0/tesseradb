@@ -14,12 +14,12 @@ macro_rules! define_id_newtype {
 
         impl $name {
             #[inline]
-            pub fn new(raw: $inner) -> Self {
+            pub const fn new(raw: $inner) -> Self {
                 $name(raw)
             }
 
             #[inline]
-            pub fn raw(self) -> $inner {
+            pub const fn raw(self) -> $inner {
                 self.0
             }
         }

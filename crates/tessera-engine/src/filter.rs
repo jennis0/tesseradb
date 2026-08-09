@@ -62,6 +62,17 @@ pub enum FilterOperand {
     TextContains(String),
 }
 
+/// The code a predicate names when its value does not resolve.
+///
+/// **An unresolvable value is an empty operand, never a refusal** (`filter-surface.md` §2.1).
+/// Refusing would say the value exists, which is exactly what `listing = "per_viewer"` hides — so a
+/// filter naming a value the principal may not see must be answered, and answered with nothing.
+///
+/// Code 0 is the vocabulary's reserved *absent* sentinel: never drawn, never bound to a key. That
+/// makes it the correct answer rather than a convenient one — an item carrying no value must not
+/// match a filter naming some other value either, and this is the code such an item carries.
+pub const UNRESOLVABLE_VALUE: AttrLocalId = AttrLocalId::new(0);
+
 /// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.
 ///
 /// **Any boolean combination, evaluated inside the candidate** (decision 0059). Every node returns a

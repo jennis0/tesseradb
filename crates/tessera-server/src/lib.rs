@@ -11,6 +11,7 @@ pub mod config;
 pub mod control;
 pub mod cors;
 pub mod error;
+mod filter_dto;
 pub mod health;
 pub mod session;
 pub mod state;

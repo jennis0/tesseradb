@@ -176,10 +176,31 @@ async fn meta(
                 "category": category,
             })
         }).collect::<Vec<_>>(),
-        // Reference Sheet R5: the filter operand names a client may use.
-        // ⊘ Specified, not implemented: no filter contract exists yet, so this is always `[]` and a
-        // client must not read an empty list as "this deployment declined to expose its filters".
-        "filter_operands": Vec::<String>::new(),
+        // Reference Sheet R5: **which columns a client may filter on, and with which operators**
+        // (contracts §3.2, decision 0059). Empty when the schema declares nothing filterable.
+        //
+        // Per column rather than a flat operator list, because the operators are a property of the
+        // column's family: a category takes `eq`/`in` over its value set, a `utf8` column takes
+        // byte predicates. A client that had to infer this from `arrow_type` would be re-deriving
+        // the schema's own rule, and would get `text` wrong the moment that type lands.
+        //
+        // **`family` is what tells a viewer which control to draw.** A category has a value set, so
+        // `/v1/categories/{column}` fills a dropdown. A string has none — its values are row data,
+        // not a vocabulary, so nothing enumerates them and the control is a free-text box. That is a
+        // data-model fact rather than a missing endpoint (per-point-attributes; `filter-index.md`
+        // §2.3), and a client that expected a value list for a string would be waiting for an
+        // endpoint that will never exist.
+        //
+        // The combinators (`all_of`, `any_of`) are not published per column — they compose
+        // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
+        "filter_operands": meta.declared_scalars.iter().filter(|d| d.filter).map(|d| {
+            let (family, operands): (&str, &[&str]) = if d.vocabulary.is_some() {
+                ("category", &["eq", "in"])
+            } else {
+                ("string", &["eq", "prefix", "contains"])
+            };
+            serde_json::json!({ "column": d.name, "family": family, "operands": operands })
+        }).collect::<Vec<_>>(),
         // §7.2's selection constants. A client cannot read mark count as density without knowing
         // where the floor and the cap sit, so these are a genuine client need rather than test
         // convenience -- and the reference oracle cannot reproduce the definition without them.
@@ -329,6 +350,13 @@ struct ViewportReq {
     /// reduced offset would hand back cells the client could not interpret.
     #[serde(default)]
     underlay_offset: Option<u8>,
+    /// The filter expression (contracts §3.2), parsed by [`crate::filter_dto`].
+    ///
+    /// Absent is the unfiltered request. A malformed expression, an unknown column or an unbuilt
+    /// operator is a `422`; an unknown **value** is not — see that module's header for why the two
+    /// must not be conflated.
+    #[serde(default)]
+    filters: Option<serde_json::Value>,
 }
 
 /// Everything a `spawn_blocking` viewport closure hands back to the async side: the wire bytes
@@ -367,15 +395,46 @@ fn run_viewport(
         .unwrap_or_else(|| state.engine.config().k_max_marks)
         .min(state.max_k);
 
+    // **Parsed against the live schema, before any compute.** A malformed expression must not reach
+    // the engine, and a `422` here costs a request nothing — where refusing after the mask is built
+    // has already paid for a fragment.
+    let filter = match &req.filters {
+        None => None,
+        Some(value) => {
+            let meta = state.engine.meta();
+            let filterable: std::collections::HashSet<&str> = meta
+                .declared_scalars
+                .iter()
+                .filter(|d| d.filter)
+                .map(|d| d.name.as_str())
+                .collect();
+            let vocab_of: std::collections::HashMap<&str, &str> = meta
+                .declared_scalars
+                .iter()
+                .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
+                .collect();
+            Some(crate::filter_dto::parse(
+                value,
+                &|column| filterable.contains(column),
+                &|column, key| {
+                    let vocabulary = vocab_of.get(column)?;
+                    meta.vocabularies.get(vocabulary)?.code_of(key)
+                },
+            )?)
+        }
+    };
+
+    let mut request = ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
+        .stamp(stamp)
+        .underlay_offset(req.underlay_offset)
+        .cancel(Some(cancel));
+    if let Some(filter) = filter {
+        request = request.filter(filter);
+    }
+
     let out = state
         .engine
-        .viewport(
-            session,
-            ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
-                .stamp(stamp)
-                .underlay_offset(req.underlay_offset)
-                .cancel(Some(cancel)),
-        )
+        .viewport(session, request)
         .map_err(map_engine_error)?;
 
     // **Nothing is reshaped here any more.** The engine gathers column-major, so the wire's

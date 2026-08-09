@@ -9,8 +9,8 @@ error[E0308]: mismatched types
 note: associated function defined here
   --> src/lib.rs
    |
-   |             pub fn new(raw: $inner) -> Self {
-   |                    ^^^
+   |             pub const fn new(raw: $inner) -> Self {
+   |                          ^^^
 ...
    | define_id_newtype!(RowId, u32);
    | ------------------------------ in this macro invocation
