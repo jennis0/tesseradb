@@ -8,10 +8,14 @@ changed: the flat value column is the artefact of record and every accelerator i
 width other than `u32` and on a string column, and a ruling on surface §4's measured
 project-vs-per-tile rule. Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
-**Built so far:** the crate and its keyed reader, the `filter` placement in the schema and manifest,
-and the batch build's derived-posting emit for **category** columns. Everything else here — the value
-column itself, strings, numerics, lists, ingest, deletion, the fold — is specified and unbuilt, marked
-at each claim.
+**Built so far:** the **read path, for every family** — the value column and its presence bitmap for
+categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
+wire surface (`/v1/meta`'s operand list, the viewport's filter expression, the boolean tree). What
+remains unbuilt is the **write** side and two operands: ingest, flush extents, deletion and the fold
+touch no attribute artefact, so a filter refuses rather than answers short once the candidate reaches
+an entity allocated since the build; lists, `none_of` and `match` are specified and refuse by name;
+and the derived category postings are emitted, digested and **not read at serving**. Marked at each
+claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4;
@@ -52,11 +56,12 @@ visibility, so building it closes the `listing = "per_viewer"` refusal rather th
 is **entity-space, so it is slice-invariant**: a slice attaches, populates or drops without touching any
 of it (§7).
 
-> **⊘ Built: categories only.** For a category column the value column, its presence bitmap, the
-> masked scan (equality and set membership), `entity → value`, and the derived per-value postings all
-> exist, in both build implementations and under the manifest digest. **Everything else here is
-> specified and unbuilt** — every other family, ingest, deletion and the fold — and is marked at each
-> claim. Present behaviour is fail-closed
+> **⊘ Built: the read path, for every family.** The value column, its presence bitmap, the masked
+> scan behind every operator each family declares, and `entity → value` all exist for categories,
+> strings and numerics, in both build implementations and under the manifest digest; a category's
+> derived per-value postings are emitted and digested but not read at serving. **The write side is
+> not built** — ingest, deletion and the fold touch no attribute artefact — and neither are lists,
+> `none_of` or `match`; each is marked at its claim. Present behaviour is fail-closed
 > throughout: a filter that cannot be expressed narrows nothing, and a value set that cannot be gated
 > is withheld entirely.
 
