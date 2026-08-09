@@ -94,7 +94,16 @@ fn write_points_with_title(path: &Path) {
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let departments: Vec<Option<String>> = ids.iter().map(|&e| department_of(e)).collect();
-    let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
+    // Item 1 carries the **empty string**; item 2 carries **no value at all**. These must not
+    // become the same answer: the empty string is a value a corpus may legitimately hold.
+    let titles: Vec<Option<String>> = ids
+        .iter()
+        .map(|&e| match e {
+            1 => Some(String::new()),
+            2 => None,
+            _ => Some(title_of(e)),
+        })
+        .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -421,8 +430,7 @@ fn the_derived_postings_agree_with_the_value_column() {
     let dir = build_with(FILTER_SCHEMA);
     let out = dir.path().join("bundle");
     let cdir = column_dir(&out, "department");
-    let column = ValueColumn::open(&cdir.join("values.arrow"), Some(&cdir.join("presence.roaring")))
-        .unwrap();
+    let column = ValueColumn::open_dir(&cdir).unwrap();
     let postings = ColumnPostings::open_keyed(&postings_path(&out, "department")).unwrap();
 
     // Every entity, so the scan's candidate excludes nothing.
@@ -450,8 +458,7 @@ fn the_column_answers_entity_to_value() {
     let entity_of = source_to_entity(&out);
     let codes = codes_of(&out, "department");
     let cdir = column_dir(&out, "department");
-    let column = ValueColumn::open(&cdir.join("values.arrow"), Some(&cdir.join("presence.roaring")))
-        .unwrap();
+    let column = ValueColumn::open_dir(&cdir).unwrap();
 
     for source in 0..N {
         let entity = entity_of[&source];
@@ -485,7 +492,7 @@ fn a_universal_column_writes_no_presence_bitmap() {
         !cdir.join("presence.roaring").exists(),
         "a universal column must not write a presence bitmap"
     );
-    let column = ValueColumn::open(&cdir.join("values.arrow"), None).unwrap();
+    let column = ValueColumn::open_dir(&cdir).unwrap();
     assert_eq!(column.present().cardinality(), N);
 }
 
@@ -540,15 +547,20 @@ fn a_string_column_answers_all_three_predicates() {
 
     let entity_of = source_to_entity(&out);
     let cdir = column_dir(&out, "title");
-    let column = ValueColumn::open(&cdir.join("values.arrow"), None).unwrap();
+    let column = ValueColumn::open_dir(&cdir).unwrap();
 
     let mut all = croaring::Bitmap::new();
     all.add_range(0u32..N as u32);
 
+    // Follows the fixture rather than `title_of`: source 1 holds the empty string and source 2
+    // holds nothing, so neither is `title_of(e)`.
     let expect = |pred: &dyn Fn(&str) -> bool| -> Vec<u32> {
         let mut v: Vec<u32> = (0..N)
-            .filter(|&e| pred(&title_of(e)))
-            .map(|e| entity_of[&e])
+            .filter_map(|e| match e {
+                1 => pred("").then_some(entity_of[&1]),
+                2 => None,
+                _ => pred(&title_of(e)).then_some(entity_of[&e]),
+            })
             .collect();
         v.sort_unstable();
         v
@@ -567,7 +579,73 @@ fn a_string_column_answers_all_three_predicates() {
         expect(&|t: &str| t.contains("er-2"))
     );
     // And `entity → value`, the direction that made the substring route possible at all.
-    for source in 0..N {
-        assert_eq!(column.text_of(entity_of[&source]), Some(title_of(source).as_str()));
+    for source in (0..N).filter(|e| *e != 1 && *e != 2) {
+        assert_eq!(
+            column.text_of(entity_of[&source]),
+            Some(title_of(source).as_str())
+        );
     }
+}
+
+/// **The empty string is a value; absence is not.** A category spends the reserved code 0 on
+/// absence because its vocabulary reserves it out of the value space; a string has no spare value
+/// to spend, so absence is carried out of band. Folding them together would report an item as
+/// matching a value it does not have.
+#[test]
+fn an_absent_string_is_not_an_empty_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_title(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+
+    let entity_of = source_to_entity(&out);
+    let cdir = column_dir(&out, "title");
+    let column = ValueColumn::open_dir(&cdir).unwrap();
+
+    // Source 1 holds "", source 2 holds nothing.
+    assert_eq!(column.text_of(entity_of[&1]), Some(""));
+    assert_eq!(column.text_of(entity_of[&2]), None);
+
+    let mut all = croaring::Bitmap::new();
+    all.add_range(0u32..N as u32);
+
+    // An equality test for the empty string finds the item that holds it, and only that item.
+    let empties = column.scan_text_eq(&all, "");
+    assert_eq!(empties.iter().collect::<Vec<_>>(), vec![entity_of[&1]]);
+
+    // An empty *prefix* matches every item that holds any string — which excludes the absent one.
+    let any = column.scan_text_prefix(&all, "");
+    assert!(any.contains(entity_of[&1]));
+    assert!(!any.contains(entity_of[&2]));
+    assert_eq!(any.cardinality(), N - 1);
+}
+
+/// **A `filter`-only column is not in the hot column.** §10.3 routes by access cadence: per-query
+/// data lives in entity space, per-mark data in `columns.arrow`. Writing a filter-only column into
+/// the tail as well would spend a slot in every row — and for a `utf8` column it would be exactly
+/// the per-row string that `render` on `utf8` is refused for.
+#[test]
+fn a_filter_only_column_is_absent_from_the_hot_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_title(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+
+    let bundle = open_bundle(&out).unwrap();
+    let slice = &bundle.partitions.values().next().unwrap().slices["s0"];
+    let columns = &slice.segments[0].columns;
+    assert!(
+        columns.scalar("department").is_some(),
+        "a render column is in the tail"
+    );
+    assert!(
+        columns.scalar("title").is_none(),
+        "a filter-only column must not occupy a slot in every row"
+    );
 }

@@ -118,8 +118,8 @@ pub struct Schema {
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: String,
-    /// The hot column's width. Every attribute reaching this struct has one, `render` being the
-    /// only placement built (§1).
+    /// The declared type. For a `render` column this is the hot column's width; for a
+    /// `filter`-only one it is the entity-space column's.
     pub ty: ScalarType,
     /// The vocabulary this column's values are drawn from, for a category; `None` for a plain
     /// numeric attribute. Names a key in [`Schema::vocabularies`].
@@ -130,10 +130,19 @@ pub struct Attribute {
     pub vocabulary_kind: Option<VocabularyKind>,
     /// Whether this column carries an entity-space filter index (`filter-index.md` §2).
     ///
-    /// Only a category may set it, checked at parse: every other family's filter index needs a
-    /// per-column value dictionary that does not exist yet. The compiled form reaches the reader as
+    /// Categories and strings may set it, checked at parse; a numeric may not, its range predicate
+    /// being unbuilt. The compiled form reaches the reader as
     /// `MANIFEST.declared_scalars[..].filter`.
     pub filter: bool,
+    /// Whether this column occupies a slot in every row of `columns.arrow`.
+    ///
+    /// **Load-bearing, not informational.** The hot column's tail is *exactly* the render columns.
+    /// A `filter`-only column is entity-space and must not appear in it — that is the whole of
+    /// §10.3's routing distinction, and it is what lets a `utf8` column be filterable while
+    /// `render` on `utf8` stays refused. A build that wrote every declared attribute into the tail
+    /// would put a per-row string in the hot column by the back door, at 0.93 GiB per byte per row
+    /// per 10⁹.
+    pub render: bool,
 }
 
 /// Whether a vocabulary's value set is authored in full before the corpus exists, or grows as the
@@ -322,6 +331,7 @@ impl Schema {
                         vocabulary: Some(vocab_name),
                         vocabulary_kind: Some(vocab_kind),
                         filter: placement.filter,
+                        render: placement.render,
                     }
                 }
                 other => {
@@ -377,6 +387,7 @@ impl Schema {
                         vocabulary: None,
                         vocabulary_kind: None,
                         filter: placement.filter,
+                        render: placement.render,
                     }
                 }
             };

@@ -825,6 +825,7 @@ mod tests {
             arrow_type: width,
             vocabulary: vocabulary.map(str::to_string),
             filter: false,
+            render: true,
         }
     }
 

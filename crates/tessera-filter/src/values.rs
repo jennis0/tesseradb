@@ -39,6 +39,12 @@ use std::path::Path;
 use croaring::{Bitmap, Portable};
 use tessera_types::AttrLocalId;
 
+/// The value column's file name within a column's directory.
+pub const VALUES_FILE: &str = "values.arrow";
+/// The presence bitmap's, written only where presence is partial — its **absence is the signal**
+/// that the entity id is the array index.
+pub const PRESENCE_FILE: &str = "presence.roaring";
+
 /// A column's values, at the declared width.
 ///
 /// The width is the point, not a convenience: a hot column is priced at 0.93 GiB per byte per row
@@ -313,7 +319,23 @@ impl ValueColumn {
         }
     }
 
-    /// Read a column written by [`write_value_column`].
+    /// Read the column in `dir`, written by [`write_value_column`].
+    ///
+    /// **Takes the directory, not the two paths, so a caller cannot forget the presence bitmap.**
+    /// A column whose presence file exists but is not read addresses every slot after the first
+    /// absent entity by the wrong entity id — every value shifted along by one, no error anywhere,
+    /// and a filter reporting items as carrying values they do not have. The presence file's
+    /// existence *is* the signal that addressing is not positional, so the two must be resolved
+    /// together.
+    pub fn open_dir(dir: &Path) -> io::Result<Self> {
+        let presence = dir.join(PRESENCE_FILE);
+        Self::open(
+            &dir.join(VALUES_FILE),
+            presence.exists().then_some(presence.as_path()),
+        )
+    }
+
+    /// Read a column from explicit paths. Prefer [`Self::open_dir`], which cannot mismatch them.
     pub fn open(values_path: &Path, presence_path: Option<&Path>) -> io::Result<Self> {
         let codes = read_values(values_path)?;
         match presence_path {

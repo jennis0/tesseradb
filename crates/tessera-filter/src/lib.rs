@@ -46,4 +46,4 @@ mod column;
 mod values;
 
 pub use column::{resolve_union, ColumnPostings};
-pub use values::{write_value_column, Codes, ValueColumn};
+pub use values::{write_value_column, Codes, ValueColumn, PRESENCE_FILE, VALUES_FILE};

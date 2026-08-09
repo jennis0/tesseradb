@@ -527,6 +527,21 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     };
 
     // ---- 7. tiler and segment ---------------------------------------------------------
+    // Narrow each item's scalars to the render columns, in declaration order, so they align with
+    // `scalar_schema_of`'s filtered list. Done after the filter emit above, which needs every
+    // declared column including the `filter`-only ones.
+    if args.schema.attributes.iter().any(|a| !a.render) {
+        let keep: Vec<bool> = args.schema.attributes.iter().map(|a| a.render).collect();
+        for item in &mut tiler_items {
+            let mut kept = Vec::with_capacity(keep.iter().filter(|k| **k).count());
+            for (i, v) in item.scalars.iter().enumerate() {
+                if keep[i] {
+                    kept.push(v.clone());
+                }
+            }
+            item.scalars = kept;
+        }
+    }
     let scalar_schema = scalar_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
     write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema)
@@ -574,9 +589,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 fn scalar_schema_of(
     schema: &crate::schema::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+    // Render columns only — the segment's tail and `permute_attribute_tail`'s output must name the
+    // same columns in the same order, or every row's values land under the wrong headings.
     schema
         .attributes
         .iter()
+        .filter(|a| a.render)
         .map(|a| (a.name.clone(), a.ty))
         .collect()
 }
@@ -688,6 +706,7 @@ fn write_manifests(
                 arrow_type: a.ty,
                 vocabulary: a.vocabulary.clone(),
                 filter: a.filter,
+                render: a.render,
             })
             .collect(),
         // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a

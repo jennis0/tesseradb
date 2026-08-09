@@ -978,16 +978,17 @@ impl BatchColumn {
         schema_decl: &crate::schema::Schema,
     ) -> Result<ScalarValue> {
         Ok(match self {
-            // A null is *absent*, and the empty string is what the caller supplied. They are
-            // deliberately not folded together here — contracts §2.4 makes the empty string a
-            // `422` on the ingest plane for the same reason, an unset field and a client bug both
-            // producing it. The build's own reader cannot yet carry the distinction downstream
-            // (⊘ `write_column_values`), which is recorded there rather than papered over here.
-            BatchColumn::Text(values) => ScalarValue::Utf8(if values.is_null(row) {
-                String::new()
-            } else {
-                values.value(row).to_string()
-            }),
+            // A null is *absent*; the empty string is a value the caller supplied. Carried apart
+            // rather than folded together, because a string has no spare in-band value to spend on
+            // absence the way a category spends code 0 — and folding them would report an item as
+            // matching a value it does not have.
+            BatchColumn::Text(values) => {
+                if values.is_null(row) {
+                    ScalarValue::Null
+                } else {
+                    ScalarValue::Utf8(values.value(row).to_string())
+                }
+            }
             BatchColumn::Keys(keys) => {
                 let code = if keys.is_null(row) {
                     crate::schema::ABSENT_CODE

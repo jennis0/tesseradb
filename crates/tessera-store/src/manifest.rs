@@ -63,6 +63,17 @@ pub struct DeclaredScalar {
     /// no caller can name it. That is a capability that quietly went missing, not a wrong answer —
     /// still worth refusing, but not for the reason a first draft of this comment gave.
     pub filter: bool,
+    /// Declared `render`: this column occupies a slot in every row of `columns.arrow`.
+    ///
+    /// **The tail is exactly the render columns.** A `filter`-only column is entity-space and must
+    /// not appear in the hot column — §10.3 routes by access cadence, and putting a per-query column
+    /// in a per-mark structure spends 0.93 GiB per byte per row per 10⁹ for nothing. Flush and merge
+    /// take their writer schema from here, so this flag is what keeps a streamed segment's tail
+    /// identical to the build's.
+    ///
+    /// No `serde(default)`: pre-release there is no bundle to stay compatible with (decision 0048),
+    /// and a defaulted placement is one that reads as declared when it was inferred.
+    pub render: bool,
 }
 
 impl DeclaredScalar {
@@ -712,7 +723,7 @@ mod tests {
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar =
-            serde_json::from_str(r#"{"name": "score", "arrow_type": "f32", "filter": false}"#)
+            serde_json::from_str(r#"{"name": "score", "arrow_type": "f32", "filter": false, "render": true}"#)
                 .expect("f32 parses");
         assert_eq!(good.arrow_type, ScalarType::F32);
         assert_eq!(
@@ -742,6 +753,7 @@ mod tests {
             arrow_type: ScalarType::U16,
             vocabulary: Some("departments".to_string()),
             filter: false,
+            render: true,
         };
         assert_eq!(category.wire_type(), ScalarType::Utf8);
         assert_eq!(category.arrow_type, ScalarType::U16);
@@ -751,6 +763,7 @@ mod tests {
             arrow_type: ScalarType::U16,
             vocabulary: None,
             filter: false,
+            render: true,
         };
         assert_eq!(
             plain.wire_type(),

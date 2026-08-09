@@ -1494,9 +1494,12 @@ pub(crate) fn write_filter_postings(
 /// (`probes/2026-08-08-filter-layout/`). Writing an all-ones bitmap would be correct and would cost
 /// the scan that path, so the distinction lives in the file set rather than in the bitmap's contents.
 ///
-/// The reserved absent code is what "carries no value" means for a category, so it decides presence
-/// here — the same code the entity-major buffer is initialised to, which is safe only because the
-/// attribute reader's count check proves every entity was visited.
+/// **Absence is out of band in both families, and by different means.** A category spends the
+/// reserved code 0, which its vocabulary reserves out of the value space. A string has no spare
+/// value to spend — the empty string is one a corpus may legitimately hold, and contracts §2.4
+/// already refuses it on the ingest plane because an unset field and a client bug both produce it —
+/// so absence arrives as `ScalarValue::Null`. Folding the two together would report an item as
+/// matching a value it does not have.
 fn write_column_values(
     values_path: &Path,
     presence_path: &Path,
@@ -1507,23 +1510,19 @@ fn write_column_values(
     let mut universal = true;
 
     // **A string's absence is not an empty string**, and a category's is not code 0 by coincidence:
-    // in both families the "carries nothing" sentinel is out of band, because the in-band value it
-    // would otherwise borrow — the empty string, code 0 — is one a corpus may legitimately hold.
+    // in both families the "carries nothing" marker is out of band. A category spends the reserved
+    // code 0, which its vocabulary reserves out of the value space; a string has no spare value to
+    // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
+    // `ScalarValue::Null` and the empty string arrives as itself.
     let codes = if attribute.ty == ScalarType::Utf8 {
         let mut held: Vec<String> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
             match value {
-                ScalarValue::Utf8(text) if !text.is_empty() => {
+                ScalarValue::Utf8(text) => {
                     present.add(entity as u32);
                     held.push(text.clone());
                 }
-                // ⊘ The attribute reader initialises unset slots to the type's zero, which for a
-                // string *is* the empty string — so at this point in the pipeline an absent value
-                // and a genuinely empty one are indistinguishable. Both are treated as absent,
-                // which is the fail-closed reading: a filter naming a value omits the item, which
-                // narrows `M_sel` and is safe under I12. Carrying the distinction needs a
-                // null-aware attribute reader and is issue-sized, not a rider here.
-                ScalarValue::Utf8(_) => universal = false,
+                ScalarValue::Null => universal = false,
                 other => {
                     return Err(BuildError::Invalid(format!(
                         "attribute '{}' is declared `utf8` but carries {other:?}",
@@ -1618,6 +1617,13 @@ fn permute_attribute_tail(
 ) -> Result<Vec<(String, ScalarColumnData)>> {
     let mut out = Vec::with_capacity(by_entity.len());
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
+        // **The tail is exactly the render columns.** A `filter`-only column is entity-space and
+        // has already been written there; including it here would give it a slot in every row as
+        // well, which is the per-row cost §10.3's routing exists to avoid and — for a `utf8`
+        // column — the one `render` on `utf8` is refused for outright.
+        if !attribute.render {
+            continue;
+        }
         let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
         for &entity in entity_row {
             column

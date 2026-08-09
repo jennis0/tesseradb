@@ -28,6 +28,16 @@ pub enum ScalarValue {
     /// the manifest rather than a convention between a schema author and their client.
     TimestampUs(i64),
     Utf8(String),
+    /// **No value at all** — distinct from every in-band value, including the empty string.
+    ///
+    /// A category expresses absence in band, as the reserved code 0, because its value space is the
+    /// vocabulary's and 0 is reserved out of it. A string has no such spare value: the empty string
+    /// is one a corpus may legitimately hold, and contracts §2.4 already refuses it on the ingest
+    /// plane precisely because an unset field and a client bug both produce it. Folding the two
+    /// together here would make "carries nothing" and "carries the empty string" the same answer to
+    /// every filter — and the filter index would then report an item as matching a value it does
+    /// not have.
+    Null,
 }
 
 /// The Arrow type of a declared scalar column, used to build `columns.arrow`'s schema
