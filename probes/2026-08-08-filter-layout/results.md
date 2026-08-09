@@ -552,7 +552,9 @@ which carries the tables; this section is the pointer, not the record.
   loop), as is the 1-byte character bloom. Arm 6's needle `-000` plus an absent and a
   25%-matching needle bracket the prefilter's range. Trigram postings were not built; a measured
   count pass (12.25 entries/value) prices them ~15–25 GB per 10⁹ column of 14-byte values,
-  modelled from arm 9's bytes-per-entry.
+  modelled from arm 9's bytes-per-entry. Confirmed at 10⁹ directly: a 25% **contiguous**
+  candidate's `contains` is 2.9–3.9 s shipped — also outside the filter budget, correcting §2.2's
+  "one cell" reading — and the region search brings it to 410 ms.
 
 ## Method
 

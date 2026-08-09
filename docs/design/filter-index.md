@@ -153,12 +153,34 @@ rather than borrowing the fixed-width one (probe arm 6, at 10⁸):
 | `contains` | 9.7 ns | 96 ns |
 
 The ratio is what the storage is: per value the scan streams two 8-byte offsets and the value's
-bytes, about 22 against a `u32` column's 4. Equality is therefore near memory bandwidth for the
-shape, and the remaining headroom is a narrower offset — not an index. **The one cell outside the
-budget is a scattered candidate over a text column**: `contains` at 96 ns is ~1 s per 10⁷ candidate
-entities, so a poorly-correlated principal issuing a substring filter at 10⁹ is at the edge of the
-ruled budget. That is the corner an accelerator would address if one is ever wanted, and it is a
-narrower corner than "broad coverage" or "text" alone.
+bytes, about 22 against a `u32` column's 4.
+
+**`contains` is outside the budget on a broad candidate of either shape, and by more than the
+scattered column alone suggests.** At 9.7 ns a *contiguous* 25% candidate at 10⁹ is 2.4 s by this
+table's own arithmetic — measured directly at 2,868 ms, and 3,890 ms for a needle many values share
+(probe arm 12). The scattered column is worse still: 96 ns is ~1 s per 10⁷ candidate entities. An
+earlier revision of this section read the scattered figure as the only cell over budget and did not
+do the multiplication for the contiguous one; the correction matters, because the two have different
+fixes.
+
+Where the time goes was measured rather than assumed (arm 11), and it inverts between the two
+shapes. Scattered, the 96 ns is ~31 ns of cache-line fetches for the offsets and the value's bytes
+and ~52 ns of scanning, and the scanning increment is itself mostly latency on a value's second
+line — so a faster inner loop recovers only 10–20%. Contiguous, memory is nearly free (1.1 ns of
+10.9) and the loop is ~80% of the cost.
+
+Two consequences follow, and the second is a floor rather than a gap:
+
+- **A contiguous candidate does not need a per-value loop at all.** The values it covers are
+  *adjacent bytes*, so a substring search can run over the concatenated region and map its hits back
+  through the offsets, discarding matches that straddle a boundary. Measured 11.4 → 1.6 ns per
+  candidate entity, and 2,868 → 410 ms for the 25% cell above, at no storage cost.
+- **No candidate-driven scan brings a broad *scattered* principal inside the budget**, whatever the
+  predicate does, because one random cache line per candidate entity is ~13–15 ns and 10⁸ candidates
+  is therefore ≥1.5 s before any comparison. Closing that needs the per-value memory traffic to
+  shrink — a packed descriptor of offset, length and a trigram summary in one word measured
+  92.5 → 39 ns, at **+8 GB per 10⁹ column** — or an index, which is a disclosure question as well as
+  a storage one (§3). Neither is built.
 
 **Set membership costs what equality costs where the domain allows a table.** A `u8` or `u16`
 category's whole code domain fits in 32 bytes or 8 KB, so `in` is a constant-time lookup built once

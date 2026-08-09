@@ -61,16 +61,17 @@ cell is the *worst* cell, not the only one over.
 | 4 | **Trigram postings** (the design cut to [#44]) | **NOT measured — not built.** The only route under the ~13–15 ns/candidate random-access floor for a broad scattered principal | Postings resident under load | **Modelled from measured counts** (§6): 12.25 posting entries/value at ~1.25–2 B/entry scattered ≈ **15–25 GB** for this 14-byte-value column; scales ≈ linearly with value length — a ~100-byte column ≈ 110–180 GB, which is where the old 100–200 GB figure lives | **Breaks §3.8 as a class** — arm 9 measured 2.1 ms hidden-vs-absent on exactly this posting shape; a needle's trigram statistics are corpus-wide quantities (C4-shape, C8-adjacent content). Needs a registered row and an owner ruling, not a footnote | Large: build, fold rebuild, extents, ingest; plus the verify path (which the flat column does supply — the #44 blocker is gone, the price is not) |
 
 Options 1 and 2/3 **compose**: the traversal hands long runs to the region search and single-slot
-runs to the descriptor path — each covers exactly the shape the other cannot. Together, measured
-at 10⁸ and confirmed at 10⁹ (§4):
+runs to the descriptor path — each covers exactly the shape the other cannot. Together, at 10⁹
+(§4; the first three rows are directly measured, the last two modelled from the measured
+constants):
 
 | Cell at 10⁹ | shipped | after 1 + 3 | inside 0.5–1 s? |
 |---|---|---|---|
-| 25% contiguous, needle `-000` | ~2.7 s | **~0.4 s** | yes — was not |
+| 25% contiguous, needle `-000` | 2,868 ms measured | **410 ms** measured | yes — was not |
+| 25% contiguous, 25%-matching needle | 3,890 ms measured | 1,663 ms measured | **no** — result-bound |
+| 1% scattered (10⁷ candidates) | 971 ms measured | **261 ms** measured | yes — was borderline |
 | whole-corpus contiguous | ~11 s | ~1.7 s | needle-dependent — absent/rare yes, common no |
-| 1% scattered (10⁷ candidates) | ~0.9–1.0 s | **~0.30 s** | yes — was borderline |
-| 10% scattered (10⁸ candidates) | ~9.3 s | **~3.0 s** | **no — see §1's floor** |
-| 25%-matching needle, any scattered candidate | ~1.0 s per 10⁷ | ~0.85 s per 10⁷ | only while the candidate is small |
+| 10% scattered (10⁸ candidates) | ~9.7 s | **~2.6 s** | **no — see §1's floor** |
 
 The residual over-budget corner is therefore **a broad scattered principal**, and for a
 common-substring needle **any large scattered candidate**: the first is bounded by memory latency
@@ -128,7 +129,29 @@ Reading it:
 
 ## 4. Evidence — 10⁹ confirmation
 
-<!-- 1e9 table pending -->
+Medians of three (`run-textaccel-1e9-{1,2,3}.csv`, `lite` mode), ns per candidate entity. Every
+constant is within noise of its 10⁸ counterpart — the scan stays linear in *n* at this cell as it
+did in arm 1's sweep — and the milliseconds are now direct measurements of the budget cells
+rather than multiplications:
+
+| Arm | contig 1% `-000` | broad 25% `-000` | broad 25% `erg` | broad 25% `qzx` | scattered 1% `-000` | scattered `erg` | scattered `qzx` |
+|---|---|---|---|---|---|---|---|
+| shipped | 10.98 | 11.47 (2,868 ms) | 15.56 (3,890 ms) | 9.02 (2,255 ms) | 97.2 (971 ms) | 98.8 | 71.9 |
+| memmem-value | 13.24 | 12.79 | 16.11 | 12.95 | 101.3 | 110.7 | 110.3 |
+| memmem-concat | **1.67** | **1.64 (410 ms)** | **6.65 (1,663 ms)** | **0.69 (172 ms)** | 77.5 | 88.8 | 73.0 |
+| swar-value | 10.69 | 10.60 | 13.70 | 8.10 | 76.2 | 90.5 | 75.8 |
+| desc64 | 3.54 | 3.52 | 14.11 | 7.75 | 32.4 (324 ms) | 90.2 | 71.7 |
+| desc64+tri32 | 3.15 | 3.18 (795 ms) | 13.25 | 6.12 | **26.1 (261 ms)** | **84.5** | **51.3** |
+
+The scattered candidate here is 10⁷ entities (1% of 10⁹), so its shipped 971 ms *is* the "~1 s
+per 10⁷ candidate entities" the campaign has been quoting, measured directly.
+
+**The baseline these cells were taken against.** The `pack` result-sink change
+(commit 7e8daed) landed in `values.rs` while this campaign ran; its diff is confined to
+`walk_typed`'s fixed-width block packing and does not touch `walk_text`, and an A/B re-run of the
+shipped text cells after it landed showed ratios at parity — the absolute numbers of that re-run
+are not quoted because a concurrent ~10-core load was on the machine by then. The tables above
+are from the pre-pack binary on the quiet machine.
 
 ## 5. Security disposition
 
