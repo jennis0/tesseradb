@@ -112,23 +112,35 @@ where a column genuinely covers everything.
 
 A filter operand is evaluated by scanning the value column **under the candidate mask** — `M_auth`
 pushed in first, as §8.2 requires — and the measured cost is per candidate entity rather than per
-corpus byte: **~0.8 ns** with a contiguous candidate, **~16 ns** with a scattered one, stable across
-three orders of magnitude and linear in *n*.
+corpus byte: **~0.24 ns** with a contiguous candidate, **~10 ns** with a scattered one, stable across
+three orders of magnitude and linear in *n*. A whole-corpus scan at 10⁹ is ~240 ms.
 
 Those are the **shipped scan's** figures, and the distinction earned its keep: the campaign's layout
 arms reimplement the loop, which is right for comparing storage shapes and wrong for sizing the code —
 the reimplementation was 23% optimistic against the scan as it then stood. Pointing the harness at
-`ValueColumn` and then iterating **runs rather than values** — a candidate run is a contiguous slice
-of the value column, because the entity id *is* the index — took the contiguous case from 3.10 ns to
-0.98 ns, with identical results (probe arm 4).
+`ValueColumn` and then optimising it took the contiguous case from 3.10 ns to 0.24 ns, with identical
+results throughout (probe arm 4). Two changes, and each is a property of the *shape* of the work
+rather than of the values:
 
-The same observation is worth more on the **partial-presence** path, where rank is what costs: slot
-*k* is the *k*-th set bit of the presence bitmap, so a per-bit walk pays O(present) however small the
-candidate is. Rank is affine *inside* a run — entity `e` in a run from `ps` with `base` bits before it
-is at slot `base + (e − ps)` — so merging the two bitmaps' runs gives every slot by arithmetic. A 1%
-candidate over a slice-blocked column went from 124.89 ms to **0.89 ms**. Arm 1 read that cell as a
-cost of the addressing structure; it was the rank algorithm, and the presence bitmap is now a filter
-on work rather than a tax on it.
+- **Iterate runs, not values.** A candidate run is a contiguous slice of the value column, because
+  the entity id *is* the index. This is worth more still on the **partial-presence** path, where
+  rank is what costs: slot *k* is the *k*-th set bit of the presence bitmap, so a per-bit walk pays
+  O(present) however small the candidate is. Rank is affine *inside* a run — entity `e` in a run
+  from `ps` with `base` bits before it is at slot `base + (e − ps)` — so merging the two bitmaps'
+  runs gives every slot by arithmetic. A 1% candidate over a slice-blocked column went from
+  124.89 ms to **0.46 ms**. Arm 1 read that cell as a cost of the addressing structure; it was the
+  rank algorithm, and the presence bitmap is now a filter on work rather than a tax on it.
+- **Traverse at the column's own type**, so the `Codes` dispatch and the widening to a common
+  numeric leave the inner loop, and a numeric bound is narrowed to the column's native type once per
+  scan. Narrowing also settles the degenerate cases once rather than per element: a bound below the
+  type's floor constrains nothing, one above its ceiling excludes everything, a fractional bound on
+  an integer column rounds outward.
+
+The second change carries a caveat worth stating at the site, because the obvious form of it is a
+regression: **a scattered candidate is one-element runs**, and building a slice iterator per run
+costs more than the direct index it replaces — measured at +20% on the scattered arm before a
+length-1 fast path was added. Anything that revisits this traversal must measure both candidate
+shapes.
 
 **The budget is a filter budget, not a viewport budget** (owner ruling, 2026-08-08): **0.5–1 s is
 acceptable for a filter change at 10⁹**, because a filter changes far less often than the viewport does.
@@ -137,13 +149,14 @@ close:
 
 | Candidate | Affordable coverage at 10⁹, 1 s |
 |---|---|
-| Contiguous | ~1.3×10⁹ entities — **the whole corpus at 10⁹** |
-| Scattered | ~6.6×10⁷ entities — 6.6% |
+| Contiguous | ~4×10⁹ entities — **four times the whole corpus at 10⁹** |
+| Scattered | ~1×10⁸ entities — 10% |
 
-Measured, a 25%-coverage contiguous principal costs **202 ms** over a universal column and **19 ms**
-over a slice-blocked one: inside the band several times over, with no accelerator of any kind. Only near-total coverage exceeds it — a full-corpus scan measures ~3.0 s — so the corner an
-accelerator addresses is the privileged tail, not "broad coverage" as an earlier revision framed it
-against a borrowed 50 ms viewport budget.
+Measured, a 25%-coverage contiguous principal costs **61 ms** over a universal column and **12 ms**
+over a slice-blocked one: inside the band by more than an order of magnitude, with no accelerator of
+any kind. **No coverage exceeds the budget on a contiguous candidate** — the whole corpus scans in
+~240 ms — so the corner an accelerator addresses is a scattered candidate at high coverage, and not
+"broad coverage" as an earlier revision framed it against a borrowed 50 ms viewport budget.
 
 The security property this buys is the reason it leads. **The work is a function of `(candidate,
 column)` and never of the value**, so a value the principal cannot see costs exactly what a value that
@@ -373,8 +386,8 @@ postings** during `M_auth` construction. A single value intersected against a ca
 operation and never enters that regime: measured at 10⁹, the worst posting shape at the worst coverage
 costs 49.5 ms (§2.3). **Do not cite the union spread against a filter operand.**
 
-What contiguity does still govern is the *scan*, where it is worth **~20×**: ~0.8 ns per candidate
-entity contiguous against ~16 ns scattered. A contiguous candidate collapses to a handful of runs, so
+What contiguity does still govern is the *scan*, where it is worth **~40×**: ~0.24 ns per candidate
+entity contiguous against ~10 ns scattered. A contiguous candidate collapses to a handful of runs, so
 the scan walks slices of the value column; a scattered one degenerates to a run per entity and pays
 cache misses on every read (§2.2).
 
@@ -601,10 +614,10 @@ an integer identity and repeats heavily, and no other family has either property
 flat table or in an index suited to that type.
 
 Two probes then settled what reasoning had been guessing at
-([`2026-08-08-filter-layout`](../../probes/2026-08-08-filter-layout/)). The masked scan is **~0.8 ns per
-candidate entity** contiguous and **~16 ns** scattered, stable across 10⁶–10⁹ — which refuted a 5–10 GB/s
+([`2026-08-08-filter-layout`](../../probes/2026-08-08-filter-layout/)). The masked scan is **~0.24 ns per
+candidate entity** contiguous and **~10 ns** scattered, stable across 10⁶–10⁹ — which refuted a 5–10 GB/s
 bandwidth model that had predicted 40–80 ms for a 25% principal at 10⁹ against a measured 730 ms, itself
-since improved ~5× by run-based iteration (arm 4). The
+since improved 13–272× by run-based iteration and typed traversal (arm 4). The
 addressing choice was measured rather than argued: bare array where presence is universal, Roaring
 presence bitmap where partial, explicit `(entity_id, value)` pairs never optimal on either axis, and run
 tables a trap that is smallest on disk and collapses at 2.9–10.2 s on a broad candidate. And the derived

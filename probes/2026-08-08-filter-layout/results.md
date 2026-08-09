@@ -10,6 +10,9 @@ where each covered entity's value sits.
 ## Results
 
 **Two constants govern the masked scan, and they are stable across three orders of magnitude.**
+*These are arm 1's, over a reimplemented per-value loop, and they are what chose the layout. **The
+constants to design against are arm 4's**, over the shipped code after two optimisations: ~0.24 ns
+contiguous and ~10 ns scattered.*
 
 | | ns per candidate entity | Measured at |
 |---|---|---|
@@ -78,10 +81,11 @@ Measured, a 25%-coverage contiguous principal costs **730 ms** — inside the ba
 at all. Only near-total coverage exceeds it: a full-corpus scan measures ~3.0 s. **The corner is the
 privileged tail, not broad coverage**, and it is the only place an accelerator earns anything.
 
-> **Superseded by arm 4, which measures the shipped code and then makes it 3–140× faster.** These
+> **Superseded by arm 4, which measures the shipped code and then makes it 13–272× faster.** These
 > thresholds derive from arm 1's reimplementation at ~2.9 ns per candidate entity. The shipped scan
-> is run-based and measures **~0.8 ns** contiguous, so a 1 s budget now buys roughly the whole corpus
-> at 10⁹ rather than a third of it, and the "privileged tail" corner all but closes. The table is
+> is run-based and typed, and measures **~0.24 ns** contiguous, so a 1 s budget now buys the whole
+> corpus at 10⁹ four times over rather than a third of it, and the "privileged tail" corner closes
+> outright: a full-corpus scan is ~240 ms. The table is
 > kept because the *method* — thresholds in candidate entities rather than bytes — is what the design
 > uses, and because a later change that lost the run path would land back here.
 
@@ -140,13 +144,13 @@ meets while no bits match — is **not measured**, and reasoning says work there
 proportional while the result is empty. That case, not the one measured, is where a residual could
 live.
 
-## Arm 4 — the shipped scan, and two run-based rewrites of it
+## Arm 4 — the shipped scan, and the two optimisations that took it 13–272× faster
 
 Arms 1–3 reimplement the scan in this crate, which is right for comparing *layouts* but means their
 constants describe the approach rather than the code. `realscan`
 ([`layoutprobe/src/bin/realscan.rs`](layoutprobe/src/bin/realscan.rs), raw
-[`run-realscan.csv`](run-realscan.csv)) calls `tessera_filter::ValueColumn::scan_eq` directly, over
-both presence shapes.
+[`run-realscan.csv`](run-realscan.csv) — three runs per scale, medians below) calls
+`tessera_filter::ValueColumn::scan_eq` directly, over both presence shapes.
 
 **The reimplementation was optimistic, and by enough to matter.** At 10⁹ and 25% coverage the model
 says 730 ms; the shipped code said **900 ms** — 23% slower, because the model's loop and the shipped
@@ -155,7 +159,10 @@ against itself.
 
 ### What changed
 
-Both rewrites are the same observation applied twice: **iterate runs, not values.**
+Two independent changes, measured separately because the second one regressed a cell the first had
+improved.
+
+**(1) Iterate runs, not values** — the same observation applied to both presence shapes.
 
 - **Universal presence** — the entity id *is* the array index, so a candidate run is a contiguous
   slice of the value column. The loop becomes a bulk range read and a plain integer walk.
@@ -165,37 +172,60 @@ Both rewrites are the same observation applied twice: **iterate runs, not values
   `e` is at slot `base + (e − ps)`. Merging the two bitmaps' runs gives every slot by arithmetic, at
   O(runs).
 
-### Measured, at 10⁹
+**(2) Traverse the column at its own type.** The scan dispatched on the `Codes` variant *per
+element* and compared through a widened `Scalar`, so every value paid a match and a widening. The
+traversal is now monomorphic per column type, and a numeric bound is narrowed to the column's native
+type **once per scan** — which also settles the degenerate cases once rather than a billion times: a
+bound below the type's floor constrains nothing, one above its ceiling excludes everything, and a
+fractional bound on an integer column rounds outward.
 
-| Presence | Candidate | Before | After | |
-|---|---|---|---|---|
-| universal | 1% contiguous | 30.97 ms (3.10 ns) | **9.81 ms (0.98 ns)** | 3.2× |
-| universal | 25% broad | 900.51 ms (3.60 ns) | **201.55 ms (0.81 ns)** | 4.5× |
-| universal | 1% scattered | 276.75 ms (27.67 ns) | **161.90 ms (16.19 ns)** | 1.7× |
-| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | **0.89 ms (0.09 ns)** | **140×** |
-| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | **18.97 ms (0.08 ns)** | 9.3× |
-| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | **27.25 ms (2.73 ns)** | 14.8× |
+### Measured, at 10⁹ — medians of three
+
+| Presence | Candidate | Original | + runs | + typed | Total |
+|---|---|---|---|---|---|
+| universal | 1% contiguous | 30.97 ms (3.10 ns) | 9.81 ms | **2.37 ms (0.24 ns)** | **13×** |
+| universal | 25% broad | 900.51 ms (3.60 ns) | 201.55 ms | **60.84 ms (0.24 ns)** | **15×** |
+| universal | 1% scattered | 276.75 ms (27.67 ns) | 161.90 ms | **101.18 ms (10.12 ns)** | 2.7× |
+| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.46 ms (0.05 ns)** | **272×** |
+| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **11.50 ms (0.05 ns)** | 15× |
+| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **17.82 ms (1.78 ns)** | 23× |
 
 Results are identical throughout; only the timings move.
 
-**The 140× is the O(present) term disappearing**, and it is the largest single win in this campaign.
+**The 272× is the O(present) term disappearing**, and it is the largest single win in this campaign.
 The old walk paid for the *whole* presence bitmap whatever the candidate asked for, so a 1% candidate
 over a 10%-present column did a hundred times the necessary work. Arm 1 measured that shape as its
 worst cell and attributed it to the addressing structure; it was the rank algorithm.
 
-**The constants to design against are now ~0.8 ns per candidate entity contiguous and ~16 ns
-scattered** for a universal column, and lower for a partial one — the presence bitmap having become
-a *filter* on work rather than a tax on it.
+**The typed traversal regressed the scattered arm before it improved it**, and that is the finding
+most worth carrying forward. Its first form took scattered from 161.90 ms to **194.34 ms** — a 20%
+regression — because **a scattered candidate is one-element runs**, and constructing a slice iterator
+per run costs more than the direct index it replaced. A length-1 fast path fixed it and then
+overtook the previous figure. A change measured only on the contiguous arm would have shipped that
+regression, on precisely the shape a poorly-correlated attribute produces.
 
-**Neither rewrite touches the timing property.** Run structure belongs to the candidate, presence to
-the column; neither is a function of the value sought. The optimisation that would not be safe —
-stopping once the result is complete — remains forbidden. Both also degrade to the old cost rather
-than past it: a scattered candidate is one run per entity, which is what the per-value loop was
-already paying.
+**The constants to design against are ~0.24 ns per candidate entity contiguous and ~10 ns
+scattered** for a universal column, and ~0.05 ns / ~1.8 ns for a partial one — the presence bitmap
+having become a *filter* on work rather than a tax on it. A whole-corpus scan at 10⁹ is **~240 ms**,
+against ~3.0 s when this campaign started.
+
+**The scattered arm is the noisy one** — 98–110 ms across runs against ±3% for the others, because
+it is the only cell bound by random access into the value array. Quote it as a range.
+
+**Neither change touches the timing property.** Run structure belongs to the candidate, presence to
+the column, the traversal to the column's declared type; none is a function of the value sought. The
+optimisation that would not be safe — stopping once the result is complete — remains forbidden. Both
+also degrade to the old cost rather than past it: a scattered candidate is one run per entity, which
+is what the per-value loop was already paying.
 
 **Not taken**, and a separate decision: the scan is single-threaded. Splitting by container is
 embarrassingly parallel, but it borrows capacity from concurrent requests, which the
 compute-admission gate exists to ration — so it is a concurrency decision rather than a free win.
+
+**The residency problem this does not touch.** `FilterColumns::open` materialises every declared
+column into memory at generation open — tens of GB at 10⁹ × 16 columns, paid whether or not a filter
+is ever issued. That is a bigger operational term than anything measured here, and it is the next
+change rather than a further constant-factor one.
 
 ## Arm 3 — getting the result into row space
 

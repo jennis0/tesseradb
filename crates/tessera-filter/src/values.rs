@@ -212,26 +212,91 @@ pub enum Scalar {
     Float(f64),
 }
 
-impl Scalar {
-    /// Order two scalars, `None` where no order exists.
-    ///
-    /// **`None` is NaN, and NaN matching nothing is the intended semantic**, inherited from IEEE
-    /// rather than implemented: every comparison with NaN is false, so a NaN value satisfies no
-    /// bound and no equality, including `= NaN`. That is SQL's treatment of an unknown, and it is
-    /// why the design needs no order-preserving key — the sign-flip trick exists to make IEEE bits
-    /// sort as unsigned bytes in a byte-ordered store, and nothing here compares bytes.
-    ///
-    /// A mixed Int/Float comparison goes through `f64`, which is lossy above 2⁵³ on the integer
-    /// side. That is reachable only by a caller giving a fractional bound for a 64-bit integer
-    /// column — `score >= 1e18.5` — where the alternative is refusing a request that plainly means
-    /// something. Stated rather than hidden.
-    fn partial_cmp(self, other: Scalar) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Scalar::Int(a), Scalar::Int(b)) => Some(a.cmp(&b)),
-            (Scalar::Float(a), Scalar::Float(b)) => a.partial_cmp(&b),
-            (Scalar::Int(a), Scalar::Float(b)) => (a as f64).partial_cmp(&b),
-            (Scalar::Float(a), Scalar::Int(b)) => a.partial_cmp(&(b as f64)),
+/// What a bound becomes once narrowed to a column's own type.
+enum Narrowed<T> {
+    /// No constraint on this side — the bound lies beyond the type's range in the permissive
+    /// direction, or was absent.
+    Unbounded,
+    /// Nothing can satisfy it: the bound lies beyond the type's range in the excluding direction.
+    Unsatisfiable,
+    /// An inclusive native bound. Exclusivity is folded in by moving the bound one step, which is
+    /// exact for integers.
+    At(T),
+}
+
+/// The lower bound as an **inclusive** native value.
+fn narrow_lo<T>(e: Option<Endpoint>) -> Narrowed<T>
+where
+    T: TryFrom<i128> + Bounded,
+{
+    let Some(e) = e else {
+        return Narrowed::Unbounded;
+    };
+    // `gt x` over integers is `gte x+1`; the saturating add keeps the shift exact at the ceiling,
+    // where `x+1` would not exist and the answer is "nothing above it".
+    let want = match e.value {
+        Scalar::Int(i) if e.inclusive => i,
+        Scalar::Int(i) => i.saturating_add(1),
+        // A fractional lower bound rounds *up* to the next integer the column can hold: `> 3.2`
+        // and `>= 3.2` both admit 4 and exclude 3.
+        Scalar::Float(f) => {
+            if f.is_nan() {
+                return Narrowed::Unsatisfiable;
+            }
+            f.ceil() as i128
         }
+    };
+    match T::try_from(want) {
+        Ok(v) => Narrowed::At(v),
+        // Below the floor: every value satisfies it. Above the ceiling: none does.
+        Err(_) if want < T::min_i128() => Narrowed::Unbounded,
+        Err(_) => Narrowed::Unsatisfiable,
+    }
+}
+
+/// The upper bound as an **inclusive** native value.
+fn narrow_hi<T>(e: Option<Endpoint>) -> Narrowed<T>
+where
+    T: TryFrom<i128> + Bounded,
+{
+    let Some(e) = e else {
+        return Narrowed::Unbounded;
+    };
+    let want = match e.value {
+        Scalar::Int(i) if e.inclusive => i,
+        Scalar::Int(i) => i.saturating_sub(1),
+        Scalar::Float(f) => {
+            if f.is_nan() {
+                return Narrowed::Unsatisfiable;
+            }
+            f.floor() as i128
+        }
+    };
+    match T::try_from(want) {
+        Ok(v) => Narrowed::At(v),
+        Err(_) if want > T::max_i128() => Narrowed::Unbounded,
+        Err(_) => Narrowed::Unsatisfiable,
+    }
+}
+
+/// The integer widths' extremes as `i128`, so `narrow_*` can tell "below the floor" (no constraint)
+/// from "above the ceiling" (nothing matches) without a per-type arm.
+trait Bounded {
+    fn min_i128() -> i128;
+    fn max_i128() -> i128;
+}
+macro_rules! bounded {
+    ($($t:ty),*) => { $(impl Bounded for $t {
+        fn min_i128() -> i128 { <$t>::MIN as i128 }
+        fn max_i128() -> i128 { <$t>::MAX as i128 }
+    })* };
+}
+bounded!(u8, u16, u32, u64, i8, i16, i32, i64);
+
+fn as_f64(s: Scalar) -> f64 {
+    match s {
+        Scalar::Int(i) => i as f64,
+        Scalar::Float(f) => f,
     }
 }
 
@@ -278,6 +343,90 @@ impl ValueColumn {
             codes,
             presence: Some(presence),
         })
+    }
+
+    /// Walk the candidate over a **typed slice**, keeping entities whose value satisfies `pred`.
+    ///
+    /// **The column's type is matched once per scan, not once per entity.** [`Self::walk`] passes
+    /// `(&Codes, slot)` to its predicate, so every element pays a match on the storage enum and a
+    /// call through a closure that cannot be specialised. This takes the slice directly, so the
+    /// inner loop is a monomorphic index and comparison over `&[T]` — which is what a fixed-width
+    /// column can actually go fast on.
+    ///
+    /// One transcription of the traversal, not a fast path beside a slow one: `walk` is kept only
+    /// for the variable-width text column, whose values are not a slice of anything.
+    #[inline]
+    fn walk_typed<T, F>(&self, candidate: &Bitmap, values: &[T], mut pred: F) -> Bitmap
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut hits: Vec<u32> = Vec::new();
+        match &self.presence {
+            None => {
+                let bound = values.len() as u32;
+                for_each_run(candidate, |start, last| {
+                    let last = last.min(bound.saturating_sub(1));
+                    if start > last {
+                        return;
+                    }
+                    // **A scattered candidate is one-element runs**, and building a slice iterator
+                    // for each costs more than the direct index it replaces — measured as a 20%
+                    // regression on the scattered arm before this branch existed. The contiguous
+                    // case is where the slice walk pays, so it is the branch that gets it.
+                    if start == last {
+                        if pred(&values[start as usize]) {
+                            hits.push(start);
+                        }
+                        return;
+                    }
+                    let base = start;
+                    for (i, v) in values[start as usize..=last as usize].iter().enumerate() {
+                        if pred(v) {
+                            hits.push(base + i as u32);
+                        }
+                    }
+                });
+            }
+            Some(presence) => {
+                let live = candidate.and(presence);
+                let mut pres = RunIter::new(presence);
+                let mut liv = RunIter::new(&live);
+                let mut base: u64 = 0;
+                let mut p = pres.next();
+                let mut l = liv.next();
+                while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
+                    if pl < ls {
+                        base += u64::from(pl - ps) + 1;
+                        p = pres.next();
+                        continue;
+                    }
+                    if ll < ps {
+                        l = liv.next();
+                        continue;
+                    }
+                    let lo = ls.max(ps);
+                    let hi = ll.min(pl);
+                    // Rank is affine inside a presence run, so the overlap maps to a contiguous
+                    // slice of the value array — the same property the universal arm gets for free.
+                    let slot0 = (base + u64::from(lo - ps)) as usize;
+                    let len = (hi - lo) as usize + 1;
+                    for (i, v) in values[slot0..slot0 + len].iter().enumerate() {
+                        if pred(v) {
+                            hits.push(lo + i as u32);
+                        }
+                    }
+                    if ll <= pl {
+                        l = liv.next();
+                    } else {
+                        base += u64::from(pl - ps) + 1;
+                        p = pres.next();
+                    }
+                }
+            }
+        }
+        let mut out = Bitmap::new();
+        out.add_many(&hits);
+        out
     }
 
     /// Walk the candidate, resolving each entity to its slot, and keep the entities whose value
@@ -379,24 +528,6 @@ impl ValueColumn {
         })
     }
 
-    /// The numeric value at `slot`, or `None` for a text column.
-    #[inline]
-    fn numeric_at(codes: &Codes, slot: usize) -> Option<Scalar> {
-        Some(match codes {
-            Codes::U8(v) => Scalar::Int(v[slot] as i128),
-            Codes::U16(v) => Scalar::Int(v[slot] as i128),
-            Codes::U32(v) => Scalar::Int(v[slot] as i128),
-            Codes::U64(v) => Scalar::Int(v[slot] as i128),
-            Codes::I8(v) => Scalar::Int(v[slot] as i128),
-            Codes::I16(v) => Scalar::Int(v[slot] as i128),
-            Codes::I32(v) => Scalar::Int(v[slot] as i128),
-            Codes::I64(v) => Scalar::Int(v[slot] as i128),
-            Codes::F32(v) => Scalar::Float(v[slot] as f64),
-            Codes::F64(v) => Scalar::Float(v[slot]),
-            Codes::Text { .. } => return None,
-        })
-    }
-
     /// Entities whose numeric value lies within the given bounds, restricted to `candidate`.
     ///
     /// Either endpoint may be absent, which is an open side — `{gte: 30}` is everything from 30 up.
@@ -416,53 +547,106 @@ impl ValueColumn {
         lo: Option<Endpoint>,
         hi: Option<Endpoint>,
     ) -> Bitmap {
-        use std::cmp::Ordering;
-        self.walk(candidate, |codes, slot| {
-            let Some(v) = Self::numeric_at(codes, slot) else {
-                return false;
-            };
-            let above = match lo {
-                None => true,
-                Some(e) => match v.partial_cmp(e.value) {
-                    Some(Ordering::Greater) => true,
-                    Some(Ordering::Equal) => e.inclusive,
-                    // Less, or None — the NaN case, which satisfies nothing.
-                    _ => false,
-                },
-            };
-            above
-                && match hi {
-                    None => true,
-                    Some(e) => match v.partial_cmp(e.value) {
-                        Some(Ordering::Less) => true,
-                        Some(Ordering::Equal) => e.inclusive,
-                        _ => false,
-                    },
-                }
-        })
+        // **Narrowed once, before the loop.** An `i128`/`f64` bound compared per element would
+        // widen every value on every comparison; narrowing to the column's own type here leaves
+        // the inner loop a native compare over a slice. `narrow_*` also settles the two degenerate
+        // outcomes up front — a bound below the type's floor constrains nothing, one above its
+        // ceiling excludes everything — rather than rediscovering them a billion times.
+        macro_rules! int_range {
+            ($v:expr, $t:ty) => {{
+                let lo_b = match narrow_lo::<$t>(lo) {
+                    Narrowed::Unsatisfiable => return Bitmap::new(),
+                    Narrowed::Unbounded => None,
+                    Narrowed::At(x) => Some(x),
+                };
+                let hi_b = match narrow_hi::<$t>(hi) {
+                    Narrowed::Unsatisfiable => return Bitmap::new(),
+                    Narrowed::Unbounded => None,
+                    Narrowed::At(x) => Some(x),
+                };
+                self.walk_typed(candidate, $v, move |x| {
+                    lo_b.is_none_or(|b| *x >= b) && hi_b.is_none_or(|b| *x <= b)
+                })
+            }};
+        }
+        // Floats keep the `f64` comparison: NaN must stay unordered, which is the whole reason no
+        // order-preserving key is needed, and narrowing through an integer would destroy it.
+        macro_rules! float_range {
+            ($v:expr, $t:ty) => {{
+                let lo_f = lo.map(|e| (as_f64(e.value), e.inclusive));
+                let hi_f = hi.map(|e| (as_f64(e.value), e.inclusive));
+                self.walk_typed(candidate, $v, move |x| {
+                    let x = *x as f64;
+                    lo_f.is_none_or(|(b, inc)| if inc { x >= b } else { x > b })
+                        && hi_f.is_none_or(|(b, inc)| if inc { x <= b } else { x < b })
+                })
+            }};
+        }
+        match &self.codes {
+            Codes::U8(v) => int_range!(v, u8),
+            Codes::U16(v) => int_range!(v, u16),
+            Codes::U32(v) => int_range!(v, u32),
+            Codes::U64(v) => int_range!(v, u64),
+            Codes::I8(v) => int_range!(v, i8),
+            Codes::I16(v) => int_range!(v, i16),
+            Codes::I32(v) => int_range!(v, i32),
+            Codes::I64(v) => int_range!(v, i64),
+            Codes::F32(v) => float_range!(v, f32),
+            Codes::F64(v) => float_range!(v, f64),
+            Codes::Text { .. } => Bitmap::new(),
+        }
     }
 
     /// Entities whose numeric value equals `needle`. A degenerate range, kept separate because a
     /// client writing `eq` means equality and should not have to spell it as two bounds.
     pub fn scan_num_eq(&self, candidate: &Bitmap, needle: Scalar) -> Bitmap {
-        self.walk(candidate, |codes, slot| {
-            Self::numeric_at(codes, slot)
-                .and_then(|v| v.partial_cmp(needle))
-                .is_some_and(|o| o == std::cmp::Ordering::Equal)
-        })
+        self.scan_num_in(candidate, std::slice::from_ref(&needle))
     }
 
     /// Entities whose numeric value equals any of `needles` — `eq` over a list, as for the other
     /// two families.
     pub fn scan_num_in(&self, candidate: &Bitmap, needles: &[Scalar]) -> Bitmap {
-        self.walk(candidate, |codes, slot| {
-            let Some(v) = Self::numeric_at(codes, slot) else {
-                return false;
-            };
-            needles
-                .iter()
-                .any(|n| v.partial_cmp(*n) == Some(std::cmp::Ordering::Equal))
-        })
+        macro_rules! int_in {
+            ($v:expr, $t:ty) => {{
+                // Values outside the column's type match nothing and are dropped here rather than
+                // compared away per element.
+                let w: Vec<$t> = needles
+                    .iter()
+                    .filter_map(|n| match n {
+                        Scalar::Int(i) => <$t>::try_from(*i).ok(),
+                        Scalar::Float(_) => None,
+                    })
+                    .collect();
+                if w.is_empty() {
+                    return Bitmap::new();
+                }
+                self.walk_typed(candidate, $v, move |x| w.contains(x))
+            }};
+        }
+        macro_rules! float_in {
+            ($v:expr) => {{
+                let w: Vec<f64> = needles.iter().map(|n| as_f64(*n)).collect();
+                // NaN equals nothing, itself included — so a NaN needle matches no row, which the
+                // comparison gives without a special case.
+                self.walk_typed(candidate, $v, move |x| {
+                    let x = *x as f64;
+                    w.iter().any(|n| x == *n)
+                })
+            }};
+        }
+        match &self.codes {
+            Codes::U8(v) => int_in!(v, u8),
+            Codes::U16(v) => int_in!(v, u16),
+            Codes::U32(v) => int_in!(v, u32),
+            Codes::U64(v) => int_in!(v, u64),
+            Codes::I8(v) => int_in!(v, i8),
+            Codes::I16(v) => int_in!(v, i16),
+            Codes::I32(v) => int_in!(v, i32),
+            Codes::I64(v) => int_in!(v, i64),
+            Codes::F32(v) => float_in!(v),
+            Codes::F64(v) => float_in!(v),
+            Codes::Text { .. } => Bitmap::new(),
+        }
     }
 
     /// Entities whose UTF-8 value equals any of `needles`, restricted to `candidate`.
@@ -533,8 +717,14 @@ impl ValueColumn {
     /// [`crate::ColumnPostings::entities`], which resolves over the whole corpus and leaves the
     /// intersection to its caller.
     pub fn scan_eq(&self, candidate: &Bitmap, value: AttrLocalId) -> Bitmap {
-        let wanted = value.raw();
-        self.walk(candidate, |codes, slot| codes.at(slot) == wanted)
+        let w = value.raw();
+        match &self.codes {
+            Codes::U8(v) => self.walk_typed(candidate, v, |x| u32::from(*x) == w),
+            Codes::U16(v) => self.walk_typed(candidate, v, |x| u32::from(*x) == w),
+            Codes::U32(v) => self.walk_typed(candidate, v, |x| *x == w),
+            // Only a category has a code, and a category is one of the three widths above.
+            _ => Bitmap::new(),
+        }
     }
 
     /// Entities carrying any of `values`, restricted to `candidate` — set membership, one pass.
@@ -544,12 +734,17 @@ impl ValueColumn {
     /// costs. A per-value loop would make the running time proportional to the number of *matching*
     /// values, which is the channel [`Self::scan_eq`]'s doc comment exists to deny.
     pub fn scan_in(&self, candidate: &Bitmap, values: &[AttrLocalId]) -> Bitmap {
-        let mut wanted: Vec<u32> = values.iter().map(|v| v.raw()).collect();
-        wanted.sort_unstable();
-        wanted.dedup();
-        self.walk(candidate, |codes, slot| {
-            wanted.binary_search(&codes.at(slot)).is_ok()
-        })
+        let mut w: Vec<u32> = values.iter().map(|v| v.raw()).collect();
+        w.sort_unstable();
+        w.dedup();
+        match &self.codes {
+            Codes::U8(v) => self.walk_typed(candidate, v, |x| w.binary_search(&u32::from(*x)).is_ok()),
+            Codes::U16(v) => {
+                self.walk_typed(candidate, v, |x| w.binary_search(&u32::from(*x)).is_ok())
+            }
+            Codes::U32(v) => self.walk_typed(candidate, v, |x| w.binary_search(x).is_ok()),
+            _ => Bitmap::new(),
+        }
     }
 
     /// The value an entity carries, or `None` where it carries none.
@@ -912,6 +1107,123 @@ mod tests {
             Some(at(lo as i128, true)),
         );
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0]);
+    }
+
+    /// **A bound outside the column's type is not an error and not a clamp-to-nothing.** Below the
+    /// floor it constrains nothing; above the ceiling nothing satisfies it. Narrowing settles both
+    /// once, so the inner loop never sees them.
+    #[test]
+    fn a_bound_outside_the_types_range_resolves_to_all_or_nothing() {
+        let column = num_column(Codes::U8(vec![0, 128, 255]));
+        let all = candidate(0..3);
+        // `>= -5` over a u8 constrains nothing.
+        assert_eq!(
+            column
+                .scan_range(&all, Some(at(-5, true)), None)
+                .cardinality(),
+            3
+        );
+        // `<= -1` over a u8 excludes everything.
+        assert!(column
+            .scan_range(&all, None, Some(at(-1, true)))
+            .is_empty());
+        // `>= 300` likewise.
+        assert!(column
+            .scan_range(&all, Some(at(300, true)), None)
+            .is_empty());
+        // `<= 300` constrains nothing.
+        assert_eq!(
+            column
+                .scan_range(&all, None, Some(at(300, true)))
+                .cardinality(),
+            3
+        );
+    }
+
+    /// An exclusive integer bound is the inclusive one next door, and at the type's extreme the
+    /// step must not wrap.
+    #[test]
+    fn an_exclusive_integer_bound_at_the_extreme_does_not_wrap() {
+        let column = num_column(Codes::U8(vec![0, 1, 254, 255]));
+        let all = candidate(0..4);
+        // `> 255` is nothing, not everything.
+        assert!(column
+            .scan_range(&all, Some(at(255, false)), None)
+            .is_empty());
+        // `< 0` is nothing.
+        assert!(column.scan_range(&all, None, Some(at(0, false))).is_empty());
+        // `> 254` is just 255.
+        assert_eq!(
+            column
+                .scan_range(&all, Some(at(254, false)), None)
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+    }
+
+    /// A fractional bound on an integer column rounds **towards excluding** the values it sits
+    /// between: `>= 3.2` and `> 3.2` both admit 4 and reject 3.
+    #[test]
+    fn a_fractional_bound_on_an_integer_column_rounds_outward() {
+        let column = num_column(Codes::I32(vec![3, 4]));
+        let all = candidate(0..2);
+        for inclusive in [true, false] {
+            let hits = column.scan_range(
+                &all,
+                Some(Endpoint {
+                    value: Scalar::Float(3.2),
+                    inclusive,
+                }),
+                None,
+            );
+            assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1], "inclusive={inclusive}");
+        }
+        for inclusive in [true, false] {
+            let hits = column.scan_range(
+                &all,
+                None,
+                Some(Endpoint {
+                    value: Scalar::Float(3.8),
+                    inclusive,
+                }),
+            );
+            assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0], "inclusive={inclusive}");
+        }
+    }
+
+    /// A NaN *bound* excludes everything, as a NaN value satisfies nothing.
+    #[test]
+    fn a_nan_bound_matches_nothing() {
+        let column = num_column(Codes::I32(vec![1, 2, 3]));
+        assert!(column
+            .scan_range(
+                &candidate(0..3),
+                Some(Endpoint {
+                    value: Scalar::Float(f64::NAN),
+                    inclusive: true
+                }),
+                None
+            )
+            .is_empty());
+    }
+
+    /// Set membership drops needles the column's type cannot hold, rather than comparing them
+    /// away per element — and a set of only such needles matches nothing.
+    #[test]
+    fn numeric_set_membership_drops_out_of_range_needles() {
+        let column = num_column(Codes::U8(vec![1, 2]));
+        let all = candidate(0..2);
+        assert_eq!(
+            column
+                .scan_num_in(&all, &[Scalar::Int(2), Scalar::Int(9999)])
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(column
+            .scan_num_in(&all, &[Scalar::Int(9999)])
+            .is_empty());
     }
 
     /// NaN satisfies no bound and no equality — inherited from IEEE rather than implemented, and
