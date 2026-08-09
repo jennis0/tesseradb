@@ -3,6 +3,7 @@ import {ScatterplotLayer} from '@deck.gl/layers';
 import {
   MARGIN,
   RENDER_MARGIN,
+  tileRectOfBbox,
   RING_MARGIN,
   MAX_DEPTH,
   WORLD_SIZE,
@@ -245,22 +246,9 @@ export class ViewportController {
     );
   }
 
-  /** Can the replica draw this view without asking for anything? */
+  /** Can the replica answer this view outright — same question, for the debounce. */
   private storeCanAnswer(view: ViewState, width: number, height: number): boolean {
-    const {meta, budget, mTarget, lastVisibleInView} = this.store.state;
-    if (!meta) return true;
-    const planned = plan({
-      viewport: {target: [view.target[0], view.target[1]], zoom: view.zoom, width, height},
-      budget,
-      mTarget,
-      maxTiles: meta.maxTilesPerRequest,
-      visibleInView: lastVisibleInView ?? undefined,
-      heldBytes: this.replica.bytes,
-      budgetBytes: this.replica.budgetBytes
-    });
-    return (
-      this.replica.novelIn(planned.visible.rect, planned.choice.depth, meta.selection.kMaxMarks) === 0
-    );
+    return this.covers(view, width, height);
   }
 
   /**
@@ -342,7 +330,35 @@ export class ViewportController {
     //
     // So the store is asked whether it can actually answer the visible box. It is a rectangle
     // subtraction and costs microseconds.
-    return this.storeCanAnswer(view, width, height);
+    //
+    // **And it must be asked about the depth on screen, not the depth the budget would pick now.**
+    // Those diverge: the budget re-chooses on every view change and flips at its thresholds, so a
+    // view drawn at depth 9 was being declared covered because the store could answer it at
+    // depth 8 — a depth nothing on screen was drawn at. Measured, that left a view of 1,918
+    // stand-in bands and 8,208 novel tiles reporting itself as answered, permanently. A depth
+    // change is itself a reason to redraw, so any disagreement fails the test.
+    const depth = this.plannedDepth(view, width, height);
+    if (depth === null || depth !== this.held.depth) return false;
+    return this.replica.novelIn(
+      tileRectOfBbox(want, depth),
+      depth,
+      this.store.state.meta?.selection.kMaxMarks ?? 0
+    ) === 0;
+  }
+
+  /** The depth the budget would ask for, or null before `meta` has arrived. */
+  private plannedDepth(view: ViewState, width: number, height: number): number | null {
+    const {meta, budget, mTarget, lastVisibleInView} = this.store.state;
+    if (!meta) return null;
+    return plan({
+      viewport: {target: [view.target[0], view.target[1]], zoom: view.zoom, width, height},
+      budget,
+      mTarget,
+      maxTiles: meta.maxTilesPerRequest,
+      visibleInView: lastVisibleInView ?? undefined,
+      heldBytes: this.replica.bytes,
+      budgetBytes: this.replica.budgetBytes
+    }).choice.depth;
   }
 
   /** Abort anything outstanding — used on principal change, where the token itself changes. */

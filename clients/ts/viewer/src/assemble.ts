@@ -143,9 +143,8 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
   // ancestor is restricted to the wanted region by Morton prefix — sound because a parent's band is
   // a prefix of its own visible set in identity order, so its restriction is a prefix of the
   // child's. Descendants contribute whole.
-  for (const band of frame.fallback) {
-    const indices =
-      band.depth < frame.depth ? BandCache.restrictToRect(band, frame.depth, frame.want) : null;
+  for (const {band, clip} of frame.fallback) {
+    const indices = BandCache.restrictToRect(band, frame.depth, clip);
     const length = indices ? indices.length : band.ids.length;
     if (length === 0) continue;
     const from = total;

@@ -102,6 +102,15 @@ for (let step = 0; step < STEPS; step++) {
     replica.frameFromCache(p.render, p.choice.depth, meta.selection.kMaxMarks);
   });
   const f = replica.frameFromCache(p.render, p.choice.depth, meta.selection.kMaxMarks);
+  // The inconsistency to hunt: coarse stand-in bands present while the plan says nothing is novel,
+  // which is the client believing a provisional patch is the final answer.
+  const visNovel = replica.novelIn(p.visible.rect, p.choice.depth, meta.selection.kMaxMarks);
+  if (f.fallback.length > 0 || visNovel > 0) {
+    console.log(
+      `      [step ${step}] d=${p.choice.depth} fallbackBands=${f.fallback.length} ` +
+        `novel(visible)=${visNovel} novel(render)=${f.plan.novel}`
+    );
+  }
   const asmNoCols = phase('asm(0col)', () => void assemble(f, []));
   const asmCols = phase('asm(1col)', () => void assemble(f, ['primary_category']));
   const a = assemble(f, ['primary_category']);

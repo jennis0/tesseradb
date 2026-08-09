@@ -189,6 +189,7 @@ describe('BandCache.bandsForRegion', () => {
     // Nothing covered at depth 3: the parent is the best available.
     const cold = cache.bandsForRegion(R(0, 0, 1, 1), 3, 'ck', 500);
     expect(cold.fallback).toHaveLength(1);
+    expect(cold.fallback[0]!.band.depth).toBe(1);
     expect(cold.exact).toHaveLength(0);
 
     // Once the region is covered at depth 3, the parent must not be drawn over it as well.

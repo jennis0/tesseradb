@@ -5,8 +5,8 @@ import {
   coverageAt,
   rectArea,
   rectContainsTile,
+  rectIntersection,
   rectSubtractAll,
-  rectsIntersect,
   type Coverage,
   type TileRect
 } from './rects.js';
@@ -367,10 +367,10 @@ export class BandCache {
     depth: number,
     contentKey: string,
     k: number
-  ): {exact: Band[]; fallback: Band[]} {
+  ): {exact: Band[]; fallback: {band: Band; clip: TileRect}[]} {
     const uncovered = rectSubtractAll(want, this.coverageFor(depth, contentKey, k));
     const exact: Band[] = [];
-    const fallback: Band[] = [];
+    const fallback: {band: Band; clip: TileRect}[] = [];
 
     for (const band of this.bands.values()) {
       if (band.depth === depth) {
@@ -387,7 +387,14 @@ export class BandCache {
         band.depth < depth
           ? {x0: x << shift, y0: y << shift, x1: ((x + 1) << shift) - 1, y1: ((y + 1) << shift) - 1}
           : {x0: x >> shift, y0: y >> shift, x1: x >> shift, y1: y >> shift};
-      if (uncovered.some((r) => rectsIntersect(r, box))) fallback.push(band);
+      // **Clipped to the uncovered part, not to the whole region.** A stand-in exists to fill
+      // ground that has no exact band; drawn across the rest it overlays coarse marks on fine ones,
+      // and a frame that is mostly stand-in reads as a lower-density patch that never refines —
+      // because as far as the plan is concerned that ground is answered, and it is.
+      for (const r of uncovered) {
+        const clip = rectIntersection(r, box);
+        if (clip) fallback.push({band, clip});
+      }
     }
     return {exact, fallback};
   }

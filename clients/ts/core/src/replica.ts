@@ -53,10 +53,11 @@ export type ReplicaFrame = {
   /** Bands at this depth inside the region — the served set, drawable with counts. */
   exact: Band[];
   /**
-   * Bands from another depth, admitted only over the part of the region not held at this one. A
-   * superset of what the definition serves there: drawn, stale-marked, and never counted.
+   * Bands from another depth, each with the rectangle it may be drawn over — the part of the region
+   * not held at this depth. A superset of what the definition serves there: drawn, stale-marked,
+   * and never counted.
    */
-  fallback: Band[];
+  fallback: {band: Band; clip: TileRect}[];
   /** Null when the region was answered entirely from the store. */
   response: ViewportResponse | null;
   /**
@@ -291,7 +292,7 @@ export class Replica {
     // renderable — it is the measurement A/B, not a way to turn the client off.
     const {exact, fallback} =
       this.opts.cache === false
-        ? {exact: fetched, fallback: [] as Band[]}
+        ? {exact: fetched, fallback: [] as {band: Band; clip: TileRect}[]}
         : this.cache.bandsForRegion(render, depth, this.contentKey, k);
 
     return {

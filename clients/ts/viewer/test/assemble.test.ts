@@ -37,12 +37,17 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
 
 const WHOLE = {x0: 0, y0: 0, x1: 65535, y1: 65535};
 
-function frame(depth: number, exact: Band[], fallback: Band[] = [], want = WHOLE): ReplicaFrame {
+function frame(
+  depth: number,
+  exact: Band[],
+  fallback: Band[] = [],
+  want = WHOLE
+): ReplicaFrame {
   return {
     depth,
     want,
     exact,
-    fallback,
+    fallback: fallback.map((band) => ({band, clip: want})),
     response: null,
     plan: {wanted: 0, novel: 0, requests: 0}
   };
