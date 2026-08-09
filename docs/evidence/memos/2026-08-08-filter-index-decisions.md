@@ -44,14 +44,16 @@ In-memory, single-threaded, `u32` column, 12-core WSL2 host.
 
 | Quantity | Value | Standing |
 |---|---|---|
-| Masked scan, contiguous candidate | **~0.25 ns per candidate entity** | category/numeric, measured on the shipped code, stable 10⁶→10⁹ (was ~2.9 ns against a reimplementation, and 3.10 ns shipped, before run-based iteration and typed traversal — probe arm 4) |
-| Masked scan, scattered candidate | **~11 ns per candidate entity** | measured on the shipped code; the ~40× penalty is cache misses, not bandwidth. The noisiest cell measured: 95–110 ms across runs at 10⁹ |
+| Masked scan, contiguous candidate | **~0.28 ns per candidate entity** | category/numeric, measured on the shipped code, stable 10⁶→10⁹ (was ~2.9 ns against a reimplementation, and 3.10 ns shipped, before run-based iteration and typed traversal — probe arm 4) |
+| Masked scan, scattered candidate | **~9.6 ns per candidate entity** | measured on the shipped code; the ~40× penalty is cache misses, not bandwidth. The noisiest cell measured: 95–110 ms across runs at 10⁹ |
 | **Text scan** | **3.5 ns `eq` / 4.3 `prefix` / 8.2 `in` / 9.7 `contains`**, contiguous; 30–96 ns scattered | measured at 10⁸ (probe arm 6). ~14× a category, because a value streams ~22 bytes against 4 — equality is at memory bandwidth for the shape |
 | **Category `in`, k values** | **flat in k at `u8`/`u16`** (0.43–0.44 ns at k = 2, 8, 32); O(log k) at `u32` | measured at 10⁸ (arm 6). A narrow domain fits a bit table, which also makes the work independent of which codes are named |
-| 25% principal, 10⁹, bare column | **66 ms** | measured on the shipped code (900 ms originally; 730 ms was a reimplementation) |
+| 25% principal, 10⁹, bare column | **74 ms** | measured on the shipped code (900 ms originally; 730 ms was a reimplementation) |
+| **An unselective predicate** | **3.4 s** matching 25% of a whole-corpus candidate, **6.0 s** at 50% | measured at 10⁹ (arm 7). Almost all of it is Roaring building the result, so **no accelerator over the column touches it** — the largest known gap in the filter path |
+| **Transient allocation per request** | **≤512 KB**, whatever the result's size | was proportional to the result — 1.1 GB matching a quarter of the corpus, 4.1 GB matching all of it (arm 7) |
 | Scale behaviour | linear, 9.5–11.2× per decade, no cliffs | measured across three decades |
 | Affordable coverage at the ruled 1 s filter budget | category: ~4×10⁹ contiguous (four times the whole corpus at 10⁹), ~9×10⁷ scattered. Text `contains`: ~10⁸ contiguous, ~10⁷ scattered | derived from the constants above |
-| Full-corpus scan at 10⁹ | **~250 ms** for a category — inside the band, so no coverage is unaffordable on a contiguous candidate. A **scattered text `contains`** is the one cell that is not: ~1 s per 10⁷ candidate entities | measured (was ~3.0 s) |
+| Full-corpus scan at 10⁹ | **~280 ms** for a category — inside the band, so no coverage is unaffordable on a contiguous candidate. A **scattered text `contains`** is the one cell that is not: ~1 s per 10⁷ candidate entities | measured (was ~3.0 s) |
 
 Addressing structure, bytes per present entity at 10⁹ (totals in parentheses below 1 B):
 

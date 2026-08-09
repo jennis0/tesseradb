@@ -112,9 +112,25 @@ where a column genuinely covers everything.
 
 A filter operand is evaluated by scanning the value column **under the candidate mask** — `M_auth`
 pushed in first, as §8.2 requires — and the measured cost is per candidate entity rather than per
-corpus byte: for a **category or numeric** column, **~0.25 ns** with a contiguous candidate and
-**~11 ns** with a scattered one, stable across three orders of magnitude and linear in *n*. A
-whole-corpus scan at 10⁹ is ~250 ms.
+corpus byte: for a **category or numeric** column, **~0.28 ns** with a contiguous candidate and
+**~9.6 ns** with a scattered one, stable across three orders of magnitude and linear in *n*. A
+whole-corpus scan at 10⁹ is ~280 ms.
+
+**Those are the cost of *finding* the matches, and they price a filter only while it is selective.**
+An unselective predicate — a range over most of a domain, a set with every value ticked — is priced
+by the size of its **result** instead, because the answer has to be built: measured at 10⁹, a
+predicate matching a quarter of a whole-corpus candidate costs 3.4 s and one matching half of it
+6.0 s, against ~280 ms to scan the same column selectively. Almost all of that is Roaring assembling
+a 250–500 million-entity bitmap, so **no accelerator over the column would touch it** — it is not the
+scan. This is the largest known gap in the filter path and it is stated here rather than in the probe
+alone, because a reader sizing against the constants above would not otherwise meet it.
+
+Two things bound it rather than close it. Consecutive matches are added as **ranges**, which takes
+the fully-matching case from 7.3 s to 878 ms and its result from 4.1 GB to nothing — an unselective
+predicate matches in long contiguous stretches by nature. And the matches are folded into the result
+every 64 Ki entities, which caps the transient buffer at 512 KB: it was previously proportional to
+the result, **1.1 GB for a filter matching a quarter of the corpus, per concurrent request**, for a
+quantity the compute-admission gate rations CPU for and knows nothing about (probe arm 7).
 
 **A text column costs about fourteen times that, and the design must size against its own number**
 rather than borrowing the fixed-width one (probe arm 6, at 10⁸):

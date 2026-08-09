@@ -11,8 +11,9 @@ where each covered entity's value sits.
 
 **Two constants govern the masked scan, and they are stable across three orders of magnitude.**
 *These are arm 1's, over a reimplemented per-value loop, and they are what chose the layout. **The
-constants to design against are arm 4's**, over the shipped code after two optimisations: ~0.24 ns
-contiguous and ~10 ns scattered.*
+constants to design against are arms 4, 6 and 7's**, over the shipped code: for a fixed-width column
+~0.28 ns contiguous and ~9.6 ns scattered; for text 3.5–9.7 ns; and for an unselective predicate, the
+result's size rather than any of these.*
 
 | | ns per candidate entity | Measured at |
 |---|---|---|
@@ -81,13 +82,16 @@ Measured, a 25%-coverage contiguous principal costs **730 ms** — inside the ba
 at all. Only near-total coverage exceeds it: a full-corpus scan measures ~3.0 s. **The corner is the
 privileged tail, not broad coverage**, and it is the only place an accelerator earns anything.
 
-> **Superseded by arm 4, which measures the shipped code and then makes it 13–272× faster.** These
+> **Superseded by arm 4, which measures the shipped code and then makes it 11–462× faster.** These
 > thresholds derive from arm 1's reimplementation at ~2.9 ns per candidate entity. The shipped scan
-> is run-based and typed, and measures **~0.24 ns** contiguous, so a 1 s budget now buys the whole
-> corpus at 10⁹ four times over rather than a third of it, and the "privileged tail" corner closes
-> outright: a full-corpus scan is ~240 ms. The table is
-> kept because the *method* — thresholds in candidate entities rather than bytes — is what the design
-> uses, and because a later change that lost the run path would land back here.
+> is run-based and typed, and measures **~0.28 ns** contiguous, so a 1 s budget buys the whole
+> corpus at 10⁹ three times over rather than a third of it, and the "privileged tail" corner closes
+> outright: a full-corpus scan of a category is ~280 ms. The table is kept because the *method* —
+> thresholds in candidate entities rather than bytes — is what the design uses, and because a later
+> change that lost the run path would land back here.
+>
+> **The axis it holds constant is the one that now binds** (arm 7): these are all *selective*
+> predicates. An unselective one is priced by its result, not by the scan.
 
 ## Arm 2 — does the category posting close the gap the scan leaves?
 
@@ -183,15 +187,16 @@ fractional bound on an integer column rounds outward.
 
 | Presence | Candidate | Original | + runs | + typed | Total |
 |---|---|---|---|---|---|
-| universal | 1% contiguous | 30.97 ms (3.10 ns) | 9.81 ms | **2.46 ms (0.25 ns)** | **13×** |
-| universal | 25% broad | 900.51 ms (3.60 ns) | 201.55 ms | **66.48 ms (0.27 ns)** | **14×** |
-| universal | 1% scattered | 276.75 ms (27.67 ns) | 161.90 ms | **109.85 ms (10.98 ns)** | 2.5× |
-| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.30 ms (0.03 ns)** | **416×** |
-| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **6.23 ms (0.02 ns)** | 28× |
-| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **17.32 ms (1.73 ns)** | 23× |
+| universal | 1% contiguous | 30.97 ms (3.10 ns) | 9.81 ms | **2.82 ms (0.28 ns)** | **11×** |
+| universal | 25% broad | 900.51 ms (3.60 ns) | 201.55 ms | **74.46 ms (0.30 ns)** | **12×** |
+| universal | 1% scattered | 276.75 ms (27.67 ns) | 161.90 ms | **96.45 ms (9.64 ns)** | 2.9× |
+| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.27 ms (0.03 ns)** | **462×** |
+| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **6.65 ms (0.03 ns)** | 27× |
+| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **18.46 ms (1.85 ns)** | 22× |
 
-(The "+ typed" column carries arm 6's shared-traversal figures, which superseded the typed pass's
-own: the universal arms are unchanged within noise and the partial-presence arms improved again.)
+(The "+ typed" column carries the **final** figures, re-measured after arms 6 and 7 against the code
+as it now stands: the universal arms are unchanged within noise throughout and the partial-presence
+arms improved with the shared traversal.)
 
 Results are identical throughout; only the timings move.
 
@@ -273,13 +278,13 @@ which is the adversarial case for a byte comparison and also what a real string 
 
 | Predicate | Before | After | |
 |---|---|---|---|
-| `text eq` | 11.05 ns | **3.49 ns** | 3.2× |
-| `text prefix` | 14.31 ns | **4.26 ns** | 3.4× |
-| `text in` (5 values) | 25.23 ns | **8.16 ns** | 3.1× |
-| `text contains` | 40.35 ns | **9.73 ns** | 4.1× |
-| `u8 in` (32 values) | 5.52 ns | **2.04 ns** | 2.7× |
-| `u16 in` (32 values) | 2.97 ns | **0.44 ns** | 6.8× |
-| `u32 in` (32 values) | 3.08 ns | 2.91 ns | unchanged |
+| `text eq` | 11.05 ns | **3.54 ns** | 3.1× |
+| `text prefix` | 14.31 ns | **4.50 ns** | 3.2× |
+| `text in` (5 values) | 25.23 ns | **8.32 ns** | 3.0× |
+| `text contains` | 40.35 ns | **9.67 ns** | 4.2× |
+| `u8 in` (32 values) | 5.52 ns | **2.51 ns** | 2.2× |
+| `u16 in` (32 values) | 2.97 ns | **0.46 ns** | 6.5× |
+| `u32 in` (32 values) | 3.08 ns | 3.41 ns | unchanged |
 
 (ns per candidate entity, 25% broad candidate. `category eq` is 0.22–0.30 ns and did not move.)
 
@@ -295,7 +300,7 @@ fixed-width arm walks values with.
 **`in` cost was a search per candidate entity, and the fix differs by width.** A `u8` or `u16`
 category's whole domain fits in a bit table — 32 bytes or 8 KB, built once per scan — so membership
 becomes a constant-time lookup and a 32-value set costs what a 2-value set costs. That is visible in
-the `u16` row above: 0.43, 0.44 and 0.44 ns at k = 2, 8 and 32. A `u32` domain is 4×10⁹ codes and is
+the `u16` row above: 0.45, 0.45 and 0.46 ns at k = 2, 8 and 32. A `u32` domain is 4×10⁹ codes and is
 not a table, so it keeps a sorted list and stays O(log k); text keeps a first-byte bucket index,
 which turns a set membership into zero or one full comparison.
 
@@ -315,6 +320,65 @@ recorded as the next thing to try if text ever needs to be faster.
 byte array rather than a stride through it. At 10⁹ a scattered 1% `contains` is ~1 s: at the edge of
 the budget, and the one cell in this campaign where a text filter and a poorly-correlated principal
 together would exceed it.
+
+## Arm 7 — what an **unselective** filter costs, which every other arm holds constant
+
+Arms 1–6 all use predicates matching a fraction of a percent of the candidate, because they were
+measuring the traversal. A filter surface issues unselective predicates routinely — a range covering
+most of a domain, a tick-box set with everything ticked — and there the *result*, not the scan, sets
+the cost. `selective`
+([`layoutprobe/src/bin/selective.rs`](layoutprobe/src/bin/selective.rs), raw
+[`run-selective.csv`](run-selective.csv), 10⁹, medians of three) sweeps the share of the candidate
+that matches, and reports peak RSS as well as time.
+
+**The result was accumulated whole before it became a bitmap, and that was a memory problem before
+it was a latency one:**
+
+| Candidate | Matches | Before | | After | |
+|---|---|---|---|---|---|
+| 25% broad | 1% | 167 ms | 10 MB | 192 ms | **0 MB** |
+| 25% broad | 25% | 878 ms | 250 MB | 857 ms | **0 MB** |
+| 25% broad | **100%** | 1,556 ms | 1,000 MB | **218 ms** | **0 MB** |
+| whole corpus | 1% | 683 ms | 40 MB | 768 ms | **1 MB** |
+| whole corpus | 25% | 3,701 ms | 1,112 MB | 3,390 ms | **105 MB** |
+| whole corpus | 50% | 7,020 ms | 2,111 MB | 6,037 ms | **105 MB** |
+| whole corpus | **100%** | 7,306 ms | 4,112 MB | **878 ms** | **0 MB** |
+
+**A filter matching a quarter of a 10⁹ corpus allocated 1.1 GB transiently, per concurrent request**,
+and one matching all of it 4.1 GB — on a request path, for a quantity the compute-admission gate
+rations CPU for and knows nothing about. Folding the buffer into the bitmap every 64 Ki entities
+bounds it at 512 KB whatever the result's size; the 105 MB that remains is the Roaring bitmap the
+result genuinely is.
+
+**Consecutive matches now go in as a range**, which is what takes the fully-matching cases from 7.3 s
+to 878 ms — an unselective predicate matches in long contiguous stretches by nature. Below a 32-entity
+threshold the entities take the bulk path they always took, so this cannot cost the middling case,
+where matches come in pairs rather than runs.
+
+**The middling case is unchanged and it is outside the budget.** A predicate matching 25–50% of a
+whole-corpus candidate costs 3.4–6.0 s, and after these changes essentially all of that is croaring
+building a 250–500 million-entity bitmap — `add_many` already uses CRoaring's bulk context, so there
+is no cheap win left in it. **This is the largest known gap in the filter path**, it is a property of
+the result's size rather than of the scan, and no accelerator over the *column* would touch it.
+
+### Three regressions on the way, all caught by re-running arms 4 and 6
+
+None of this was visible in the arm being optimised, and each cost more than the change was worth:
+
+- **Capping the slot ranges by wrapping the callback** in a splitting closure cost the scattered arm
+  a doubling, 98 → 239 ms, because the extra closure layer stopped the predicate inlining into the
+  traversal. A scattered candidate is one call per entity, so an indirection there is paid ten
+  million times. The cap turned out to be unnecessary once the buffer was bounded in `push`, where
+  the check is per *match* rather than per candidate entity.
+- **`run_optimize` on every result** cost the partial-presence arms 0.25 → 0.45 ms and 6.2 →
+  12.7 ms, walking every container of a result that had no runs to find. It now runs only when the
+  coalescing actually fired, which is exactly the case that pays for it.
+- **`push` carrying its cold path inline** — the branch that retires a stretch calls into croaring —
+  cost the scattered arm 34%, for the same inlining reason as the first. Moving it behind
+  `#[inline(never)]` restored parity.
+
+The published arm 4 and 6 figures are re-measured against the final code and are at parity with the
+pre-arm-7 ones.
 
 ### What the fix cost the other arms: nothing, and it helped one
 

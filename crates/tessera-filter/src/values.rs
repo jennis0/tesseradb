@@ -41,6 +41,144 @@ use arrow::buffer::{Buffer, ScalarBuffer};
 use croaring::{Bitmap, Portable};
 use tessera_types::AttrLocalId;
 
+/// Matched entities, folded into the result bitmap in bounded chunks.
+///
+/// **The result is not a safe thing to accumulate whole.** A predicate that matches most of what it
+/// is asked about is ordinary — a range covering most of a domain, a tick-box set with everything
+/// ticked — and buffering every match before building the bitmap made the buffer proportional to
+/// the *result*: measured at 10⁹, a filter matching a quarter of the corpus peaked at 1.1 GB and one
+/// matching all of it at 4.1 GB, on a request path, transiently, per concurrent request. The
+/// compute-admission gate rations CPU and knows nothing about it.
+///
+/// Folding every [`CHUNK`] entities instead bounds the buffer at 512 KB whatever the result's size,
+/// and costs nothing measurable: the check is per *run* rather than per entity, because
+/// [`ValueColumn::for_each_slot_run`] caps the ranges it hands out at `CHUNK` — so the buffer can
+/// reach at most twice it, and the sparse case still batches thousands of scattered hits into one
+/// bulk add rather than paying a bitmap insertion each.
+/// **Consecutive matches are added as a range, not one at a time**, which is the other half of the
+/// unselective case. Inserting a billion entities individually costs 4.5 s at 10⁹ where adding the
+/// same entities as ranges costs a fraction of it, and an unselective predicate matches in long
+/// contiguous stretches by nature — a range over most of a domain matches nearly everything the
+/// candidate offers, in candidate order.
+///
+/// The coalescing branch runs once per *hit*, not once per candidate entity, so the selective case —
+/// where hits are a fraction of a percent — pays a comparison on almost nothing. **It also carries
+/// no channel:** the work depends on how the matches are distributed, and a value the principal
+/// cannot see and a value that does not exist both produce no matches at all, so they take the same
+/// path at the same cost.
+struct Hits {
+    /// Scattered singles, folded in bulk.
+    buf: Vec<u32>,
+    /// The contiguous stretch being extended: `start..end`, empty when `start == end`.
+    start: u32,
+    end: u32,
+    /// Whether any stretch was long enough to go in as a range — see [`Self::finish`].
+    coalesced: bool,
+    out: Bitmap,
+}
+
+/// Entities buffered before folding, and the cap on a single slot range. 64 Ki × 4 B = 256 KB, so
+/// the buffer stays within L2 while remaining large enough for the bulk add to amortise.
+const CHUNK: usize = 1 << 16;
+
+/// The shortest stretch of consecutive matches worth adding as a range rather than buffering.
+const RUN_MIN: usize = 32;
+
+impl Hits {
+    fn new() -> Self {
+        Hits {
+            buf: Vec::with_capacity(CHUNK + RUN_MIN),
+            start: 0,
+            end: 0,
+            coalesced: false,
+            out: Bitmap::new(),
+        }
+    }
+
+    /// Entities arrive in ascending order — the traversal visits the candidate in order and each
+    /// range in slot order — which is what makes "extends the current stretch" a single comparison.
+    /// **The body here is two comparisons and an increment, and everything else is out of line.**
+    /// `push` is reached from inside the traversal's inner loop, so if its body carries a call into
+    /// croaring the whole callback stops being inlinable — measured as a 34% regression on the
+    /// scattered arm, where the callback is invoked once per candidate entity and an indirect call
+    /// is therefore paid ten million times.
+    #[inline(always)]
+    fn push(&mut self, entity: u32) {
+        // `end != start` is what distinguishes "extends the open stretch" from "the accumulator is
+        // empty and the first entity happens to be 0". A sentinel empty stretch would save the
+        // comparison and was measured to save nothing, while making entity `u32::MAX` an overflow.
+        if entity == self.end && self.end != self.start {
+            self.end += 1;
+            return;
+        }
+        self.begin(entity);
+    }
+
+    /// Retire the open stretch and start a new one. Out of line by design — see [`Self::push`].
+    #[inline(never)]
+    fn begin(&mut self, entity: u32) {
+        self.close();
+        self.start = entity;
+        self.end = entity + 1;
+        // **Bounded here, where the cost is per match**, not at the end of each slot range where it
+        // would be per candidate entity. A scattered candidate is one range per entity, so a check
+        // there is a load and a branch on every entity scanned — measured as a doubling of the
+        // scattered arm, 98 to 239 ms at 10⁹, for a buffer that only ever grows on a match.
+        if self.buf.len() >= CHUNK {
+            self.out.add_many(&self.buf);
+            self.buf.clear();
+        }
+    }
+
+    /// Retire the open stretch: a short one joins the bulk buffer, a long one goes straight in as a
+    /// range.
+    ///
+    /// **The threshold matters more than the coalescing does.** At middling selectivity the matches
+    /// are not long stretches but pairs — a predicate matching half a uniform column gives runs
+    /// averaging two — and adding those as ranges is dearer than buffering them. Below
+    /// [`RUN_MIN`] the entities take the bulk path they always took, so coalescing helps the case it
+    /// was built for and cannot cost the case it was not.
+    #[inline]
+    fn close(&mut self) {
+        let len = self.end - self.start;
+        // One entity is the overwhelmingly common case at any selectivity a scan is worth running
+        // at, so it is the branch taken first and the only one that avoids a loop.
+        if len == 1 {
+            self.buf.push(self.start);
+        } else if (len as usize) < RUN_MIN {
+            for e in self.start..self.end {
+                self.buf.push(e);
+            }
+        } else if len != 0 {
+            self.out.add_range(self.start..self.end);
+            self.coalesced = true;
+        }
+        self.start = 0;
+        self.end = 0;
+    }
+
+
+    fn finish(mut self) -> Bitmap {
+        self.close();
+        self.out.add_many(&self.buf);
+        // **Only when the result actually has runs in it.** A dense result is mostly runs, and
+        // leaving it as array or bitset containers would hand every downstream intersection a
+        // representation several times larger than it needs — the cost model being O(containers
+        // touched), that is paid once here and saved at every composition and count after. But the
+        // pass walks every container, which a *selective* result cannot amortise: unconditionally
+        // it cost the partial-presence arms 0.25 → 0.45 ms and 6.2 → 12.7 ms at 10⁹, for a result
+        // with no runs to find. The coalescing flag says which case this is, exactly.
+        if self.coalesced {
+            self.out.run_optimize();
+        }
+        // A dense result is mostly runs, and leaving it as array or bitset containers would hand
+        // every downstream intersection a representation several times larger than it needs. The
+        // measured cost model is O(containers touched), so this is paid once here and saved at
+        // every operand composition, projection and count that follows.
+        self.out
+    }
+}
+
 /// A membership test over a narrow code domain: one bit per code point.
 ///
 /// Built once per scan and tested in constant time, which is what keeps a set-membership filter the
@@ -490,8 +628,16 @@ impl ValueColumn {
     /// without a bounds check per element — a fixed-width column iterates a slice of values, a text
     /// column iterates a slice of offsets. Handing out one slot at a time would force both into
     /// indexed access and cost the fixed-width case the property it goes fast on.
+    ///
+    /// **No range exceeds [`CHUNK`]**, which is what lets [`Hits`] bound its buffer with a check per
+    /// range instead of per entity. A broad candidate is one enormous run — a 25% candidate at 10⁹
+    /// is a single 250-million-entity range — so without the cap the result would be accumulated
+    /// whole before it became a bitmap. Splitting costs nothing: the pieces are still contiguous
+    /// slices walked the same way, and 64 Ki of them amortises any per-range overhead many times
+    /// over.
     #[inline]
     fn for_each_slot_run(&self, candidate: &Bitmap, len: usize, mut f: impl FnMut(usize, usize, u32)) {
+
         match &self.presence {
             // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
             // array. The run structure is the *candidate's*, so a scattered candidate degenerates
@@ -562,7 +708,7 @@ impl ValueColumn {
     where
         F: FnMut(&T) -> bool,
     {
-        let mut hits: Vec<u32> = Vec::new();
+        let mut hits = Hits::new();
         self.for_each_slot_run(candidate, values.len(), |slot0, count, entity0| {
             // **A scattered candidate is one-element runs**, and building a slice iterator for each
             // costs more than the direct index it replaces — measured as a 20% regression on the
@@ -580,9 +726,7 @@ impl ValueColumn {
                 }
             }
         });
-        let mut out = Bitmap::new();
-        out.add_many(&hits);
-        out
+        hits.finish()
     }
 
     /// Walk the candidate over a **text column**, keeping entities whose bytes satisfy `pred`.
@@ -609,7 +753,7 @@ impl ValueColumn {
             // defence, not the first.
             return Bitmap::new();
         };
-        let mut hits: Vec<u32> = Vec::new();
+        let mut hits = Hits::new();
         self.for_each_slot_run(candidate, self.codes.len(), |slot0, count, entity0| {
             // `offsets` has one more element than there are values, so a run of `count` values
             // needs `count + 1` offsets — walked as overlapping pairs, which is the text-shaped
@@ -621,9 +765,7 @@ impl ValueColumn {
                 }
             }
         });
-        let mut out = Bitmap::new();
-        out.add_many(&hits);
-        out
+        hits.finish()
     }
 
     /// Entities whose UTF-8 value equals `needle`, restricted to `candidate`.
@@ -1622,6 +1764,81 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
+    }
+
+    /// **The result accumulator has three paths and the small fixtures reach only one of them.**
+    /// Matches are coalesced into ranges above `RUN_MIN`, buffered below it, and the buffer is
+    /// folded every `CHUNK` — none of which a twenty-element column touches. These walk a column
+    /// past both boundaries, in each of the shapes the three paths correspond to.
+    #[test]
+    fn a_result_is_complete_across_the_run_and_fold_boundaries() {
+        // Comfortably past CHUNK (65,536) so the buffer folds several times and the traversal
+        // splits its range.
+        let n: u32 = (CHUNK as u32) * 2 + 1_000;
+
+        // (1) Every entity matches — one long run per split range, the add_range path throughout.
+        let dense = ValueColumn::universal(Codes::U8(vec![7u8; n as usize].into()));
+        let all = {
+            let mut b = Bitmap::new();
+            b.add_range(0..n);
+            b.run_optimize();
+            b
+        };
+        let hits = dense.scan_eq(&all, AttrLocalId::new(7));
+        assert_eq!(hits.cardinality(), u64::from(n), "every entity matches");
+        assert_eq!(hits.minimum(), Some(0));
+        assert_eq!(hits.maximum(), Some(n - 1));
+        // The fold boundary itself, and the two entities either side of it, must all be present —
+        // an off-by-one in the buffer flush would drop exactly one of these.
+        for e in [CHUNK as u32 - 1, CHUNK as u32, CHUNK as u32 + 1, n - 1] {
+            assert!(hits.contains(e), "entity {e} across the fold boundary");
+        }
+
+        // (2) Alternating — every run is length 1, so nothing coalesces and everything goes through
+        // the buffer, folding repeatedly.
+        let alternating: Vec<u8> = (0..n).map(|e| (e % 2) as u8).collect();
+        let column = ValueColumn::universal(Codes::U8(alternating.into()));
+        let hits = column.scan_eq(&all, AttrLocalId::new(0));
+        assert_eq!(hits.cardinality(), u64::from(n.div_ceil(2)));
+        assert!(hits.contains(0) && !hits.contains(1));
+        assert!(hits.contains(CHUNK as u32), "the boundary entity is even");
+
+        // (3) One long run in the middle of a sparse column — the mixed case, where a range and
+        // buffered singles must compose into one result without losing either.
+        let mut mixed: Vec<u8> = vec![0u8; n as usize];
+        mixed[5] = 7;
+        for v in mixed.iter_mut().take(2_000).skip(1_000) {
+            *v = 7;
+        }
+        mixed[n as usize - 1] = 7;
+        let column = ValueColumn::universal(Codes::U8(mixed.into()));
+        let hits = column.scan_eq(&all, AttrLocalId::new(7));
+        let want: Vec<u32> = std::iter::once(5)
+            .chain(1_000..2_000)
+            .chain(std::iter::once(n - 1))
+            .collect();
+        assert_eq!(hits.to_vec(), want, "a range and its scattered neighbours");
+    }
+
+    /// The same boundaries on the text walker, which has its own accumulator call sites.
+    #[test]
+    fn a_text_result_is_complete_across_the_fold_boundary() {
+        let n: u32 = (CHUNK as u32) + 500;
+        let column = ValueColumn::universal(Codes::text(
+            (0..n).map(|e| if e % 3 == 0 { "hit".into() } else { "miss".into() }),
+        ));
+        let mut all = Bitmap::new();
+        all.add_range(0..n);
+        all.run_optimize();
+
+        let hits = column.scan_text_eq(&all, "hit");
+        assert_eq!(hits.cardinality(), u64::from(n.div_ceil(3)));
+        assert!(hits.contains(CHUNK as u32 - (CHUNK as u32 % 3)));
+        assert_eq!(hits.maximum(), Some((n - 1) - ((n - 1) % 3)));
+
+        // A prefix every value shares is the text column's dense case.
+        let all_hit = column.scan_text_prefix(&all, "");
+        assert_eq!(all_hit.cardinality(), u64::from(n));
     }
 
     /// The mask still goes in first for text, by the same shared walker every other family uses.
