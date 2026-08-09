@@ -42,7 +42,8 @@ rule, and three things follow that an inverted-postings design could not give. A
 **self-retiring** — rebuilt whole at the fold, never a second durable identity, so no ordinal has to
 stay stable across ingest and the C11 hazard that shape carries does not arise. `entity → value` is one
 array index, so the conformance oracle's relation *is* the artefact rather than a side output the fold
-could forget, and substring matching needs no trigram index. And the work a scan does is a function of
+could forget, and substring matching needs no trigram index — it is a region search over the values a
+contiguous candidate covers, measured at 1.7 ns per candidate entity (§2.2). And the work a scan does is a function of
 the candidate mask and the column, never of the value — which is what makes a hidden value and a
 nonexistent one indistinguishable **in work**, as per-point-attributes §3.8 requires (§2.2).
 
@@ -62,7 +63,8 @@ of it (§7).
 ### 1.1 What this deliberately does not do
 
 **No trigram index.** Substring matching over a `filter` string column is a **masked scan predicate**,
-needing no index and no new library. An earlier revision cut substring to [#44] because a trigram
+needing no index and no per-value loop: a contiguous candidate's values are adjacent bytes, so the
+search runs over the region and maps its hits back through the offsets (§2.2). An earlier revision cut substring to [#44] because a trigram
 conjunction returns a superset needing verification against the stored value, and an inverted-postings
 design gave a filter-only attribute no `entity → value` route to verify against. That premise was a
 consequence of the design, not a requirement; under a flat column the route is an array index. What
@@ -150,7 +152,7 @@ rather than borrowing the fixed-width one (probe arm 6, at 10⁸):
 | `eq` | 3.5 ns | 30 ns |
 | `prefix` | 4.3 ns | 47–56 ns |
 | `in` (5 values) | 8.2 ns | 61 ns |
-| `contains` | 9.7 ns | 96 ns |
+| `contains` | **1.7 ns** | 96 ns |
 
 The ratio is what the storage is: per value the scan streams two 8-byte offsets and the value's
 bytes, about 22 against a `u32` column's 4.
@@ -171,16 +173,26 @@ line — so a faster inner loop recovers only 10–20%. Contiguous, memory is ne
 
 Two consequences follow, and the second is a floor rather than a gap:
 
-- **A contiguous candidate does not need a per-value loop at all.** The values it covers are
-  *adjacent bytes*, so a substring search can run over the concatenated region and map its hits back
-  through the offsets, discarding matches that straddle a boundary. Measured 11.4 → 1.6 ns per
-  candidate entity, and 2,868 → 410 ms for the 25% cell above, at no storage cost.
+- **A contiguous candidate does not need a per-value loop at all, and no longer uses one.** The
+  values it covers are *adjacent bytes*, so the substring search runs over the concatenated region
+  and maps its hits back through the offsets, discarding matches that straddle a boundary — the
+  concatenation joins unrelated values, so `"ab" ++ "cd"` contains the bytes `bc` and neither value
+  does. Measured 9.7 → 1.7 ns per candidate entity, which takes the 25% cell above from 2,868 ms to
+  ~430 ms, at no storage cost. **Built.**
 - **No candidate-driven scan brings a broad *scattered* principal inside the budget**, whatever the
   predicate does, because one random cache line per candidate entity is ~13–15 ns and 10⁸ candidates
   is therefore ≥1.5 s before any comparison. Closing that needs the per-value memory traffic to
   shrink — a packed descriptor of offset, length and a trigram summary in one word measured
   92.5 → 39 ns, at **+8 GB per 10⁹ column** — or an index, which is a disclosure question as well as
-  a storage one (§3). Neither is built.
+  a storage one. ⊘ **Neither is built**, and a scattered candidate therefore still scans per value.
+
+**A `text` type is where this is expected to be revisited, and the split is deliberate.** `utf8` is
+row data: its values are compared, never enumerated, and it is fastest at the predicates that
+compare — exact match and prefix, at 3.5 and 4.5 ns. A separate **`text` type optimised for
+in-query filtering** is the natural home for the structures priced above, because they buy substring
+and phrase matching at a storage cost only a column declared for that purpose should pay. ⊘ **`text`
+is not specified and not built**; today `contains` on a `utf8` column is the scan described here,
+which is inside the budget for every candidate shape but a broad scattered one.
 
 **Set membership costs what equality costs where the domain allows a table.** A `u8` or `u16`
 category's whole code domain fits in 32 bytes or 8 KB, so `in` is a constant-time lookup built once

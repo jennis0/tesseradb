@@ -279,6 +279,52 @@ fn pack_run<T>(
     true
 }
 
+/// Find `finder`'s needle in the concatenated bytes of slots `slot0..slot0 + count`, and record the
+/// entity of every value that contains it.
+///
+/// **A match that straddles a value boundary is not a match in any value**, and discarding those is
+/// the whole correctness argument for searching a region instead of a value: the concatenation joins
+/// values that are unrelated, so `"ab" ++ "cd"` contains the bytes `bc` and neither value does. A
+/// match is kept only when it ends at or before the end of the value it starts in.
+///
+/// The owning slot is tracked with a forward cursor rather than a binary search, because matches
+/// arrive in ascending order — so the cursor advances at most `count` times across the whole run,
+/// however many matches there are.
+///
+/// **Out of line on purpose**, like `pack_run`: inlined into the traversal's callback this costs
+/// every scan whose runs are single values, because the larger closure stops being inlined into
+/// `for_each_run`. That has happened three times in this module's history.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn search_region(
+    finder: &memchr::memmem::Finder<'_>,
+    needle_len: usize,
+    bytes: &[u8],
+    offsets: &[i64],
+    slot0: usize,
+    count: usize,
+    entity0: u32,
+    hits: &mut Hits,
+) {
+    let base = offsets[slot0] as usize;
+    let region = &bytes[base..offsets[slot0 + count] as usize];
+    let mut slot = slot0;
+    let mut last: Option<usize> = None;
+    for pos in finder.find_iter(region) {
+        let at = base + pos;
+        while (offsets[slot + 1] as usize) <= at {
+            slot += 1;
+        }
+        // A value containing the needle twice is recorded once. The result would be correct either
+        // way — the accumulator's bulk add tolerates a repeat — but a repeat breaks the run being
+        // coalesced in two, so this keeps a dense result expressible as ranges.
+        if at + needle_len <= offsets[slot + 1] as usize && last != Some(slot) {
+            hits.push(entity0 + (slot - slot0) as u32);
+            last = Some(slot);
+        }
+    }
+}
+
 /// A membership test over a narrow code domain: one bit per code point.
 ///
 /// Built once per scan and tested in constant time, which is what keeps a set-membership filter the
@@ -369,30 +415,6 @@ impl<'a> ByteSet<'a> {
     }
 }
 
-/// Does `haystack` contain `needle` as a byte substring?
-///
-/// **Byte-wise, and that agrees with `str::contains` on validated UTF-8** — UTF-8 is
-/// self-synchronising, so a valid needle cannot match starting part-way through a character: every
-/// continuation byte is `10xxxxxx` and no lead byte is. Working in bytes is what lets a text scan
-/// skip the per-value UTF-8 validation that dominated it.
-///
-/// The first-byte scan before each comparison is what makes this cheap on the shape a text column
-/// actually holds — short values, most of which do not contain the needle at all.
-#[inline]
-fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if haystack.len() < needle.len() {
-        return false;
-    }
-    let first = needle[0];
-    let last_start = haystack.len() - needle.len();
-    haystack[..=last_start]
-        .iter()
-        .enumerate()
-        .any(|(i, &b)| b == first && &haystack[i..i + needle.len()] == needle)
-}
 
 /// Visit `bitmap`'s set values as ascending, non-overlapping, **inclusive** runs.
 ///
@@ -1084,7 +1106,39 @@ impl ValueColumn {
     /// the trigram index to accelerate that the budget does not already afford.
     pub fn scan_text_contains(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
         let needle = needle.as_bytes();
-        self.walk_text(candidate, |v| byte_contains(v, needle))
+        let Codes::Text { bytes, offsets } = &self.codes else {
+            return Bitmap::new();
+        };
+        // The empty needle is contained in every value, so there is nothing to search for; the
+        // per-value walk answers it without a special case in the loop below.
+        if needle.is_empty() {
+            return self.walk_text(candidate, |_| true);
+        }
+
+        // **A contiguous run's values are adjacent bytes, so the search runs over the region rather
+        // than over each value.** The per-value loop was spending its time on memory rather than
+        // comparison — measured, a contiguous candidate's cost is ~80% inner loop and ~10% cache
+        // misses, the reverse of the scattered case — and searching the concatenation amortises the
+        // scan across every value in the run at SIMD throughput. Measured at 10⁸: 11.4 → 1.7 ns per
+        // candidate entity on a 25% candidate, and 15.9 → 7.5 ns for a needle a quarter of the
+        // values contain (probe arm 12).
+        //
+        // This is a property of the *candidate's* run structure, not of the values: a scattered
+        // candidate degenerates to one value per run and takes the same per-value path it always
+        // did. Nothing here depends on what is being sought.
+        let finder = memchr::memmem::Finder::new(needle);
+        let mut hits = Hits::new();
+        self.for_each_slot_run(candidate, self.codes.len(), |slot0, count, entity0| {
+            if count == 1 {
+                let (lo, hi) = (offsets[slot0] as usize, offsets[slot0 + 1] as usize);
+                if finder.find(&bytes[lo..hi]).is_some() {
+                    hits.push(entity0);
+                }
+                return;
+            }
+            search_region(&finder, needle.len(), bytes, offsets, slot0, count, entity0, &mut hits);
+        });
+        hits.finish()
     }
 
     /// The UTF-8 value an entity carries, or `None` where it carries none or the column is numeric.
@@ -2053,6 +2107,65 @@ mod tests {
         // A prefix every value shares is the text column's dense case.
         let all_hit = column.scan_text_prefix(&all, "");
         assert_eq!(all_hit.cardinality(), u64::from(n));
+    }
+
+    /// **The region search must agree with a per-value definition**, over candidate shapes that
+    /// exercise its two moving parts: the cursor that maps a match back to the value it fell in, and
+    /// the boundary test that discards a match spanning two values. The expectation is a literal
+    /// per-value `contains`, not another route through the same code.
+    #[test]
+    fn the_region_search_agrees_with_a_per_value_definition() {
+        // Values chosen so the concatenation manufactures substrings none of them contain: "ab" ++
+        // "ba" reads as "abba", and repeats put the needle in one value twice.
+        let corpus: Vec<String> = (0..500)
+            .map(|i| match i % 7 {
+                0 => "ab".into(),
+                1 => "ba".into(),
+                2 => "xabx".into(),
+                3 => "abab".into(), // two occurrences in one value
+                4 => "".into(),
+                5 => "zzzz".into(),
+                _ => format!("q{i}ab"),
+            })
+            .collect();
+        let column = ValueColumn::universal(Codes::text(corpus.iter().cloned()));
+        let n = corpus.len() as u32;
+
+        let shapes: [(&str, &[(u32, u32)]); 4] = [
+            ("all", &[(0, n)]),
+            ("one run, offset start", &[(3, n - 3)]),
+            ("many runs", &[(0, 10), (11, 12), (13, 100), (150, n)]),
+            ("alternating singles", &[(0, 1), (2, 3), (4, 5), (6, 7)]),
+        ];
+        for needle in ["ab", "abba", "zz", "q", "nowhere", "abab"] {
+            for (shape, runs) in shapes {
+                let mut candidate = Bitmap::new();
+                for &(lo, hi) in runs {
+                    candidate.add_range(lo..hi);
+                }
+                candidate.run_optimize();
+
+                let want: Vec<u32> = candidate
+                    .iter()
+                    .filter(|&e| corpus[e as usize].contains(needle))
+                    .collect();
+                assert_eq!(
+                    column.scan_text_contains(&candidate, needle).to_vec(),
+                    want,
+                    "needle {needle:?} / {shape}"
+                );
+            }
+        }
+    }
+
+    /// A value holding the needle more than once is one entity, not several — the region search
+    /// sees every occurrence and `Hits` requires strictly ascending entities.
+    #[test]
+    fn a_repeated_needle_records_its_entity_once() {
+        let column = text_column(&["aaaa", "b", "aa"]);
+        let hits = column.scan_text_contains(&candidate(0..3), "a");
+        assert_eq!(hits.to_vec(), vec![0, 2]);
+        assert_eq!(hits.cardinality(), 2, "each entity once, however many matches");
     }
 
     /// The mask still goes in first for text, by the same shared walker every other family uses.
