@@ -50,6 +50,21 @@ pub enum Codes {
     U8(Vec<u8>),
     U16(Vec<u16>),
     U32(Vec<u32>),
+    /// UTF-8 values, concatenated, with `offsets[k]..offsets[k+1]` delimiting slot `k`.
+    ///
+    /// **A string column carries no dictionary and no index, and that is the design rather than a
+    /// stage it has not reached** (`filter-index.md` §2.3). A dictionary exists to give a value an
+    /// integer identity so an inverted index can key on it; nothing here is keyed on a value, so
+    /// there is nothing to intern. Equality, prefix and substring are all the same masked scan with
+    /// a different comparison, and the FST a prefix walk would need exists to *order* distinct
+    /// values, which only matters when the values are being looked up rather than tested.
+    ///
+    /// Interning would also not be free of consequence: it is what made a value's identity durable,
+    /// and a durable per-value identity is what the C11 ordinal hazard lives in.
+    Text {
+        bytes: Vec<u8>,
+        offsets: Vec<u32>,
+    },
 }
 
 impl Codes {
@@ -58,7 +73,36 @@ impl Codes {
             Codes::U8(v) => v.len(),
             Codes::U16(v) => v.len(),
             Codes::U32(v) => v.len(),
+            Codes::Text { offsets, .. } => offsets.len().saturating_sub(1),
         }
+    }
+
+    /// The UTF-8 value at `slot`, for a text column. `None` for a numeric one.
+    #[inline]
+    fn text_at(&self, slot: usize) -> Option<&str> {
+        match self {
+            Codes::Text { bytes, offsets } => {
+                let lo = offsets[slot] as usize;
+                let hi = offsets[slot + 1] as usize;
+                // Validated once at open (`read_values`), so the slice is known UTF-8 and the
+                // unchecked conversion would be sound — but the checked one costs a length-
+                // proportional scan only on invalid input, and this is a request path where a
+                // corrupted file must fail closed rather than reinterpret bytes.
+                std::str::from_utf8(&bytes[lo..hi]).ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a text column from values in slot order.
+    pub fn text(values: impl IntoIterator<Item = String>) -> Codes {
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0u32];
+        for v in values {
+            bytes.extend_from_slice(v.as_bytes());
+            offsets.push(bytes.len() as u32);
+        }
+        Codes::Text { bytes, offsets }
     }
 
     #[inline]
@@ -67,6 +111,10 @@ impl Codes {
             Codes::U8(v) => v[slot] as u32,
             Codes::U16(v) => v[slot] as u32,
             Codes::U32(v) => v[slot],
+            // A text column has no code. Callers reach it through `text_at`; this arm exists so
+            // that a numeric predicate applied to a text column matches nothing rather than
+            // panicking or, worse, comparing an offset to a code.
+            Codes::Text { .. } => u32::MAX,
         }
     }
 }
@@ -109,14 +157,16 @@ impl ValueColumn {
         })
     }
 
-    /// Entities carrying `value`, **restricted to `candidate`**.
+    /// Walk the candidate, resolving each entity to its slot, and keep the entities whose value
+    /// satisfies `keep`.
     ///
-    /// The candidate is `M_auth` (or a narrower composition of it), pushed in first as §8.2
-    /// requires. The result is therefore already inside the authorised set — unlike
-    /// [`crate::ColumnPostings::entities`], which resolves over the whole corpus and leaves the
-    /// intersection to its caller.
-    pub fn scan_eq(&self, candidate: &Bitmap, value: AttrLocalId) -> Bitmap {
-        let wanted = value.raw();
+    /// **Every predicate goes through this one loop**, which is what makes the timing property a
+    /// property of the module rather than of each function: the traversal is a function of
+    /// `(candidate, presence)` alone, and `keep` sees a slot only after the traversal has already
+    /// decided to visit it. A predicate cannot skip work no matter what it is testing for, so
+    /// adding a family adds a comparison and cannot add a channel.
+    #[inline]
+    fn walk(&self, candidate: &Bitmap, mut keep: impl FnMut(&Codes, usize) -> bool) -> Bitmap {
         let mut hits: Vec<u32> = Vec::new();
         match &self.presence {
             // The entity id is the slot. One direct index per candidate entity.
@@ -124,7 +174,7 @@ impl ValueColumn {
                 let bound = self.codes.len();
                 for e in candidate.iter() {
                     let slot = e as usize;
-                    if slot < bound && self.codes.at(slot) == wanted {
+                    if slot < bound && keep(&self.codes, slot) {
                         hits.push(e);
                     }
                 }
@@ -147,7 +197,7 @@ impl ValueColumn {
                             break;
                         }
                     }
-                    if self.codes.at(slot) == wanted {
+                    if keep(&self.codes, slot) {
                         hits.push(e);
                     }
                 }
@@ -156,6 +206,68 @@ impl ValueColumn {
         let mut out = Bitmap::new();
         out.add_many(&hits);
         out
+    }
+
+    /// Entities whose UTF-8 value equals `needle`, restricted to `candidate`.
+    ///
+    /// A string column needs no dictionary to answer this: the comparison is against the stored
+    /// bytes (`Codes::Text`).
+    pub fn scan_text_eq(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
+        self.walk(candidate, |codes, slot| {
+            codes.text_at(slot) == Some(needle)
+        })
+    }
+
+    /// Entities whose UTF-8 value starts with `prefix`, restricted to `candidate`.
+    ///
+    /// The FST an inverted design needed here existed to walk *distinct values in order*, which is
+    /// only necessary when a prefix has to be turned into a set of value identifiers to look up.
+    /// Testing a stored value directly needs no ordering at all.
+    pub fn scan_text_prefix(&self, candidate: &Bitmap, prefix: &str) -> Bitmap {
+        self.walk(candidate, |codes, slot| {
+            codes.text_at(slot).is_some_and(|v| v.starts_with(prefix))
+        })
+    }
+
+    /// Entities whose UTF-8 value contains `needle`, restricted to `candidate`.
+    ///
+    /// **This is why substring matching stopped needing a trigram index.** A trigram conjunction
+    /// returns a *superset* that must be verified against the stored value, and the cut to issue #44
+    /// was made because a filter-only attribute had no route to that value. The value column is that
+    /// route, and with it the verification step *is* the whole operation — there is nothing left for
+    /// the trigram index to accelerate that the budget does not already afford.
+    pub fn scan_text_contains(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
+        self.walk(candidate, |codes, slot| {
+            codes.text_at(slot).is_some_and(|v| v.contains(needle))
+        })
+    }
+
+    /// The UTF-8 value an entity carries, or `None` where it carries none or the column is numeric.
+    pub fn text_of(&self, entity: u32) -> Option<&str> {
+        self.slot_of(entity).and_then(|slot| self.codes.text_at(slot))
+    }
+
+    fn slot_of(&self, entity: u32) -> Option<usize> {
+        match &self.presence {
+            None => {
+                let slot = entity as usize;
+                (slot < self.codes.len()).then_some(slot)
+            }
+            Some(presence) => presence
+                .contains(entity)
+                .then(|| (presence.rank(entity) - 1) as usize),
+        }
+    }
+
+    /// Entities carrying `value`, **restricted to `candidate`**.
+    ///
+    /// The candidate is `M_auth` (or a narrower composition of it), pushed in first as §8.2
+    /// requires. The result is therefore already inside the authorised set — unlike
+    /// [`crate::ColumnPostings::entities`], which resolves over the whole corpus and leaves the
+    /// intersection to its caller.
+    pub fn scan_eq(&self, candidate: &Bitmap, value: AttrLocalId) -> Bitmap {
+        let wanted = value.raw();
+        self.walk(candidate, |codes, slot| codes.at(slot) == wanted)
     }
 
     /// Entities carrying any of `values`, restricted to `candidate` — set membership, one pass.
@@ -168,42 +280,9 @@ impl ValueColumn {
         let mut wanted: Vec<u32> = values.iter().map(|v| v.raw()).collect();
         wanted.sort_unstable();
         wanted.dedup();
-        let matches = |code: u32| wanted.binary_search(&code).is_ok();
-
-        let mut hits: Vec<u32> = Vec::new();
-        match &self.presence {
-            None => {
-                let bound = self.codes.len();
-                for e in candidate.iter() {
-                    let slot = e as usize;
-                    if slot < bound && matches(self.codes.at(slot)) {
-                        hits.push(e);
-                    }
-                }
-            }
-            Some(presence) => {
-                let live = candidate.and(presence);
-                let mut slot: usize = 0;
-                let mut it = presence.iter();
-                let mut cur = it.next();
-                for e in live.iter() {
-                    while let Some(p) = cur {
-                        if p < e {
-                            slot += 1;
-                            cur = it.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if matches(self.codes.at(slot)) {
-                        hits.push(e);
-                    }
-                }
-            }
-        }
-        let mut out = Bitmap::new();
-        out.add_many(&hits);
-        out
+        self.walk(candidate, |codes, slot| {
+            wanted.binary_search(&codes.at(slot)).is_ok()
+        })
     }
 
     /// The value an entity carries, or `None` where it carries none.
@@ -212,23 +291,11 @@ impl ValueColumn {
     /// oracle reads the artefact under test rather than a parallel relation the fold could forget
     /// (`filter-index.md` §9), and why substring matching needs no trigram index to verify against.
     pub fn value_of(&self, entity: u32) -> Option<AttrLocalId> {
-        let slot = match &self.presence {
-            None => {
-                let slot = entity as usize;
-                if slot >= self.codes.len() {
-                    return None;
-                }
-                slot
-            }
-            Some(presence) => {
-                if !presence.contains(entity) {
-                    return None;
-                }
-                // `rank` counts set bits at or below `entity`; the slot is one less.
-                (presence.rank(entity) - 1) as usize
-            }
-        };
-        Some(AttrLocalId::new(self.codes.at(slot)))
+        let slot = self.slot_of(entity)?;
+        match &self.codes {
+            Codes::Text { .. } => None,
+            codes => Some(AttrLocalId::new(codes.at(slot))),
+        }
     }
 
     /// Entities this column holds a value for. `None` presence means the dense range.
@@ -266,13 +333,15 @@ impl ValueColumn {
 }
 
 fn read_values(path: &Path) -> io::Result<Codes> {
-    use arrow::array::{UInt16Array, UInt32Array, UInt8Array};
+    use arrow::array::{Array, StringArray, UInt16Array, UInt32Array, UInt8Array};
     let file = std::fs::File::open(path)?;
     let reader = arrow::ipc::reader::FileReader::try_new(file, None)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let mut u8s: Vec<u8> = Vec::new();
     let mut u16s: Vec<u16> = Vec::new();
     let mut u32s: Vec<u32> = Vec::new();
+    let mut text_bytes: Vec<u8> = Vec::new();
+    let mut text_offsets: Vec<u32> = vec![0];
     let mut kind: Option<u8> = None;
     for batch in reader {
         let batch = batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -286,6 +355,17 @@ fn read_values(path: &Path) -> io::Result<Codes> {
         } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
             kind = Some(4);
             u32s.extend(a.values().iter().copied());
+        } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+            kind = Some(8);
+            // Materialised rather than borrowed from the mapped file: `Codes::Text` owns its bytes,
+            // and a text column read on a request path must be valid UTF-8 *before* any predicate
+            // sees it — `StringArray` has already checked that, which is why the concatenation here
+            // needs no second validation pass.
+            for k in 0..a.len() {
+                let v = a.value(k);
+                text_bytes.extend_from_slice(v.as_bytes());
+                text_offsets.push(text_bytes.len() as u32);
+            }
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -301,6 +381,10 @@ fn read_values(path: &Path) -> io::Result<Codes> {
         Some(1) => Ok(Codes::U8(u8s)),
         Some(2) => Ok(Codes::U16(u16s)),
         Some(4) => Ok(Codes::U32(u32s)),
+        Some(8) => Ok(Codes::Text {
+            bytes: text_bytes,
+            offsets: text_offsets,
+        }),
         // An empty file is an empty column, not an error: a schema may declare a filterable
         // column a corpus has no values for.
         _ => Ok(Codes::U8(Vec::new())),
@@ -327,6 +411,14 @@ pub fn write_value_column(
         Codes::U8(v) => (Arc::new(UInt8Array::from(v.clone())), DataType::UInt8),
         Codes::U16(v) => (Arc::new(UInt16Array::from(v.clone())), DataType::UInt16),
         Codes::U32(v) => (Arc::new(UInt32Array::from(v.clone())), DataType::UInt32),
+        Codes::Text { .. } => {
+            let n = codes.len();
+            let values: Vec<&str> = (0..n).map(|k| codes.text_at(k).unwrap_or("")).collect();
+            (
+                Arc::new(arrow::array::StringArray::from(values)),
+                DataType::Utf8,
+            )
+        }
     };
     let schema = Arc::new(Schema::new(vec![Field::new("value", ty, false)]));
     let batch = RecordBatch::try_new(schema.clone(), vec![array])
@@ -408,6 +500,96 @@ mod tests {
         assert!(column
             .scan_eq(&candidate(0..3), AttrLocalId::new(42))
             .is_empty());
+    }
+
+    fn text_column(values: &[&str]) -> ValueColumn {
+        ValueColumn::universal(Codes::text(values.iter().map(|s| s.to_string())))
+    }
+
+    #[test]
+    fn a_string_column_answers_equality_without_a_dictionary() {
+        let column = text_column(&["smith", "smythe", "smith", "jones"]);
+        let hits = column.scan_text_eq(&candidate(0..4), "smith");
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    /// Prefix needs no FST: the FST existed to order *distinct values* so a prefix could be turned
+    /// into a set of identifiers to look up, and nothing here looks a value up.
+    #[test]
+    fn a_string_column_answers_prefix_without_an_fst() {
+        let column = text_column(&["smith", "smythe", "smote", "jones"]);
+        let hits = column.scan_text_prefix(&candidate(0..4), "sm");
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert!(column
+            .scan_text_prefix(&candidate(0..4), "zz")
+            .is_empty());
+    }
+
+    /// Substring was cut to #44 because a trigram conjunction returns a superset needing
+    /// verification against the stored value, and a filter-only attribute had no route to that
+    /// value. The value column is that route, and the verification step is the whole operation.
+    #[test]
+    fn a_string_column_answers_substring_without_a_trigram_index() {
+        let column = text_column(&["blacksmith", "smythe", "goldsmith", "jones"]);
+        let hits = column.scan_text_contains(&candidate(0..4), "smith");
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    /// The mask still goes in first for text, by the same shared walker every other family uses.
+    #[test]
+    fn the_candidate_bounds_a_text_result() {
+        let column = text_column(&["a", "a", "a", "a"]);
+        let hits = column.scan_text_prefix(&candidate([1, 3]), "a");
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    /// A string column's absent values are its presence bitmap's business, exactly as a
+    /// category's are — there is no in-band empty-string sentinel, because the empty string is a
+    /// value a corpus may legitimately hold.
+    #[test]
+    fn an_absent_string_is_not_an_empty_string() {
+        let column = ValueColumn::partial(
+            Codes::text(["".to_string(), "x".to_string()]),
+            candidate([5, 9]),
+        )
+        .unwrap();
+        assert_eq!(column.text_of(5), Some(""));
+        assert_eq!(column.text_of(7), None);
+        // Entity 5 holds the empty string and matches an empty-prefix test; entity 7 holds no
+        // value and matches nothing at all.
+        let hits = column.scan_text_prefix(&candidate(0..10), "");
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![5, 9]);
+    }
+
+    /// A numeric predicate against a text column matches nothing rather than comparing an offset
+    /// to a code.
+    #[test]
+    fn a_numeric_predicate_on_text_matches_nothing() {
+        let column = text_column(&["1", "2"]);
+        assert!(column
+            .scan_eq(&candidate(0..2), AttrLocalId::new(1))
+            .is_empty());
+        assert_eq!(column.value_of(0), None);
+    }
+
+    #[test]
+    fn a_text_column_round_trips_through_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = dir.path().join("values.arrow");
+        let presence = dir.path().join("presence.roaring");
+        let codes = Codes::text(["alpha".to_string(), "".to_string(), "gamma".to_string()]);
+        write_value_column(&values, &presence, &codes, None).unwrap();
+        let column = ValueColumn::open(&values, None).unwrap();
+        assert_eq!(column.text_of(0), Some("alpha"));
+        assert_eq!(column.text_of(1), Some(""));
+        assert_eq!(column.text_of(2), Some("gamma"));
+        assert_eq!(
+            column
+                .scan_text_contains(&candidate(0..3), "amm")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]

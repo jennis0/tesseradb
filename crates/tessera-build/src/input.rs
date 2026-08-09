@@ -849,6 +849,14 @@ enum BatchColumn {
     U64(Vec<u64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
+    /// A per-item string, for a `filter`-only `utf8` column.
+    ///
+    /// **Not a category**, and the distinction is the data model rather than the encoding: a
+    /// category's value is a vocabulary entry with an identity, a pinned code and a lifecycle,
+    /// existing independently of any row; a string is row data whose visibility is the visibility
+    /// of the rows carrying it. So this variant resolves nothing against a vocabulary and mints
+    /// nothing — the bytes are the value (per-point-attributes; filter-index §2.3).
+    Text(arrow::array::StringArray),
 }
 
 impl BatchColumn {
@@ -943,11 +951,14 @@ impl BatchColumn {
                     return Err(mismatch());
                 })
             }
-            ScalarType::Utf8 => {
-                // Unreachable: `render` on `utf8` is refused at parse (§4.3). An error rather than
-                // an `unreachable!` so that lifting that refusal cannot land on a panic.
-                return Err(mismatch());
-            }
+            // Reached only by a `filter`-only column: `render` on `utf8` is still refused at parse
+            // (§4.3 — a non-fixed-width type in the hot column), but a filter column lives in
+            // entity space and costs the hot column nothing.
+            ScalarType::Utf8 => BatchColumn::Text(
+                any.downcast_ref::<arrow::array::StringArray>()
+                    .ok_or_else(mismatch)?
+                    .clone(),
+            ),
             // A `u64` declaration over a `u64` source keeps the full range; every other
             // combination widens, which is lossless for it.
             ScalarType::U64 if any.is::<UInt64Array>() => BatchColumn::U64(
@@ -967,6 +978,16 @@ impl BatchColumn {
         schema_decl: &crate::schema::Schema,
     ) -> Result<ScalarValue> {
         Ok(match self {
+            // A null is *absent*, and the empty string is what the caller supplied. They are
+            // deliberately not folded together here — contracts §2.4 makes the empty string a
+            // `422` on the ingest plane for the same reason, an unset field and a client bug both
+            // producing it. The build's own reader cannot yet carry the distinction downstream
+            // (⊘ `write_column_values`), which is recorded there rather than papered over here.
+            BatchColumn::Text(values) => ScalarValue::Utf8(if values.is_null(row) {
+                String::new()
+            } else {
+                values.value(row).to_string()
+            }),
             BatchColumn::Keys(keys) => {
                 let code = if keys.is_null(row) {
                     crate::schema::ABSENT_CODE

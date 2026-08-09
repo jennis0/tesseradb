@@ -1436,21 +1436,6 @@ pub(crate) fn write_filter_postings(
         if !postings_are_owed(schema, attribute) {
             continue;
         }
-        // Ascending by code, and each `Vec` ascending by entity: exactly the two orders
-        // `write_delta_tier_at` checks rather than trusts.
-        let mut by_code: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        for (entity, value) in values.iter().enumerate() {
-            let code = category_code(value, &attribute.name)?;
-            if code == tessera_store::vocabulary::ABSENT_CODE {
-                continue;
-            }
-            by_code.entry(code).or_default().push(entity as u32);
-        }
-        // A code with no members is dropped rather than written empty. The positional format has
-        // no such choice — every ordinal below the largest must exist — but a keyed file addresses
-        // by search, and a missing key already reads as the empty set (filter-index §6).
-        let entries: Vec<(u32, Vec<u32>)> = by_code.into_iter().collect();
-
         let column_dir = partition_dir.join("attrs").join(&attribute.name);
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
 
@@ -1466,6 +1451,31 @@ pub(crate) fn write_filter_postings(
             fsync_file(&presence_path)?;
             paths.push(presence_path);
         }
+
+        // **Only a category earns an accelerator.** Its values already carry a vocabulary code and
+        // repeat heavily, so one bitmap replaces millions of repeated codes; a string's values
+        // carry no such identity and do not repeat densely enough for a posting per value to be
+        // anything but a second copy of the column. So a string column is the value column and
+        // nothing else (filter-index §2.3), which is also what makes its scan the whole operation
+        // rather than a verification step behind an index.
+        if attribute.ty == ScalarType::Utf8 {
+            continue;
+        }
+
+        // Ascending by code, and each `Vec` ascending by entity: exactly the two orders
+        // `write_delta_tier_at` checks rather than trusts.
+        let mut by_code: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (entity, value) in values.iter().enumerate() {
+            let code = category_code(value, &attribute.name)?;
+            if code == tessera_store::vocabulary::ABSENT_CODE {
+                continue;
+            }
+            by_code.entry(code).or_default().push(entity as u32);
+        }
+        // A code with no members is dropped rather than written empty. The positional format has
+        // no such choice — every ordinal below the largest must exist — but a keyed file addresses
+        // by search, and a missing key already reads as the empty set (filter-index §6).
+        let entries: Vec<(u32, Vec<u32>)> = by_code.into_iter().collect();
 
         let path = column_dir.join("postings.arrow");
         write_delta_tier_at(&path, &entries, SMALL_TERM_THRESHOLD_DEFAULT)
@@ -1494,25 +1504,54 @@ fn write_column_values(
     values: &[ScalarValue],
 ) -> Result<bool> {
     let mut present = croaring::Bitmap::new();
-    let mut held: Vec<u32> = Vec::new();
     let mut universal = true;
-    for (entity, value) in values.iter().enumerate() {
-        let code = category_code(value, &attribute.name)?;
-        if code == tessera_store::vocabulary::ABSENT_CODE {
-            universal = false;
-            continue;
-        }
-        present.add(entity as u32);
-        held.push(code);
-    }
 
-    // The declared width is the storage width. Narrowing here rather than storing `u32` throughout
-    // is worth a match arm: the column is priced at 1 GB per byte of width per 10⁹ items
-    // (Appendix A), so a `u8` category stored as `u32` would cost 3 GB it does not need.
-    let codes = match attribute.ty {
-        ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect()),
-        ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect()),
-        _ => Codes::U32(held),
+    // **A string's absence is not an empty string**, and a category's is not code 0 by coincidence:
+    // in both families the "carries nothing" sentinel is out of band, because the in-band value it
+    // would otherwise borrow — the empty string, code 0 — is one a corpus may legitimately hold.
+    let codes = if attribute.ty == ScalarType::Utf8 {
+        let mut held: Vec<String> = Vec::new();
+        for (entity, value) in values.iter().enumerate() {
+            match value {
+                ScalarValue::Utf8(text) if !text.is_empty() => {
+                    present.add(entity as u32);
+                    held.push(text.clone());
+                }
+                // ⊘ The attribute reader initialises unset slots to the type's zero, which for a
+                // string *is* the empty string — so at this point in the pipeline an absent value
+                // and a genuinely empty one are indistinguishable. Both are treated as absent,
+                // which is the fail-closed reading: a filter naming a value omits the item, which
+                // narrows `M_sel` and is safe under I12. Carrying the distinction needs a
+                // null-aware attribute reader and is issue-sized, not a rider here.
+                ScalarValue::Utf8(_) => universal = false,
+                other => {
+                    return Err(BuildError::Invalid(format!(
+                        "attribute '{}' is declared `utf8` but carries {other:?}",
+                        attribute.name
+                    )))
+                }
+            }
+        }
+        Codes::text(held)
+    } else {
+        let mut held: Vec<u32> = Vec::new();
+        for (entity, value) in values.iter().enumerate() {
+            let code = category_code(value, &attribute.name)?;
+            if code == tessera_store::vocabulary::ABSENT_CODE {
+                universal = false;
+                continue;
+            }
+            present.add(entity as u32);
+            held.push(code);
+        }
+        // The declared width is the storage width. Narrowing here rather than storing `u32`
+        // throughout is worth a match arm: the column is priced at 1 GB per byte of width per 10⁹
+        // items (Appendix A), so a `u8` category stored as `u32` would cost 3 GB it does not need.
+        match attribute.ty {
+            ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect()),
+            ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect()),
+            _ => Codes::U32(held),
+        }
     };
     let presence = (!universal).then_some(&present);
     write_value_column(values_path, presence_path, &codes, presence)

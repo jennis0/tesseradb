@@ -283,19 +283,21 @@ impl Schema {
                     decl.name
                 )));
             }
-            // `filter` is built for categories and nothing else (filter-index §2.3, §2.5). A
-            // category's identifier is its vocabulary code and its postings are keyed by it; the
-            // other families need a per-column dictionary to intern values into, and the numeric
-            // ones need §3.4's structure choice, which waits on the cardinality sweep. Refused
-            // here rather than accepted and ignored, because a column that parsed as filterable
-            // and emitted no postings would serve an empty operand for every value it holds —
-            // indistinguishable from a correctly-computed empty answer (decision 0013).
-            if placement.filter && decl.ty != "category" {
+            // `filter` is built for categories and strings (filter-index §2.3). Both are a flat
+            // entity-indexed value column scanned under the candidate mask; a category adds a
+            // derived per-value posting because its values already carry a vocabulary code and
+            // repeat heavily. The numeric families are unbuilt — not for want of a structure, since
+            // a numeric column is a value column and nothing else (§3), but because nothing yet
+            // parses or emits a range predicate. Refused here rather than accepted and ignored: a
+            // column that parsed as filterable and emitted nothing would serve an empty operand for
+            // every value it holds, indistinguishable from a correctly-computed empty answer
+            // (decision 0013).
+            if placement.filter && decl.ty != "category" && decl.ty != "utf8" {
                 return Err(schema_error(format!(
-                    "attribute '{}': `filter` is built for `type = \"category\"` only. This \
-                     column is `{}`, whose filter index needs a per-column value dictionary — and, \
-                     for a numeric, the range structure chosen from measured cardinality \
-                     (filter-index §3.4) — neither of which exists yet",
+                    "attribute '{}': `filter` is built for `type = \"category\"` and \
+                     `type = \"utf8\"`. This column is `{}`, whose range predicate is specified \
+                     (filter-index §3) and not built — the column would store correctly and answer \
+                     nothing",
                     decl.name, decl.ty
                 )));
             }
@@ -352,12 +354,20 @@ impl Schema {
                             )));
                         }
                     }
-                    if ty == ScalarType::Utf8 {
+                    // **`render`, not the type.** A string is refused from the *hot column*, which
+                    // is per-row and fixed-width; it is not refused from the bundle. A
+                    // `filter`-only string lives in entity space, is read once per query rather
+                    // than once per rendered mark, and costs the hot column nothing — which is
+                    // exactly the placement distinction §10.3 routes by. An earlier revision
+                    // refused the type outright, which was right while `filter` was unbuilt and
+                    // became wrong when the value column landed.
+                    if ty == ScalarType::Utf8 && placement.render {
                         return Err(schema_error(format!(
                             "attribute '{}': `render` on `utf8` is refused \
                              (per-point-attributes §4.3 — a non-fixed-width type in the hot \
                              column). A per-row string is the vocabulary stored once per row; \
-                             declare a category, whose row cost is its width",
+                             declare a category, whose row cost is its width. `used_for = \
+                             [\"filter\"]` is available and costs the hot column nothing",
                             decl.name
                         )));
                     }
@@ -366,10 +376,7 @@ impl Schema {
                         ty,
                         vocabulary: None,
                         vocabulary_kind: None,
-                        // Unreachable while `filter` is category-only, and not asserted as such:
-                        // the parse check above is the guard, and a `false` here means the same
-                        // thing the check enforces rather than duplicating it.
-                        filter: false,
+                        filter: placement.filter,
                     }
                 }
             };
@@ -987,7 +994,10 @@ used_for = ["render", "filter"]
 "#;
         let message = err(SCORE);
         assert!(message.contains("category"), "{message}");
-        assert!(message.contains("dictionary"), "{message}");
+        // What is absent is the range **predicate**, not a structure. An earlier revision asserted
+        // the message named a per-column dictionary; the flat value column removed the dictionary
+        // from the design, so an assertion on that word would now pin a claim that is false.
+        assert!(message.contains("range predicate"), "{message}");
     }
 
     /// Decision 0013: absent machinery names itself rather than refusing generically.
@@ -1100,6 +1110,21 @@ type = "utf8"
 used_for = ["render"]
 "#;
         assert!(err(text).contains("non-fixed-width"), "{}", err(text));
+    }
+
+    /// A string is refused from the **hot column**, not from the bundle: `filter` puts it in
+    /// entity space, where it is read once per query rather than once per rendered mark.
+    #[test]
+    fn a_filter_only_string_is_accepted() {
+        let text = r#"
+[[attribute]]
+name = "title"
+type = "utf8"
+used_for = ["filter"]
+"#;
+        let schema = parse_str(text).expect("a filter-only string parses");
+        assert!(schema.attributes[0].filter);
+        assert_eq!(schema.attributes[0].ty, ScalarType::Utf8);
     }
 
     #[test]

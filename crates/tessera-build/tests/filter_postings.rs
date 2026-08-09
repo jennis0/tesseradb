@@ -75,6 +75,42 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// `title` is distinct per item, which is the shape an inverted string index handles worst and a
+/// scan handles identically to any other.
+fn title_of(e: u64) -> String {
+    format!("paper-{e}")
+}
+
+/// Points carrying both a category and a per-item string.
+fn write_points_with_title(path: &Path) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("department", DataType::Utf8, true),
+        Field::new("title", DataType::Utf8, true),
+    ]));
+    let ids: Vec<u64> = (0..N).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let departments: Vec<Option<String>> = ids.iter().map(|&e| department_of(e)).collect();
+    let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(departments)),
+            Arc::new(StringArray::from(titles)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
 /// Every item carries a value — the universal-presence case.
 fn write_points_dense(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
@@ -451,4 +487,87 @@ fn a_universal_column_writes_no_presence_bitmap() {
     );
     let column = ValueColumn::open(&cdir.join("values.arrow"), None).unwrap();
     assert_eq!(column.present().cardinality(), N);
+}
+
+const STRING_SCHEMA: &str = r#"
+[[attribute]]
+name = "department"
+type = "category"
+width = "u16"
+used_for = ["render"]
+vocabulary = "discovered"
+listing = "public"
+
+[[attribute]]
+name = "title"
+type = "utf8"
+used_for = ["filter"]
+"#;
+
+/// A string column is a value column and nothing else — no dictionary, no FST, no postings
+/// (filter-index §2.3). The build emits the values and stops.
+#[test]
+fn a_string_filter_column_emits_values_and_no_postings() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_title(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+
+    let cdir = column_dir(&out, "title");
+    assert!(cdir.join("values.arrow").exists());
+    assert!(
+        !cdir.join("postings.arrow").exists(),
+        "a string column earns no accelerator: its values neither repeat densely nor carry an \
+         identity a posting could be keyed by"
+    );
+}
+
+/// Equality, prefix and substring over the stored bytes, under the candidate mask. The substring
+/// case is the one whose cut to #44 this reverses: the trigram index was needed to *narrow* to a
+/// superset that then had to be verified against the stored value, and the stored value is here.
+#[test]
+fn a_string_column_answers_all_three_predicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_title(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+
+    let entity_of = source_to_entity(&out);
+    let cdir = column_dir(&out, "title");
+    let column = ValueColumn::open(&cdir.join("values.arrow"), None).unwrap();
+
+    let mut all = croaring::Bitmap::new();
+    all.add_range(0u32..N as u32);
+
+    let expect = |pred: &dyn Fn(&str) -> bool| -> Vec<u32> {
+        let mut v: Vec<u32> = (0..N)
+            .filter(|&e| pred(&title_of(e)))
+            .map(|e| entity_of[&e])
+            .collect();
+        v.sort_unstable();
+        v
+    };
+
+    assert_eq!(
+        column.scan_text_eq(&all, "paper-3").iter().collect::<Vec<_>>(),
+        expect(&|t| t == "paper-3")
+    );
+    assert_eq!(
+        column.scan_text_prefix(&all, "paper-1").iter().collect::<Vec<_>>(),
+        expect(&|t: &str| t.starts_with("paper-1"))
+    );
+    assert_eq!(
+        column.scan_text_contains(&all, "er-2").iter().collect::<Vec<_>>(),
+        expect(&|t: &str| t.contains("er-2"))
+    );
+    // And `entity → value`, the direction that made the substring route possible at all.
+    for source in 0..N {
+        assert_eq!(column.text_of(entity_of[&source]), Some(title_of(source).as_str()));
+    }
 }
