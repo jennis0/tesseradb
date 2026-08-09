@@ -7,7 +7,7 @@ built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
 width other than `u32` and on a string column, a ruling on surface §4's measured
-project-vs-per-tile rule, and **§6.3's one remaining fold ruling**. Measured input:
+project-vs-per-tile rule. **§6.3's rulings are all made** (owner, 2026-08-10). Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
@@ -856,10 +856,9 @@ an empty `attr_extents` today, which is why the gap above is currently loud rath
 pass must publish both halves in the same manifest write, and a test that a folded bundle still
 answers over post-build entities is what keeps that true.
 
-### 6.3 What needs an owner ruling
+### 6.3 The fold's rulings, and what they settled
 
-One question, rulable from this section alone. Two earlier entries are gone, each for a stated
-reason: the **interim carry-forward is withdrawn** (owner, 2026-08-09 — nothing is deployed, so
+**All three are made; nothing here is open.** Two never reached a ruling and one was answered: the **interim carry-forward is withdrawn** (owner, 2026-08-09 — nothing is deployed, so
 there is no folded bundle to rescue and a state whose only justification is the pass's absence is
 decision 0048's forbidden shape; the gap stays loud until the pass closes it), and the
 **postings-memory ruling dissolved** rather than being ruled — banding the emit (§6.2) turns the
@@ -869,12 +868,22 @@ banding: the counting pass holds one count per distinct code, which is vocabular
 remains for compaction §3 is recording the band budget as a stated constant in the pre-flight —
 an owed amendment, not a ruling.
 
-1. **No attribute gauge, and the earlier promise of one is withdrawn** — §6.2's argument: §5.2's
-   coalesce bounds the extent axis continuously, what escapes it moves one-for-one with the
-   gauged segment axis at microseconds per layer (measured, §5.1), and the pass reports its bytes
-   rather than triggering on them. Ruling this confirms a narrowing of what this document
-   previously said against decision 0056's surface. Cost if wrong: an axis nobody triggers on —
-   bounded regardless by the coalesce policy and the segment ceiling at 64.
+**The attribute axis is reported, never triggered on** (owner, 2026-08-10). Compaction §9's
+automatic trigger stays an OR over its four gauges — segment count, retirable overlay depth, the
+tombstoned-row fraction and the dead-byte ratio — and **gains no fifth for attribute work**. An
+earlier revision of this document promised those gauges attribute-bytes terms; that promise is
+withdrawn rather than deferred.
+
+The argument the ruling accepts: §5.2's coalesce bounds the extent axis continuously, so extents no
+longer wait on a fold at all; what escapes the coalesce moves one-for-one with the segment axis
+already gauged, so a fifth gauge would fire when the first does and cover nothing the first misses —
+and §9's gauges are an OR *because the obligations are independent*, which a correlated axis is not;
+and a layer costs microseconds to query (measured, §5.1), so there is no latency pressure to detect.
+
+What the pass owes instead is **visibility**: attribute bytes read and written in the fold's dispatch
+log line and `/control/status`'s fold block, beside the figures already there. An operator can see
+the work; nothing dispatches a fold on it. Cost if this is wrong: an axis nobody triggers on, bounded
+regardless by the coalesce policy and the segment ceiling at 64.
 
 Amendments this design owes elsewhere, none of which it makes itself: compaction §2's table and §3's
 pass list gain the attribute pass and the band budget (normative — its own review); write-path §7
@@ -995,6 +1004,14 @@ the same two edges the authorisation crate is denied, for the same reason.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-10 — the fold's rulings are closed** (owner). The attribute axis is **reported, never
+triggered on**: compaction §9's OR over four gauges gains no fifth, and this document's earlier
+promise of attribute-bytes terms on them is withdrawn rather than deferred — a correlated axis
+cannot earn a place among gauges whose independence is the reason they are an OR. With the
+carry-forward withdrawn under 0048 and the postings-memory question dissolved by banding, §6.3 has
+no open question; what stands between this design and normative is §2's constants at a second value
+width and on a string column, surface §4's project-vs-per-tile rule, and one adversarial round.
 
 **2026-08-10 (r6) — two owner corrections, both of which change what gets built.** First, the
 extent coalesce was declined at r5 on the query axis — the wrong axis, since arm 13's own numbers
