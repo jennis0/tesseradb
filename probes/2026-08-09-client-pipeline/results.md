@@ -31,6 +31,23 @@ every redraw rather than every fetch — is single-digit milliseconds per step.
 corpus of 2.4M items. On a local socket that decodes in tens of milliseconds and looks free. Over a
 real network it is the dominant cost of the whole design, and nothing here measures that.
 
+## The per-frame cost, which is what "smooth" actually means
+
+`redraw` above is the whole render-side path with nothing fetched — plan, select the bands in the
+region, assemble the buffers — which is what runs on every animation frame of a drag.
+
+| held bands | redraw, before | redraw, after |
+|---|---|---|
+| 24 × 10³ | 14–20 ms | 0.2–6.0 ms |
+
+Before, it scaled with **bands held** rather than with marks drawn: a view drawing 5,700 marks cost
+14.4 ms because the region query recovered each band's tile index from its Morton prefix with a
+per-bit `BigInt` loop, over every held band, every frame. A small mark budget therefore bought
+nothing, and a broad principal — which fills the cache fastest — was the worst case.
+
+Bands now remember their own tile index, and the cost scales with what is drawn: 211,900 marks cost
+6.0 ms and 5,700 cost 0.4 ms.
+
 ## What this corrects
 
 Earlier the same interaction measured 8–29 s of "fetch + decode" in headless Chromium, which led to

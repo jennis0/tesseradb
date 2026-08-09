@@ -54,7 +54,7 @@ let visibleInView: number | undefined;
 // margined box at the depth the budget picks.
 const viewport = {target: [256, 256] as [number, number], zoom: arg('zoom', 4.3), width: 1280, height: 800};
 
-console.log('step | reqs | wire+decode | assemble | novel | held pts | drawn  | bytes');
+console.log('step | reqs | wire+dec | redraw | bands  | held pts | drawn  | bytes');
 for (let step = 0; step < STEPS; step++) {
   // A third of a viewport per step, which is what a drag moves.
   const stride = (viewport.width / 2 ** viewport.zoom) / 3;
@@ -80,6 +80,15 @@ for (let step = 0; step < STEPS; step++) {
   const asmMs = performance.now() - ta;
   const drawn = assembled.ids.length;
 
+  // The redraw path on its own: what a *frame* costs when nothing is fetched. This is what runs on
+  // every animation frame of a drag, so it is the number that decides whether panning is smooth.
+  const tc = performance.now();
+  for (let i = 0; i < 5; i++) {
+    const f = replica.frameFromCache(p.render, p.choice.depth, meta.selection.kMaxMarks);
+    assemble(f, ['primary_category']);
+  }
+  const redrawMs = (performance.now() - tc) / 5;
+
   // The anticipatory ring, as the viewer schedules it: the nearest band with novel work, one
   // bounded bite, up to a budget per still period.
   if (process.argv.includes('--ring')) {
@@ -95,8 +104,8 @@ for (let step = 0; step < STEPS; step++) {
 
   console.log(
     `${String(step).padStart(4)} | ${String(requests - r0).padStart(4)} | ` +
-      `${(wireMs - w0).toFixed(0).padStart(11)} | ${asmMs.toFixed(0).padStart(8)} | ` +
-      `${String(frame.plan.novel).padStart(5)} | ` +
+      `${(wireMs - w0).toFixed(0).padStart(8)} | ${redrawMs.toFixed(1).padStart(6)} | ` +
+      `${String(replica.bandCount).padStart(6)} | ` +
       `${String(replica.points).padStart(8)} | ${String(drawn).padStart(6)} | ` +
       `${((bytes - b0) / 1e6).toFixed(2)} MB`
   );

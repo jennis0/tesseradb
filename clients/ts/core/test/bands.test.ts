@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {BandCache, bandsOfResult, isComplete, type Band} from '../src/bands.js';
-import {mortonOfTile, tileContains, tileOfCode} from '../src/coords.js';
+import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
 import type {ScalarColumn, ViewportResult} from '../src/types.js';
 
 /**
@@ -11,7 +11,11 @@ function band(overrides: Partial<Band> & {depth: number; prefix: bigint; n: numb
   const {n, ...rest} = overrides;
   const ids = BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1));
   const codes = BigUint64Array.from({length: n}, () => overrides.prefix << BigInt(64 - 2 * overrides.depth));
+  // The tile index the store would have de-interleaved when the band was built.
+  const {x, y} = tileXY(overrides.prefix, overrides.depth);
   return {
+    x,
+    y,
     ids,
     codes,
     positions: new Float32Array(n * 2),

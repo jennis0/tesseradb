@@ -53,6 +53,17 @@ export function bandKey(depth: number, prefix: bigint): BandKey {
 export type Band = {
   depth: number;
   prefix: bigint;
+  /**
+   * The tile's `(x, y)` index, de-interleaved once when the band is built.
+   *
+   * **Every region query needs it and none of them should pay for it.** Recovering it from the
+   * prefix is a per-bit `BigInt` loop, and `bandsForRegion` runs over every held band on every
+   * redraw — so at 2.4 × 10^4 bands that was ~2.4 × 10^5 `BigInt` allocations per frame, measured
+   * at 14–20 ms of redraw for a view drawing as few as 5,700 marks. It scaled with what the cache
+   * *held* rather than with what was drawn, which is why a small mark budget did not help.
+   */
+  x: number;
+  y: number;
   ids: BigUint64Array;
   codes: BigUint64Array;
   /**
@@ -168,9 +179,12 @@ export function bandsOfResult(
     const positions = new Float32Array(cells.length);
     for (let i = 0; i < cells.length; i++) positions[i] = cells[i]! / CELLS_PER_WORLD_UNIT;
     const scalars = sliceScalars(result.scalars, offset, end);
+    const {x, y} = tileXY(tile.tile, depth);
     bands.push({
       depth,
       prefix: tile.tile,
+      x,
+      y,
       ids,
       codes,
       positions,
@@ -367,8 +381,7 @@ export class BandCache {
 
     for (const band of this.bands.values()) {
       if (band.depth === depth) {
-        const {x, y} = tileXY(band.prefix, depth);
-        if (rectContainsTile(want, x, y)) exact.push(band);
+        if (rectContainsTile(want, band.x, band.y)) exact.push(band);
         continue;
       }
       if (uncovered.length === 0) continue; // the view is wholly held; nothing to fall back for
@@ -376,7 +389,7 @@ export class BandCache {
       // Project the band's tile onto this depth's grid and admit it only where the view is not
       // already answered. An ancestor covers a block; a descendant collapses to a single tile.
       const shift = Math.abs(band.depth - depth);
-      const {x, y} = tileXY(band.prefix, band.depth);
+      const {x, y} = band;
       const box: TileRect =
         band.depth < depth
           ? {x0: x << shift, y0: y << shift, x1: ((x + 1) << shift) - 1, y1: ((y + 1) << shift) - 1}
@@ -498,15 +511,14 @@ export class BandCache {
    * not a rectangle, and the alternative is to start storing the holes. It is self-healing and it
    * costs a refetch of ground the cache had already decided to give up.
    */
-  private retractCoverage(depth: number, prefix: bigint): void {
-    const {x, y} = tileXY(prefix, depth);
+  private retractCoverage(depth: number, x: number, y: number): void {
     this.covered = this.covered.filter(
       (c) => c.depth !== depth || !rectContainsTile(c.rect, x, y)
     );
   }
 
   private truncate(band: Band, keep: number): void {
-    this.retractCoverage(band.depth, band.prefix);
+    this.retractCoverage(band.depth, band.x, band.y);
     const ids = band.ids.slice(0, keep);
     const codes = band.codes.slice(0, keep);
     const positions = band.positions.slice(0, keep * 2);
