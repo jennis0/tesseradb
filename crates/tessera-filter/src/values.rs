@@ -39,6 +39,61 @@ use std::path::Path;
 use croaring::{Bitmap, Portable};
 use tessera_types::AttrLocalId;
 
+/// Visit `bitmap`'s set values as ascending, non-overlapping, **inclusive** runs.
+///
+/// Bulk-read through the cursor rather than one value at a time: a contiguous candidate collapses
+/// to a handful of ranges, and the caller then walks a plain integer range instead of stepping a
+/// bitmap cursor per entity.
+/// Ranges per cursor read. Large enough that the call amortises, small enough to stay on the stack.
+const RUN_BUF: usize = 64;
+
+fn for_each_run(bitmap: &Bitmap, mut f: impl FnMut(u32, u32)) {
+    let mut cursor = bitmap.cursor();
+    let mut buf = [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF];
+    loop {
+        let n = cursor.read_many_ranges(&mut buf);
+        if n == 0 {
+            return;
+        }
+        for r in &buf[..n] {
+            f(r.start, r.last);
+        }
+    }
+}
+
+/// One run at a time from a bitmap, buffered through the cursor's bulk read.
+struct RunIter<'a> {
+    cursor: croaring::bitmap::BitmapCursor<'a>,
+    buf: [croaring::RangeInclusive<u32>; RUN_BUF],
+    filled: usize,
+    at: usize,
+}
+
+impl<'a> RunIter<'a> {
+    fn new(bitmap: &'a Bitmap) -> Self {
+        RunIter {
+            cursor: bitmap.cursor(),
+            buf: [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF],
+            filled: 0,
+            at: 0,
+        }
+    }
+
+    /// The next run as `(start, last)`, inclusive.
+    fn next(&mut self) -> Option<(u32, u32)> {
+        if self.at == self.filled {
+            self.filled = self.cursor.read_many_ranges(&mut self.buf);
+            self.at = 0;
+            if self.filled == 0 {
+                return None;
+            }
+        }
+        let r = self.buf[self.at];
+        self.at += 1;
+        Some((r.start, r.last))
+    }
+}
+
 /// The value column's file name within a column's directory.
 pub const VALUES_FILE: &str = "values.arrow";
 /// The presence bitmap's, written only where presence is partial — its **absence is the signal**
@@ -237,36 +292,74 @@ impl ValueColumn {
     fn walk(&self, candidate: &Bitmap, mut keep: impl FnMut(&Codes, usize) -> bool) -> Bitmap {
         let mut hits: Vec<u32> = Vec::new();
         match &self.presence {
-            // The entity id is the slot. One direct index per candidate entity.
+            // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
+            // array — walked as an integer range rather than stepped through the bitmap one value
+            // at a time. That is the same trade `compose::for_each_run_in` makes for the mask, and
+            // for the same reason: the per-value cursor step, not the comparison, is where the time
+            // goes on a contiguous candidate.
+            //
+            // The run structure is the *candidate's*, so this is still work as a function of
+            // `(candidate, column)` — a scattered candidate degenerates to one run per entity and
+            // pays what it paid before, which is the honest outcome rather than a regression.
             None => {
-                let bound = self.codes.len();
-                for e in candidate.iter() {
-                    let slot = e as usize;
-                    if slot < bound && keep(&self.codes, slot) {
-                        hits.push(e);
-                    }
-                }
-            }
-            // Container arithmetic first, so blocks the candidate does not touch are never visited,
-            // then one lockstep walk to turn entity ids into slots. The walk is O(present) rather
-            // than O(hits), which is why the universal case above does not use this path even
-            // though it would be correct: measured, it costs 1,078 ms against 28.7 ms at 10⁹.
-            Some(presence) => {
-                let live = candidate.and(presence);
-                let mut slot: usize = 0;
-                let mut it = presence.iter();
-                let mut cur = it.next();
-                for e in live.iter() {
-                    while let Some(p) = cur {
-                        if p < e {
-                            slot += 1;
-                            cur = it.next();
-                        } else {
-                            break;
+                let bound = self.codes.len() as u32;
+                for_each_run(candidate, |start, last| {
+                    // Inclusive `last`, and clamped rather than incremented: a run ending at
+                    // `u32::MAX` would overflow on `last + 1`, which is the edge
+                    // `compose::for_each_run_in` also carries a test for.
+                    let last = last.min(bound.saturating_sub(1));
+                    for e in start..=last {
+                        if keep(&self.codes, e as usize) {
+                            hits.push(e);
                         }
                     }
-                    if keep(&self.codes, slot) {
-                        hits.push(e);
+                });
+            }
+            // Container arithmetic first, so blocks the candidate does not touch are never visited,
+            // then a **run-merge** to turn entity ids into slots.
+            //
+            // Rank is what makes this path expensive: slot *k* is the *k*-th set bit of `presence`,
+            // so a naive walk steps `presence` one bit at a time and costs O(present) however small
+            // the candidate is — measured at 1,078 ms against a bare array's 28.7 ms at 10⁹. But
+            // rank is *affine inside a run*: within one presence run starting at `ps` with `base`
+            // set bits before it, entity `e` is at slot `base + (e - ps)`. So walking both bitmaps
+            // as runs gives every slot by arithmetic, at O(runs) rather than O(entities).
+            //
+            // It degrades to the old cost rather than past it: a scattered presence has one run per
+            // entity, which is the case the naive walk was already paying for.
+            Some(presence) => {
+                let live = candidate.and(presence);
+                let mut pres = RunIter::new(presence);
+                let mut liv = RunIter::new(&live);
+                // Set bits before the current presence run — the run's base slot.
+                let mut base: u64 = 0;
+                let mut p = pres.next();
+                let mut l = liv.next();
+                while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
+                    if pl < ls {
+                        base += u64::from(pl - ps) + 1;
+                        p = pres.next();
+                        continue;
+                    }
+                    if ll < ps {
+                        // `live ⊆ presence`, so this cannot happen for a well-formed column; the
+                        // arm keeps the merge total rather than looping forever if it ever does.
+                        l = liv.next();
+                        continue;
+                    }
+                    let lo = ls.max(ps);
+                    let hi = ll.min(pl);
+                    for e in lo..=hi {
+                        let slot = base + u64::from(e - ps);
+                        if keep(&self.codes, slot as usize) {
+                            hits.push(e);
+                        }
+                    }
+                    if ll <= pl {
+                        l = liv.next();
+                    } else {
+                        base += u64::from(pl - ps) + 1;
+                        p = pres.next();
                     }
                 }
             }

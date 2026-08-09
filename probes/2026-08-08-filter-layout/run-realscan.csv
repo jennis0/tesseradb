@@ -1,0 +1,13 @@
+n,presence,candidate,candidate_entities,ms,ns_per_candidate,hits
+100000000,universal,sparse-contiguous-1pct,1000000,0.92,0.92,1007
+100000000,universal,broad-25pct,25000000,17.38,0.70,24952
+100000000,universal,sparse-scattered-1pct,999463,16.79,16.80,1015
+100000000,slice-blocked,sparse-contiguous-1pct,1000000,0.12,0.12,85
+100000000,slice-blocked,broad-25pct,25000000,1.67,0.07,2497
+100000000,slice-blocked,sparse-scattered-1pct,999463,2.32,2.32,85
+1000000000,universal,sparse-contiguous-1pct,10000000,9.81,0.98,10046
+1000000000,universal,broad-25pct,250000000,201.55,0.81,250294
+1000000000,universal,sparse-scattered-1pct,10000954,161.90,16.19,10070
+1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.89,0.09,970
+1000000000,slice-blocked,broad-25pct,250000000,18.97,0.08,24816
+1000000000,slice-blocked,sparse-scattered-1pct,10000954,27.25,2.73,967

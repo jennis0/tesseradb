@@ -112,8 +112,23 @@ where a column genuinely covers everything.
 
 A filter operand is evaluated by scanning the value column **under the candidate mask** — `M_auth`
 pushed in first, as §8.2 requires — and the measured cost is per candidate entity rather than per
-corpus byte: **~2.9 ns** with a contiguous candidate, **~22 ns** with a scattered one, stable across
+corpus byte: **~0.8 ns** with a contiguous candidate, **~16 ns** with a scattered one, stable across
 three orders of magnitude and linear in *n*.
+
+Those are the **shipped scan's** figures, and the distinction earned its keep: the campaign's layout
+arms reimplement the loop, which is right for comparing storage shapes and wrong for sizing the code —
+the reimplementation was 23% optimistic against the scan as it then stood. Pointing the harness at
+`ValueColumn` and then iterating **runs rather than values** — a candidate run is a contiguous slice
+of the value column, because the entity id *is* the index — took the contiguous case from 3.10 ns to
+0.98 ns, with identical results (probe arm 4).
+
+The same observation is worth more on the **partial-presence** path, where rank is what costs: slot
+*k* is the *k*-th set bit of the presence bitmap, so a per-bit walk pays O(present) however small the
+candidate is. Rank is affine *inside* a run — entity `e` in a run from `ps` with `base` bits before it
+is at slot `base + (e − ps)` — so merging the two bitmaps' runs gives every slot by arithmetic. A 1%
+candidate over a slice-blocked column went from 124.89 ms to **0.89 ms**. Arm 1 read that cell as a
+cost of the addressing structure; it was the rank algorithm, and the presence bitmap is now a filter
+on work rather than a tax on it.
 
 **The budget is a filter budget, not a viewport budget** (owner ruling, 2026-08-08): **0.5–1 s is
 acceptable for a filter change at 10⁹**, because a filter changes far less often than the viewport does.
@@ -122,11 +137,11 @@ close:
 
 | Candidate | Affordable coverage at 10⁹, 1 s |
 |---|---|
-| Contiguous | ~3.4×10⁸ entities — **34% of the corpus** |
-| Scattered | ~4.5×10⁷ entities — 4.5% |
+| Contiguous | ~1.3×10⁹ entities — **the whole corpus at 10⁹** |
+| Scattered | ~6.6×10⁷ entities — 6.6% |
 
-Measured, a 25%-coverage contiguous principal costs **730 ms**: inside the band, with no accelerator of
-any kind. Only near-total coverage exceeds it — a full-corpus scan measures ~3.0 s — so the corner an
+Measured, a 25%-coverage contiguous principal costs **202 ms** over a universal column and **19 ms**
+over a slice-blocked one: inside the band several times over, with no accelerator of any kind. Only near-total coverage exceeds it — a full-corpus scan measures ~3.0 s — so the corner an
 accelerator addresses is the privileged tail, not "broad coverage" as an earlier revision framed it
 against a borrowed 50 ms viewport budget.
 
@@ -137,9 +152,11 @@ inverted-postings design achieved it — filter-surface §2.1 superseded the req
 could not meet it. That supersession is **withdrawn**: the requirement holds as originally written, for
 every scanned family.
 
-> **The scan is not bandwidth-bound, and sizing it as though it were runs ~5–7× optimistic.** A model
-> assuming 5–10 GB/s predicted 40–80 ms for a 25% principal at 10⁹; measured is **730 ms**, an
-> effective ~1.4 GB/s. The bound is per-candidate work and cache misses.
+> **The scan is not bandwidth-bound, and sizing it as though it were misleads in both directions.** A
+> model assuming 5–10 GB/s predicted 40–80 ms for a 25% principal at 10⁹ against a then-measured
+> 730 ms — ~5–7× optimistic. Run-based iteration has since taken the same cell to **181 ms**, which a
+> bandwidth model would have called *pessimistic* by 2×. The bound is per-candidate work and cache
+> misses, and it moves with the loop rather than with the hardware.
 
 ### 2.3 The category accelerator
 
@@ -285,8 +302,8 @@ and an earlier revision specified both — along with a probe to calibrate the c
 which is no longer a question that exists.
 
 **Broad numeric ranges need no accelerator, and both candidates are declined** (owner ruling,
-2026-08-08). A range is a scan, and §2.2's budget puts a 25%-coverage range at 730 ms measured — inside
-the band. The two structures an earlier revision reached for are therefore not built, and the reasons
+2026-08-08). A range is a scan, and §2.2's budget puts a 25%-coverage range at 202 ms measured — inside
+the band several times over. The two structures an earlier revision reached for are therefore not built, and the reasons
 they are *declined* rather than deferred are worth stating, because one of them is a security result:
 
 - **Zone maps** — per-block min/max, skipping blocks that cannot match — are declined **because they
@@ -356,8 +373,10 @@ postings** during `M_auth` construction. A single value intersected against a ca
 operation and never enters that regime: measured at 10⁹, the worst posting shape at the worst coverage
 costs 49.5 ms (§2.3). **Do not cite the union spread against a filter operand.**
 
-What contiguity does still govern is the *scan*, where it is worth **7.6×**: ~2.9 ns per candidate entity
-contiguous against ~22 ns scattered, the difference being cache misses on the value column (§2.2).
+What contiguity does still govern is the *scan*, where it is worth **~20×**: ~0.8 ns per candidate
+entity contiguous against ~16 ns scattered. A contiguous candidate collapses to a handful of runs, so
+the scan walks slices of the value column; a scattered one degenerates to a run per entity and pays
+cache misses on every read (§2.2).
 
 ---
 
@@ -582,9 +601,10 @@ an integer identity and repeats heavily, and no other family has either property
 flat table or in an index suited to that type.
 
 Two probes then settled what reasoning had been guessing at
-([`2026-08-08-filter-layout`](../../probes/2026-08-08-filter-layout/)). The masked scan is **~2.9 ns per
-candidate entity** contiguous and **~22 ns** scattered, stable across 10⁶–10⁹ — which refuted a 5–10 GB/s
-bandwidth model that had predicted 40–80 ms for a 25% principal at 10⁹ against a measured **730 ms**. The
+([`2026-08-08-filter-layout`](../../probes/2026-08-08-filter-layout/)). The masked scan is **~0.8 ns per
+candidate entity** contiguous and **~16 ns** scattered, stable across 10⁶–10⁹ — which refuted a 5–10 GB/s
+bandwidth model that had predicted 40–80 ms for a 25% principal at 10⁹ against a measured 730 ms, itself
+since improved ~5× by run-based iteration (arm 4). The
 addressing choice was measured rather than argued: bare array where presence is universal, Roaring
 presence bitmap where partial, explicit `(entity_id, value)` pairs never optimal on either axis, and run
 tables a trap that is smallest on disk and collapses at 2.9–10.2 s on a broad candidate. And the derived

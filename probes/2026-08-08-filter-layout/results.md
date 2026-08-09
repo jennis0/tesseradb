@@ -78,6 +78,13 @@ Measured, a 25%-coverage contiguous principal costs **730 ms** — inside the ba
 at all. Only near-total coverage exceeds it: a full-corpus scan measures ~3.0 s. **The corner is the
 privileged tail, not broad coverage**, and it is the only place an accelerator earns anything.
 
+> **Superseded by arm 4, which measures the shipped code and then makes it 3–140× faster.** These
+> thresholds derive from arm 1's reimplementation at ~2.9 ns per candidate entity. The shipped scan
+> is run-based and measures **~0.8 ns** contiguous, so a 1 s budget now buys roughly the whole corpus
+> at 10⁹ rather than a third of it, and the "privileged tail" corner all but closes. The table is
+> kept because the *method* — thresholds in candidate entities rather than bytes — is what the design
+> uses, and because a later change that lost the run path would land back here.
+
 ## Arm 2 — does the category posting close the gap the scan leaves?
 
 `accel` ([`layoutprobe/src/bin/accel.rs`](layoutprobe/src/bin/accel.rs), raw
@@ -132,6 +139,63 @@ every container), but the intermediate case — a scattered posting whose contai
 meets while no bits match — is **not measured**, and reasoning says work there is container-
 proportional while the result is empty. That case, not the one measured, is where a residual could
 live.
+
+## Arm 4 — the shipped scan, and two run-based rewrites of it
+
+Arms 1–3 reimplement the scan in this crate, which is right for comparing *layouts* but means their
+constants describe the approach rather than the code. `realscan`
+([`layoutprobe/src/bin/realscan.rs`](layoutprobe/src/bin/realscan.rs), raw
+[`run-realscan.csv`](run-realscan.csv)) calls `tessera_filter::ValueColumn::scan_eq` directly, over
+both presence shapes.
+
+**The reimplementation was optimistic, and by enough to matter.** At 10⁹ and 25% coverage the model
+says 730 ms; the shipped code said **900 ms** — 23% slower, because the model's loop and the shipped
+`walk` were not the same loop. Any optimisation judged against arm 1's numbers would have been judged
+against itself.
+
+### What changed
+
+Both rewrites are the same observation applied twice: **iterate runs, not values.**
+
+- **Universal presence** — the entity id *is* the array index, so a candidate run is a contiguous
+  slice of the value column. The loop becomes a bulk range read and a plain integer walk.
+- **Partial presence** — slot *k* is the *k*-th set bit of the presence bitmap, so a naive walk
+  steps it one bit at a time and costs O(present) however small the candidate is. But rank is
+  **affine inside a run**: within a presence run starting at `ps` with `base` bits before it, entity
+  `e` is at slot `base + (e − ps)`. Merging the two bitmaps' runs gives every slot by arithmetic, at
+  O(runs).
+
+### Measured, at 10⁹
+
+| Presence | Candidate | Before | After | |
+|---|---|---|---|---|
+| universal | 1% contiguous | 30.97 ms (3.10 ns) | **9.81 ms (0.98 ns)** | 3.2× |
+| universal | 25% broad | 900.51 ms (3.60 ns) | **201.55 ms (0.81 ns)** | 4.5× |
+| universal | 1% scattered | 276.75 ms (27.67 ns) | **161.90 ms (16.19 ns)** | 1.7× |
+| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | **0.89 ms (0.09 ns)** | **140×** |
+| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | **18.97 ms (0.08 ns)** | 9.3× |
+| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | **27.25 ms (2.73 ns)** | 14.8× |
+
+Results are identical throughout; only the timings move.
+
+**The 140× is the O(present) term disappearing**, and it is the largest single win in this campaign.
+The old walk paid for the *whole* presence bitmap whatever the candidate asked for, so a 1% candidate
+over a 10%-present column did a hundred times the necessary work. Arm 1 measured that shape as its
+worst cell and attributed it to the addressing structure; it was the rank algorithm.
+
+**The constants to design against are now ~0.8 ns per candidate entity contiguous and ~16 ns
+scattered** for a universal column, and lower for a partial one — the presence bitmap having become
+a *filter* on work rather than a tax on it.
+
+**Neither rewrite touches the timing property.** Run structure belongs to the candidate, presence to
+the column; neither is a function of the value sought. The optimisation that would not be safe —
+stopping once the result is complete — remains forbidden. Both also degrade to the old cost rather
+than past it: a scattered candidate is one run per entity, which is what the per-value loop was
+already paying.
+
+**Not taken**, and a separate decision: the scan is single-threaded. Splitting by container is
+embarrassingly parallel, but it borrows capacity from concurrent requests, which the
+compute-admission gate exists to ration — so it is a concurrency decision rather than a free win.
 
 ## Arm 3 — getting the result into row space
 

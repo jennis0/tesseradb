@@ -9,6 +9,12 @@ edition = "2021"
 
 [dependencies]
 croaring = "2"
+# **The shipped scan, not a model of it.** `realscan` calls `ValueColumn` directly: the other
+# binaries here reimplement the loop, which is right for comparing *layouts* but means their
+# constants describe the approach rather than the code. An optimisation measured against a
+# reimplementation is measured against itself.
+tessera-filter = { path = "../../../crates/tessera-filter" }
+tessera-types = { path = "../../../crates/tessera-types" }
 
 [profile.release]
 opt-level = 3

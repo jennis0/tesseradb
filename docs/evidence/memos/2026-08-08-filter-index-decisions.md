@@ -44,11 +44,11 @@ In-memory, single-threaded, `u32` column, 12-core WSL2 host.
 
 | Quantity | Value | Standing |
 |---|---|---|
-| Masked scan, contiguous candidate | **~2.9 ns per candidate entity** | measured, stable 10⁶→10⁹ |
-| Masked scan, scattered candidate | **~22 ns per candidate entity** | measured; 7.6× penalty is cache misses, not bandwidth |
-| 25% principal, 10⁹, bare column | **730 ms** | measured |
+| Masked scan, contiguous candidate | **~0.8 ns per candidate entity** | measured on the shipped code, stable 10⁶→10⁹ (was ~2.9 ns against a reimplementation, and 3.10 ns shipped, before run-based iteration — probe arm 4) |
+| Masked scan, scattered candidate | **~16 ns per candidate entity** | measured on the shipped code; the ~20× penalty is cache misses, not bandwidth |
+| 25% principal, 10⁹, bare column | **202 ms** | measured on the shipped code (900 ms before run-based iteration; 730 ms was a reimplementation) |
 | Scale behaviour | linear, 9.5–11.2× per decade, no cliffs | measured across three decades |
-| Affordable coverage at the ruled 1 s filter budget | ~3.4×10⁸ contiguous (34% of 10⁹), ~4.5×10⁷ scattered | derived from the two constants |
+| Affordable coverage at the ruled 1 s filter budget | ~1.3×10⁹ contiguous (the whole corpus at 10⁹), ~6.6×10⁷ scattered | derived from the two constants |
 | Full-corpus scan at 10⁹ | ~3.0 s — the only case outside the band | measured |
 
 Addressing structure, bytes per present entity at 10⁹ (totals in parentheses below 1 B):
