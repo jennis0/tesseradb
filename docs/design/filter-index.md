@@ -1,12 +1,13 @@
 # The filter index — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r5, the fold and start-up designed on measurement.** The category case is
+**Status:** **Provisional — r6, the fold, the extent coalesce and start-up designed on measurement.**
+The category case is
 built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
 width other than `u32` and on a string column, a ruling on surface §4's measured
-project-vs-per-tile rule, and **§6.3's three fold rulings**. Measured input:
+project-vs-per-tile rule, and **§6.3's one remaining fold ruling**. Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
@@ -490,6 +491,14 @@ a correctness gap, and it is the same ceiling the existing attribute reader alre
 regardless. A streaming emit — a counting pass for band prefix sums, then an emit pass — is what the
 plan's arithmetic needs and is not written.
 
+⊘ **The shipped postings emit is unbanded, and that is a finding about existing code, not only a
+plan.** `write_filter_postings` accumulates every code's entity list in memory before anything is
+written — 4 B per present entity per category column, ~4 GB per fully covered column at 10⁹ — on
+**every build**, in the same pipeline whose authorisation emit bands term space precisely to avoid
+this shape. Harmless at the scales built so far and outside the memory plan at 10⁹. The banded
+construction both producers should share is specified at §6.2, where the fold — the second caller —
+made the shape's cost unavoidable to state.
+
 The two fail-closed scatter checks carry over unchanged and for unchanged reasons: an overflow check,
 because one term's entities silently becoming another's is a disclosure; and a short-fill check **by
 count rather than by value**, because zero is a valid entity ID.
@@ -582,11 +591,66 @@ pays +15.3 ms over a zero-layer column, ~5% over the folded equivalent and far i
 
 **What accumulates fastest is files, not scan time.** Two files per column per flush is ~31,000
 files a day at sixteen columns: manifest entries, digest-sweep members (§8), and 28 ms per column
-of open-and-compose at 960 extents (measured, arm 13). So the axis is bounded the same way the
-segment axis is, and by the same events — **every flush adds exactly one segment and one extent per
-column, so the extent count moves one-for-one with the axis compaction §9's segment gauge already
-watches**, and the fold that pays the segment axis down folds the extents with it (§6.2). No
-separate extent gauge is proposed; §6.3 puts that to the owner alongside the fold's other rulings.
+of open-and-compose at 960 extents (measured, arm 13). That is the axis that needs bounding, it is
+a *file-count* axis rather than a query axis, and the system already has the pass whose job that is
+— §5.2 makes attribute extents its fourth axis. What the fold is then left holding is §6.2.
+
+### 5.2 The extent coalesce: a fourth axis on the entity-space pass
+
+⊘ **Specified, not implemented.** Today nothing bounds the extent count between folds; the layers
+accumulate at flush rate until the fold consumes them (§6.2).
+
+The engine's entity-space coalesce (write-path §7; `tessera-engine`'s `coalesce` module) already
+bounds three per-flush, entity-space, accumulating axes — delta postings tiers, dictionary extents,
+external-id runs — as a **content-preserving re-encode**: no `segments_version` bump, no cache key
+rotated, no projection or fragment invalidated, everything named by path and therefore ABA-safe
+against concurrent flushes. Attribute extents are the same shape as delta tiers, and take the
+same safety argument: **layers are unioned at composition, so their division into files is
+immaterial; what must not change is the set of `(entity, column, value)` triples**, which a merge
+of disjoint extents preserves exactly. Like every pass in that module, **a coalesce retires
+nothing**: a deleted entity's value rides through untouched, because removal is the fold's (§6).
+
+The mechanics, against the pass's existing shape:
+
+- **The selection window is a window of flushes, taken across every column at once.** A flush
+  writes one extent per filterable column, and the file set being a function of the schema rather
+  than of the data is a property §2.5 already establishes — so the pass consumes the same
+  contiguous window of flushes for every column and emits **one coalesced extent per column**,
+  keeping that property through the coalesce. Any contiguous window qualifies, for the tier
+  axis's reason: a union has no order. (Extent entity ranges are in fact ascending across flushes
+  under **I9**, so the merge is a concatenation in practice; the design requires only
+  disjointness, which is checked at composition, not assumed here.)
+- **The policy's knobs carry over with their meanings intact.** `width` (8) is how many flushes'
+  extents collapse into one; the size `floor` (1 MiB) does for extents exactly what it does for
+  tiers — a flush's extent is ~100 KB at the owner's stated rates, so without the floor every
+  tick would mint its own size class and the pass would silently never fire; and the input cap
+  (256 MiB) bounds the pass transient, which for this axis is the input extents' values and
+  presence bitmaps held during the merge. At measured category widths the cap is inert — a
+  width-8 window across sixteen `u32` columns is ~13 MB — and it is kept because a **text**
+  column's extent is its values' bytes, which nothing bounds per flush.
+- **Output lands under `coalesced/<id>/attrs/<column>/`**, on contracts §2.1's existing precedent
+  for entity-space output that belongs to no segment — the coalesced tier and run already live
+  there, and the never-reused `<id>` rule is what stops two passes truncating each other's mapped
+  files. No format change follows: `attr_extents` names paths, never a path convention (§2.5's
+  own rule), so the manifest edit is remove-consumed, insert-one-per-column, exactly the tier
+  axis's edit.
+- **Disjointness at composition survives, and is still checked rather than assumed.** A coalesced
+  layer covers the union of its inputs' entity sets. The inputs were pairwise disjoint and
+  disjoint from every other layer, so their union is too — and the composition check is
+  set-intersection against accumulated coverage, not a range test, so a layer covering a union of
+  ranges satisfies it identically. The check keeps its job: if I9 ever failed, two layers
+  claiming one entity is still a refusal at compose, coalesced or not.
+- **Publication recomposes the affected columns** from the manifest it just wrote — the
+  generation's filter columns are rebuilt with the coalesced layer replacing the consumed ones,
+  a pointer-clone plus one `mmap` per column, on the executor exactly as a flush's composition
+  is. Nothing row-space moves, so decision 0043 is satisfied by construction.
+
+**What this bounds, modelled from arm 13's constants.** Repeated width-8 coalescing walks the same
+size-tier ladder the segment merge does, so the steady-state layer count per column is tens rather
+than a day's ~960 — which takes the open path from 28 ms per column and ~31,000 files a day to
+~1 ms and a bounded few hundred files, and makes §5.1's "a week without a fold" arithmetic moot:
+the file-count axis no longer waits for the fold at all. The query-axis saving is real and
+unimportant — layers were already microseconds each (measured, §5.1).
 
 
 ## 6. Deletion, suppression and retirement
@@ -653,11 +717,15 @@ self-retires.
 
 **The objective is the owner's, verbatim: after a fold, a bundle should cost what a freshly built
 one costs — to open, to hold resident, and to query — without disrupting serving to get there.**
-For this artefact both halves are now quantified. The layered column's *query* cost is already
-within ~5% of a single build's at a day of layers (measured, §5.1), so what the fold restores is
-the open path — one mapping per column instead of ~31,000 files a day of extents — and the
-retention property below. The non-disruption half is the pass's own cost, sized at the end of this
-section.
+For this artefact both halves are now quantified, and with §5.2 bounding the file-count axis
+continuously the fold's share is smaller than a day's pile-up: the layered column's *query* cost is
+within ~5% of a single build's at a day of layers and the coalesce holds the layer count at tens
+(measured and modelled, §5.1–§5.2), so what only the fold can do is **retention** — the blanking
+below — the **postings rebuild** to the new watermark, and the final collapse of the surviving
+handful of layers into one base, which is what makes the folded bundle *equal* to a built one
+rather than close to it. The fold is no longer the only thing standing between the open path and a
+day's ~31,000 files; missing a window costs a bounded steady state, not unbounded growth. The
+non-disruption half is the pass's own cost, sized at the end of this section.
 
 ⊘ **Specified, not implemented — none of this pass exists.** What happens instead today is that a
 fold drops `attrs/` entirely and a node restarting onto the folded bundle refuses to open. That is
@@ -673,7 +741,7 @@ snapshot/publication split:
 | | At the snapshot | At publication |
 |---|---|---|
 | **base value column + presence** | folded: one new base per column, snapshot extents in, `D₀`'s entities out | — |
-| **per-flush extents** | consumed by the fold | post-snapshot extents carried forward, listed in the new `attr_extents` |
+| **extents, per-flush and coalesced (§5.2)** | consumed by the fold | post-snapshot extents carried forward, listed in the new `attr_extents` |
 | **category postings** | rebuilt whole from the folded column | — |
 | `suppressed` | **untouched — no attribute artefact ever changes for a suppression** (Rule S) | the live set, exactly as compaction §2 already publishes it |
 
@@ -717,12 +785,11 @@ not already encode.
 **Slice invariance holds through the fold**: the pass is per partition in entity space, reads
 nothing per-slice, and emits nothing per-slice. §7's statement is unchanged by it.
 
-**Deliberately not designed here.** An *incremental* extent coalesce between folds — a mini-merge
-for attribute layers, by analogy with the segment merge — because §5.1 measured the axis it would
-bound at microseconds per layer, so it would be mechanism without a cost to remove. A resumable
-attribute pass — the fold has no resume anywhere, deliberately (compaction §3), and this pass
-inherits that. And any change to *when* folds run: decision 0056's schedule is taken as given, and
-nothing here adds a trigger.
+**Deliberately not designed here.** A resumable attribute pass — the fold has no resume anywhere,
+deliberately (compaction §3), and this pass inherits that. And any change to *when* folds run:
+decision 0056's schedule is taken as given, and nothing here adds a trigger. (An earlier revision
+also declined the extent coalesce here, on the query axis — the wrong axis, since the binding cost
+is files and open time; it is now designed at §5.2.)
 
 #### What the pass costs, against non-disruption
 
@@ -739,20 +806,33 @@ owns; it must not advise the live generation's `FilterColumns` maps, which are t
 for exactly pass 2's reason. The pass is single-threaded like the rest of the fold; parallelism is
 excluded by owner ruling and not further discussed.
 
-**Memory: streaming except one term.** The merge holds cursors; the writers spool. The exception is
-postings assembly — every value's bitmap grows until the column's scan completes — bounded by the
-measured serialised sizes (probe arm 9): 2.0 B per present entity for a fully scattered category,
-**~2 GB per such column at 10⁹**, kilobytes when the values correlate with entity order. That term
-joins compaction §3's pre-flight budget or silently consumes its ×2 headroom; §6.3 puts the choice
-to the owner, because the budget is normative and an OOM-killed node is the failure it exists to
-prevent.
+**Memory: streaming everywhere, and the postings emit is banded to keep it so.** The merge holds
+cursors; the writers spool. The one construction that would not stream is the obvious postings
+emit — every code's entity list accumulated until the column's scan completes — and its in-flight
+cost is the **raw entity ids, 4 B per present entity, ~4 GB per fully covered category column at
+10⁹**. (An earlier revision quoted ~2 GB from probe arm 9; that is the *serialised* size, and the
+correction matters — the transient is the ids, not the bitmaps.) The build's authorisation emit
+already solved this shape and the attribute emit takes the same construction: **band the code
+space**, a code never split across a band, a counting pass over the column sizing each band from a
+memory budget, then per band one column scan cursor-scattering into a flat buffer laid out by
+prefix sums and appended to the keyed postings file — bands partition ascending code space, so the
+writer's ascending-order check holds across them unchanged. The cost is one column scan per band at
+§2.2's measured ~280 ms per 10⁹, so even sixteen bands is a few seconds per column inside an
+operation of minutes to hours; the memory is the band budget, **a constant the planner chooses**,
+not a corpus-dependent figure — which is what dissolves the pre-flight ruling an earlier revision
+put to the owner (§6.3). The counting pass's own residue is one count per distinct code, and a
+category's distinct codes are vocabulary-sized by definition (§2.3) — kilobytes, not a term.
+**The build owes itself the same fix**: its shipped emit is the unbanded shape (§4's finding), so
+the banded emit is written once and both producers call it, which is also what keeps them one
+writer rather than two that agree.
 
 **No new gauge.** The fold's free-space precondition already covers `attrs/` — its estimate is the
-bytes the manifests name, which these files are — and §5.1's measurement makes a layer-count
-trigger unnecessary: the extent axis moves one-for-one with the segment axis compaction §9 already
-gauges, and costs microseconds per layer where a segment costs a binary search per tile. What the
-pass owes instead is *visibility*: attribute bytes read and written in the fold's dispatch log line
-and `/control/status`'s fold block, beside the figures already there. (An earlier revision of this
+bytes the manifests name, which these files are — and the extent axis needs no trigger of its own
+twice over: §5.2's coalesce bounds it continuously on its own policy, and what escapes the policy
+moves one-for-one with the segment axis compaction §9 already gauges, at microseconds per layer
+where a segment costs a binary search per tile (measured, §5.1). What the pass owes instead is
+*visibility*: attribute bytes read and written in the fold's dispatch log line and
+`/control/status`'s fold block, beside the figures already there. (An earlier revision of this
 section promised the *gauges* attribute-bytes terms; that was a trigger where only reporting is
 warranted, and it is withdrawn.)
 
@@ -778,30 +858,28 @@ answers over post-build entities is what keeps that true.
 
 ### 6.3 What needs an owner ruling
 
-Two questions, each rulable from this section alone.
+One question, rulable from this section alone. Two earlier entries are gone, each for a stated
+reason: the **interim carry-forward is withdrawn** (owner, 2026-08-09 — nothing is deployed, so
+there is no folded bundle to rescue and a state whose only justification is the pass's absence is
+decision 0048's forbidden shape; the gap stays loud until the pass closes it), and the
+**postings-memory ruling dissolved** rather than being ruled — banding the emit (§6.2) turns the
+corpus-dependent gigabyte term into a planner-chosen band budget, so there is no longer a choice
+between an explicit formula and consumed headroom. No corpus-proportional residual survives the
+banding: the counting pass holds one count per distinct code, which is vocabulary-sized. What
+remains for compaction §3 is recording the band budget as a stated constant in the pre-flight —
+an owed amendment, not a ruling.
 
-**An interim carry-forward was offered here and is withdrawn** (owner, 2026-08-09): nothing is
-deployed, so there is no folded bundle to rescue and no reason to build a state whose only
-justification is the absence of the pass — decision 0048's rule, applied. The gap stays loud until
-the pass closes it.
-
-1. **Where does the postings-assembly memory term go?** The fold's pre-flight budget (compaction
-   §3, normative) estimates three computable terms and doubles them. The attribute pass adds a term
-   measured at up to ~2 GB per fully scattered category column at 10⁹. *Explicit term*
-   (recommended): the estimate gains `Σ per category column: 2 B × present entities` — computable
-   from the presence bitmaps at plan time, and the doubling keeps meaning what it means. *Absorb in
-   the doubling*: no amendment, but several scattered categories silently consume the headroom that
-   stands in for the widest term's encode, and the pre-flight passes on a box the fold then
-   OOMs — the exact failure the check exists to prevent.
-2. **No attribute gauge, and the earlier promise of one is withdrawn** — §6.2's argument: the
-   extent axis moves one-for-one with the gauged segment axis and costs microseconds per layer
-   (measured, §5.1); the pass reports its bytes rather than triggering on them. Ruling this
-   confirms a narrowing of what this document previously said against decision 0056's surface.
-   Cost if wrong: an axis nobody triggers on — bounded regardless by the segment ceiling at 64.
+1. **No attribute gauge, and the earlier promise of one is withdrawn** — §6.2's argument: §5.2's
+   coalesce bounds the extent axis continuously, what escapes it moves one-for-one with the
+   gauged segment axis at microseconds per layer (measured, §5.1), and the pass reports its bytes
+   rather than triggering on them. Ruling this confirms a narrowing of what this document
+   previously said against decision 0056's surface. Cost if wrong: an axis nobody triggers on —
+   bounded regardless by the coalesce policy and the segment ceiling at 64.
 
 Amendments this design owes elsewhere, none of which it makes itself: compaction §2's table and §3's
-pass list gain the attribute pass and the budget term (normative — its own review), and §8's
-first-touch digest deferral remains contracts §2.4's owed amendment.
+pass list gain the attribute pass and the band budget (normative — its own review); write-path §7
+and contracts §2.1's tree gain the coalesce's fourth axis and `coalesced/<id>/attrs/<column>/`; and
+§8's first-touch digest deferral remains contracts §2.4's owed amendment.
 
 
 ## 7. Slices
@@ -917,6 +995,19 @@ the same two edges the authorisation crate is denied, for the same reason.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-10 (r6) — two owner corrections, both of which change what gets built.** First, the
+extent coalesce was declined at r5 on the query axis — the wrong axis, since arm 13's own numbers
+put the binding cost in files and open time — and is now designed as the **fourth axis of the
+existing entity-space coalesce** (§5.2): same policy, same `coalesced/<id>/` precedent, same
+content-preserving and retire-nothing rules, with the fold re-derived to hold retention, the
+postings rebuild and a final collapse of tens of layers rather than a day's ~960. Second, the
+postings-memory figure was wrong twice — ~2 GB is the *serialised* size where the in-flight
+transient is the raw ids at ~4 GB, and it is not the fold's problem alone: the **build's shipped
+emit is unbanded today** (§4's finding). The emit is now specified banded by code space on the
+authorisation build's own construction (§6.2), shared by both producers, which dissolves r5's
+pre-flight ruling: the term becomes a planner-chosen band budget with no corpus-proportional
+residual. §6.3 is down to one ruling — no attribute gauge.
 
 **2026-08-09 (r5) — the fold and start-up designed, on a new measurement.** §5.1 and §6.2 are new
 and §6.3 lists what the owner must rule; probe arm 13 measured layer accumulation — ~9 µs per layer
