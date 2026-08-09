@@ -1,0 +1,1 @@
+stats,n=100000000,distinct_trigrams=1210,posting_entries=1224721702,entries_per_value=12.25

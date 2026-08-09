@@ -39,6 +39,8 @@ use std::sync::Arc;
 
 use arrow::buffer::{Buffer, ScalarBuffer};
 use croaring::{Bitmap, Portable};
+
+use crate::pack;
 use tessera_types::AttrLocalId;
 
 /// Matched entities, folded into the result bitmap in bounded chunks.
@@ -177,6 +179,104 @@ impl Hits {
         // every operand composition, projection and count that follows.
         self.out
     }
+}
+
+/// Whether this scan packs whole blocks, decided once from the first block it packs.
+///
+/// **Packing is flat and the per-entity walk is not**, so which is cheaper depends on how much
+/// matches: measured at 10⁹, packing costs ~0.8 ns per candidate entity whatever the predicate,
+/// against 0.28 ns for a branch the processor predicts and 5.9 ns for one it does not. Packing
+/// everything would therefore buy a 4–9.5× win on unselective predicates at a 30–49% cost on
+/// selective ones — and a selective predicate over a broad candidate is the ordinary filter.
+///
+/// So the first whole block is packed, and its match density decides the rest of the scan. One
+/// block is ~50 µs at this scale, against the seconds at stake.
+///
+/// **This is a decision about the principal's own visible matches, and it carries no channel.** A
+/// value the principal cannot see and a value that does not exist both match nothing in that first
+/// block, take the same branch, and cost the same — which is what per-point-attributes §3.8
+/// requires. What the timing can reveal is roughly how much of the viewer's own result matched,
+/// which is the result they are about to be handed.
+#[derive(Clone, Copy, PartialEq)]
+enum Packing {
+    Undecided,
+    On,
+    /// The first block was too sparse to pay for packing; the rest of this scan walks entities.
+    Abandoned,
+}
+
+/// The match density, per block, at or above which packing pays. The measured crossover sits between
+/// 1% and 5% selectivity; a thirty-second is inside that band and is a shift.
+const PACK_MIN_DENSITY: u32 = (pack::BLOCK as u32) / 32;
+
+/// One candidate run that spans at least one whole 2¹⁶-aligned block: the aligned interior is packed
+/// into Roaring containers, the ragged ends either side of it walked per entity. Returns whether the
+/// run was handled here.
+///
+/// **Out of line on purpose.** Inlined into the traversal's callback this code costs every *other*
+/// scan shape — measured at 10⁹, the partial-presence arms regressed 80% and the scattered arm 78%,
+/// with no block ever packed in either, because the larger closure stopped being inlined into
+/// `for_each_run`. The same failure and the same fix as `Hits::push`'s cold path: the callback that
+/// runs once per candidate entity has to stay small.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn pack_run<T>(
+    values: &[T],
+    slot0: usize,
+    count: usize,
+    entity0: u32,
+    pred: &mut impl FnMut(&T) -> bool,
+    hits: &mut Hits,
+    packed: &mut pack::Sink,
+    words: &mut [u64; pack::WORDS],
+    state: &mut Packing,
+) -> bool {
+    if *state == Packing::Abandoned {
+        return false;
+    }
+    let end = slot0 + count;
+    let first = slot0.div_ceil(pack::BLOCK);
+    let last = end / pack::BLOCK;
+    if first >= last {
+        return false;
+    }
+    let interior = first * pack::BLOCK..last * pack::BLOCK;
+    for (i, v) in values[slot0..interior.start].iter().enumerate() {
+        if pred(v) {
+            hits.push(entity0 + i as u32);
+        }
+    }
+    for block in first..last {
+        let at = block * pack::BLOCK;
+        let card = pack::pack_block(&values[at..at + pack::BLOCK], pred, words);
+        packed.push_block(block as u16, card, words);
+        if *state == Packing::Undecided {
+            *state = if card >= PACK_MIN_DENSITY {
+                Packing::On
+            } else {
+                Packing::Abandoned
+            };
+            if *state == Packing::Abandoned {
+                // This block is answered already; the remainder of the run returns to the
+                // per-entity walk, which is what every later run will take too.
+                let done = at + pack::BLOCK;
+                let base = entity0 + (done - slot0) as u32;
+                for (i, v) in values[done..end].iter().enumerate() {
+                    if pred(v) {
+                        hits.push(base + i as u32);
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    let tail = entity0 + (interior.end - slot0) as u32;
+    for (i, v) in values[interior.end..end].iter().enumerate() {
+        if pred(v) {
+            hits.push(tail + i as u32);
+        }
+    }
+    true
 }
 
 /// A membership test over a narrow code domain: one bit per code point.
@@ -709,7 +809,39 @@ impl ValueColumn {
         F: FnMut(&T) -> bool,
     {
         let mut hits = Hits::new();
+        let mut packed = pack::Sink::new();
+        let mut words = [0u64; pack::WORDS];
+        // Slot and entity coincide only where the entity id *is* the array index. A presence bitmap
+        // makes a block's values a rank-addressed subsequence rather than a contiguous slice, so it
+        // keeps the per-entity path — see `pack`'s module docs.
+        let positional = self.presence.is_none();
+        let mut packing = Packing::Undecided;
+
         self.for_each_slot_run(candidate, values.len(), |slot0, count, entity0| {
+            // **Whole 2¹⁶-aligned blocks are packed into Roaring containers directly**, which is
+            // what keeps an unselective predicate inside the filter budget: measured at 10⁹, a
+            // predicate matching half a whole-corpus candidate cost 5.9 s inserted and 0.83 s packed,
+            // and one matching three quarters 10.2 s against 0.84 s. The cost is *flat* in how much
+            // matches, where the per-entity path is not.
+            //
+            // The condition is the candidate's shape and the column's addressing, never the values,
+            // so this adds no dependence on what is being sought.
+            if positional
+                && count >= pack::BLOCK
+                && pack_run(
+                    values,
+                    slot0,
+                    count,
+                    entity0,
+                    &mut pred,
+                    &mut hits,
+                    &mut packed,
+                    &mut words,
+                    &mut packing,
+                )
+            {
+                return;
+            }
             // **A scattered candidate is one-element runs**, and building a slice iterator for each
             // costs more than the direct index it replaces — measured as a 20% regression on the
             // scattered arm before this branch existed. The contiguous case is where the slice walk
@@ -726,7 +858,13 @@ impl ValueColumn {
                 }
             }
         });
-        hits.finish()
+
+        // The two paths cover disjoint entity ranges by construction — the packed blocks are exactly
+        // the aligned interior each run's per-entity walk skipped — so the union is exact and its
+        // order does not matter.
+        let mut out = hits.finish();
+        out.or_inplace(&packed.finish());
+        out
     }
 
     /// Walk the candidate over a **text column**, keeping entities whose bytes satisfy `pred`.
@@ -1818,6 +1956,82 @@ mod tests {
             .chain(std::iter::once(n - 1))
             .collect();
         assert_eq!(hits.to_vec(), want, "a range and its scattered neighbours");
+    }
+
+    /// **The packed path must agree with the definition, at every shape of candidate that reaches
+    /// it.** Whole 2¹⁶-aligned blocks are answered by assembling Roaring containers by hand
+    /// (`pack`), and the ragged ends either side of them by the per-entity walk — so the cases that
+    /// matter are the seams: a candidate starting mid-block, ending mid-block, exactly aligned, and
+    /// split across several runs. The expectation here is a literal per-entity filter, not another
+    /// route through the same code.
+    #[test]
+    fn the_packed_path_agrees_with_a_per_entity_definition() {
+        const B: u32 = pack::BLOCK as u32;
+        let n = B * 3 + 5_000;
+        // Three densities: one that lands every block in a bitset container, one in an array
+        // container, and one that matches nothing at all.
+        for (label, modulus) in [("dense", 2u32), ("sparse", 900), ("none", 0)] {
+            let values: Vec<u8> = (0..n)
+                .map(|e| if modulus != 0 && e % modulus == 0 { 7 } else { 1 })
+                .collect();
+            let column = ValueColumn::universal(Codes::U8(values.clone().into()));
+
+            // Runs as (start, end) pairs rather than ranges, so a one-run shape is still a list.
+            let shapes: [(&str, &[(u32, u32)]); 6] = [
+                ("whole column", &[(0, n)]),
+                ("ragged both ends", &[(7, B * 2 + 33)]),
+                ("aligned exactly", &[(B, B * 3)]),
+                ("one block only", &[(B, B * 2)]),
+                ("just under a block", &[(B + 1, B * 2)]),
+                (
+                    "several runs",
+                    &[(0, B + 9), (B + 100, B * 2 + 7), (B * 2 + 50, n)],
+                ),
+            ];
+
+            for (shape, runs) in shapes {
+                let mut candidate = Bitmap::new();
+                for &(lo, hi) in runs {
+                    candidate.add_range(lo..hi);
+                }
+                candidate.run_optimize();
+
+                let want: Vec<u32> = candidate
+                    .iter()
+                    .filter(|&e| values[e as usize] == 7)
+                    .collect();
+                let got = column.scan_eq(&candidate, AttrLocalId::new(7));
+                assert_eq!(got.to_vec(), want, "{label} / {shape}");
+            }
+        }
+    }
+
+    /// The packed path and the per-entity path must not disagree about a column whose length is not
+    /// a multiple of the block size — the trailing partial block is the one a packer is most likely
+    /// to run past the end of, or to drop entirely.
+    #[test]
+    fn a_partial_trailing_block_is_neither_dropped_nor_overrun() {
+        const B: u32 = pack::BLOCK as u32;
+        let n = B + 3; // one whole block, then three entities
+        let values: Vec<u8> = (0..n).map(|e| (e % 2) as u8).collect();
+        let column = ValueColumn::universal(Codes::U8(values.into()));
+        let mut all = Bitmap::new();
+        all.add_range(0..n);
+        all.run_optimize();
+
+        let got = column.scan_eq(&all, AttrLocalId::new(0));
+        assert_eq!(got.cardinality(), u64::from(n.div_ceil(2)));
+        assert_eq!(got.maximum(), Some(B + 2), "the trailing block is included");
+        assert!(got.contains(B), "the entity just past the packed block");
+        // And a candidate that stops inside the packed block must not gain its remainder.
+        let mut short = Bitmap::new();
+        short.add_range(0..(B - 1));
+        short.run_optimize();
+        assert_eq!(
+            column.scan_eq(&short, AttrLocalId::new(0)).maximum(),
+            Some(B - 2),
+            "nothing beyond the candidate"
+        );
     }
 
     /// The same boundaries on the text walker, which has its own accumulator call sites.

@@ -334,15 +334,20 @@ that matches, and reports peak RSS as well as time.
 **The result was accumulated whole before it became a bitmap, and that was a memory problem before
 it was a latency one:**
 
-| Candidate | Matches | Before | | After | |
-|---|---|---|---|---|---|
-| 25% broad | 1% | 167 ms | 10 MB | 192 ms | **0 MB** |
-| 25% broad | 25% | 878 ms | 250 MB | 857 ms | **0 MB** |
-| 25% broad | **100%** | 1,556 ms | 1,000 MB | **218 ms** | **0 MB** |
-| whole corpus | 1% | 683 ms | 40 MB | 768 ms | **1 MB** |
-| whole corpus | 25% | 3,701 ms | 1,112 MB | 3,390 ms | **105 MB** |
-| whole corpus | 50% | 7,020 ms | 2,111 MB | 6,037 ms | **105 MB** |
-| whole corpus | **100%** | 7,306 ms | 4,112 MB | **878 ms** | **0 MB** |
+| Candidate | Matches | Originally | | Chunked + coalesced | | **Packed (arm 8, shipped)** | |
+|---|---|---|---|---|---|---|---|
+| 25% broad | 1% | 167 ms | 10 MB | 192 ms | 0 MB | **199 ms** | 0 MB |
+| 25% broad | 25% | 878 ms | 250 MB | 857 ms | 0 MB | **166 ms** | 41 MB |
+| 25% broad | 50% | — | — | 1,402 ms | 27 MB | **161 ms** | 44 MB |
+| 25% broad | **100%** | 1,556 ms | 1,000 MB | 218 ms | 0 MB | **167 ms** | 30 MB |
+| whole corpus | 1% | 683 ms | 40 MB | 768 ms | 1 MB | **800 ms** | 0 MB |
+| whole corpus | 25% | 3,701 ms | 1,112 MB | 3,390 ms | 105 MB | **670 ms** | 208 MB |
+| whole corpus | 50% | 7,020 ms | 2,111 MB | 6,037 ms | 105 MB | **692 ms** | 217 MB |
+| whole corpus | **100%** | 7,306 ms | 4,112 MB | 878 ms | 0 MB | **677 ms** | 215 MB |
+
+**Every cell is now inside the 0.5–1 s budget**, and for a 25% principal inside 200 ms. The residual
+memory is the result bitmap itself plus croaring's union temporary, bounded and unrelated to how the
+result was accumulated.
 
 **A filter matching a quarter of a 10⁹ corpus allocated 1.1 GB transiently, per concurrent request**,
 and one matching all of it 4.1 GB — on a request path, for a quantity the compute-admission gate
@@ -523,6 +528,31 @@ which carries the tables; this section is the pointer, not the record.
   also Arrow `Utf8`'s **2 GiB** (signed offsets), not the 4 GiB arm 6 assumed. The recorded "next
   thing to try if text needs to be faster" is hereby retired; the remaining lever is the value
   bytes, not the offsets.
+
+## Arms 11–12 (2026-08-09) — text `contains` decomposed, and the accelerators priced
+
+Measured after arms 8–10 and written up in
+[`docs/evidence/memos/2026-08-09-text-contains-acceleration.md`](../../docs/evidence/memos/2026-08-09-text-contains-acceleration.md),
+which carries the tables; this section is the pointer, not the record.
+
+- **Arm 11, `textdecomp`** ([`src/bin/textdecomp.rs`](layoutprobe/src/bin/textdecomp.rs), raw
+  [`run-textdecomp-1e8-{1,2,3}.csv`](run-textdecomp-1e8-1.csv)) — splits arm 6's 96 ns scattered
+  `contains` cell: ~3.6 ns traversal, ~31 ns the two random cache lines (offsets, value bytes),
+  ~52 ns search-plus-verify — of which most is second-line latency rather than arithmetic, since
+  a SWAR first-byte loop recovers only 10–20%. On a contiguous candidate ~80% is the loop and the
+  memory is free. Any per-value structure keeps a ~13–15 ns/candidate random-access floor, so
+  **no candidate-driven scan brings a broad scattered principal inside the filter budget**.
+- **Arm 12, `textaccel`** ([`src/bin/textaccel.rs`](layoutprobe/src/bin/textaccel.rs), raw
+  [`run-textaccel-1e8-{1,2,3}.csv`](run-textaccel-1e8-1.csv),
+  [`run-textaccel-1e9-{1,2,3}.csv`](run-textaccel-1e9-1.csv)) — searching a contiguous run's
+  values as **one region** (`memmem::find_iter`, hits mapped back through the offsets) takes
+  contiguous/broad `contains` 10.3–11.4 → 1.6–1.7 ns; a derived 8 B/value packed descriptor
+  (`offset | len | trigram bloom`) takes the scattered cell 92.5 → 39 ns, 30 with a +4 B second
+  bloom. Per-value `memmem::Finder` is **refuted** at this value length (worse than the scalar
+  loop), as is the 1-byte character bloom. Arm 6's needle `-000` plus an absent and a
+  25%-matching needle bracket the prefilter's range. Trigram postings were not built; a measured
+  count pass (12.25 entries/value) prices them ~15–25 GB per 10⁹ column of 14-byte values,
+  modelled from arm 9's bytes-per-entry.
 
 ## Method
 

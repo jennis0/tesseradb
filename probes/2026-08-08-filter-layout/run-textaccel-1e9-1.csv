@@ -1,0 +1,10 @@
+n,arm,needle,candidate,candidate_entities,ms,ns_per_candidate,hits
+1000000000,shipped,-000,sparse-contiguous-1pct,10000000,115.635,11.56,9984
+1000000000,shipped,-000,broad-25pct,250000000,3305.289,13.22,249513
+1000000000,shipped,-000,sparse-scattered-1pct,10000954,1244.176,124.41,9944
+1000000000,shipped,erg,sparse-contiguous-1pct,10000000,161.767,16.18,2500408
+1000000000,shipped,erg,broad-25pct,250000000,5070.284,20.28,62498067
+1000000000,shipped,erg,sparse-scattered-1pct,10000954,1121.165,112.11,2500224
+1000000000,shipped,qzx,sparse-contiguous-1pct,10000000,94.179,9.42,0
+1000000000,shipped,qzx,broad-25pct,250000000,2301.883,9.21,0
+1000000000,shipped,qzx,sparse-scattered-1pct,10000954,797.322,79.72,0
