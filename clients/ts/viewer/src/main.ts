@@ -66,6 +66,7 @@ const store = createStore({
   k: undefined,
   underlayOffset: 0,
   assembled: null,
+  sessionWarm: false,
   status: 'idle',
   lastError: null,
   view: null,
@@ -292,6 +293,7 @@ function render() {
           s.terms = preset.terms;
           s.termsLabel = preset.label;
           s.assembled = null;
+          s.sessionWarm = false;
           s.status = 'idle';
           s.lastVisibleInView = null;
           s.mTarget = s.meta?.selection.thetaTargetMarks ?? 16;

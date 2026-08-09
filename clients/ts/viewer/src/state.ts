@@ -31,6 +31,15 @@ export type AppState = {
    */
   assembled: Assembled | null;
   status: DisplayStatus;
+  /**
+   * Whether this session has received its first viewport response.
+   *
+   * The visible set materialises lazily inside that first request, and at 10^9 items a broad
+   * principal's union measured ~10 s — re-paid per session, since nothing is shared across them
+   * yet. Until it lands, "loading" means something different from every later loading state, and
+   * the panel says so instead of letting a session's establishment read as a hung fetch.
+   */
+  sessionWarm: boolean;
   lastError: {code: string; detail: string} | null;
   /** The depth the budget chose for the current view. */
   view: (DepthChoice & {requestedAt: number}) | null;

@@ -720,6 +720,7 @@ export class ViewportController {
 
       this.store.update((s) => {
         s.assembled = assembled;
+        s.sessionWarm = true;
         // Widened for the coloured column only. Widening every column would walk eighteen arrays
         // per response to build ramps nothing is displaying; the cost is paid when a column is
         // chosen, which is also when the domain first has a reader.

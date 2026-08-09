@@ -17,8 +17,21 @@ export function renderCounts(state: AppState): string {
   switch (state.status) {
     case 'idle':
       return panel('Counts', '<div class="muted">waiting for the first view</div>');
-    case 'loading':
+    case 'loading': {
+      if (!state.sessionWarm) {
+        const waited = state.view ? Math.round((Date.now() - state.view.requestedAt) / 1000) : 0;
+        // The visible set materialises inside the session's first request, and at a large corpus a
+        // broad principal's union takes seconds — a different wait from every later "loading", so
+        // it says what is happening rather than reading as a hung fetch.
+        return panel(
+          'Counts',
+          `<div class="muted">establishing this principal's visible set — the first request of a
+           session materialises the mask, which can take seconds on a large corpus
+           (${waited}s)…</div>`
+        );
+      }
       return panel('Counts', '<div class="muted">loading…</div>');
+    }
     case 'retrying':
       return panel(
         'Counts',

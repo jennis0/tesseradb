@@ -10,6 +10,10 @@
 #   ./run_demo.sh                 # build the demo fixture if needed, serve it, open the viewer
 #   ./run_demo.sh --wide          # the 19-column tail instead: every declared type, 5x the bytes
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have
+#   ./run_demo.sh --bundle PATH --ranks RANKS.json
+#                                 # ...with coverage principals (sparse ~1% / medium ~10% /
+#                                 # heavy ~50%) composed from a term ranking; generate the
+#                                 # ranking once per pairs file with scripts/rank_terms.py
 #   ./run_demo.sh --no-viewer     # server only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundle
 #
@@ -113,12 +117,14 @@ export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-dev-session-credential}"
 export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 
 bundle_override=""
+ranks_file=""
 run_viewer=1
 rebuild=0
 wide=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --bundle)     bundle_override="$2"; shift 2 ;;
+    --ranks)      ranks_file="$2"; shift 2 ;;
     --no-viewer)  run_viewer=0; shift ;;
     --rebuild)    rebuild=1; shift ;;
     --wide)       wide=1; shift ;;
@@ -253,7 +259,8 @@ cd "$REPO/clients/ts"
 # committed one back.
 say "measuring principals (rewrites the tracked clients/ts/viewer/presets.json)"
 node scripts/measure-principals.mjs \
-  --viewer "http://$VIEWER_ADDR" --session "http://$SESSION_ADDR" --terms 0..200
+  --viewer "http://$VIEWER_ADDR" --session "http://$SESSION_ADDR" --terms 0..200 \
+  ${ranks_file:+--ranks "$ranks_file"}
 
 say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop both"
 echo "Opens on every term, the largest mark budget, coloured by archive. Other columns in the"
