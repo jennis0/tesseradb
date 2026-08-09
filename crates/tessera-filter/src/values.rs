@@ -224,6 +224,26 @@ impl ValueColumn {
         })
     }
 
+    /// Entities whose UTF-8 value equals any of `needles`, restricted to `candidate`.
+    ///
+    /// **`in` is `eq` over a list**, and that generalisation is not category-only: a string's
+    /// values are compared for equality exactly as a category's codes are, so set membership means
+    /// the same thing over both families. What differs is only what a value *is*.
+    ///
+    /// One pass with a sorted needle list, for the reason [`Self::scan_in`] gives: a per-needle
+    /// loop would make the running time proportional to how many needles *match*, which is the
+    /// channel this module's candidate-first discipline exists to deny.
+    pub fn scan_text_in(&self, candidate: &Bitmap, needles: &[String]) -> Bitmap {
+        let mut wanted: Vec<&str> = needles.iter().map(String::as_str).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        self.walk(candidate, |codes, slot| {
+            codes
+                .text_at(slot)
+                .is_some_and(|v| wanted.binary_search(&v).is_ok())
+        })
+    }
+
     /// Entities whose UTF-8 value starts with `prefix`, restricted to `candidate`.
     ///
     /// The FST an inverted design needed here existed to walk *distinct values in order*, which is
@@ -537,6 +557,27 @@ mod tests {
 
     /// Prefix needs no FST: the FST existed to order *distinct values* so a prefix could be turned
     /// into a set of identifiers to look up, and nothing here looks a value up.
+    /// `in` over strings is `eq` over a list — the same generalisation a category gets.
+    #[test]
+    fn a_string_column_answers_set_membership() {
+        let column = text_column(&["smith", "smythe", "jones", "smith"]);
+        let hits = column.scan_text_in(
+            &candidate(0..4),
+            &["smith".to_string(), "jones".to_string(), "absent".to_string()],
+        );
+        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2, 3]);
+    }
+
+    /// A **code**-valued set predicate over a text column matches nothing: the two `in` spellings
+    /// do not cross, because a text column has no code to compare.
+    #[test]
+    fn a_code_set_predicate_on_text_matches_nothing() {
+        let column = text_column(&["1", "2"]);
+        assert!(column
+            .scan_in(&candidate(0..2), &[AttrLocalId::new(1), AttrLocalId::new(2)])
+            .is_empty());
+    }
+
     #[test]
     fn a_string_column_answers_prefix_without_an_fst() {
         let column = text_column(&["smith", "smythe", "smote", "jones"]);

@@ -17,7 +17,7 @@ PYPROJECT = ORACLE.parent / "pyproject.toml"
 # `oracle/__init__.py` divides the package into three. The definitional group is the one a
 # differential's independence rests on: it must reach nothing that spawns, drives or mutates the
 # system under test.
-DEFINITIONAL = ("viewport", "mask", "morton", "identity", "bundle", "wire")
+DEFINITIONAL = ("viewport", "mask", "morton", "identity", "bundle", "wire", "filters")
 DRIVERS = ("harness", "journal")
 FIXTURE_BUILDERS = ("catalogue", "canary_fixture")
 

@@ -1,6 +1,6 @@
 # Tessera — Conformance Suite Design
 
-**Status:** Draft r8 — r7 plus decision 0048's deletion sweep: script 5, already void twice over, loses the evaluate machinery it folded and can no longer be reconstructed from any state at all. r7 stands otherwise: the interleaving scripts that test a deletion **stamp ledger** and a **retirement floor** are void, both being deleted from the spec rather than unbuilt (Rule S / Rule F, write-path §5.4), `ledger_state()`'s stamp components with them. §4.6's tally is corrected to the table it summarises; no row's position moves (Appendix R)
+**Status:** Draft r9 — I12's mask half moves to covered: the filter surface landed and the attribute-filter differential (`conformance/tests/test_filter_differential.py`, `reference/oracle/filters.py`) tests it in the form filter-surface §9 specifies. The frontier half stays blocked on the label service, with I3 (Appendix R). r8 stands otherwise: script 5 is unreconstructable, the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
 
 **Owns:** the design of `conformance/` and `reference/` — harness architecture, oracle interfaces, fixtures, the invariant matrix's concrete test forms, the interleaving machinery, and what "pass" means. The implementation plan (§10.1) is blunt that the suite is the deliverable; this document exists so it is designed, not accreted.
 
@@ -20,8 +20,8 @@ The suite is designed here and built in part. Both halves matter to a reader dec
 
 | | Designed | Built |
 |---|---|---|
-| Directory layout | `conformance/{fixtures,differential,invariants,lifecycle,oracles,compile-fail}` | one flat `conformance/tests/`, six pytest modules, plus `conftest.py`. None of the six designed directories exists in any form |
-| Definitions oracle | `reference/` | **built** — `reference/oracle/`, ~3,400 lines over eleven modules, conformant on every load-bearing point (§1) |
+| Directory layout | `conformance/{fixtures,differential,invariants,lifecycle,oracles,compile-fail}` | one flat `conformance/tests/`, seven pytest modules, plus `conftest.py`. None of the six designed directories exists in any form |
+| Definitions oracle | `reference/` | **built** — `reference/oracle/`, ~3,600 lines over twelve modules, conformant on every load-bearing point (§1) |
 | Differential families | five (viewport, region, labels, drill-down, authorise-effective-visibility) | **two** — viewport and drill-down. The other three have no server route to test |
 | Byte-scanner (I10) | §4.3 | **built, exceeding its design on reach (§4.3), and its control is now a plant** |
 | Canary comparator (I2) | §4.2, §4.4 | **built** — three fixture states, canonicalised byte comparison, and a state it must reject (§4.2, §4.4) |
@@ -35,7 +35,7 @@ The invariant-by-invariant position is §4.6, and it is this document's most imp
 
 Two things a reader should carry from this table. First, **every differential and every sweep here now has something that makes it fail**: the canary comparator was the last one without, and its third fixture state closed that. That claim is deliberately narrower than "every test" — several structural checks remain pass-only, and the restart-replay module's controls needed a deliberately damaged WAL and so live outside the suite (§5). Second, **a pause mechanism already exists** — in the write path's fault-injection module, with different vocabulary and a different home (lifecycle §7.3). §5's interleavings must be built by extending it, not beside it; that has not happened, and it is the largest thing this document still describes and the system does not have.
 
-**What did not move, and why it did not.** Seven invariants remain uncovered, and exactly one of them is a gap in this suite. Four — I3, I6, I8, I12 — have no implementation to test: no label service, no plugin host, no generating sets, no filter surface. I5 needs an authorisation plugin whose two functions can genuinely diverge before any oracle could disagree with it (decision [0027](../decisions/0027-i5-is-unverified.md)). I13b needs a required-set gate. Of the eight interleaving scripts, five (2 through 6) test a compaction fold that does not exist — and, in two cases, a stamp ledger and a retirement floor that are now deleted from the spec rather than merely unbuilt (owner-ruled 2026-08-03; Rule S / Rule F at write-path §5.4), so those two will never be written in the form specified — and a sixth needs a pause point. **None of that is a testing gap**, and a reader deciding what this system's evidence is worth should not read it as one. **I11 is the one that is**: the pin that carried it is deleted (decision [0041](../decisions/0041-pins-become-a-staleness-stamp.md)) and neither replacement §4.4 names is written, which §4.6 records as a regression in coverage rather than a reclassification.
+**What did not move, and why it did not.** Six invariants remain uncovered, and exactly one of them is a gap in this suite. Three — I3, I6, I8 — have no implementation to test: no label service, no plugin host, no generating sets. (I12 left this list at r9: the filter surface landed and its mask half is covered by the attribute-filter differential; the frontier half stays blocked on the label service, with I3.) I5 needs an authorisation plugin whose two functions can genuinely diverge before any oracle could disagree with it (decision [0027](../decisions/0027-i5-is-unverified.md)). I13b needs a required-set gate. Of the eight interleaving scripts, five (2 through 6) test a compaction fold that does not exist — and, in two cases, a stamp ledger and a retirement floor that are now deleted from the spec rather than merely unbuilt (owner-ruled 2026-08-03; Rule S / Rule F at write-path §5.4), so those two will never be written in the form specified — and a sixth needs a pause point. **None of that is a testing gap**, and a reader deciding what this system's evidence is worth should not read it as one. **I11 is the one that is**: the pin that carried it is deleted (decision [0041](../decisions/0041-pins-become-a-staleness-stamp.md)) and neither replacement §4.4 names is written, which §4.6 records as a regression in coverage rather than a reclassification.
 
 ## 1. Components
 
@@ -50,7 +50,7 @@ conformance/
   compile-fail/       trybuild: I4 and I8 as compile errors
 ```
 
-> **⊘ Specified, not implemented.** `reference/` exists as designed. Under `conformance/` there is one flat `tests/` directory of six pytest modules — mask catalogue, I7 selection, overlay journal, canary, byte scan, restart replay — and nothing else. `lifecycle/`, `oracles/` and `compile-fail/` do not exist in any form; `fixtures/`, `differential/` and `invariants/` exist as content inside those six modules and inside `reference/oracle/`, not as a layout. The layout is worth keeping as a target because it is what makes coverage countable by looking; nothing else depends on it.
+> **⊘ Specified, not implemented.** `reference/` exists as designed. Under `conformance/` there is one flat `tests/` directory of seven pytest modules — mask catalogue, I7 selection, overlay journal, canary, byte scan, restart replay, filter differential — and nothing else. `lifecycle/`, `oracles/` and `compile-fail/` do not exist in any form; `fixtures/`, `differential/` and `invariants/` exist as content inside those modules and inside `reference/oracle/`, not as a layout. The layout is worth keeping as a target because it is what makes coverage countable by looking; nothing else depends on it.
 
 **The oracle implements definitions, not algorithms** (per-entity visibility walks, literal subset tests, sort-and-take-k; no bitmaps, no caching). **Its inputs are three, and the distinction is load-bearing:** the bundle (read only through the contracts spec — every differential run doubles as a contract check) for build-time state; the **fixture-owned journal of acked control operations** for runtime state, because dispositions and unflushed entities live in the overlay and WAL, which are out of contract and invisible in any bundle file; and the **points file the build consumed**, for geometry. A 500'd control call is *not* journalled as applied.
 
@@ -126,7 +126,7 @@ The plant this subsection specifies now exists, and it lives **in the scanner ra
 >
 > The suite's other two controls are unchanged: the I7 differential runs a first-*k* storage-order stub and asserts the differential *disagrees* with it; the overlay-journal differential runs two deliberately defective engines — one sampling from a pre-overlay mask, one anchoring θ on a pre-overlay projection — and asserts both are rejected.
 
-Of the other rows in this subsection: I7 is built and is the best-covered invariant in the suite. I3, I6, I11 and I12 are not built here — see §4.6 for what covers I11 elsewhere, and for which of these have no implementation to test at all.
+Of the other rows in this subsection: I7 is built and is the best-covered invariant in the suite. I12's row above names the *frontier-depth* form, which needs the label service; its mask half is covered at r9 in the form filter-surface §9 specifies (§4.6). I3, I6 and I11 are not built here — see §4.6 for what covers I11 elsewhere, and for which of these have no implementation to test at all.
 
 **4.5 An independent second implementation, for I5.** I5 holds only if the two authorisation functions agree about what a term means, and nothing downstream can check that — so checking it requires a second implementation of the same policy language to disagree with.
 
@@ -155,9 +155,9 @@ This is the coverage claim the suite can actually support. "As designed" means t
 | **I5** the two authorisation functions agree | **not covered** | passthrough plugin only; the differential oracle that would test it does not exist (§4.5) |
 | **I6** authorisation comes only from the token | **not covered — nothing to test** | no plugin host, no sandbox |
 | **I8** generating sets immutable | **not covered — nothing to test** | no generating sets |
-| **I12** filters narrow rendering, never authorisation | **not covered — nothing to test** | no filter surface |
+| **I12** filters narrow rendering, never authorisation | **covered — mask half, in the form filter-surface §9 specifies** *(r9; was: not covered — nothing to test)* | the attribute-filter differential: engine against `reference/oracle/filters.py` — a per-entity walk over the fixture's planted values, never the `attrs/` artefact — across the mask catalogue's principals. Per tile `matched ≤ visible` with `visible` unmoved; the filtered served set equals the oracle's brute-force `M_sel` exactly; hidden, hollow and nonexistent values byte-identical in outcome (C11), with a single-member positive control; composition and the empty-combinator identities against brute force; unknown column `422`, unknown value not. The **frontier half** — §4.4's frontier-depth form, `min_visible_members` against `M_auth` — stays blocked on the label service, with I3. Rule S over filter counts (surface §9) is also not yet driven; the test module's doc says why |
 
-**Five covered as designed, one in substance, one incidental, seven not covered — four of those seven for want of an implementation rather than for want of a test.** The plan calls the suite the deliverable; this is where it stands.
+**Six covered as designed, one in substance, one incidental, six not covered — three of those six for want of an implementation rather than for want of a test.** The plan calls the suite the deliverable; this is where it stands.
 
 Durability ordering is not an invariant row, and it is recorded here because it is the row a reader will look for and not find. The restart-replay module truncates the WAL to its last-synced offset (§5), which establishes that replay is correct when the unsynced tail is discarded — **not** that the engine never acks before it fsyncs. An engine whose `sync_data()` is a no-op, while it still publishes the offset, passes both tests; measured. That property is held in Rust by the `Published` token type, at a narrower scope, and issue #71 asks whether an end-to-end check is worth its cost.
 
@@ -224,6 +224,27 @@ A differential failure is a defect until proven a fixture bug. The oracle change
 9. **Coverage is reported, not claimed.** §4.6 is the matrix of record, and a row moves only when a test moves with it.
 
 ## Appendix R — Review record
+
+**r9** (2026-08-09) moves one row of §4.6, with the test that moves it: **I12's mask half is
+covered**. The filter surface landed (decision 0059; contracts §3.2 r26), and
+`conformance/tests/test_filter_differential.py` runs the differential in the form
+[`filter-surface.md`](filter-surface.md) §9 specifies, against a new definitional oracle module,
+`reference/oracle/filters.py` — a per-entity walk over the **fixture's own planted values**,
+which keeps it a second implementation: the engine reads `attrs/`, the oracle reads what the
+synthesised corpus was given, and the two meet only at the served surface (the same construction
+as the geometry input, §1). The mask catalogue's corpus gains two `filter`-only columns —
+a `per_viewer` category and a `utf8` string — deliberately **decorrelated** from the grant
+structure, a precondition the suite asserts rather than assumes, because a correlated fixture
+passes every cross-principal check while testing nothing. Surface §9's adversarial value shapes
+are partially planted: a hidden value, a hollow (declared, memberless) value, a single-member
+value; container-straddling membership comes free of the cycling values. Not planted: values
+whose only member is deleted or suppressed (Rule S over filter counts — needs the overlay
+machinery's private-bundle servers) and tier-straddling values (no attribute ingest exists).
+§4.4's I12 row — the frontier-depth form — is untouched and still blocked on the label service,
+with I3; the row's coverage claim names the distinction. One divergence is pinned as a strict
+xfail rather than resolved: a cross-family operator (`prefix` on a category, `in` on `utf8`)
+answers as an empty operand where `match` on the same surface refuses `422`, and no document
+rules the case — recorded in the test's docstring for an owner ruling.
 
 **r8** (2026-08-06) applies decision
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md). Script 5 was

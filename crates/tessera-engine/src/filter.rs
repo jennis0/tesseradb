@@ -40,6 +40,37 @@ use tessera_authz::fragment::FrozenFragment;
 use tessera_lifecycle::buffer::IngestBuffer;
 use tessera_lifecycle::overlay::Overlay;
 
+/// A filterable column's family, which decides **which operators apply to it**.
+///
+/// Published per column by `/v1/meta` so a client need not infer it, and checked at the parse: an
+/// operator outside a column's family is a *shape* error, refused like an unknown column rather
+/// than answered as an empty operand. That distinction is safe to make because a family is
+/// deployment schema — identical for every principal — where a *value*'s existence is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    /// Values are vocabulary entries: `eq`, `in`, over a key or a code.
+    Category,
+    /// Values are row data: `eq`, `in`, `prefix`, `contains`, over the stored bytes.
+    Text,
+}
+
+impl Family {
+    /// The operator names this family accepts, in the order `/v1/meta` publishes them.
+    pub fn operands(self) -> &'static [&'static str] {
+        match self {
+            Family::Category => &["eq", "in"],
+            Family::Text => &["eq", "in", "prefix", "contains"],
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Family::Category => "category",
+            Family::Text => "string",
+        }
+    }
+}
+
 /// What a request may ask of one column.
 ///
 /// **Narrow on purpose.** The leak register is exhaustive because the query surface is enumerable
@@ -55,6 +86,9 @@ pub enum FilterOperand {
     In(Vec<AttrLocalId>),
     /// Exact string match against the stored bytes.
     TextEquals(String),
+    /// Stored value equals any of these — `eq` over a list, the same generalisation `In` is for a
+    /// category. The two do not cross: a category's set is codes, a string's is strings.
+    TextIn(Vec<String>),
     /// Stored value starts with this.
     TextPrefix(String),
     /// Stored value contains this. Needs no trigram index: the value column *is* the verification
@@ -232,6 +266,7 @@ impl FilterColumns {
             FilterOperand::Equals(v) => values.scan_eq(candidate, *v),
             FilterOperand::In(vs) => values.scan_in(candidate, vs),
             FilterOperand::TextEquals(s) => values.scan_text_eq(candidate, s),
+            FilterOperand::TextIn(ss) => values.scan_text_in(candidate, ss),
             FilterOperand::TextPrefix(s) => values.scan_text_prefix(candidate, s),
             FilterOperand::TextContains(s) => values.scan_text_contains(candidate, s),
         })

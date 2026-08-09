@@ -346,11 +346,12 @@ class Server:
         bbox,
         k: int | None = None,
         underlay_offset: int | None = None,
+        filters: dict | None = None,
     ) -> bytes:
         """Returns the raw framed body (matches the pre-refactor `reference/tests/conftest.py`
         behaviour exactly — the differential suite depends on getting bytes back here)."""
         return self.viewport_response(
-            token, slice_id, zoom, bbox, k=k, underlay_offset=underlay_offset
+            token, slice_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
         ).content
 
     def meta(self, token: str) -> dict:
@@ -373,22 +374,42 @@ class Server:
         bbox,
         k: int | None = None,
         underlay_offset: int | None = None,
+        filters: dict | None = None,
     ) -> requests.Response:
         """Like `viewport`, but returns the full `requests.Response` — for callers that need
         headers (e.g. `x-tessera-pin`) alongside the body."""
+        resp = self.viewport_request(
+            token, slice_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
+        )
+        resp.raise_for_status()
+        return resp
+
+    def viewport_request(
+        self,
+        token: str,
+        slice_id: str,
+        zoom: int,
+        bbox,
+        k: int | None = None,
+        underlay_offset: int | None = None,
+        filters: dict | None = None,
+    ) -> requests.Response:
+        """[`viewport_response`] without the raise — for tests whose subject *is* the refusal
+        (contracts §3.2: an unknown filter column is a `422`, `none_of` is a `422`), where
+        `raise_for_status` would convert the assertion target into a harness exception."""
         body = {"slice": slice_id, "zoom": zoom, "bbox": list(bbox)}
         if k is not None:
             body["k"] = k
         if underlay_offset is not None:
             body["underlay_offset"] = underlay_offset
-        resp = requests.post(
+        if filters is not None:
+            body["filters"] = filters
+        return requests.post(
             f"{self.viewer_base}/v1/viewport",
             headers={"Authorization": f"Bearer {token}"},
             json=body,
             timeout=30,
         )
-        resp.raise_for_status()
-        return resp
 
     def item(self, token: str, handle: int, pin: str | None = None) -> requests.Response:
         body: dict = {}

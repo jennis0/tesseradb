@@ -560,6 +560,12 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.field("y", pa.float32()),
             pa.field("access", pa.utf8()),
             pa.field("fx_key", pa.uint64()),
+            # The catalogue's filter columns, present for the same contracts §2.2 reason as
+            # fx_key. A category value must be a declared key ("alpha" is), and the values are
+            # inert here: nothing in this module filters, and attribute ingest writes no
+            # artefact today (filter-index §5 ⊘).
+            pa.field("department", pa.utf8()),
+            pa.field("title", pa.utf8()),
         ]
     )
     batch = pa.record_batch(
@@ -569,6 +575,8 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.array([2000.0 + i for i in range(rows)], pa.float32()),
             pa.array([access] * rows, pa.utf8()),
             pa.array(cat.ingest_fx_keys(rows), pa.uint64()),
+            pa.array(["alpha"] * rows, pa.utf8()),
+            pa.array([f"ingested-{i}" for i in range(rows)], pa.utf8()),
         ],
         schema=schema,
     )

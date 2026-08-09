@@ -194,12 +194,12 @@ async fn meta(
         // The combinators (`all_of`, `any_of`) are not published per column — they compose
         // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
         "filter_operands": meta.declared_scalars.iter().filter(|d| d.filter).map(|d| {
-            let (family, operands): (&str, &[&str]) = if d.vocabulary.is_some() {
-                ("category", &["eq", "in"])
-            } else {
-                ("string", &["eq", "prefix", "contains"])
-            };
-            serde_json::json!({ "column": d.name, "family": family, "operands": operands })
+            let family = family_of(d);
+            serde_json::json!({
+                "column": d.name,
+                "family": family.as_str(),
+                "operands": family.operands(),
+            })
         }).collect::<Vec<_>>(),
         // §7.2's selection constants. A client cannot read mark count as density without knowing
         // where the floor and the cap sit, so these are a genuine client need rather than test
@@ -333,6 +333,16 @@ async fn categories(
     })))
 }
 
+/// A filterable column's family — **one derivation, used by both `/v1/meta` and the parser**, so
+/// the operator list a client is published cannot differ from the one it is held to.
+fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Family {
+    if d.vocabulary.is_some() {
+        tessera_engine::filter::Family::Category
+    } else {
+        tessera_engine::filter::Family::Text
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ViewportReq {
     slice: String,
@@ -402,11 +412,11 @@ fn run_viewport(
         None => None,
         Some(value) => {
             let meta = state.engine.meta();
-            let filterable: std::collections::HashSet<&str> = meta
+            let filterable: std::collections::HashMap<&str, tessera_engine::filter::Family> = meta
                 .declared_scalars
                 .iter()
                 .filter(|d| d.filter)
-                .map(|d| d.name.as_str())
+                .map(|d| (d.name.as_str(), family_of(d)))
                 .collect();
             let vocab_of: std::collections::HashMap<&str, &str> = meta
                 .declared_scalars
@@ -415,7 +425,7 @@ fn run_viewport(
                 .collect();
             Some(crate::filter_dto::parse(
                 value,
-                &|column| filterable.contains(column),
+                &|column| filterable.get(column).copied(),
                 &|column, key| {
                     let vocabulary = vocab_of.get(column)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)

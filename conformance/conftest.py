@@ -59,6 +59,36 @@ def catalogue_bundle(catalogue_bundle_root: Path):
 
 
 @pytest.fixture(scope="session")
+def catalogue_filter_columns():
+    """The catalogue's filter columns as the **fixture** planted them — the filter oracle's input.
+
+    Built from `oracle.catalogue`'s pure generation functions (`department_of`, `title_of`) and
+    the declaration's own key→code pinning, never from the bundle's `attrs/` artefact: the
+    differential's independence is that the oracle knows what each entity was *given* while the
+    engine serves what the build *stored* (see `oracle/filters.py`'s module doc). Entity id ==
+    source id for this corpus, an equality `verify()` re-derives rather than assumes.
+    """
+    from oracle import catalogue as cat  # noqa: PLC0415
+    from oracle.filters import CategoryColumn, StringColumn  # noqa: PLC0415
+
+    return {
+        "department": CategoryColumn(
+            values={
+                e: key
+                for e in range(cat.N_ITEMS)
+                if (key := cat.department_of(e)) is not None
+            },
+            codes=dict(cat.DEPARTMENT_CODES),
+        ),
+        "title": StringColumn(
+            values={
+                e: text for e in range(cat.N_ITEMS) if (text := cat.title_of(e)) is not None
+            }
+        ),
+    }
+
+
+@pytest.fixture(scope="session")
 def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
     """θ **saturated** — selection reduces to "serve every visible row up to the cap".
 

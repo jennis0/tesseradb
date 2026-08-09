@@ -30,7 +30,7 @@
 
 use serde_json::Value;
 
-use tessera_engine::filter::{FilterExpr, FilterOperand};
+use tessera_engine::filter::{Family, FilterExpr, FilterOperand};
 use tessera_types::AttrLocalId;
 
 use crate::error::ApiError;
@@ -43,14 +43,14 @@ const UNRESOLVABLE: u32 = UNRESOLVABLE_ID.raw();
 
 /// Parse `filters` into an expression, or refuse.
 ///
-/// `resolve` maps `(column, key)` to a code, returning `None` when the column has no vocabulary or
-/// the key is unbound. `is_column` reports whether a name is a declared filterable column.
+/// `family_of` reports a column's family, or `None` for a name that is not a declared filterable
+/// column. `resolve` maps `(column, key)` to a code.
 pub fn parse(
     filters: &Value,
-    is_column: &dyn Fn(&str) -> bool,
+    family_of: &dyn Fn(&str) -> Option<Family>,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
 ) -> Result<FilterExpr, ApiError> {
-    parse_node(filters, is_column, resolve)
+    parse_node(filters, family_of, resolve)
 }
 
 fn bad(detail: impl Into<String>) -> ApiError {
@@ -59,7 +59,7 @@ fn bad(detail: impl Into<String>) -> ApiError {
 
 fn parse_node(
     node: &Value,
-    is_column: &dyn Fn(&str) -> bool,
+    family_of: &dyn Fn(&str) -> Option<Family>,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
 ) -> Result<FilterExpr, ApiError> {
     let obj = node
@@ -90,7 +90,7 @@ fn parse_node(
             })?;
             let kids = arr
                 .iter()
-                .map(|k| parse_node(k, is_column, resolve))
+                .map(|k| parse_node(k, family_of, resolve))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(if combinator == "all_of" {
                 FilterExpr::AllOf(kids)
@@ -100,15 +100,15 @@ fn parse_node(
         }
         column => {
             // **An unknown column is an error; an unknown value is not.** See the module header.
-            if !is_column(column) {
+            let Some(family) = family_of(column) else {
                 return Err(bad(format!(
                     "'{column}' is not a filterable column. `/v1/meta`'s `filter_operands` lists \
                      the columns and the operators each accepts"
                 )));
-            }
+            };
             Ok(FilterExpr::Leaf {
                 column: column.to_string(),
-                operand: parse_operand(column, body, resolve)?,
+                operand: parse_operand(column, family, body, resolve)?,
             })
         }
     }
@@ -116,6 +116,7 @@ fn parse_node(
 
 fn parse_operand(
     column: &str,
+    family: Family,
     body: &Value,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
 ) -> Result<FilterOperand, ApiError> {
@@ -130,11 +131,35 @@ fn parse_operand(
     }
     let (op, value) = obj.iter().next().expect("length checked");
 
-    match op.as_str() {
-        "eq" => Ok(FilterOperand::Equals(AttrLocalId::new(category_value(
+    // **An operator outside the column's family is a shape error, not an empty operand.** The
+    // family is deployment schema — `/v1/meta` publishes it precisely so a client need not infer
+    // it — and is identical for every principal, so refusing discloses nothing. The alternative,
+    // answering empty, turns a client typo into a silent "no matches" and contradicts the refusal
+    // `match` already gets one operator over. (An unknown *value* stays an empty operand: that one
+    // is viewer data, and refusing it would be an existence oracle.)
+    let applies = family.operands().contains(&op.as_str());
+    if !applies {
+        return Err(match op.as_str() {
+            // ⊘ Named rather than folded into the generic refusal: `match` is the analysed-token
+            // operator a `text` column would take, and that type is not declarable yet (#44), so
+            // this names what is absent rather than refusing generically (decision 0013).
+            "match" => bad(format!(
+                "column '{column}': `match` needs a column of declared type `text`, whose \
+                 analysed-token matching is specified and not built"
+            )),
+            other => bad(format!(
+                "column '{column}' is a {} column, which takes {:?}; it does not take '{other}'",
+                family.as_str(),
+                family.operands()
+            )),
+        });
+    }
+
+    match (family, op.as_str()) {
+        (Family::Category, "eq") => Ok(FilterOperand::Equals(AttrLocalId::new(category_value(
             column, value, resolve,
         )?))),
-        "in" => {
+        (Family::Category, "in") => {
             let arr = value
                 .as_array()
                 .ok_or_else(|| bad(format!("column '{column}': `in` takes an array")))?;
@@ -144,20 +169,24 @@ fn parse_operand(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FilterOperand::In(codes))
         }
-        "prefix" => Ok(FilterOperand::TextPrefix(text_value(column, op, value)?)),
-        "contains" => Ok(FilterOperand::TextContains(text_value(column, op, value)?)),
-        // ⊘ `match` is the analysed-token operator a `text` column would take. The type is not
-        // declarable yet (#44), so naming the operator names what is absent rather than refusing
-        // generically (decision 0013).
-        "match" => Err(bad(format!(
-            "column '{column}': `match` needs a column of declared type `text`, whose analysed-token \
-             matching is specified and not built. `utf8` columns take `eq`, `prefix` and `contains` \
-             against the stored bytes"
-        ))),
-        other => Err(bad(format!(
-            "column '{column}': unknown operator '{other}'. `/v1/meta`'s `filter_operands` lists \
-             what this column accepts"
-        ))),
+        (Family::Text, "eq") => Ok(FilterOperand::TextEquals(text_value(column, op, value)?)),
+        (Family::Text, "in") => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| bad(format!("column '{column}': `in` takes an array")))?;
+            let needles = arr
+                .iter()
+                .map(|v| text_value(column, op, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(FilterOperand::TextIn(needles))
+        }
+        (Family::Text, "prefix") => Ok(FilterOperand::TextPrefix(text_value(column, op, value)?)),
+        (Family::Text, "contains") => Ok(FilterOperand::TextContains(text_value(column, op, value)?)),
+        // `applies` above is derived from the same table this matches on, so every accepted
+        // (family, operator) pair has an arm. Unreachable rather than a fallback: a new operator
+        // added to `Family::operands` without an arm here should fail loudly in test, not parse
+        // into some other operator's meaning.
+        (family, op) => unreachable!("{} accepts '{op}' with no arm to build it", family.as_str()),
     }
 }
 
@@ -198,8 +227,16 @@ fn text_value(column: &str, op: &str, value: &Value) -> Result<String, ApiError>
 mod tests {
     use super::*;
 
-    fn schema(name: &str) -> impl Fn(&str) -> bool + '_ {
-        move |c: &str| c == name || c == "title"
+    fn schema(name: &str) -> impl Fn(&str) -> Option<Family> + '_ {
+        move |c: &str| {
+            if c == name {
+                Some(Family::Category)
+            } else if c == "title" {
+                Some(Family::Text)
+            } else {
+                None
+            }
+        }
     }
 
     fn codes(column: &str, key: &str) -> Option<u32> {
@@ -287,15 +324,42 @@ mod tests {
         assert!(format!("{err:?}").contains("per_viewer"), "{err:?}");
     }
 
+    /// `in` over a string column is `eq` over a list — the same generalisation a category gets,
+    /// and it produces the string-valued operand, not the code-valued one.
+    #[test]
+    fn in_over_a_string_column_is_string_valued() {
+        let expr = parse_str(r#"{"title": {"in": ["smith", "jones"]}}"#).unwrap();
+        let FilterExpr::Leaf { operand, .. } = expr else {
+            panic!("expected a leaf")
+        };
+        assert_eq!(
+            operand,
+            FilterOperand::TextIn(vec!["smith".into(), "jones".into()])
+        );
+    }
+
+    /// **An operator outside the column's family is a shape error, not an empty operand.** The
+    /// family is deployment schema and identical for every principal, so refusing discloses
+    /// nothing — where refusing an unknown *value* would be an existence oracle.
+    #[test]
+    fn an_operator_outside_the_family_is_refused() {
+        let err = parse_str(r#"{"department": {"prefix": "al"}}"#).unwrap_err();
+        assert!(format!("{err:?}").contains("category column"), "{err:?}");
+        assert!(format!("{err:?}").contains("does not take 'prefix'"), "{err:?}");
+    }
+
     #[test]
     fn match_names_the_absent_text_type() {
         let err = parse_str(r#"{"title": {"match": "smith"}}"#).unwrap_err();
         assert!(format!("{err:?}").contains("declared type `text`"), "{err:?}");
     }
 
+    /// An operator no family has is refused by the same family check — the message names what
+    /// the column *does* take rather than only what it does not.
     #[test]
     fn an_unknown_operator_is_refused() {
         let err = parse_str(r#"{"title": {"regex": "s.*"}}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("unknown operator 'regex'"), "{err:?}");
+        assert!(format!("{err:?}").contains("does not take 'regex'"), "{err:?}");
+        assert!(format!("{err:?}").contains("string column"), "{err:?}");
     }
 }

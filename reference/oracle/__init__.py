@@ -13,7 +13,8 @@ cosmetic: it decides what a reader is entitled to assume when they open a module
 change to it can break.
 
 **Definitional — pure, no I/O beyond reading a bundle, no server.** ``viewport`` (§7.2 written as
-a definition), ``mask`` (I1's composition), ``morton``, ``identity``, ``bundle``, ``wire``. These
+a definition), ``mask`` (I1's composition), ``filters`` (decision 0059's tree as a per-entity
+walk), ``morton``, ``identity``, ``bundle``, ``wire``. These
 are the second implementation of record. They are held to being *obviously the spec*: literal
 constructions, no cleverness, and a documented pin to the design revision they were checked
 against. A differential is only as good as these are independent, so a change here that imports an

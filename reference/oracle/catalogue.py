@@ -92,7 +92,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import morton
 from .bundle import Bundle
 from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, read_recipe, write_recipe
 
@@ -123,12 +122,105 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # basenames, so a changed declaration under an unchanged name would otherwise reuse a bundle built
 # against the old one — the silent divergence this module's doc warns about, arriving by a new
 # route.
+#
+# The two filter columns exist for `conformance/tests/test_filter_differential.py` (I12's mask
+# half). Both are `filter`-only, so neither touches the points batch, the hot column, or any
+# existing point-set assertion — a mask-catalogue test built before them sees the same wire bytes.
+#
+# **`department` is deliberately decorrelated from the grant structure.** The catalogue's terms
+# are contiguous source-id blocks; `department` cycles with period 6 (`(source_id // 2) % 3`), so
+# every block of consequence contains every cycling value and every cycling value spans every
+# block. If the attribute tracked the terms — one department per block — then masking and
+# filtering would select the same items for different reasons, every cross-principal assertion
+# would pass vacuously, and the differential would prove nothing. The decorrelation is asserted
+# by a test, not just stated here.
+#
+# `listing = "per_viewer"` on `department`, deliberately: the hidden-value/nonexistent-value
+# outcome rule (per-point-attributes §3.8, C11) is only *about* a gated vocabulary, and `omega`
+# — planted only in `high_tail`, a block no catalogue mask case is granted — is the value a test
+# principal provably cannot see a member of. `hollow` is declared and planted nowhere: a known
+# value with no members anywhere, the third outcome that must be indistinguishable from the
+# other two.
 SCHEMA_TOML = """\
 [[attribute]]
 name     = "fx_key"
 type     = "u64"
 used_for = ["render"]
+
+[[attribute]]
+name       = "department"
+type       = "category"
+width      = "u8"
+used_for   = ["filter"]
+vocabulary = "declared"
+listing    = "per_viewer"
+  [attribute.values]
+  alpha  = 1
+  beta   = 2
+  gamma  = 3
+  omega  = 4
+  solo   = 5
+  hollow = 6
+
+[[attribute]]
+name     = "title"
+type     = "utf8"
+used_for = ["filter"]
 """
+
+# The declaration's own key→code pinning, transcribed for the filter oracle. The oracle resolves
+# a code operand through this — the *declaration* is the authority on codes (per-point-attributes
+# §3.4) — and never through the bundle, which is what keeps its derivation independent of the
+# artefact under test.
+DEPARTMENT_CODES: dict[str, int] = {
+    "alpha": 1,
+    "beta": 2,
+    "gamma": 3,
+    "omega": 4,
+    "solo": 5,
+    "hollow": 6,
+}
+
+# The one entity carrying `solo` — a single-member value, inside `cross_lo` so the crossover
+# principals can see it. Chosen not to collide with the absence rule below.
+DEPARTMENT_SOLO_ID = 69_000
+
+# Absence strides. Both columns leave a value off a thin, deterministic scattering of entities so
+# presence is partial — the ordinary case filter-index §2.1 designs for — and an entity with no
+# value must match no predicate. Distinct primes, and distinct from every other period in this
+# corpus (the term blocks, the department cycle's 6, the title cycle's 12), so absence correlates
+# with nothing.
+DEPARTMENT_ABSENT_STRIDE = 101
+TITLE_ABSENT_STRIDE = 103
+
+
+def department_of(source_id: int) -> str | None:
+    """`department` as planted, a pure function of the source id (== entity id, per this module's
+    interning argument). This is the oracle's side of the filter differential: what the entity was
+    *given*, upstream of what the build stored."""
+    if source_id % DEPARTMENT_ABSENT_STRIDE == 0:
+        return None
+    if source_id == DEPARTMENT_SOLO_ID:
+        return "solo"
+    high_tail = BLOCKS["high_tail"]
+    if high_tail.start <= source_id < high_tail.stop:
+        return "omega"
+    return ("alpha", "beta", "gamma")[(source_id // 2) % 3]
+
+
+# The four stems cycle with period 12 (stride 3 × 4 stems) — a third period, decorrelated from
+# both the term blocks and the department cycle. The stems are chosen for the string operators:
+# `prefix "smi"` matches smith and smithy but not smythe; `contains "myth"` matches smythe only;
+# and the appended source id makes every full title unique, so `eq` has a single-member value to
+# select.
+_TITLE_STEMS = ("smith", "smithy", "jones", "smythe")
+
+
+def title_of(source_id: int) -> str | None:
+    """`title` as planted — see [`department_of`]."""
+    if source_id % TITLE_ABSENT_STRIDE == 0:
+        return None
+    return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{source_id}"
 
 # The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
 # `Bundle.extent` uses for the same four numbers (`(x_min, x_max, y_min, y_max)`). Writing the
@@ -513,6 +605,15 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 # Planted, and currently ignored by the build — see the module doc's `fx_key`
                 # section. Written anyway so the fixture is whole the day the build reads it.
                 "fx_key": pa.array(fx, type=pa.uint64()),
+                # The filter columns, as the declaration requires them in the source: a category
+                # arrives as its *key* (utf8) and is resolved against the declared vocabulary,
+                # never as a code (input.rs — a data file supplying codes would be a second place
+                # codes are decided); a filter-only string is its bytes. A null is the absent
+                # value, which the build stores as presence-bitmap absence.
+                "department": pa.array(
+                    [department_of(i) for i in range(N_ITEMS)], type=pa.string()
+                ),
+                "title": pa.array([title_of(i) for i in range(N_ITEMS)], type=pa.string()),
             }
         ),
         points_path,
@@ -576,11 +677,13 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
-        # 3: the bundle gained a declared `fx_key` column (2026-08-07). The `schema` key below
-        # would force a rebuild on its own; the version moves too, because a receipt that merely
-        # *gained* a key is one an older reader would compare unequal for the right reason by
-        # accident rather than by rule.
-        "recipe_version": 3,
+        # 4: the corpus gained the two filter columns (`department`, `title`) and their planting
+        # rules (2026-08-09). The `schema` key alone would force the rebuild — the declaration's
+        # content is in the receipt — but the planted *values* are a function of the strides and
+        # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
+        # version moves with them.
+        # 3: the bundle gained a declared `fx_key` column (2026-08-07).
+        "recipe_version": 4,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -590,6 +693,17 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "slice": SLICE_ID,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
         "id_key": CATALOGUE_ID_KEY_HEX,
+        # The filter columns' planting rules — everything `department_of`/`title_of` are a
+        # function of that the schema text is not. An edited stride under an unchanged
+        # declaration would otherwise reuse a bundle whose stored values no longer match the
+        # oracle's derivation, and the differential would report an engine bug that is a stale
+        # fixture.
+        "filter_columns": {
+            "department_solo_id": DEPARTMENT_SOLO_ID,
+            "department_absent_stride": DEPARTMENT_ABSENT_STRIDE,
+            "title_absent_stride": TITLE_ABSENT_STRIDE,
+            "title_stems": list(_TITLE_STEMS),
+        },
         # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
         # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt
         # identical and reuse a bundle whose columns no longer match the declaration.
@@ -640,18 +754,45 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
 def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
     """The receipt matches, and there is a readable post-r6 bundle under it.
 
-    The receipt is the test; the structural check below is a cheap second gate against a bundle
-    that was damaged *after* its receipt was written (a truncated `/tmp`, a half-deleted tree) —
-    a case the receipt cannot see. Both are tolerant of anything unreadable: what cannot be
-    confirmed is rebuilt, because being wrong in that direction costs a build and being wrong in
-    the other hands every test a fixture nobody asked for.
+    The receipt is the test; the structural checks below are a cheap second gate against a bundle
+    that was damaged *after* its receipt was written — a case the receipt cannot see. Both are
+    tolerant of anything unreadable: what cannot be confirmed is rebuilt, because being wrong in
+    that direction costs a build and being wrong in the other hands every test a fixture nobody
+    asked for.
+
+    **A bundle a server has published into is not the built fixture, and is rebuilt.** An
+    accepted deny is published into the bundle prefix as a `SEGMENTS-<n>.json` beyond the build's
+    own `SEGMENTS-0.json` (contracts §2.3), and Phase 1 denies never retire — so one run of a
+    module that deletes items against a server on this shared root permanently narrows every
+    later session's masks. That is not hypothetical: it presented as the mask differential
+    disagreeing by a contiguous *prefix* of each granted block (the denied batch), on a bundle
+    whose data files were byte-identical to a fresh build. The receipt cannot see it because the
+    build wrote everything the receipt stamps; only the overlay grew.
     """
     if read_recipe(bundle_root) != wanted:
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
-        manifest = json.loads((bundle_root / current["prefix"] / "MANIFEST.json").read_text())
-        return "identity" in manifest
+        prefix = bundle_root / current["prefix"]
+        manifest = json.loads((prefix / "MANIFEST.json").read_text())
+        if "identity" not in manifest:
+            return False
+        # Glob rather than iterdir: an absent `partitions/` tree means nothing was published,
+        # which is the clean state, not damage — the CURRENT/MANIFEST reads above carry the
+        # damage gate.
+        published = [
+            p.relative_to(prefix)
+            for p in prefix.glob("partitions/*/SEGMENTS-*.json")
+            if p.name != "SEGMENTS-0.json"
+        ]
+        if published:
+            print(
+                f"fixture at {bundle_root} carries published server state "
+                f"({[str(p) for p in sorted(published)]}) on top of the build — a previous "
+                "run's denies live in it, so it is rebuilt rather than reused"
+            )
+            return False
+        return True
     except (OSError, KeyError, ValueError):
         return False
 

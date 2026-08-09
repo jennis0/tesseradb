@@ -178,6 +178,11 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             # batch (contracts §2.2) — the tail is read back positionally, so an omission shifts
             # every later scalar rather than defaulting. The fixture chooses the values.
             pa.field("fx_key", pa.uint64()),
+            # The catalogue's filter columns, present for the same reason. "alpha" is a declared
+            # key; the values are inert here — nothing in this module filters, and attribute
+            # ingest writes no artefact today (filter-index §5 ⊘).
+            pa.field("department", pa.utf8()),
+            pa.field("title", pa.utf8()),
         ]
     )
     batch = pa.record_batch(
@@ -187,6 +192,8 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.array(ys, type=pa.float32()),
             pa.array(accesses, type=pa.utf8()),
             pa.array(ingest_fx_keys(len(external_ids)), type=pa.uint64()),
+            pa.array(["alpha"] * len(external_ids), type=pa.utf8()),
+            pa.array([f"ingested-{i}" for i in range(len(external_ids))], type=pa.utf8()),
         ],
         schema=schema,
     )

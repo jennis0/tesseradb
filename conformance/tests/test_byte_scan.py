@@ -241,7 +241,6 @@ import io
 import re
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest

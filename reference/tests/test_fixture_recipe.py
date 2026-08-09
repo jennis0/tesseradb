@@ -108,6 +108,32 @@ def test_an_unstamped_or_damaged_bundle_is_never_reused(work_dir: Path):
     assert not cat._is_usable_bundle(bundle_root, wanted), "a damaged bundle must be rebuilt"
 
 
+def test_a_bundle_a_server_has_published_into_is_not_reused(work_dir: Path):
+    """The receipt cannot see state added *after* the build, and one kind is added in ordinary
+    operation: an accepted deny is published into the bundle prefix as a `SEGMENTS-<n>.json`
+    beyond the build's own `SEGMENTS-0.json` (contracts §2.3), and Phase 1 denies never retire.
+    One overlay-driving run against a server on the shared fixture root therefore permanently
+    narrows every later session's masks — measured as the mask differential disagreeing by a
+    contiguous prefix of each granted block, on a bundle whose data files were byte-identical to
+    a fresh build. A published-into fixture is a different corpus and must be rebuilt."""
+    bundle_root = work_dir / "bundle"
+    wanted = cat.recipe(work_dir, bundle_root)
+
+    _stamped(bundle_root, wanted)
+    partition = bundle_root / "v00000" / "partitions" / "default"
+    partition.mkdir(parents=True)
+    (partition / "SEGMENTS-0.json").write_text("{}")
+    assert cat._is_usable_bundle(bundle_root, wanted), (
+        "the build's own SEGMENTS-0.json is part of every built bundle and must not trip the gate"
+    )
+
+    (partition / "SEGMENTS-1.json").write_text("{}")
+    assert not cat._is_usable_bundle(bundle_root, wanted), (
+        "a bundle with published server state on top of the build was reused — a previous run's "
+        "denies would silently narrow every mask in this one"
+    )
+
+
 def test_the_receipt_lives_beside_the_bundle_and_not_inside_it(work_dir: Path):
     """The bundle is a `tessera build` output and the suite audits it byte by byte; a
     fixture-management file inside it would be the suite planting something in its own evidence."""
