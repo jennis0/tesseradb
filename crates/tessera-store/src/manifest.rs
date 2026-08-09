@@ -738,40 +738,6 @@ mod tests {
     /// always refusal; the only question was where. Refusing at the parse makes it one refusal
     /// instead of the four the fallible spelling needed, and makes the *whole* manifest
     /// unavailable rather than one field, which is what makes a caller's refusal total.
-    /// **The tail is the render columns, and a segment-facing consumer that took the full list
-    /// would refuse the build's own segment.** `gather_scalars` refuses a segment missing a
-    /// declared column, so a merge or fold whose writer schema named a `filter`-only column would
-    /// fail against a correctly-built bundle — a hard break between the build and the serving path,
-    /// with nothing wrong at either end.
-    #[test]
-    fn render_scalars_excludes_a_filter_only_column() {
-        let declared = [
-            DeclaredScalar {
-                name: "department".to_string(),
-                arrow_type: ScalarType::U16,
-                vocabulary: Some("departments".to_string()),
-                filter: true,
-                render: true,
-            },
-            DeclaredScalar {
-                name: "title".to_string(),
-                arrow_type: ScalarType::Utf8,
-                vocabulary: None,
-                filter: true,
-                render: false,
-            },
-        ];
-        let tail: Vec<&str> = declared
-            .iter()
-            .filter(|d| d.render)
-            .map(|d| d.name.as_str())
-            .collect();
-        assert_eq!(tail, vec!["department"]);
-        // The full list is unchanged: the ingest plane supplies values for every declared column,
-        // filterable ones included.
-        assert_eq!(declared.len(), 2);
-    }
-
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar =

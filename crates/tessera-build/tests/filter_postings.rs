@@ -623,6 +623,43 @@ fn an_absent_string_is_not_an_empty_string() {
     assert_eq!(any.cardinality(), N - 1);
 }
 
+/// The build's own writer schema omits a filter-only column, and the manifest records the
+/// placement so the *serving* path can narrow the same way. Asserted against a real built bundle
+/// rather than a constructed manifest: the two halves agreeing is the whole point, and a merge
+/// whose schema named `title` would refuse this very segment.
+#[test]
+fn the_manifest_records_the_placement_the_tail_was_built_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_title(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+
+    let bundle = open_bundle(&out).unwrap();
+    let declared: Vec<&str> = bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    let tail: Vec<&str> = bundle
+        .manifest
+        .render_scalars()
+        .map(|d| d.name.as_str())
+        .collect();
+
+    // Both columns are declared — the ingest plane supplies values for each.
+    assert_eq!(declared, vec!["department", "title"]);
+    // Only one is in the tail, and it is exactly what the segment carries.
+    assert_eq!(tail, vec!["department"]);
+    let slice = &bundle.partitions.values().next().unwrap().slices["s0"];
+    let columns = &slice.segments[0].columns;
+    assert!(columns.scalar("department").is_some());
+    assert!(columns.scalar("title").is_none());
+}
+
 /// **A `filter`-only column is not in the hot column.** §10.3 routes by access cadence: per-query
 /// data lives in entity space, per-mark data in `columns.arrow`. Writing a filter-only column into
 /// the tail as well would spend a slot in every row — and for a `utf8` column it would be exactly

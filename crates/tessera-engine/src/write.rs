@@ -2871,6 +2871,80 @@ fn write_vocabulary_extensions(
 }
 
 #[cfg(test)]
+mod segment_schema_tests {
+    use super::*;
+    use tessera_store::manifest::DeclaredScalar;
+
+    /// **A segment's writer schema is the render columns, and this guards the one line that makes
+    /// it so.**
+    ///
+    /// `scalar_schema_of` feeds flush, merge, fold and compact. `gather_scalars` refuses a segment
+    /// missing a declared column, so a schema built from the *full* `declared_scalars` — which
+    /// includes `filter`-only columns, deliberately absent from `columns.arrow` — makes a merge
+    /// refuse the build's own segment. Nothing is wrong at either end, and an ordinary merge
+    /// reaches it.
+    ///
+    /// This calls the production function rather than re-deriving its filter, because a test that
+    /// re-implements the predicate passes with the fix reverted.
+    #[test]
+    fn a_segments_writer_schema_omits_filter_only_columns() {
+        let manifest = tessera_store::manifest::Manifest {
+            bundle_format: 1,
+            created_at: String::new(),
+            data_plugin_hash: String::new(),
+            declared_bounds: serde_json::json!({}),
+            vocabularies: vec![],
+            small_term_threshold: 32,
+            quantisation: tessera_store::manifest::Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            entity_id_high_water: 0,
+            identity: tessera_store::manifest::IdentityDescriptor {
+                construction: "siphash-2-4".to_string(),
+                rounds: 1,
+                key: "0123456789abcdef0123456789abcdef".to_string(),
+                shard_id: 0,
+                idset: 1,
+            },
+            slices: vec![],
+            partitions: vec![],
+            provenance: serde_json::json!({}),
+            files: std::collections::BTreeMap::new(),
+            declared_scalars: vec![
+                DeclaredScalar {
+                    name: "department".to_string(),
+                    arrow_type: ScalarType::U16,
+                    vocabulary: Some("departments".to_string()),
+                    filter: true,
+                    render: true,
+                },
+                DeclaredScalar {
+                    name: "title".to_string(),
+                    arrow_type: ScalarType::Utf8,
+                    vocabulary: None,
+                    filter: true,
+                    render: false,
+                },
+            ],
+        };
+
+        let schema = scalar_schema_of(&manifest);
+        assert_eq!(
+            schema,
+            vec![("department".to_string(), ScalarType::U16)],
+            "a filter-only column must not reach the segment writer"
+        );
+
+        // And the full list is untouched — the ingest plane supplies values for every declared
+        // column, filterable ones included.
+        assert_eq!(manifest.declared_scalars.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod vocabulary_extensions_tests {
     use super::*;
     use std::collections::BTreeMap;
