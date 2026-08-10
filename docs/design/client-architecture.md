@@ -213,17 +213,25 @@ plus the driver's headless suite in CI.
   pan for a doubled no-request rate. Bound: bites × byte budget × pause rate, all knobs.
   Ruling wanted on the default posture (ship at design budgets, or ramp behind measurement).
 
-## Appendix M — measured divergence (2026-08-10, trace T22-03-36, 88 s, 10⁹ corpus)
+## Appendix M — measured divergence, and the re-measure that closed it (10⁹ corpus)
 
-| behaviour | designed | measured |
-|---|---|---|
-| ring bites per idle pause | ≤3, byte-budgeted | 2 rings / ~41 pauses (~0.05); budgets never bound |
-| pause-loss cause | — | 27/39 skips: foreground in flight at idle-fire, no re-arm |
-| pans needing no request | ~92% (look-ahead probe) | 86% |
-| wholly-novel foreground viewports | rare | 8/26 arrivals (31%) |
-| revalidation at rest | ≤60 s cadence | zero events in 88 s |
-| frame targets | >45 fps, p95 <100 ms | met (50.3 fps) |
-| density anomalies | none | 17, clustered at depth transitions |
+Before: trace T22-03-36 (88 s) against the timer-soup controller. After: trace T22-53-41
+(74 s) against the driver (`6aa84f7`), same protocol.
+
+| behaviour | designed | before | after (driver) |
+|---|---|---|---|
+| ring bites per idle pause | ≤3, byte-budgeted | 2 rings / ~41 pauses; budgets never bound | 8 rings; the bite budget observed binding |
+| pause-loss cause | — | 27/39 skips: no re-arm after foreground | deferral re-arms; 15 waits, 17 honest "nothing novel" |
+| pans needing no request | ~92% (look-ahead probe) | 86% | **93%** |
+| foreground completion under pipelining | — | 15/16 | 15/17 |
+| revalidation | reachable | unreachable at a warm cache | reachable (fake-clock test); zero fired here *correctly* — every arrival revalidates implicitly, and 60 s never lapsed between them |
+| frame targets | >45 fps, p95 <100 ms | met (50.3 fps) | met (53.6 fps) |
+| density anomalies | none | 17 | 2 |
+| first-paint on novel ground | p50 ≤350 ms | 347 ms | 374 ms (p95 tail is the session's *first* request — server materialisation, S1/S2's item, not client) |
+
+Residual instrumentation quirk: `ring` events report ~0 bytes — the plan's byte total appears
+not to see ring piece bodies; verify `ViewportResponse.bytes` on the background path before
+trusting ring-spend figures (D5's measurement needs it).
 
 ## Appendix D — provenance
 
