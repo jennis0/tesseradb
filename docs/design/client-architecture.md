@@ -190,24 +190,21 @@ plus the driver's headless suite in CI.
 
 - **D1a — the boundary rule of §1** and the two-package split, with the driver as the default
   scheduler and the enforce-vs-discharge obligation split of §3.
-- **D1b — when the driver becomes public API.** Either public from the start (the SDK story is
-  complete on day one; cost: a freshly re-specified state machine becomes consumer surface
-  while its behaviour is still being proven), or internal until Appendix M re-measures green,
-  then promoted (cost: dependent clients briefly keep reimplementing scheduling). Recommended:
-  internal until step 2 of §6 completes, public at step 4.
-- **D2 — whether the staleness bound is enforced by a timer at all.** Two forms.
-  *Timer-driven*: the driver revalidates a presented view every `revalidateAfterMs` (default
-  60 s) while visible (visibility is an injected input, §3), suspending when hidden — the
-  minutes-bound holds even for a motionless viewer, at the cost of fleet requests from every
-  idle tab. *Interaction-driven* (client-interaction §4's own lean: cadence machinery
-  "specifically not worth building"): no timer; the covered-view path issues the counts-only
-  refresh when due, so the bound holds for any viewer who ever moves and is unreachable only
-  at absolute rest, at zero idle cost. Either way the k=0 request runs in the foreground slot,
-  never beside a real fetch, aborted by movement. Recommended: interaction-driven now; the
-  timer is one driver transition away if the residue matters.
-- **D3 — delete the tile-addressed path** (`tile()`/`scheduleFlush`; verified consumers: two
-  unit tests only) and record the rectangle-shaped supersession of the plan's tile-shaped
-  Layer 1 in this document rather than repairing the vestige.
+- **D1b — RULED 2026-08-10: moot in private development.** Nothing is public yet; the driver
+  develops freely as ordinary client API under 0048. The "stable client" bar attaches at
+  public launch, not before.
+- **D2 — RULED 2026-08-10: a few minutes of staleness is acceptable; latency-neutrality is
+  the binding requirement.** Either form may be built (a timer, if built, is configurable);
+  what is ruled is the constraint: the counts-only refresh must never add latency to the
+  viewer — it runs only when the foreground slot is otherwise idle, is aborted by movement,
+  and never displaces or delays a real fetch.
+- **D3 — RULED 2026-08-10: delete the vestige; preserve the tile-engine story.** What the
+  owner cares about is future support for **tile-based visualisation engines**, not tile
+  addressing per se. `tile()`/`scheduleFlush` (verified consumers: two unit tests) are
+  deleted; the supported integration path for a `TileLayer`-style engine is an **adapter over
+  `fetch`/`read`** — per-tile asks batched into region fetches, each answered from `read`,
+  with empty distinct from refused per ask — documented with §3's driver-bypass obligation
+  list. The rectangle-shaped supersession of the plan's tile-shaped Layer 1 is recorded here.
 - **D4 — RULED 2026-08-10: no rename.** `tessera-vis` was a stand-in name; the package stays
   `@tessera/viewer`. This document keeps "vis" as the boundary vocabulary only.
 - **D5 — the anticipation spend the re-arm unlocks.** Fixing the dead ring moves measured
@@ -248,4 +245,8 @@ produced Appendix M.
   (F6); the presented-frame handle added so migration step 1 does not read viewer state (F7).
   Reviewer verdict: ready to bind after these changes; D3's deletion verified safe.
 - 2026-08-10: D4 ruled — no rename; the package stays `@tessera/viewer`.
-- Owner decisions D1a, D1b, D2, D3, D5 open (owner "generally on board").
+- 2026-08-10: owner "generally on board" (D1a accepted); D1b ruled moot pre-launch; D2 ruled
+  — minutes-scale staleness acceptable, latency-neutrality binding, timer (if any)
+  configurable; D3 ruled — delete, with the tile-engine adapter story preserved over
+  `fetch`/`read`.
+- **Open: D5** (anticipation spend posture — default budgets vs ramp behind measurement).
