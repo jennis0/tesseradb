@@ -14,10 +14,10 @@ import {countCodesCached, extendRanks, widenDomain} from './colour.js';
 import {MarkSlab} from './slab.js';
 import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore, type Store} from './state.js';
+import {DriverBinding} from './binding.js';
 import {
   INITIAL_VIEW_STATE,
   VIEW,
-  ViewportController,
   buildViewportLayers,
   encodingSignature,
   type ViewState
@@ -99,7 +99,7 @@ const store = createStore({
  * because it needs the quantisation extent to turn tiles into a request box.
  */
 let replica: Replica | null = null;
-let controller: ViewportController | null = null;
+let controller: DriverBinding | null = null;
 const mapEl = document.getElementById('map') as HTMLDivElement;
 const panels = document.getElementById('panels')!;
 
@@ -482,14 +482,14 @@ async function start() {
         if (trace.enabled) trace.event(kind, {ms, n});
         // A piece of a split response has been absorbed: its bands are drawable NOW, not when the
         // whole fetch settles — so paint them. rAF-coalesced, and the fold path makes it cheap.
-        if (kind === 'store') controller?.absorbed(currentView, mapEl.clientWidth, mapEl.clientHeight);
+        if (kind === 'store') controller?.absorbed();
       }
     }
   );
   // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement
   // wants, and the switch an operator watching aggregate select CPU would reach for.
   const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
-  controller = new ViewportController(store, replica, prefetch);
+  controller = new DriverBinding(store, replica, prefetch);
   trace.event('session', {
     prefetch: prefetch ? 1 : 0,
     kMaxMarks: meta.selection.kMaxMarks,

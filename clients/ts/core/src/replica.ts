@@ -134,19 +134,12 @@ function splitRect(rect: TileRect, maxTiles: number): TileRect[] {
   return out;
 }
 
-type PendingAsk = {
-  prefix: bigint;
-  resolve: (band: Resolved | null) => void;
-};
-
 export class Replica {
   private readonly cache: BandCache;
   private readonly now: () => number;
   private identityKey = '';
   private contentKey = '';
   private validatedAt = Number.NEGATIVE_INFINITY;
-  private pending: PendingAsk[] = [];
-  private flush: Promise<void> | null = null;
 
   constructor(
     private readonly fetchViewport: (
@@ -223,18 +216,12 @@ export class Replica {
     return this.contentKey;
   }
 
-  /**
-   * Ask for one tile. Asks made in the same microtask are answered by one request.
-   *
-   * Resolves to `null` where the tile holds nothing — an empty tile is a legitimate answer, and is
-   * distinct from one that could not be fetched.
-   */
-  tile(prefix: bigint, depth: number, k: number): Promise<Resolved | null> {
-    return new Promise((resolve) => {
-      this.pending.push({prefix, resolve});
-      this.scheduleFlush(depth, k);
-    });
-  }
+  // The tile-addressed ask (`tile()` + a microtask-batched flush) was DELETED here — D3,
+  // `client-architecture.md` §4: its batch coalesced by bounding rectangle and its error path
+  // resolved refused asks to the same `null` as empty ones, the exact conflation
+  // client-interaction §9 forbids. The supported path for a tile-based visualisation engine is
+  // an adapter over `fetchRegion`/`frameFromCache`: batch per-tile asks into region fetches,
+  // answer each from the store, and keep empty distinct from refused per ask.
 
   /**
    * Ask for a tile set, answering from the store where it can and issuing at most one request for
@@ -504,39 +491,6 @@ export class Replica {
     return bands;
   }
 
-  private scheduleFlush(depth: number, k: number): void {
-    if (this.flush) return;
-    this.flush = Promise.resolve().then(async () => {
-      const batch = this.pending;
-      this.pending = [];
-      this.flush = null;
-      try {
-        // **Coalesced into the bounding rectangle of the batch.** A tile-addressed consumer asks
-        // for a contiguous viewport, so the bound is tight; where it is not, the surplus is ground
-        // the consumer is about to ask for anyway. Answering each ask from the store afterwards is
-        // what keeps this a fetch of a region and a resolution per tile, rather than both per tile.
-        let rect: TileRect | null = null;
-        for (const ask of batch) {
-          const {x, y} = tileXY(ask.prefix, depth);
-          rect = rect
-            ? {
-                x0: Math.min(rect.x0, x),
-                y0: Math.min(rect.y0, y),
-                x1: Math.max(rect.x1, x),
-                y1: Math.max(rect.y1, y)
-              }
-            : {x0: x, y0: y, x1: x, y1: y};
-        }
-        if (rect) await this.fetchRegion(rect, depth, k);
-        for (const ask of batch) ask.resolve(this.cache.resolve(depth, ask.prefix));
-      } catch {
-        // A failed batch resolves every ask to null rather than rejecting each: a tile-addressed
-        // consumer treats a null tile as "not yet", and rejecting would surface one transport
-        // failure as N unhandled rejections.
-        for (const ask of batch) ask.resolve(null);
-      }
-    });
-  }
 }
 
 export type {Band, Resolved};

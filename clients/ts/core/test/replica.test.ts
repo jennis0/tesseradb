@@ -256,37 +256,5 @@ describe('Replica.fetchRegion', () => {
   });
 });
 
-describe('Replica.tile coalescing', () => {
-  it('answers many per-tile asks with one request', async () => {
-    const {r, calls} = replica(() =>
-      response([
-        {tile: 0n, served: 1},
-        {tile: 1n, served: 1},
-        {tile: 2n, served: 1},
-        {tile: 3n, served: 1}
-      ])
-    );
-
-    // What a deck.gl TileLayer does: one getTileData per tile, all in the same turn.
-    const asks = [r.tile(0n, 1, 500), r.tile(1n, 1, 500), r.tile(2n, 1, 500), r.tile(3n, 1, 500)];
-    const resolved = await Promise.all(asks);
-
-    expect(calls).toHaveLength(1);
-    expect(resolved.every((x) => x !== null)).toBe(true);
-  });
-
-  it('resolves a batch to null rather than rejecting when the request fails', async () => {
-    const r = new Replica(
-      async () => {
-        throw new Error('transport');
-      },
-      Q,
-      {slice: 's', now: () => 0}
-    );
-    r.reset();
-
-    const resolved = await Promise.all([r.tile(0n, 1, 500), r.tile(1n, 1, 500)]);
-
-    expect(resolved).toEqual([null, null]);
-  });
-});
+// The per-tile ask suite left with `tile()` itself (D3): a tile-based engine adapts over
+// `fetchRegion`/`frameFromCache`, keeping empty distinct from refused per ask.
