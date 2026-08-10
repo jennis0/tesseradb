@@ -249,14 +249,25 @@ check per element. Because the ranges are a function of `(candidate, presence)` 
 cannot skip work whatever it is testing for — so adding a family adds a comparison and cannot add a
 channel.
 
-**These constants are a property of the crate's *contents*, not only of the scan's code.** Seven
-times during this work an unrelated addition to `tessera-filter` moved them 30–70% — three of those
-from code that never runs during a scan, and once from a function that was never called at all.
-Probe arm 16 measures the remedies and none is general: `inline(always)` fixes an individual case,
-one codegen unit fixes the presence path and not the packing path, and a crate boundary recovers
-about half. **Any change to that crate must be A/B'd interleaved before its constants are
-believed.** The structural answer — a crate holding only the scan, with nothing left to perturb it —
-is named there, unbuilt and unpriced.
+**These constants are a property of the hot loops' *addresses*, and the fast value above is one of
+two.** An unrelated addition to `tessera-filter` moves them 30–70% — three times from code that
+never runs during a scan, once from a function never called at all — and the mechanism is
+instruction-address alignment, not code generation
+([`scan-constant-sensitivity`](../evidence/memos/2026-08-11-scan-constant-sensitivity.md)):
+the perturbed builds emit the hot functions instruction-for-instruction identical and merely place
+them elsewhere, and padding the crate's text with inert bytes reproduces the whole effect as a
+function of shift mod 64. Over the layouts measured the packing path's constant takes **~0.25–0.28
+or ~0.42–0.44 ns and nothing between**, two of the four 16-byte residues landing on each. **Read
+every figure in this section as the favourable draw**; an unlucky link of byte-identical scan code
+costs 65% more. The memory-bound cells — every scattered candidate — are immune, which is why the
+9.6 ns and the scattered text figures carry no such caveat.
+
+⊘ **The remedy is identified and not applied.** Pinning function starts to 64 bytes
+(`-C llvm-args=-align-all-functions=6`) closes the channel by which unrelated code reaches the
+constant, at no measurable baseline cost against `codegen-units = 1`'s ~15%; it is a workspace
+profile change and is not made here. Until it is, **any change to this crate must be A/B'd
+interleaved before its constants are believed** — and even after it, a change to the hot files
+themselves still relocates their own blocks and still needs the discipline.
 
 The typed change carries a caveat worth stating at the site, because the obvious form of it is a
 regression: **a scattered candidate is one-element runs**, and building a slice iterator per run
@@ -830,13 +841,15 @@ does, with one exception marked at its own paragraph: the `MADV_SEQUENTIAL` aske
 the ownership rule — it maps its own inputs and never advises the request path's — rather than the
 hint itself.
 
-**The pass is a crate rather than a module, and that is measured rather than tidy.** Written inside
-`tessera-filter` it cost the scan's universal-contiguous arm **0.27 → 0.44 ns** per candidate entity
-at 10⁹ — 65%, with the hot file byte-identical, and identically whether it sat in a new module or
-inside `values_writer.rs`. Codegen units are partitioned per *crate*, so the file discipline §2.2's
-constants were won under does not reach far enough. The write side is therefore
-`tessera-filter-write`, and with it there the same arms measure 0.26–0.28 ns against a 0.27 ns
-baseline — within drift. §9 records the edges that placement implies.
+**The pass is a crate rather than a module, and the reason is audit separation — not the
+measurement that originally prompted it.** Written inside `tessera-filter` it cost the scan's
+universal-contiguous arm **0.27 → 0.44 ns** per candidate entity at 10⁹, with the hot file
+byte-identical. That figure is real and its explanation was wrong: the cause is §2.2's
+instruction-address alignment, so the crate boundary did not remove the sensitivity but re-rolled
+the layout, and the "within drift" reading the split earned was luck rather than structure. A crate
+holding only the scan would be the same gamble. The split stands on its own merits — the write side
+has no business in the read path's crate, and §9 records the edges that placement implies — and
+alignment pinning is what actually addresses the constant.
 
 One pass on the fold's dedicated thread, before the manifests, mirroring compaction §2's
 snapshot/publication split:

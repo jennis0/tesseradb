@@ -156,18 +156,25 @@ split is not.
 | **b** | `codegen-units = 1` as an interim | −15% baseline, bought against a sensitivity it only half removes. Paying a measured 15% to half-fix a hazard is the worst cell here |
 | **c** | Neither; A/B the two remaining items | Two campaigns, no structural change, constants stay as published |
 
-**Ruled: none of the three, yet** (owner, 2026-08-10). All three options route *around* the
-phenomenon, and the owner's reading is that the phenomenon itself is the finding: a function that is
-never called does not move a hot loop by 65% for any reason a codegen-unit story explains, so
-"partitioned per crate" describes the symptom rather than the cause. **The mechanism is being
-investigated before a remedy is chosen**, because the choice depends on it — if the cause is code
-layout rather than code generation, a crate boundary is not a fix but a fresh roll of the same dice,
-which would also explain why it "recovers about half".
+**Ruled: none of the three** (owner, 2026-08-10) — all three route *around* the phenomenon, and the
+owner's reading was that the phenomenon itself was the finding. **The investigation settled it the
+next day** ([`scan-constant-sensitivity`](2026-08-11-scan-constant-sensitivity.md)), and the
+suspicion was right on both counts:
 
-The question the investigation has to answer, and the one that matters most to this design, is not
-which remedy to buy: it is whether **~0.27 ns is the scan's cost or one sample from a distribution
-over layouts whose spread is 30–70%**. §2.2 quotes those constants as *the* cost of the scan, and a
-great deal is sized against them.
+- **The cause is instruction-address alignment, not code generation.** The perturbed build emits the
+  hot functions instruction-for-instruction identical and places them 0x50 bytes elsewhere; padding
+  the crate's text with inert bytes reproduces the whole effect as a function of shift mod 64.
+- **~0.27 ns is not the scan's cost.** It is one draw from a bimodal distribution — ~0.25–0.28 or
+  ~0.42–0.44 ns, nothing between — and it is the favourable one. §2.2 now says so.
+- **A crate boundary would have re-rolled the layout rather than pinned it**, so option (a) was the
+  wrong answer and "recovers about half" was luck. §6.2's performance rationale for the
+  `tessera-filter-write` split is withdrawn; the split stands on audit separation.
+
+⊘ **What remains is a profile decision, unmade:** `-C llvm-args=-align-all-functions=6` pins
+function starts to 64 bytes at no measurable baseline cost, and is independently confirmed to put
+all four hot symbols on residue 0 where unpinned they sit at 16, 0, 48, 0. It was measured on
+`realscan` alone and wants re-running against the real `tessera` binary, on a quiet machine, before
+the workspace profile is changed.
 
 ---
 

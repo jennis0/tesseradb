@@ -25,15 +25,20 @@ code** (§2.2, probe arm 16). Seven times during this work an unrelated addition
 them 30–70%; three of those were from code that never runs during a scan, and once from a function
 that was never *called*. Deleting the call and leaving the symbol reproduced the regression exactly.
 
-No remedy measured is general: `#[inline(always)]` fixes the case in front of you, one codegen unit
-fixes the presence path and not the packing path, moving the symbol to another crate recovers about
-half. **A/B interleaved against a `HEAD` build, medians of three, before believing any number** —
-`probes/2026-08-08-filter-layout/layoutprobe`'s `realscan` and `textscan` are the harness, and
-run-to-run drift is ~5%.
+**The cause was found on 2026-08-11 and it is instruction-address alignment**
+([`scan-constant-sensitivity`](2026-08-11-scan-constant-sensitivity.md)): the hot loops' *addresses*
+move relative to 64-byte boundaries, the emitted code being identical. So the constant is bimodal —
+~0.25–0.28 or ~0.42–0.44 ns, nothing between — and the published figure is the favourable draw.
+Only the compute-bound cells are affected; every memory-bound one is immune.
 
-The structural answer — a crate containing *only* the scan, so there is nothing left to perturb it —
-is named at arm 16, unbuilt and unpriced. **It is the first thing worth doing if more work is
-planned in this crate**, because it changes the cost of everything after it.
+**A crate containing only the scan is *not* the answer**, which is what this memo said before the
+cause was known: a crate boundary re-rolls the layout rather than pinning it, which is exactly why
+moving the symbol "recovered about half". ⊘ The remedy is `-C llvm-args=-align-all-functions=6`,
+identified and **not applied** — a workspace profile change, unmade.
+
+Until it is applied: **A/B interleaved against a `HEAD` build, medians of three, before believing
+any number** — `probes/2026-08-08-filter-layout/layoutprobe`'s `realscan` and `textscan` are the
+harness, run-to-run drift is ~5% on a quiet machine, and this one is often not quiet.
 
 ## 2. Unbuilt operands and one family
 
