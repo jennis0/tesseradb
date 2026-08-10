@@ -127,8 +127,8 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use tessera_authz::{encode_posting, write_delta_tier_at};
-use tessera_filter::{write_value_column, Codes};
+use tessera_authz::{encode_posting, KeyedPostingsSpool};
+use tessera_filter::{Codes, ColumnKind, ValueColumnWriter};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
@@ -1421,15 +1421,36 @@ fn read_attributes_by_entity(
 /// `encode_posting`'s unconditional sortedness check re-verifies the property this loop
 /// established rather than taking it on trust.
 ///
-/// **The memory here is the whole-column-in-RAM shape, and filter-index §4 already prices it as
-/// outside the plan at 10⁹**: the attribute reader materialises `Vec<ScalarValue>` per column at
-/// ~24 B per value, and this grouping adds a `u32` per non-absent entity on top. The streaming
-/// emit that §4 specifies is not built; at the scales this pipeline is exercised at, the tail
-/// dominates and this is the smaller term.
+/// **The emit bands code space** (filter-index §6.2), which is what keeps its transient a constant
+/// the caller chooses rather than 4 B per present entity — ~4 GB per fully covered category column
+/// at 10⁹, on every build, in the same pipeline whose *authorisation* emit bands term space
+/// precisely to avoid this shape. A counting pass sizes each band from `band_rows`, a code is never
+/// split across a band, and each band is one column scan cursor-scattering into a flat buffer laid
+/// out by prefix sums. Bands partition ascending code space, so [`KeyedPostingsSpool`]'s
+/// ascending-key check holds across them unchanged.
+///
+/// What the banding does *not* bound is the attribute tail this reads from: `by_entity` is already
+/// a `Vec<ScalarValue>` per column at ~24 B per value, which filter-index §4 prices as outside the
+/// memory plan at 10⁹ regardless. That is the reader's ceiling, stated where it is paid; this pass
+/// no longer adds a second copy of the column to it.
 pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::schema::Schema,
     by_entity: &[Vec<ScalarValue>],
+) -> Result<Vec<PathBuf>> {
+    write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
+}
+
+/// Entity ids the postings emit holds in flight, at 4 B each: 2²⁶ is a 256 MB flat buffer, and the
+/// cost of a smaller band is one more column scan — measured at ~280 ms per 10⁹ (filter-index
+/// §2.2), so seconds per column even at sixteen bands.
+const POSTINGS_BAND_ROWS: usize = 1 << 26;
+
+fn write_filter_postings_banded(
+    partition_dir: &Path,
+    schema: &crate::schema::Schema,
+    by_entity: &[Vec<ScalarValue>],
+    band_rows: usize,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
@@ -1463,28 +1484,126 @@ pub(crate) fn write_filter_postings(
             continue;
         }
 
-        // Ascending by code, and each `Vec` ascending by entity: exactly the two orders
-        // `write_delta_tier_at` checks rather than trusts.
-        let mut by_code: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        for (entity, value) in values.iter().enumerate() {
-            let code = category_code(value, &attribute.name)?;
-            if code == tessera_store::vocabulary::ABSENT_CODE {
-                continue;
-            }
-            by_code.entry(code).or_default().push(entity as u32);
-        }
-        // A code with no members is dropped rather than written empty. The positional format has
-        // no such choice — every ordinal below the largest must exist — but a keyed file addresses
-        // by search, and a missing key already reads as the empty set (filter-index §6).
-        let entries: Vec<(u32, Vec<u32>)> = by_code.into_iter().collect();
-
         let path = column_dir.join("postings.arrow");
-        write_delta_tier_at(&path, &entries, SMALL_TERM_THRESHOLD_DEFAULT)
-            .map_err(|e| BuildError::io(&path, e))?;
+        write_category_postings(&path, &attribute.name, values, band_rows)?;
         fsync_file(&path)?;
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// One category column's derived postings, emitted band by band.
+///
+/// **The counting pass is what makes the scatter possible without holding the relation.** It gives
+/// each code's exact member count, which lays a band's flat buffer out by prefix sums — so the
+/// emit pass writes each entity to a known slot rather than growing a list per code. Its residue is
+/// one count per distinct code: vocabulary-sized by definition (filter-index §2.3), kilobytes.
+///
+/// **A code is never split across a band**, which is what lets a band be encoded and appended the
+/// moment its scatter finishes; a code larger than the budget forms a band of its own, exactly as
+/// the authorisation build's `band_rows_budget` takes its floor from the largest single term.
+///
+/// The two fail-closed scatter checks are the authorisation emit's, for its reasons: an overflow
+/// check, because one code's entities silently becoming another's is a disclosure; and a short-fill
+/// check **by count rather than by value**, because zero is a valid entity id.
+fn write_category_postings(
+    path: &Path,
+    column: &str,
+    values: &[ScalarValue],
+    band_rows: usize,
+) -> Result<()> {
+    // Code 0 is the reserved *absent* code, so an entity carrying it gets no posting. A code with
+    // no members at all is dropped rather than written empty: the positional format has no such
+    // choice — every ordinal below the largest must exist — but a keyed file addresses by search,
+    // and a missing key already reads as the empty set (filter-index §6).
+    let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
+    for value in values {
+        let code = category_code(value, column)?;
+        if code == tessera_store::vocabulary::ABSENT_CODE {
+            continue;
+        }
+        let slot = counts.entry(code).or_insert(0);
+        *slot = slot.checked_add(1).ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "attribute '{column}': code {code} is carried by more than 2^32 entities, which \
+                 the entity ceiling makes impossible"
+            ))
+        })?;
+    }
+    let codes: Vec<u32> = counts.keys().copied().collect();
+    let rows: Vec<u32> = counts.values().copied().collect();
+    drop(counts);
+
+    let budget = band_rows
+        .max(rows.iter().copied().max().unwrap_or(0) as usize)
+        .max(1);
+    let mut bands: Vec<(usize, usize)> = Vec::new();
+    let mut lo = 0usize;
+    let mut acc = 0usize;
+    for (i, &r) in rows.iter().enumerate() {
+        if acc + r as usize > budget && i > lo {
+            bands.push((lo, i));
+            lo = i;
+            acc = 0;
+        }
+        acc += r as usize;
+    }
+    bands.push((lo, codes.len()));
+
+    let spool_path = path.with_extension("spool");
+    let mut spool = KeyedPostingsSpool::create(&spool_path, SMALL_TERM_THRESHOLD_DEFAULT)
+        .map_err(|e| BuildError::io(&spool_path, e))?;
+    for (lo, hi) in bands {
+        let keys = &codes[lo..hi];
+        let width = hi - lo;
+        let mut offsets: Vec<u64> = Vec::with_capacity(width + 1);
+        let mut total = 0u64;
+        offsets.push(0);
+        for &r in &rows[lo..hi] {
+            total += r as u64;
+            offsets.push(total);
+        }
+        let mut flat: Vec<u32> = vec![0; total as usize];
+        let mut cursor: Vec<u64> = offsets[..width].to_vec();
+        // Entities are swept ascending, so each posting's entity list arrives sorted and
+        // `encode_posting`'s unconditional sortedness check re-verifies the property this loop
+        // established rather than taking it on trust.
+        for (entity, value) in values.iter().enumerate() {
+            let code = category_code(value, column)?;
+            // A code outside this band — including the absent code, which was never counted — is
+            // this band's business only in that it is not.
+            let Ok(local) = keys.binary_search(&code) else {
+                continue;
+            };
+            let slot = &mut cursor[local];
+            if *slot >= offsets[local + 1] {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{column}': code {code} received more postings than the {} the \
+                     counting pass found",
+                    offsets[local + 1] - offsets[local]
+                )));
+            }
+            flat[*slot as usize] = entity as u32;
+            *slot += 1;
+        }
+        for (local, slot) in cursor.iter().enumerate() {
+            if *slot != offsets[local + 1] {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{column}': code {} expected {} postings, received {}",
+                    keys[local],
+                    offsets[local + 1] - offsets[local],
+                    slot - offsets[local]
+                )));
+            }
+        }
+        for local in 0..width {
+            let entities = &flat[offsets[local] as usize..offsets[local + 1] as usize];
+            spool
+                .append(keys[local], entities)
+                .map_err(|e| BuildError::io(path, e))?;
+        }
+    }
+    spool.finish(path).map_err(|e| BuildError::io(path, e))
 }
 
 /// Write one column's values in entity order, and its presence bitmap where presence is partial.
@@ -1510,12 +1629,22 @@ fn write_column_values(
     let mut present = croaring::Bitmap::new();
     let mut universal = true;
 
+    let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
+        .map_err(|e| BuildError::io(values_path, e))?;
+    macro_rules! push {
+        ($chunk:expr) => {
+            writer
+                .push(&$chunk)
+                .map_err(|e| BuildError::io(values_path, e))?
+        };
+    }
+
     // **A string's absence is not an empty string**, and a category's is not code 0 by coincidence:
     // in both families the "carries nothing" marker is out of band. A category spends the reserved
     // code 0, which its vocabulary reserves out of the value space; a string has no spare value to
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
-    let codes = if attribute.ty == ScalarType::Utf8 {
+    if attribute.ty == ScalarType::Utf8 {
         let mut held: Vec<String> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
             match value {
@@ -1531,8 +1660,13 @@ fn write_column_values(
                     )))
                 }
             }
+            if held.len() >= VALUE_CHUNK {
+                push!(Codes::text(held.drain(..)));
+            }
         }
-        Codes::text(held)
+        if !held.is_empty() {
+            push!(Codes::text(held));
+        }
     } else if attribute.vocabulary.is_some() {
         let mut held: Vec<u32> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
@@ -1543,14 +1677,13 @@ fn write_column_values(
             }
             present.add(entity as u32);
             held.push(code);
+            if held.len() >= VALUE_CHUNK {
+                push!(category_chunk(attribute.ty, &held));
+                held.clear();
+            }
         }
-        // The declared width is the storage width. Narrowing here rather than storing `u32`
-        // throughout is worth a match arm: the column is priced at 1 GB per byte of width per 10⁹
-        // items (Appendix A), so a `u8` category stored as `u32` would cost 3 GB it does not need.
-        match attribute.ty {
-            ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect::<Vec<_>>().into()),
-            ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect::<Vec<_>>().into()),
-            _ => Codes::U32(held.into()),
+        if !held.is_empty() {
+            push!(category_chunk(attribute.ty, &held));
         }
     } else {
         // **A plain numeric has no absent representation, and that is a real gap rather than a
@@ -1561,12 +1694,118 @@ fn write_column_values(
         // bounded and stated rather than hidden: an item with no value for a numeric column
         // matches a range containing zero. Fixing it needs the same null-aware attribute reader
         // the string column's ⊘ names, and the presence bitmap is already there to receive it.
-        numeric_codes(attribute, values)?
-    };
+        push_numeric_chunks(&mut writer, values_path, attribute, values)?;
+    }
     let presence = (!universal).then_some(&present);
-    write_value_column(values_path, presence_path, &codes, presence)
+    writer
+        .finish(presence)
         .map_err(|e| BuildError::io(values_path, e))?;
     Ok(!universal)
+}
+
+/// Values pushed to the column writer at a time. The writer spools each chunk as it arrives, so
+/// this is the whole of what the emit holds beside the attribute tail it reads from.
+const VALUE_CHUNK: usize = 1 << 16;
+
+/// A category chunk at the declared width.
+///
+/// The declared width is the storage width. Narrowing here rather than storing `u32` throughout is
+/// worth a match arm: the column is priced at 1 GB per byte of width per 10⁹ items (Appendix A), so
+/// a `u8` category stored as `u32` would cost 3 GB it does not need.
+fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
+    match ty {
+        ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect::<Vec<_>>().into()),
+        ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect::<Vec<_>>().into()),
+        _ => Codes::U32(held.to_vec().into()),
+    }
+}
+
+/// The kind of column a declared attribute stores — the type the writer is created with, before
+/// its first value arrives.
+fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
+    if attribute.ty == ScalarType::Utf8 {
+        return ColumnKind::Text;
+    }
+    if attribute.vocabulary.is_some() {
+        return match attribute.ty {
+            ScalarType::U8 => ColumnKind::U8,
+            ScalarType::U16 => ColumnKind::U16,
+            _ => ColumnKind::U32,
+        };
+    }
+    match attribute.ty {
+        // `bool` stores as `u8` and `timestamp_us` as the `i64` it is — the *type* carries the unit
+        // into the manifest, and the storage and the comparison are an `i64`'s.
+        ScalarType::Bool | ScalarType::U8 => ColumnKind::U8,
+        ScalarType::U16 => ColumnKind::U16,
+        ScalarType::U32 => ColumnKind::U32,
+        ScalarType::U64 => ColumnKind::U64,
+        ScalarType::I8 => ColumnKind::I8,
+        ScalarType::I16 => ColumnKind::I16,
+        ScalarType::I32 => ColumnKind::I32,
+        ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
+        ScalarType::F32 => ColumnKind::F32,
+        ScalarType::F64 => ColumnKind::F64,
+        ScalarType::Utf8 => ColumnKind::Text,
+    }
+}
+
+/// One numeric column's values, at the declared width, pushed in bounded chunks.
+///
+/// Every entity is present: see [`write_column_values`]'s note on why a plain numeric has no absent
+/// representation yet.
+fn push_numeric_chunks(
+    writer: &mut ValueColumnWriter,
+    values_path: &Path,
+    attribute: &crate::schema::Attribute,
+    values: &[ScalarValue],
+) -> Result<()> {
+    macro_rules! stream {
+        ($variant:ident, $ctor:expr, $map:expr) => {{
+            let mut out = Vec::with_capacity(VALUE_CHUNK);
+            for v in values {
+                match v {
+                    ScalarValue::$variant(x) => out.push($map(*x)),
+                    other => {
+                        return Err(BuildError::Invalid(format!(
+                            "attribute '{}' is declared {:?} but carries {other:?}",
+                            attribute.name, attribute.ty
+                        )))
+                    }
+                }
+                if out.len() >= VALUE_CHUNK {
+                    writer
+                        .push(&$ctor(std::mem::take(&mut out).into()))
+                        .map_err(|e| BuildError::io(values_path, e))?;
+                    out.reserve(VALUE_CHUNK);
+                }
+            }
+            if !out.is_empty() {
+                writer
+                    .push(&$ctor(out.into()))
+                    .map_err(|e| BuildError::io(values_path, e))?;
+            }
+        }};
+        ($variant:ident, $ctor:expr) => {
+            stream!($variant, $ctor, |x| x)
+        };
+    }
+    match attribute.ty {
+        ScalarType::Bool => stream!(Bool, Codes::U8, u8::from),
+        ScalarType::U8 => stream!(U8, Codes::U8),
+        ScalarType::U16 => stream!(U16, Codes::U16),
+        ScalarType::U32 => stream!(U32, Codes::U32),
+        ScalarType::U64 => stream!(U64, Codes::U64),
+        ScalarType::I8 => stream!(I8, Codes::I8),
+        ScalarType::I16 => stream!(I16, Codes::I16),
+        ScalarType::I32 => stream!(I32, Codes::I32),
+        ScalarType::I64 => stream!(I64, Codes::I64),
+        ScalarType::F32 => stream!(F32, Codes::F32),
+        ScalarType::F64 => stream!(F64, Codes::F64),
+        ScalarType::TimestampUs => stream!(TimestampUs, Codes::I64),
+        ScalarType::Utf8 => unreachable!("the caller handles utf8 before reaching here"),
+    }
+    Ok(())
 }
 
 /// Does this column owe a postings file?
@@ -1597,60 +1836,6 @@ fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::
         .as_ref()
         .and_then(|name| schema.vocabularies.get(name))
         .is_some_and(|v| v.listing == crate::schema::Listing::PerViewer)
-}
-
-/// One numeric column's values, at the declared width.
-///
-/// Every entity is present: see the caller's note on why a plain numeric has no absent
-/// representation yet. `bool` stores as `u8` and `timestamp_us` as the `i64` it is — the *type*
-/// carries the unit into the manifest, and the storage and the comparison are an `i64`'s.
-fn numeric_codes(attribute: &crate::schema::Attribute, values: &[ScalarValue]) -> Result<Codes> {
-    macro_rules! gather {
-        ($variant:ident, $ctor:expr) => {{
-            let mut out = Vec::with_capacity(values.len());
-            for v in values {
-                match v {
-                    ScalarValue::$variant(x) => out.push(*x),
-                    other => {
-                        return Err(BuildError::Invalid(format!(
-                            "attribute '{}' is declared {:?} but carries {other:?}",
-                            attribute.name, attribute.ty
-                        )))
-                    }
-                }
-            }
-            $ctor(out.into())
-        }};
-    }
-    Ok(match attribute.ty {
-        ScalarType::Bool => {
-            let mut out = Vec::with_capacity(values.len());
-            for v in values {
-                match v {
-                    ScalarValue::Bool(b) => out.push(u8::from(*b)),
-                    other => {
-                        return Err(BuildError::Invalid(format!(
-                            "attribute '{}' is declared bool but carries {other:?}",
-                            attribute.name
-                        )))
-                    }
-                }
-            }
-            Codes::U8(out.into())
-        }
-        ScalarType::U8 => gather!(U8, Codes::U8),
-        ScalarType::U16 => gather!(U16, Codes::U16),
-        ScalarType::U32 => gather!(U32, Codes::U32),
-        ScalarType::U64 => gather!(U64, Codes::U64),
-        ScalarType::I8 => gather!(I8, Codes::I8),
-        ScalarType::I16 => gather!(I16, Codes::I16),
-        ScalarType::I32 => gather!(I32, Codes::I32),
-        ScalarType::I64 => gather!(I64, Codes::I64),
-        ScalarType::F32 => gather!(F32, Codes::F32),
-        ScalarType::F64 => gather!(F64, Codes::F64),
-        ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 => unreachable!("the caller handles utf8 before reaching here"),
-    })
 }
 
 /// The vocabulary code a category column's value carries.
@@ -2057,6 +2242,69 @@ fn refine_group(
 mod tests {
     use super::*;
     use tessera_types::IdentityKey;
+
+    /// **The band count must not be observable in the artefact.** A band boundary is a place the
+    /// scatter restarts and the ascending-key check spans, so a column emitted in one band and the
+    /// same column emitted in a band per code have to be the same file — which is also what makes
+    /// the band budget a memory knob rather than a format decision.
+    #[test]
+    fn banding_the_postings_emit_does_not_change_its_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Codes scattered across a 32-bit space, as `vocabulary` mints them, with one code held
+        // heavily enough to cross the Roaring threshold and code 0 (absent) carried too.
+        let values: Vec<ScalarValue> = (0..5_000u32)
+            .map(|e| {
+                ScalarValue::U32(match e % 7 {
+                    0 => tessera_store::vocabulary::ABSENT_CODE,
+                    1 => 3_999_999_999,
+                    2 => 17,
+                    _ => 1_000 + (e % 53),
+                })
+            })
+            .collect();
+
+        let mut files: Vec<Vec<u8>> = Vec::new();
+        for band_rows in [1usize, 2, 100, 1_000, usize::MAX] {
+            let path = dir.path().join(format!("postings-{band_rows}.arrow"));
+            write_category_postings(&path, "colour", &values, band_rows).expect("emit");
+            files.push(std::fs::read(&path).expect("read"));
+        }
+        for f in &files[1..] {
+            assert_eq!(f, &files[0]);
+        }
+
+        // And the postings say what the column says: each code's posting is exactly the entities
+        // carrying it, which is what makes one a derivative of the other.
+        let tier = tessera_authz::DeltaTier::open(&dir.path().join("postings-1.arrow"))
+            .expect("open");
+        let mut codes: Vec<u32> = values
+            .iter()
+            .map(|v| category_code(v, "colour").expect("code"))
+            .collect::<Vec<_>>();
+        codes.sort_unstable();
+        codes.dedup();
+        for code in codes {
+            let posting = tier.posting_at(code).expect("read");
+            let expected: Vec<u32> = values
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| category_code(v, "colour").expect("code") == code)
+                .map(|(e, _)| e as u32)
+                .collect();
+            if code == tessera_store::vocabulary::ABSENT_CODE {
+                assert!(posting.is_none(), "the absent code earns no posting");
+                continue;
+            }
+            let got = match posting.expect("carried") {
+                tessera_authz::PostingRef::Roaring(view) => view.iter().collect::<Vec<_>>(),
+                tessera_authz::PostingRef::Array(bytes) => bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().expect("four bytes")))
+                    .collect(),
+            };
+            assert_eq!(got, expected, "code {code}");
+        }
+    }
 
     /// `join_chunk` must resolve every id that is present (including runs of duplicates, which
     /// all map to the same ordinal), report every id that is absent as `None`, and drain the

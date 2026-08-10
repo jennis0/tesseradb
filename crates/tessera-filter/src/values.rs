@@ -1420,97 +1420,10 @@ fn read_values(path: &Path, mmap: bool) -> io::Result<Codes> {
     })
 }
 
-/// Write a value column, and its presence bitmap where presence is partial.
-///
-/// `presence` is `None` when every entity in `0..codes.len()` carries a value. Writing an
-/// all-ones bitmap instead would be correct and would cost the scan its fast path, so the
-/// distinction is carried in the file set rather than in the bitmap's contents.
-pub fn write_value_column(
-    values_path: &Path,
-    presence_path: &Path,
-    codes: &Codes,
-    presence: Option<&Bitmap>,
-) -> io::Result<()> {
-    use arrow::array::{ArrayRef, UInt16Array, UInt32Array, UInt8Array};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-
-    // The array borrows the `Codes` buffers rather than rebuilding them, so writing a column costs
-    // no second copy of it — which matters most at the fold, where every column is rewritten.
-    let (array, ty): (ArrayRef, DataType) = match codes {
-        Codes::U8(v) => (Arc::new(UInt8Array::new(v.clone(), None)), DataType::UInt8),
-        Codes::U16(v) => (
-            Arc::new(UInt16Array::new(v.clone(), None)),
-            DataType::UInt16,
-        ),
-        Codes::U32(v) => (
-            Arc::new(UInt32Array::new(v.clone(), None)),
-            DataType::UInt32,
-        ),
-        Codes::U64(v) => (
-            Arc::new(arrow::array::UInt64Array::new(v.clone(), None)),
-            DataType::UInt64,
-        ),
-        Codes::I8(v) => (
-            Arc::new(arrow::array::Int8Array::new(v.clone(), None)),
-            DataType::Int8,
-        ),
-        Codes::I16(v) => (
-            Arc::new(arrow::array::Int16Array::new(v.clone(), None)),
-            DataType::Int16,
-        ),
-        Codes::I32(v) => (
-            Arc::new(arrow::array::Int32Array::new(v.clone(), None)),
-            DataType::Int32,
-        ),
-        Codes::I64(v) => (
-            Arc::new(arrow::array::Int64Array::new(v.clone(), None)),
-            DataType::Int64,
-        ),
-        Codes::F32(v) => (
-            Arc::new(arrow::array::Float32Array::new(v.clone(), None)),
-            DataType::Float32,
-        ),
-        Codes::F64(v) => (
-            Arc::new(arrow::array::Float64Array::new(v.clone(), None)),
-            DataType::Float64,
-        ),
-        // `LargeUtf8`, not `Utf8`: 32-bit offsets cap the concatenated bytes at 2 GiB, which a
-        // 10⁹-entity column passes at two bytes a value. `try_new` is what validates the offsets
-        // ascend and the bytes are UTF-8, so a column that could not be read back is refused here
-        // rather than at the next open.
-        Codes::Text { bytes, offsets } => (
-            Arc::new(
-                arrow::array::LargeStringArray::try_new(
-                    arrow::buffer::OffsetBuffer::new(offsets.clone()),
-                    bytes.clone(),
-                    None,
-                )
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
-            ),
-            DataType::LargeUtf8,
-        ),
-    };
-    let schema = Arc::new(Schema::new(vec![Field::new("value", ty, false)]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![array])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let file = std::fs::File::create(values_path)?;
-    let mut w = arrow::ipc::writer::FileWriter::try_new(file, &schema)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    w.write(&batch)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    w.finish().map_err(|e| io::Error::other(e.to_string()))?;
-
-    if let Some(p) = presence {
-        std::fs::write(presence_path, p.serialize::<Portable>())?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::values_writer::write_value_column;
 
     fn candidate(all: impl IntoIterator<Item = u32>) -> Bitmap {
         let mut b = Bitmap::new();

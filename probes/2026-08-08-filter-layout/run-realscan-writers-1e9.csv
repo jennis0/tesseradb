@@ -1,0 +1,44 @@
+# Interleaved medians-of-three at 1e9: this branch's tessera-filter against HEAD (0207585),
+# same machine, same binary shape, alternating runs. The check is that adding the value-column
+# writers did not perturb the scan; see run-writers-2e8.csv for what they were added for.
+# The first attempt DID regress the universal arm 64% (112.3 vs 68.3 ms on broad-25pct) with not
+# a line of the scan changed — the new module re-partitioned the crate's codegen units and
+# `pack::pack_block` stopped being inlined into `pack_run`. `#[inline(always)]` on the kernel
+# fixed it; these are the numbers after that.
+build,n,presence,candidate,candidate_entities,ms,ns_per_candidate,hits
+mine-1,1000000000,universal,sparse-contiguous-1pct,10000000,2.65,0.26,10046
+mine-1,1000000000,universal,broad-25pct,250000000,68.64,0.27,250294
+mine-1,1000000000,universal,sparse-scattered-1pct,10000954,100.49,10.05,10070
+mine-1,1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.26,0.03,970
+mine-1,1000000000,slice-blocked,broad-25pct,250000000,6.15,0.02,24816
+mine-1,1000000000,slice-blocked,sparse-scattered-1pct,10000954,16.53,1.65,967
+head-1,1000000000,universal,sparse-contiguous-1pct,10000000,2.81,0.28,10046
+head-1,1000000000,universal,broad-25pct,250000000,67.43,0.27,250294
+head-1,1000000000,universal,sparse-scattered-1pct,10000954,102.88,10.29,10070
+head-1,1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.23,0.02,970
+head-1,1000000000,slice-blocked,broad-25pct,250000000,6.25,0.03,24816
+head-1,1000000000,slice-blocked,sparse-scattered-1pct,10000954,16.70,1.67,967
+mine-2,1000000000,universal,sparse-contiguous-1pct,10000000,2.53,0.25,10046
+mine-2,1000000000,universal,broad-25pct,250000000,66.39,0.27,250294
+mine-2,1000000000,universal,sparse-scattered-1pct,10000954,103.17,10.32,10070
+mine-2,1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.24,0.02,970
+mine-2,1000000000,slice-blocked,broad-25pct,250000000,6.16,0.02,24816
+mine-2,1000000000,slice-blocked,sparse-scattered-1pct,10000954,16.30,1.63,967
+head-2,1000000000,universal,sparse-contiguous-1pct,10000000,2.50,0.25,10046
+head-2,1000000000,universal,broad-25pct,250000000,74.03,0.30,250294
+head-2,1000000000,universal,sparse-scattered-1pct,10000954,103.01,10.30,10070
+head-2,1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.23,0.02,970
+head-2,1000000000,slice-blocked,broad-25pct,250000000,6.25,0.02,24816
+head-2,1000000000,slice-blocked,sparse-scattered-1pct,10000954,16.75,1.68,967
+mine-3,1000000000,universal,sparse-contiguous-1pct,10000000,2.58,0.26,10046
+mine-3,1000000000,universal,broad-25pct,250000000,65.28,0.26,250294
+mine-3,1000000000,universal,sparse-scattered-1pct,10000954,102.92,10.29,10070
+mine-3,1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.25,0.02,970
+mine-3,1000000000,slice-blocked,broad-25pct,250000000,6.19,0.02,24816
+mine-3,1000000000,slice-blocked,sparse-scattered-1pct,10000954,16.63,1.66,967
+head-3,1000000000,universal,sparse-contiguous-1pct,10000000,2.61,0.26,10046
+head-3,1000000000,universal,broad-25pct,250000000,66.42,0.27,250294
+head-3,1000000000,universal,sparse-scattered-1pct,10000954,102.70,10.27,10070
+head-3,1000000000,slice-blocked,sparse-contiguous-1pct,10000000,0.24,0.02,970
+head-3,1000000000,slice-blocked,broad-25pct,250000000,6.12,0.02,24816
+head-3,1000000000,slice-blocked,sparse-scattered-1pct,10000954,16.24,1.62,967

@@ -14,4 +14,6 @@ pub use postings::{
     write_postings, PostingRef, PostingsReader, PostingsSpool,
 };
 pub use term_sweep::sweep_term_postings;
-pub use tier::{coalesce_delta_tiers, write_delta_tier, write_delta_tier_at, DeltaTier};
+pub use tier::{
+    coalesce_delta_tiers, write_delta_tier, write_delta_tier_at, DeltaTier, KeyedPostingsSpool,
+};

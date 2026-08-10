@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
 
-use crate::values::{write_value_column, Codes, ValueColumn};
+use crate::values::{Codes, ValueColumn};
+use crate::values_writer::write_value_column;
 
 /// Where a column's per-flush extents live, under the column's own directory.
 pub const EXTENTS_DIR: &str = "extents";

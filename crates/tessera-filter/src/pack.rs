@@ -73,7 +73,16 @@ const COOKIE_NO_RUN: u32 = 12346;
 /// time does not depend on how many values match. That is what removes the misprediction term — a
 /// predicate matching half its input mispredicts on roughly half of it — and it also makes the work
 /// a function of the block alone.
-#[inline]
+///
+/// **`inline(always)`, not `inline`, and the difference is 70%.** The kernel is one call per 65,536
+/// values, so inlining it looks like a detail — but the predicate reaches it as `&mut impl FnMut`,
+/// and only inlining turns that into the direct comparison the branchless loop is written around.
+/// As a hint it is a codegen-unit lottery: adding an unrelated *module* to this crate (the value
+/// column's writers) re-partitioned the crate's CGUs, `pack_run` stopped getting this body, and the
+/// broad-candidate arm went from 13.3 to 22.1 ms at 2×10⁸ with not a line of the scan changed.
+/// That is the same failure mode as `values.rs`'s two `inline(never)` markers, from the other
+/// direction, and the fix is the same: state the inlining rather than hint at it.
+#[inline(always)]
 pub(crate) fn pack_block<T>(
     values: &[T],
     pred: &mut impl FnMut(&T) -> bool,
@@ -339,7 +348,11 @@ mod tests {
                 let mut words = [0u64; WORDS];
                 let mut card = 0;
                 for slot in 0..BLOCK {
-                    let hit = if sparse { slot % 900 == 0 } else { slot % 2 == 0 };
+                    let hit = if sparse {
+                        slot % 900 == 0
+                    } else {
+                        slot % 2 == 0
+                    };
                     if hit {
                         words[slot >> 6] |= 1u64 << (slot & 63);
                         card += 1;

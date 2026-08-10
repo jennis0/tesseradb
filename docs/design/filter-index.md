@@ -513,20 +513,22 @@ everything else in a bundle.
 > column value for value, which is what makes one a derivative of the other rather than two writers
 > that happen to agree today.
 
-The current emit groups the entity-major values the attribute pass already materialises, which holds a
-`u32` per non-absent entity per column on top of the attribute tail. That is a scale ceiling rather than
-a correctness gap, and it is the same ceiling the existing attribute reader already has: it materialises
-`Vec<ScalarValue>` per column at ~24 B per value, which at 10⁹ is tens of GB and outside the memory plan
-regardless. A streaming emit — a counting pass for band prefix sums, then an emit pass — is what the
-plan's arithmetic needs and is not written.
+**The emit is banded, and streams into both writers.** The value column is pushed to the streaming
+writer in bounded chunks; the postings take a counting pass for band prefix sums, then one column
+scan per band cursor-scattering into a flat buffer sized by them, appended through the keyed
+postings writer — the construction §6.2 specifies, written once and called by both producers. The
+band budget is a constant the emit chooses, and the counting pass's residue is one count per
+distinct code, vocabulary-sized by definition. *Measured* at 2×10⁸ over a fully covered `u32`
+category (`probes/2026-08-08-filter-layout/run-writers-2e8.csv`): the postings emit's peak
+anonymous residency fell from 832 MB to 269 MB — the band buffer plus the counts — and the value
+column's from 800 MB to 1 MB. Both writers still map their spool at assembly, so the process's
+high-water resident set includes the finished artefact once as clean page cache; what banding
+bounds is the heap, which is the term the plan is written against.
 
-⊘ **The shipped postings emit is unbanded, and that is a finding about existing code, not only a
-plan.** `write_filter_postings` accumulates every code's entity list in memory before anything is
-written — 4 B per present entity per category column, ~4 GB per fully covered column at 10⁹ — on
-**every build**, in the same pipeline whose authorisation emit bands term space precisely to avoid
-this shape. Harmless at the scales built so far and outside the memory plan at 10⁹. The banded
-construction both producers should share is specified at §6.2, where the fold — the second caller —
-made the shape's cost unavoidable to state.
+What this does **not** bound is the attribute tail it reads from: the reader materialises
+`Vec<ScalarValue>` per column at ~24 B per value, which at 10⁹ is tens of GB and outside the memory
+plan regardless. That ceiling is the reader's, stated where it is paid; the emit no longer adds a
+second copy of the column to it.
 
 The two fail-closed scatter checks carry over unchanged and for unchanged reasons: an overflow check,
 because one term's entities silently becoming another's is a disclosure; and a short-fill check **by
@@ -903,17 +905,22 @@ owns; it must not advise the live generation's `FilterColumns` maps, which are t
 for exactly pass 2's reason. The pass is single-threaded like the rest of the fold; parallelism is
 excluded by owner ruling and not further discussed.
 
-**Memory: banding bounds the transient only if the writers stream, and today they do not — the
-streaming writers are a deliverable of this design, not an assumption.** The shipped
-`write_value_column` takes a fully materialised `Codes`, and the keyed postings writer takes its
-complete entries slice and holds every encoded posting before writing; the format's reader refuses
-a second record batch, so incremental append is no escape. Banding the *ids* against unbanded
-writers merely moves the resident gigabytes from the ids to the values array or the serialised
-postings. So the pass owes two writers on the repo's own spool-then-assemble discipline (the
-`SegmentWriter`/`PostingsSpool` construction, applied to this format): a **value-column writer**
-that spools value bytes and assembles the single record batch at `finish` with the spool mapped as
-its values buffer, and a **keyed-postings writer** that appends encoded records band by band and
-assembles the same way. With those in place the emit **bands the code space**: a code never split
+**Memory: banding bounds the transient only because the writers stream — ✔ and they now do.** The
+writers this design called for are built (2026-08-10): `ValueColumnWriter` spools value bytes, and
+a text column's offsets, and assembles the single record batch at `finish` with the spool mapped as
+the array's own buffer; `KeyedPostingsSpool` appends encoded records band by band and assembles the
+same way, its strictly-ascending-key check comparing across band boundaries and not only within
+one. Both are on the repo's own spool-then-assemble discipline, both are byte-identical to the
+whole-column writers they replace at every chunking tested, and the batch build is ported onto them
+— so there is one writer per artefact rather than two producers that happen to agree.
+
+That mattered more than an optimisation: it is what the earlier revision of this paragraph had
+wrong. `write_value_column` took a fully materialised `Codes` and the keyed writer its complete
+entries slice, and the format's reader refuses a second record batch, so incremental append was no
+escape — banding the *ids* against unbanded writers would have moved the resident gigabytes from
+the ids to the values array or the serialised postings rather than removing them. Measured at
+2×10⁸ over a fully covered `u32` category, heap peak: the value column 800 MB → **1 MB**, the
+postings 832 MB → **269 MB** at three bands. With those in place the emit **bands the code space**: a code never split
 across a band, a counting pass over the column sizing each band from a memory budget, then per
 band one column scan cursor-scattering into a flat buffer laid out by prefix sums and appended
 through the spool — bands partition ascending code space, so the writer's ascending-order check
