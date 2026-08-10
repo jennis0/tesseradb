@@ -44,11 +44,22 @@ export type DriverMeta = {
 
 export type DriverEvents = {
   /**
-   * A frame to compose and draw, with the plan it answered. `reason` says what changed:
-   * `response` after a fetch, `fold` for a mid-fetch absorb or covered-view change, `settle`
-   * for the full quiet-moment derivation.
+   * The reconciler's verdict: what this paint may cost, decided in one place (the tier rule
+   * client-architecture §3 assigns to the driver, and review finding F8 demanded be one
+   * statement).
+   *
+   * - `fold` — the presented frame still covers the view and only exact bands moved: the
+   *   consumer refreshes those from the depth index and lets stand-ins ride one step stale.
+   *   No frame is carried, because none is needed.
+   * - `derive` — depth or region changed, or the settle is finalising: the full derivation,
+   *   carried as `frame`. The driver has already paid the stand-in walk exactly once and
+   *   rate-limited it during gestures; the consumer just composes.
+   *
+   * The third tier — `reuse`, nothing changed — never reaches the consumer at all: the driver
+   * traces it and stops. That the walk cannot run more often than the tier rule allows is the
+   * whole fix for the 18–20 fps zoom the eager per-schedule derivation caused.
    */
-  onFrame(frame: ReplicaFrame, planned: Plan, reason: 'response' | 'fold' | 'settle'): void;
+  onFrame(verdict: {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame}): void;
   onStatus?(status: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying', detail?: unknown): void;
   /** The Phase-0 instrumentation stream: request/arrived/covered/ring/ringskip/revalidate. */
   onTrace?(kind: string, fields: Record<string, number>): void;
@@ -216,12 +227,7 @@ export class Driver {
       return;
     }
 
-    const planned = this.planFor(view);
-    this.events.onFrame(
-      this.replica.frameFromCache(planned.render, planned.choice.depth, this.meta.kMaxMarks),
-      planned,
-      'fold'
-    );
+    this.reconcile('schedule', view);
 
     if (this.debounceHandle) this.clock.cancel(this.debounceHandle);
     const notRecent = now - this.lastRequestAt > this.o.leadingEdgeMinGapMs;
@@ -237,14 +243,55 @@ export class Driver {
 
   /** An absorb landed mid-fetch: pieces paint as they arrive. The consumer coalesces to frames. */
   absorbed(): void {
-    if (!this.lastView) return;
-    const planned = this.planFor(this.lastView);
-    this.events.onFrame(
-      this.replica.frameFromCache(planned.render, planned.choice.depth, this.meta.kMaxMarks),
-      planned,
-      'fold'
-    );
-    this.scheduleSettle();
+    if (this.lastView) this.reconcile('absorb', this.lastView);
+  }
+
+  /**
+   * The tier rule — the one statement of what a paint may cost, every trigger passing through.
+   *
+   * Reuse is exact (a version counter, not a heuristic); a fold marks the handle's stand-ins
+   * stale and lets the settle repair them; the full derivation is paid at most once per
+   * {@link DriverOptions.deriveMinGapMs} while the view is moving, and unconditionally at the
+   * settle — which is also the only trigger allowed to clear `standInStale`.
+   */
+  private reconcile(trigger: 'schedule' | 'absorb' | 'response' | 'settle', view: ViewState): void {
+    const planned = this.planFor(view);
+    const handle = this.presented;
+    const covered =
+      handle !== null &&
+      handle.depth === planned.choice.depth &&
+      rectContains(handle.want, planned.render);
+
+    if (
+      covered &&
+      handle.version === this.replica.version &&
+      (trigger !== 'settle' || !handle.standInStale)
+    ) {
+      this.trace('reuse', {depth: handle.depth});
+      return;
+    }
+
+    if (covered && trigger !== 'settle') {
+      this.presented = {...handle, version: this.replica.version, standInStale: true};
+      this.events.onFrame({tier: 'fold', plan: planned});
+      this.scheduleSettle();
+      return;
+    }
+
+    const now = this.clock.now();
+    if (trigger !== 'settle' && now - this.lastFullDeriveAt < this.o.deriveMinGapMs) {
+      this.scheduleSettle();
+      return;
+    }
+    this.lastFullDeriveAt = now;
+    const frame = this.replica.frameFromCache(planned.render, planned.choice.depth, this.meta.kMaxMarks);
+    this.presented = {
+      want: planned.render,
+      depth: planned.choice.depth,
+      version: frame.version,
+      standInStale: false
+    };
+    this.events.onFrame({tier: 'derive', plan: planned, frame});
   }
 
   private storeCanAnswer(view: ViewState): boolean {
@@ -314,12 +361,7 @@ export class Driver {
     const wait = Math.min(this.o.settleMs, Math.max(0, this.settleDeadline - now));
     this.settleHandle = this.clock.after(wait, () => {
       this.settleHandle = null;
-      if (!this.lastView) return;
-      const planned = this.planFor(this.lastView);
-      this.lastFullDeriveAt = this.clock.now();
-      const frame = this.replica.frameFromCache(planned.render, planned.choice.depth, this.meta.kMaxMarks);
-      this.presented = {want: planned.render, depth: planned.choice.depth, version: frame.version, standInStale: false};
-      this.events.onFrame(frame, planned, 'settle');
+      if (this.lastView) this.reconcile('settle', this.lastView);
     });
   }
 
@@ -413,12 +455,16 @@ export class Driver {
     this.events.onStatus?.('loading');
 
     try {
+      // `standIns: false` — the fetch absorbs and reports; what gets DERIVED is the
+      // reconciler's decision, paid once under its own rate rule rather than per fetch.
       const frame = await this.replica.fetchRegion(
         planned.visible.rect,
         choice.depth,
         this.meta.kMaxMarks,
         controller.signal,
-        planned.render
+        planned.render,
+        undefined,
+        false
       );
       if (generation !== this.generation) return;
       const arrivedAt = this.clock.now();
@@ -432,9 +478,7 @@ export class Driver {
       });
 
       this.heldBbox = {bbox: [0, 0, 0, 0], depth: choice.depth};
-      this.presented = {want: planned.render, depth: choice.depth, version: frame.version, standInStale: true};
-      this.events.onFrame(frame, planned, 'response');
-      this.scheduleSettle();
+      this.reconcile('response', view);
 
       // Calibration over the frame the planner predicted for — driver state, driver domain.
       const visible = frame.exact.reduce((a, b) => a + Number(b.visible), 0);
@@ -456,16 +500,17 @@ export class Driver {
       // The margin leg — an explicit phase of the lifecycle, superseded by a queued view.
       if (planned.foreground.rect !== planned.visible.rect) {
         try {
-          const margin = await this.replica.fetchRegion(
+          await this.replica.fetchRegion(
             planned.foreground.rect,
             choice.depth,
             this.meta.kMaxMarks,
             controller.signal,
-            planned.render
+            planned.render,
+            undefined,
+            false
           );
           if (generation !== this.generation) return;
-          this.events.onFrame(margin, planned, 'fold');
-          this.scheduleSettle();
+          this.reconcile('response', view);
         } catch {
           // Already drawn; the margin buys the next gesture, not this one.
         }

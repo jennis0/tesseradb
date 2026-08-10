@@ -1,13 +1,13 @@
 import {
   Driver,
-  RENDER_MARGIN,
-  rectContains,
-  worldBbox,
   type Plan,
   type Replica,
   type ReplicaFrame,
   type DriverViewState as ViewState
 } from '@tessera/client';
+
+/** The driver's tier verdict — see `Driver`'s `onFrame` doc for what each costs. */
+type Verdict = {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame};
 import {
   assemble,
   assembledMarks,
@@ -36,7 +36,7 @@ export class DriverBinding {
   private width = 0;
   private height = 0;
   /** rAF coalescing — the one clock the vis side is allowed. */
-  private pending: {frame: ReplicaFrame; plan: Plan; reason: string} | null = null;
+  private pending: Verdict | null = null;
   private raf: number | null = null;
 
   constructor(
@@ -58,7 +58,7 @@ export class DriverBinding {
         cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
       },
       {
-        onFrame: (frame, plan, reason) => this.apply(frame, plan, reason),
+        onFrame: (verdict) => this.apply(verdict),
         onStatus: (status, detail) => this.status(status, detail),
         onTrace: (kind, fields) => trace.event(kind, fields)
       },
@@ -85,38 +85,46 @@ export class DriverBinding {
     this.pending = null;
   }
 
-  /** Frames coalesce to one application per animation frame; the newest wins. */
-  private apply(frame: ReplicaFrame, plan: Plan, reason: string): void {
-    this.pending = {frame, plan, reason};
+  /** Verdicts coalesce to one application per animation frame; the newest wins. */
+  private apply(verdict: Verdict): void {
+    this.pending = verdict;
     if (this.raf !== null) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = null;
       const next = this.pending;
       this.pending = null;
-      if (next) this.applyNow(next.frame, next.plan, next.reason);
+      if (next) this.applyNow(next);
     });
   }
 
-  private applyNow(frame: ReplicaFrame, plan: Plan, reason: string): void {
+  /**
+   * Execute the driver's tier — no second-guessing here. The reconciliation rule lives in the
+   * driver as one statement; this side only knows how to do what it was told: a fold refreshes
+   * exact bands from the depth index and keeps the stand-ins by reference, a derive composes the
+   * frame the driver already paid the walk for.
+   */
+  private applyNow(verdict: Verdict): void {
     const held = this.store.state.assembled;
-    // Fold when the drawn frame still covers this one; derive in full otherwise. A `settle` is
-    // always the full derivation — that is what the driver's settle cadence exists to pay for.
-    const foldable =
-      reason !== 'settle' &&
-      held !== null &&
-      held.depth === frame.depth &&
-      rectContains(held.want, frame.want);
-    const assembled: Assembled = foldable
-      ? trace.phase('refresh', () =>
-          refreshExact(held, this.replica.exactIn(held.want, held.depth), this.replica.version)
-        )
-      : trace.phase(
-          'derive',
-          () => assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []),
-          {depth: frame.depth, n: frame.exact.length, standIn: frame.fallback.length}
-        );
+    let assembled: Assembled;
+    if (verdict.tier === 'fold') {
+      // A fold against nothing drawn can only follow a refusal that cleared the store while the
+      // driver's handle survived; the settle's derive repairs it, so dropping this one is safe.
+      if (held === null) return;
+      assembled = trace.phase('refresh', () =>
+        refreshExact(held, this.replica.exactIn(held.want, held.depth), this.replica.version)
+      );
+    } else {
+      const frame = verdict.frame;
+      assembled = trace.phase(
+        'derive',
+        () => assemble(frame, this.store.state.colourBy ? [this.store.state.colourBy] : []),
+        {depth: frame.depth, n: frame.exact.length, standIn: frame.fallback.length}
+      );
+    }
     if (assembledMarks(assembled) === 0 && this.store.state.assembled === null) return;
     assertAssemblyMatchesServed(assembled);
+    const plan = verdict.plan;
+    const frame = verdict.tier === 'derive' ? verdict.frame : null;
 
     const meta = this.store.state.meta;
     const {mTarget, visibleInView} = this.driver.calibration;
@@ -130,21 +138,19 @@ export class DriverBinding {
         const widened = foldBandColumn(assembled, s.colourBy, s.domains[s.colourBy] ?? null, widenDomain);
         if (widened) s.domains[s.colourBy] = widened;
       }
-      if (frame.response) {
+      if (frame?.response) {
         s.lastTimings = frame.response.timings;
         s.lastBytes = frame.plan.bytes;
+      }
+      if (frame) {
+        s.lastPlan = {omitted: frame.plan.wanted - frame.plan.novel, fetched: frame.plan.novel};
       }
       s.replicaBytes = this.replica.bytes;
       s.replicaPoints = this.replica.points;
       s.replicaBands = this.replica.bandCount;
-      s.lastPlan = {omitted: frame.plan.wanted - frame.plan.novel, fetched: frame.plan.novel};
       s.inFlight = 0;
     });
-    // The world bbox the drawn buffer answers — kept for panels; the covered test itself is the
-    // driver's, over its presented-frame handle.
-    void worldBbox({target: [0, 0], zoom: 0, width: this.width, height: this.height}, RENDER_MARGIN);
     void plan;
-    void this.lastView;
   }
 
   private status(status: string, detail?: unknown): void {

@@ -167,6 +167,54 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
+  it('a gesture pays the full derivation at most once per gap — the walk never runs per frame', async () => {
+    const h = harness();
+    const derives: number[] = [];
+    const driver = new Driver(
+      h.replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      h.clock,
+      {
+        onFrame: (v) => {
+          if (v.tier === 'derive') derives.push(h.clock.now());
+        }
+      }
+    );
+    // A zoom: depth changes every emission, so the covered test fails on each one — the shape
+    // that ran the stand-in walk at animation-frame rate before the reconciler existed.
+    for (let i = 0; i < 12; i++) {
+      driver.schedule({target: [0.5, 0.5, 0], zoom: 3 + i * 0.2}, 400, 300);
+      await h.clock.advance(16);
+    }
+    for (let i = 1; i < derives.length; i++) {
+      // The settle's finalising derive is exempt; consecutive gesture derives are not.
+      expect(derives[i]! - derives[i - 1]!).toBeGreaterThanOrEqual(119);
+    }
+    expect(derives.length).toBeGreaterThan(0);
+    expect(derives.length).toBeLessThan(6);
+  });
+
+  it('an unchanged store under a covering frame reuses — no verdict reaches the consumer', async () => {
+    const h = harness();
+    const verdicts: string[] = [];
+    const driver = new Driver(
+      h.replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      h.clock,
+      {
+        onFrame: (v) => verdicts.push(v.tier),
+        onTrace: (kind) => verdicts.push(kind === 'reuse' ? 'reuse' : `(${kind})`)
+      }
+    );
+    const view = {target: [0.5, 0.5, 0] as [number, number, number], zoom: 3};
+    driver.schedule(view, 400, 300);
+    await h.clock.advance(3_000); // fetch, settle, stillness
+    const before = verdicts.filter((v) => v === 'fold' || v === 'derive').length;
+    driver.schedule(view, 400, 300); // identical view, untouched store
+    await h.clock.advance(50);
+    expect(verdicts.filter((v) => v === 'fold' || v === 'derive').length).toBe(before);
+  });
+
   it('a due revalidation never displaces a live fetch — latency-neutral by construction', async () => {
     const h = harness({revalidateAfterMs: 1, hang: () => true});
     h.driver.schedule(h.view, 400, 300);
