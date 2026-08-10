@@ -1,0 +1,3 @@
+n,file_bytes,stage,rss_anon_delta,rss_file_delta,ms
+20000000,475000690,open-mapped,0,472772608,39.7
+20000000,475000690,after-1pct-scan,36864,472772608,0.7

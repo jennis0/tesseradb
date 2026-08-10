@@ -1071,22 +1071,35 @@ resident and resides only what a request touches. Those scan figures are warm-pa
 a cold-start claim; what the comparison establishes is that the read path pays its I/O for every
 declared column while the mapped path pays it for the columns actually scanned.
 
-> **⊘ That table is a `u32` measurement and it does not generalise to `utf8`.** Measured per column
-> at 2.5×10⁷ on real data (`probes/2026-08-10-filter-lifecycle/`), resident bytes at open: a 203 MB
-> `i64` column **98 KB**, three category columns 111–143 KB — and a 365 MB `utf8` column
-> **362 MB**, which is the whole file. The cause is not the mapping but what is layered over it:
-> the reader decodes the batch into a `LargeStringArray`, and Arrow validates UTF-8 across every
-> byte of the values buffer at decode, touching every page the map was supposed to leave cold. At
-> 10⁹ that is ~14 GB resident for one text column where this section would lead a reader to size
-> for megabytes. **Fixed-width columns behave exactly as the table says; text does not, and the
-> claim above must not be read as covering it.**
+> **⊘ A text column is resident at open where a fixed-width one is not — but it is *clean page
+> cache*, and the distinction is the whole finding.** Measured per column at 2.5×10⁷ on real data
+> (`probes/2026-08-10-filter-lifecycle/`), resident bytes at open: a 203 MB `i64` column **98 KB**,
+> three category columns 111–143 KB, and a 365 MB `utf8` column **362 MB** — the whole file. That
+> looks like the mapping failing for text, and it is not. Splitting the figure (arm 15,
+> `textresident`, a 475 MB column at 2×10⁷): **`RssAnon` delta 0, `RssFile` delta 472 MB.** Nothing
+> is copied to the heap; the mapping does exactly what §8 claims. What happens is that every page is
+> *touched* — the reader decodes a `LargeStringArray` and Arrow validates UTF-8 across the values
+> buffer — so the pages become resident, and being clean and file-backed they are evictable under
+> pressure, which is the property mapping exists to give.
 >
-> The fix is not merely `skip_validation`, and the reason is worth stating so it is not
-> rediscovered as a one-liner. Nothing here depends on Arrow's UTF-8 guarantee — `text_at` converts
-> with a checked `from_utf8` and the byte predicates compare bytes — so *that* half is redundant.
-> But the same switch skips the **offset** validation, and a corrupt offset pair would then reach
-> `&bytes[lo..hi]` and panic on a request path where today it refuses loudly at open. Deferring the
-> byte scan while keeping the offsets checked is the shape that closes this, and it is unbuilt.
+> So the residual cost is **open time and page-cache pressure, not memory that cannot be
+> reclaimed**: ~40 ms per 475 MB column, which extrapolates to ~1.6 s for a 19 GB text column at
+> 10⁹ (*modelled*, and the extrapolations in this campaign have a poor record). Fixed-width columns
+> are untouched by any of this and behave exactly as the table says.
+>
+> **Do not "fix" this with `skip_validation` alone.** Nothing here depends on Arrow's UTF-8
+> guarantee — `text_at` converts with a checked `from_utf8` and the byte predicates compare bytes —
+> so that half is redundant, and no unvalidated string can reach a bundle in the first place (every
+> route in is a Rust `String` or a validated Arrow array). But the same switch drops the **offset**
+> validation, and a corrupt offset pair would then reach `&bytes[lo..hi]` and panic on a request
+> path where today it refuses at open. It would also buy less than it appears to: `verify_files`
+> hashes every named file in full at open regardless, so Arrow's pass is the *second* read of bytes
+> already in cache. The change with the real win is §8's owed first-touch digest deferral, which
+> removes the first read — and that is an owner ruling, because it narrows a deliberate fail-closed
+> rule. **Note the asymmetry it turns on**: a corrupt *value column* can only narrow `M_sel`, since
+> the scan runs inside the candidate and **I12** holds structurally — but a corrupt *posting* now
+> feeds `/v1/categories`' `per_viewer` visibility predicate (decision 0060), which is a disclosure
+> control. Deferral is arguable for value columns and is not obviously safe for postings.
 >
 > **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
 > column here, and by decision 0060 they are now on the serving path for a `public` listing. That is
