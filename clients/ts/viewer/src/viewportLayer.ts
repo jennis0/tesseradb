@@ -271,6 +271,10 @@ export class ViewportController {
 
     if (this.covers(view, width, height)) {
       // Already drawn. deck.gl re-projects the marks we have, so this pan costs nothing at all.
+      // Counted because the prefetch design is judged by this rate: covered / (covered +
+      // requests) is the look-ahead probe's "pans needing no request" figure (~92% as designed),
+      // measured continuously instead of assumed.
+      trace.event('covered', {depth: this.held?.depth ?? -1});
       this.movedAt = 0;
       return;
     }
@@ -561,13 +565,27 @@ export class ViewportController {
    * user nothing but a round trip they were going to pay anyway, and retrying into a saturated
    * gate is how anticipation becomes the reason the view is slow.
    */
+  /**
+   * Why an idle pause bought no ring, as a `ringskip` trace event.
+   *
+   * Phase 0 of the scheduling redesign: the review found the composed prefetch behaviour had
+   * drifted from its design with nothing measuring it — the ring was invisible in every trace.
+   * Codes: 1 foreground in flight, 2 ring already in flight, 3 bite budget spent, 4 byte budget
+   * spent, 5 nothing novel in any band.
+   */
+  private ringSkip(why: number): void {
+    trace.event('ringskip', {why});
+  }
+
   private async anticipate(view: ViewState, width: number, height: number) {
     const {meta, session, budget, mTarget, lastVisibleInView} = this.store.state;
     // Never two rings at once, and never one alongside a foreground request: the foreground is what
     // the user is waiting for, and anticipation must not queue ahead of it at the admission gate.
-    if (!meta || !session || this.inFlight || this.background) return;
-    if (this.prefetchesSinceMove >= MAX_PREFETCH_PER_PAUSE) return;
-    if (this.prefetchBytesSinceMove >= MAX_PREFETCH_BYTES_PER_PAUSE) return;
+    if (!meta || !session) return;
+    if (this.inFlight) return this.ringSkip(1);
+    if (this.background) return this.ringSkip(2);
+    if (this.prefetchesSinceMove >= MAX_PREFETCH_PER_PAUSE) return this.ringSkip(3);
+    if (this.prefetchBytesSinceMove >= MAX_PREFETCH_BYTES_PER_PAUSE) return this.ringSkip(4);
 
     const viewport = {
       target: [view.target[0], view.target[1]] as [number, number],
@@ -596,7 +614,7 @@ export class ViewportController {
         break;
       }
     }
-    if (!ring) return;
+    if (!ring) return this.ringSkip(5);
 
     // **Hysteresis, not containment, and the distinction is what makes this work.** deck emits
     // view-state events continuously while a drag's inertia decays, and the values drift by small
@@ -619,6 +637,7 @@ export class ViewportController {
       // the rest for the next pause. The region still fills; it stops doing it in one block that
       // freezes the view.
       this.prefetchesSinceMove += 1;
+      const ringStarted = performance.now();
       // `standIns: false` — the ring never draws its frame (next comment), so deriving the
       // stand-in set for it was a walk of the held store per bite, paid for a value nobody read.
       const frame = await this.replica.fetchRegion(
@@ -635,7 +654,15 @@ export class ViewportController {
       );
       // The ring never draws and never calibrates. It is at a margin the user is not looking at,
       // so folding it into either would report a view that is not on screen.
-      this.prefetchBytesSinceMove += frame.response?.bytes ?? 0;
+      // Budgeted on the plan's byte total: `response` keeps only the last piece, so the previous
+      // `response.bytes` figure under-counted every multi-piece ring by the piece count.
+      this.prefetchBytesSinceMove += frame.plan.bytes;
+      trace.event('ring', {
+        depth: ring.depth,
+        ms: performance.now() - ringStarted,
+        n: frame.plan.novel,
+        bytes: frame.plan.bytes
+      });
       this.store.update((s) => {
         s.replicaBytes = this.replica.bytes;
         s.prefetched = frame.plan.novel;
@@ -749,9 +776,13 @@ export class ViewportController {
       const arrivedAt = performance.now();
       trace.event('arrived', {
         ms: arrivedAt - startedAt,
-        n: frame.response?.bytes ?? 0,
+        n: frame.plan.bytes,
         server: Math.round((frame.response?.timings.serverUs ?? 0) / 1000),
-        depth: choice.depth
+        depth: choice.depth,
+        // The prefetch verdict per foreground request: novel === 0 is a fully anticipated view,
+        // novel === wanted is a whole viewport the ring never saw coming.
+        novel: frame.plan.novel,
+        wanted: frame.plan.wanted
       });
       // **The covered-view test is against what was DRAWN, not what was fetched.** Panning inside
       // the drawn buffer is a deck re-projection and costs nothing; testing against the fetched box

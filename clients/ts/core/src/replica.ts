@@ -90,8 +90,14 @@ export type ReplicaFrame = {
     /** Tiles the region spans, and how many of them had to be asked for. */
     wanted: number;
     novel: number;
-    /** How many requests that took — one per novel rectangle. */
+    /** How many requests were actually issued — pieces sent, not rectangles planned. */
     requests: number;
+    /**
+     * Response bytes across every piece. `response` keeps only the last piece under pipelining,
+     * so this is the only honest byte figure — the anticipation byte budget and the traces both
+     * read it, and both undercounted by the piece count before it existed.
+     */
+    bytes: number;
   };
 };
 
@@ -267,7 +273,7 @@ export class Replica {
       fallback,
       version: this.cache.version,
       response: null,
-      plan: {wanted: plan.wanted, novel: plan.novel, requests: 0}
+      plan: {wanted: plan.wanted, novel: plan.novel, requests: 0, bytes: 0}
     };
   }
 
@@ -362,9 +368,13 @@ export class Replica {
       fetching.catch(() => {});
       return fetching;
     };
+    let issued = 0;
+    let responseBytes = 0;
     let pending = pieces.length > 0 ? request(pieces[0]!) : null;
     for (let i = 0; i < pieces.length; i++) {
       response = await pending!;
+      issued += 1;
+      responseBytes += response.bytes;
       pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
       fetched = fetched.concat(await this.absorb(response, depth, k));
       // Marked only after the bands are in. A region marked covered before its points are held
@@ -378,12 +388,17 @@ export class Replica {
       // Everything is held, so the only thing left to refresh is the number channel and the content
       // key — which is what keeps the staleness bound reachable for a client panning entirely from
       // its replica (`delta-serving.md` §8).
+      const revalidatedAt = performance.now();
       const bbox = rectToRequestBbox(want, depth, this.quantisation);
       response = await this.fetchViewport(
         {slice: this.opts.slice, zoom: depth, bbox, k: 0},
         signal
       );
       this.observe(response);
+      // Made visible because its *absence* is the finding that matters: the 2026-08-10 review
+      // showed the caller's covered-view path starves this branch entirely, so a trace with zero
+      // `revalidate` events over minutes of settled panning is the staleness bound failing.
+      this.opts.onPhase?.('revalidate', performance.now() - revalidatedAt, 1);
     }
 
     // With the store bypassed there is nothing to draw from but this response. The mode has to stay
@@ -402,7 +417,7 @@ export class Replica {
       fallback,
       version: this.cache.version,
       response,
-      plan: {wanted: plan.wanted, novel: plan.novel, requests: plan.fetch.length}
+      plan: {wanted: plan.wanted, novel: plan.novel, requests: issued, bytes: responseBytes}
     };
   }
 
