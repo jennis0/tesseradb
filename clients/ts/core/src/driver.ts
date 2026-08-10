@@ -1,6 +1,6 @@
 import {calibrate, type DepthChoice} from './budget.js';
 import {plan, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
-import {rectContains, rectIntersection, type TileRect} from './rects.js';
+import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
 import {TesseraError} from './client.js';
 
@@ -480,9 +480,16 @@ export class Driver {
       this.heldBbox = {bbox: [0, 0, 0, 0], depth: choice.depth};
       this.reconcile('response', view);
 
-      // Calibration over the frame the planner predicted for — driver state, driver domain.
-      const visible = frame.exact.reduce((a, b) => a + Number(b.visible), 0);
-      const actual = frame.exact.reduce((a, b) => a + b.served, 0);
+      // Calibration over the rect the prediction was for — the VISIBLE box, not the wider render
+      // rect the frame spans. Review F6: summing over 1.69x the predicted area inflated `actual`
+      // and silenced the loop in the one direction that mattered.
+      let visible = 0;
+      let actual = 0;
+      for (const b of frame.exact) {
+        if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
+        visible += Number(b.visible);
+        actual += b.served;
+      }
       this.lastVisibleInView = visible;
       this.mTarget = calibrate(
         {predictedMarks: choice.predictedMarks, actualMarks: actual, visibleInView: visible},

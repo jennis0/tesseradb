@@ -155,13 +155,16 @@ const DAMPING = 0.5;
  * −32%/+14% across viewport fractions, because tile occupancy varies with clustering. The client
  * has the true figure in every response, so it need carry no model of clustering at all.
  *
- * **The correction is one-directional: it may only make the next request deeper, never shallower.**
- * That is not a stylistic choice. A shallower request returns a strict *subset* of what was just
- * drawn, so marks would pop *out* while the user did nothing — which is exactly the count-modulated
- * lever design §7.2 and §7.3 strike as unsound ("`k` ∝ count inverts the requirement and marks pop
- * out on zoom-in"). Damping would change the frequency of that, not its existence. Overshoot in the
- * other direction is harmless for correctness: more marks than budgeted is a payload question, and
- * `maxTiles` bounds it.
+ * **The correction is bidirectional, but takes effect only across motion.** The one-directional
+ * form ("never go shallower") existed because a shallower re-request of the *same* view is a
+ * strict subset of what was just drawn — marks popping out while the user does nothing, the
+ * count-modulated lever design §7.2 and §7.3 strike as unsound. Its premise — "overshoot is
+ * harmless, a payload question" — was falsified at 10⁹: on dense ground `m(T)` scales with local
+ * density, overshoot reached 4–8× the budget, and 3.8 × 10⁶ resident marks rasterised at 11 fps.
+ * The pop-out objection is honoured by WHERE the correction lands rather than by refusing it: the
+ * driver holds the presented depth while the view is still (no re-derivation at rest, so nothing
+ * can pop), and a banked shallower choice applies when the user next moves — where the regime
+ * changes under their own action, indistinguishable from any other zoom response.
  *
  * **Saturation stops the loop.** When the server has served every visible item in view, a deeper
  * request cannot add marks, and an uncorrected loop would ratchet depth to the `maxTiles` cap
@@ -171,7 +174,6 @@ export function calibrate(observation: Observation, mTarget: number, base: numbe
   const {predictedMarks, actualMarks, visibleInView} = observation;
   if (actualMarks >= visibleInView) return mTarget; // saturated: deeper cannot help
   if (actualMarks <= 0 || predictedMarks <= 0) return mTarget;
-  if (actualMarks >= predictedMarks) return mTarget; // one-directional: never go shallower
 
   const ratio = actualMarks / predictedMarks;
   const damped = mTarget * (1 + (ratio - 1) * DAMPING);
