@@ -7,7 +7,7 @@ built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
 width other than `u32` and on a string column, a ruling on surface §4's measured
-project-vs-per-tile rule, and decision 0060's leak-register row landing (in flight on the postings
+project-vs-per-tile rule, and decision 0061's leak-register row landing (in flight on the postings
 track; §6.2 names the dependency). **§6.3's rulings are all made** (owner, 2026-08-10). Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
@@ -30,7 +30,7 @@ attribute indexing); decisions [0013](../decisions/0013-mark-specified-vs-implem
 [0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md),
 [0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
 [0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
-[0060](../decisions/0060-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
+[0061](../decisions/0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **index §n**. The companion read-side design is
@@ -315,12 +315,12 @@ So a `per_viewer` category gets postings whatever its `used_for` says, where a `
 only from `used_for = "filter"` — a published value set is served as authored and derives no membership
 at all.
 
-**The postings answer a filter only under `listing = "public"`** (decision 0060). Under `per_viewer`
+**The postings answer a filter only under `listing = "public"`** (decision 0061). Under `per_viewer`
 they exist for the membership question above and the *filter* is answered by the masked scan, for the
 timing reason the note below this section records. The route is a function of the **declaration** —
 never of the request, the principal, or any statistic, which §8.2 forbids because a statistics-driven
 route makes execution time a function of how much the principal can see — so it is fixed at schema time
-and identical for every viewer. It is registered as leak-register row **C24**, which decision 0060 makes
+and identical for every viewer. It is registered as leak-register row **C24**, which decision 0061 makes
 a condition of itself.
 
 **A routed answer is `postings ∩ candidate` unioned with a scan of every extent layer.** The postings
@@ -357,7 +357,7 @@ buys nothing, so it is not adopted.
 > **The case an earlier revision marked unmeasured is now measured, and the residual is real**
 > (probe arm 9): a scattered posting whose containers the candidate meets while no bits match costs
 > ~2 ms per operand at 10⁹ against ~0 for an absent value — container-proportional work for an
-> empty result. That measurement is what decision 0060 is built on: a `per_viewer` column never
+> empty result. That measurement is what decision 0061 is built on: a `per_viewer` column never
 > takes the postings route, because under that control the ~2 ms *is* the disclosure, while under
 > `listing = "public"` what the timing distinguishes is a fact `/v1/categories` already serves.
 
@@ -615,7 +615,7 @@ predicate, so any failure that loses values under-reports, under-reporting narro
 **I12** absorbs it. A negative operand inverts that arithmetic: under `none_of`, an entity with no
 reachable value *matches*, so the same failures — a lost layer, a lagging flush, a blanked slot —
 **widen** the result instead of narrowing it. `none_of` is fenced today for a different reason
-(decision 0059's existence oracle over gated vocabularies), so nothing enforces this one; the
+(decision 0060's existence oracle over gated vocabularies), so nothing enforces this one; the
 review that ever lifts that fence must therefore revisit layer composition and every start-up
 failure mode in §6.2 under the inverted sign, and this paragraph is the tripwire that forces it.
 
@@ -875,9 +875,9 @@ holds unchanged.
 **A category's postings are rebuilt whole from the folded column** — the self-retiring derivation
 §2.3 requires, and after the rebuild they cover the new `fold_watermark`, closing the un-folded
 tail the flush marker in §5 records. Where the rebuilt postings serve a *filter* — a `public`
-listing's route under decision 0060 — this rests on the leak-register row 0060 names as a
+listing's route under decision 0061 — this rests on the leak-register row 0060 names as a
 condition of itself, **which does not exist yet in Appendix C and is being registered on the
-postings track**; until that row lands, 0060's condition is unmet and this paragraph inherits the
+postings track**; until that row lands, 0061's condition is unmet and this paragraph inherits the
 dependency. The rebuild reuses the build's emit — one banded emit over a
 `(entity, code)` source each producer supplies, the build's from its staged values and the fold's
 from the column it has just written, so the postings are a derivative of the artefact of record
@@ -1107,11 +1107,11 @@ declared column while the mapped path pays it for the columns actually scanned.
 > removes the first read — and that is an owner ruling, because it narrows a deliberate fail-closed
 > rule. **Note the asymmetry it turns on**: a corrupt *value column* can only narrow `M_sel`, since
 > the scan runs inside the candidate and **I12** holds structurally — but a corrupt *posting* now
-> feeds `/v1/categories`' `per_viewer` visibility predicate (decision 0060), which is a disclosure
+> feeds `/v1/categories`' `per_viewer` visibility predicate (decision 0061), which is a disclosure
 > control. Deferral is arguable for value columns and is not obviously safe for postings.
 >
 > **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
-> column here, and by decision 0060 they are now on the serving path for a `public` listing. That is
+> column here, and by decision 0061 they are now on the serving path for a `public` listing. That is
 > correct as designed and is not covered by the table either.
 
 - **Category membership at 0.31–1.01× the render column it indexes** (*measured* at 2.4×10⁶ items; the 10⁹
@@ -1210,7 +1210,7 @@ is positive, so lifting `none_of`'s fence must revisit §5.2/§6.2 under the inv
 review's most valuable finding); **lists break one-bit-one-slot addressing** and are excluded from
 the merge and blanking specifications until §2.6's addressing exists; and §2.3's "unmeasured"
 marker was stale — arm 9 measured the residual and 0060 is built on it. §6.2 also now names its
-dependency on 0060's leak-register row, which is registered on the postings track, not here.
+dependency on 0061's leak-register row, which is registered on the postings track, not here.
 
 **2026-08-10 — the fold's attribute pass is built**, to §6.2 as written. Two things the design did
 not anticipate, both recorded at their sites. The pass had to become its own **crate**: written

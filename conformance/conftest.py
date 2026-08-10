@@ -81,7 +81,7 @@ def catalogue_filter_columns():
             codes=dict(cat.DEPARTMENT_CODES),
         ),
         # The `public` counterpart: the same definition, over the column whose operands the engine
-        # answers from its derived postings rather than by scanning (decision 0060). The oracle has
+        # answers from its derived postings rather than by scanning (decision 0061). The oracle has
         # one evaluation and the engine has two, which is what makes the routed answer testable.
         "archive": CategoryColumn(
             values={

@@ -177,7 +177,7 @@ async fn meta(
             })
         }).collect::<Vec<_>>(),
         // Reference Sheet R5: **which columns a client may filter on, and with which operators**
-        // (contracts §3.2, decision 0059). Empty when the schema declares nothing filterable.
+        // (contracts §3.2, decision 0060). Empty when the schema declares nothing filterable.
         //
         // Per column rather than a flat operator list, because the operators are a property of the
         // column's family: a category takes `eq`/`in` over its value set, a `utf8` column takes

@@ -41,7 +41,7 @@ const N: u64 = 60;
 const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// Two `u8` categories and a per-item string. `department` is `per_viewer`, which is the shape that
-/// owes membership postings *and* keeps the scan for filtering (decision 0060); `archive` is
+/// owes membership postings *and* keeps the scan for filtering (decision 0061); `archive` is
 /// `public`, which is the shape whose filter is routed through those postings. The two carry the
 /// same value distribution under different names, so the routed answer and the scanned one are
 /// comparable value by value. The string is `filter`-only, which is the shape that owes no postings
@@ -1479,7 +1479,7 @@ fn a_range_composes_with_a_category_and_a_string() {
 }
 
 // =================================================================================================
-// The category postings route (decision 0060) and `/v1/categories` under `per_viewer`
+// The category postings route (decision 0061) and `/v1/categories` under `per_viewer`
 // =================================================================================================
 
 /// Where the build wrote one column's derived postings.
@@ -1593,7 +1593,7 @@ fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
     assert_eq!(
         as_vec(&archived),
         vec![0u32],
-        "a `public` column must answer from its postings — this is what decision 0060 buys, and \
+        "a `public` column must answer from its postings — this is what decision 0061 buys, and \
          with the file corrupted it is the only way the answer can be this"
     );
 
@@ -1609,7 +1609,7 @@ fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
         expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng")),
         "a `per_viewer` column must be answered by the masked scan, whatever its postings say: \
          the postings' work is a function of the value named, which is the disclosure \
-         `listing = \"per_viewer\"` exists to prevent (decision 0060)"
+         `listing = \"per_viewer\"` exists to prevent (decision 0061)"
     );
     assert!(
         departmental.cardinality() > 1,
@@ -1882,7 +1882,7 @@ fn a_per_viewer_page_is_filtered_before_it_is_cut() {
 
 /// **A `public` vocabulary is served as authored, to every principal alike** — including a value
 /// nothing carries, and including a principal who can see nothing. It derives no membership at all,
-/// which is why its filter may be routed through the postings (decision 0060) while a `per_viewer`
+/// which is why its filter may be routed through the postings (decision 0061) while a `per_viewer`
 /// one may not.
 #[test]
 fn a_public_vocabulary_is_served_as_authored_to_every_principal() {

@@ -5,8 +5,8 @@ nothing.
 **Reads with:** [`filter-index.md`](../../design/filter-index.md) (r7, Provisional — the
 specification for the artefact and its lifecycle), [`filter-surface.md`](../../design/filter-surface.md),
 decisions [0039](../../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
-[0059](../../decisions/0059-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
-[0060](../../decisions/0060-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
+[0060](../../decisions/0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
+[0061](../../decisions/0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
 and the measurement campaigns in [`probes/2026-08-08-filter-layout/`](../../../probes/2026-08-08-filter-layout/)
 (arms 1–16) and [`probes/2026-08-10-filter-lifecycle/`](../../../probes/2026-08-10-filter-lifecycle/).
 
@@ -39,7 +39,7 @@ planned in this crate**, because it changes the cost of everything after it.
 
 Each refuses by name today, which is the fail-closed shape; none is a silent gap.
 
-**`none_of`** is fenced by [decision 0059](../../decisions/0059-filters-compose-as-a-boolean-tree-inside-the-candidate.md)
+**`none_of`** is fenced by [decision 0060](../../decisions/0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md)
 — a negation over a gated vocabulary is an existence oracle, and its C11 rule must be built with it.
 **There is a second reason, added later, that is easy to miss and more dangerous**: §5 records
 *positivity* as a load-bearing property. Every "this failure degrades safely under **I12**" argument
@@ -64,7 +64,7 @@ owed). This is the one with a real win: `verify_files` hashes every named file i
 for a text column that is the *first* of two passes over its bytes. The asymmetry that makes it
 rulable: a corrupt **value column** can only narrow `M_sel`, because the scan runs inside the
 candidate and I12 holds structurally — but a corrupt **posting** now feeds `/v1/categories`'
-`per_viewer` visibility predicate under decision 0060, which is a disclosure control. Deferral is
+`per_viewer` visibility predicate under decision 0061, which is a disclosure control. Deferral is
 arguable for value columns and not obviously safe for postings.
 
 **Where the fold's flip opens `FilterColumns`.** §6.2 says the columns join the rotation the way the

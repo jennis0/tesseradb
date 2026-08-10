@@ -1,7 +1,7 @@
-"""The filter expression, written as a **definition** — decision 0059's boolean tree over
+"""The filter expression, written as a **definition** — decision 0060's boolean tree over
 per-entity attribute values, evaluated by a per-entity walk inside a candidate set.
 
-**Pinned to decision 0059 and contracts §3.2 r26.** A node is a leaf — one column name mapped to
+**Pinned to decision 0060 and contracts §3.2 r26.** A node is a leaf — one column name mapped to
 one operator — or a combinator, `all_of` / `any_of`, over sub-expressions. A category leaf takes
 `eq` and `in`, whose values are the vocabulary's key (a string) or its code (an integer), freely
 mixed; a `utf8` leaf takes `eq`, `prefix` and `contains` against the stored bytes. Empty
@@ -71,7 +71,7 @@ class UnbuiltOperator(Exception):
 
     Raised rather than evaluated, because guessing at unbuilt semantics is how an oracle stops
     disagreeing: `none_of` over a `per_viewer` category has a C11 rule that must be built with it
-    (decision 0059), and an oracle that pre-implemented a guess would ratify whichever behaviour
+    (decision 0060), and an oracle that pre-implemented a guess would ratify whichever behaviour
     the engine happened to ship.
     """
 
@@ -148,7 +148,7 @@ def _leaf_matches(column, operator: str, operand, entity: int) -> bool:
 
 
 def matches(expr: dict, columns: dict, entity: int) -> bool:
-    """Does `entity` satisfy `expr`? — decision 0059's tree, one entity at a time.
+    """Does `entity` satisfy `expr`? — decision 0060's tree, one entity at a time.
 
     `expr` is the wire form exactly: `{"all_of": [...]}`, `{"any_of": [...]}`, or a leaf
     `{"<column>": {"<operator>": <operand>}}`. `all` over an empty list is `True` and `any` is
@@ -163,7 +163,7 @@ def matches(expr: dict, columns: dict, entity: int) -> bool:
     if name == "any_of":
         return any(matches(sub, columns, entity) for sub in body)
     if name == "none_of":
-        raise UnbuiltOperator("none_of is specified and not built (decision 0059)")
+        raise UnbuiltOperator("none_of is specified and not built (decision 0060)")
     if name not in columns:
         raise UnknownColumn(name)
     if not isinstance(body, dict) or len(body) != 1:
@@ -177,7 +177,7 @@ def evaluate(expr: dict, columns: dict, candidate: set[int]) -> set[int]:
 
     `candidate` is the **composed** authorised set — `M_auth` after deny precedence, never a raw
     fragment (see the module doc). Every result is a subset of it by construction, which is I12's
-    mask half holding structurally in the oracle exactly as decision 0059 argues it holds in the
+    mask half holding structurally in the oracle exactly as decision 0060 argues it holds in the
     engine: the leaves evaluate inside the candidate and union and intersection of subsets are
     subsets. The differential's job is to show the engine's masked scan agrees.
     """

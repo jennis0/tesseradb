@@ -1,7 +1,8 @@
 # Five filter rulings, and what each unblocks
 
-**Date:** 2026-08-10 · **Status:** Escalation memo — evidence, not normative. Puts open questions
-to the owner; rules nothing.
+**Date:** 2026-08-10 · **Status:** Ruled by the owner, 2026-08-10. Evidence, not normative — the
+rulings bind, and each is recorded at the section that put it. Where a ruling changes a design, the
+design carries it and this memo is the account of why.
 **Reads with:** [`2026-08-10-filter-handover.md`](2026-08-10-filter-handover.md) (§3 and §4, which
 this expands), [`filter-index.md`](../../design/filter-index.md) (r7, Provisional),
 [`filter-surface.md`](../../design/filter-surface.md).
@@ -14,16 +15,16 @@ is at its stated baseline to the test — **3 failed / 81 passed / 1 skipped / 2
 failures and errors confined to `test_overlay_journal.py` and `test_restart_replay.py`, which are
 the pre-existing WAL and overlay ones and not filter work.
 
-| | Ruling | Recommendation | Unblocks |
+| | Ruling | **Ruled** | Unblocks |
 |---|---|---|---|
-| **R1** | Defer `attrs/` digests to first touch? | Value columns yes, postings no | Open time at 10⁹; the reverted bounds check |
-| **R2** | Where the fold's flip opens `FilterColumns` | Keep as built (post-flip) | Nothing — closes a stated conflict |
-| **R3** | Isolate the scan in its own crate? | Not yet; A/B the two remaining items | The order of every §5 gap |
-| **R4** | An r-letter for the contracts tree lines? | Annotate, no letter | A tidiness debt |
-| **R5** | Surface §4's project-vs-per-tile rule | Build the per-tile route | `filter-index.md` promotion |
+| **R1** | Defer `attrs/` digests to first touch? | **Value columns yes, postings no** (option b) | Open time at 10⁹; the reverted bounds check |
+| **R2** | Where the fold's flip opens `FilterColumns` | **Keep as built** — post-flip (option a) | Nothing — closes a stated conflict |
+| **R3** | Isolate the scan in its own crate? | **Neither, yet — the cause is under investigation.** The owner's reading is that a never-called function moving a constant 65% indicates something is wrong rather than something to route around, and no remedy is chosen before the mechanism is known | The order of every §5 gap |
+| **R4** | An r-letter for the contracts tree lines? | **Leave it** (option c) — no letter, no annotation | Nothing |
+| **R5** | Surface §4's project-vs-per-tile rule | **Build the per-tile route** (option a) — **and two further routes the viewport wants, which this memo did not anticipate** (below) | `filter-index.md` promotion |
 
-R3 is the one that changes the shape of the work that follows it; R5 is the one that gates
-promotion. R2 and R4 are cheap and can be ruled in a line each.
+R3 is now an investigation rather than a choice, and it still gates the order of the work that
+follows it. R5 grew: the two-route rule stands, and the surface needs two more routes beside it.
 
 ---
 
@@ -56,7 +57,7 @@ check on the reader; it is not new machinery.
   entity outside the candidate cannot be added to a result. The failure mode is a viewer seeing
   fewer items than they are entitled to, which is the fail-closed direction.
 - A corrupt **posting** does not have that property any more. Under
-  [decision 0060](../../decisions/0060-category-postings-serve-public-listings-and-never-per-viewer-ones.md)
+  [decision 0061](../../decisions/0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md)
   the derived postings feed `/v1/categories`' `per_viewer` visibility predicate. That is a
   disclosure control, and a disclosure control computed from unverified bytes is not obviously safe
   in either direction.
@@ -69,8 +70,8 @@ check on the reader; it is not new machinery.
 | **b** | Defer `values.arrow` and `presence.roaring`; keep `postings.arrow` in the open sweep | Takes the term that dominates — postings are 6–12 MB per column against 4 GB — and leaves the disclosure control verified before serving |
 | **c** | Defer nothing | Open time stays O(corpus bytes) per declared column |
 
-**Recommended: (b).** It takes essentially all of the win, because the postings are three orders of
-magnitude smaller than the columns they accelerate, and it leaves 0060's predicate resting on bytes
+**Ruled: (b)** (owner, 2026-08-10). It takes essentially all of the win, because the postings are three orders of
+magnitude smaller than the columns they accelerate, and it leaves 0061's predicate resting on bytes
 that were checked before anything was served. Under (b) the deferral is per file with the digest
 checked on first touch *before* any borrowed view is constructed, and record-level validation moves
 onto that same first-touch path — which is what actually guards the unsafe zero-copy view.
@@ -116,10 +117,11 @@ the flip either splits that value or moves the postings and the sidecar with it.
 | **b** | Pre-open all four before the flip | Removes the restart window; costs the identity argument above, since there is no committed identity to open against yet |
 | **c** | Pre-open to *validate*, discard, then flip and open again | Removes the window and keeps the identity argument; pays the open twice and lets the two opens disagree |
 
-**Recommended: (a), and record it** — the ⊘ at §6.2 already describes the built behaviour, so this
-ruling costs a sentence in the design saying the alternative was considered and why the identity
-argument decides it. The failure it leaves is loud, bounded, and lands on a bundle that a restart
-serves correctly, which is the fail-closed shape.
+**Ruled: (a), and recorded** (owner, 2026-08-10) — the ⊘ at §6.2 already describes the built
+behaviour, so this ruling costs a sentence in the design saying the alternative was considered and
+why the identity argument decides it. The failure it leaves is loud, bounded, and lands on a bundle
+that a restart serves correctly, which is the fail-closed shape. The briefing that said otherwise is
+superseded; nothing in the code changes.
 
 ---
 
@@ -154,11 +156,18 @@ split is not.
 | **b** | `codegen-units = 1` as an interim | −15% baseline, bought against a sensitivity it only half removes. Paying a measured 15% to half-fix a hazard is the worst cell here |
 | **c** | Neither; A/B the two remaining items | Two campaigns, no structural change, constants stay as published |
 
-**Recommended: (c) now, and (a) the moment a third item wants that crate** — the split earns its
-price when filter work becomes ongoing rather than closing out, and §2.2 already carries the warning
-in the document where a reader will meet it. This is the ruling I would most like reversed by
-information I do not have: if you expect the `text` type of §2.2, or `none_of`, or list attributes
-to arrive within the next few tracks, (a) is right and should happen before them.
+**Ruled: none of the three, yet** (owner, 2026-08-10). All three options route *around* the
+phenomenon, and the owner's reading is that the phenomenon itself is the finding: a function that is
+never called does not move a hot loop by 65% for any reason a codegen-unit story explains, so
+"partitioned per crate" describes the symptom rather than the cause. **The mechanism is being
+investigated before a remedy is chosen**, because the choice depends on it — if the cause is code
+layout rather than code generation, a crate boundary is not a fix but a fresh roll of the same dice,
+which would also explain why it "recovers about half".
+
+The question the investigation has to answer, and the one that matters most to this design, is not
+which remedy to buy: it is whether **~0.27 ns is the scan's cost or one sample from a distribution
+over layouts whose spread is 30–70%**. §2.2 quotes those constants as *the* cost of the scan, and a
+great deal is sized against them.
 
 ---
 
@@ -170,11 +179,11 @@ revision letter. No field, no behaviour, no wire change; contracts is at r26 and
 entry is marked *(r25)*. The same branch's `730b919` added the `terms-0.dict` tree line the same way,
 so there are two.
 
-**Recommended: one annotation in Appendix R covering both, no revision letter.** Contracts already
-has the form for this — the r6 entry carries an *"Annotated 2026-07-30 (design r22, no revision here
-— no byte, schema or contract changes)"* note for exactly a change that made older text stale
-without changing the format. A letter should mean a reader has to re-check something; neither of
-these gives them anything to re-check.
+**Ruled: leave it** (owner, 2026-08-10) — no revision letter, and no Appendix R annotation either.
+A letter should mean a reader has to re-check something, and neither commit gives them anything to
+re-check; a note recording that nothing needs re-checking is the revision archaeology the house
+style exists to keep out of the corpus. The tree lines stand as ordinary description of where the
+files are.
 
 ---
 
@@ -204,15 +213,65 @@ A threshold hard-coded from the contiguous constant will project too much on sca
 | **a** | Build the per-tile route with the measured crossover | Removes the dominant term for every broad filter; needs the shape caveat handled, conservatively or by measuring the scattered constant first |
 | **b** | Projection only, and say so at the claim | Every broad filter pays a projection larger than its own scan — this is a viewport-path cost, and §10.4's warning about `Permutation::project` drifting onto the per-viewport path is unambiguous |
 
-**Recommended: (a)**, with the threshold set from the *scattered* constant rather than the
-contiguous one until a scattered arm runs, so the rule errs toward the route whose cost is bounded
-by the viewport.
+**Ruled: (a)** (owner, 2026-08-10), with the threshold set from the *scattered* constant rather than
+the contiguous one until a scattered arm runs, so the rule errs toward the route whose cost is
+bounded by the viewport.
 
 **One correction to make either way.** §4's closing paragraphs still assert that a filter operand's
 projection is principal-independent and "computed once and shared across every principal". The ⊘
 note immediately above them withdraws exactly that premise — under `filter-index.md` §2.2 the mask
 is the scan's candidate, so a result is `M_sel` and principal-*specific*. The stale paragraphs sit
 below the note that supersedes them and read as current.
+
+### R5b — Two further routes the viewport wants, and what they turn on
+
+**Owner requirement, 2026-08-10.** The two routes above both answer *"which entities match?"* and
+hand back a set. A viewport wants two questions neither of them asks, and both exist to support
+**in-screen filtering and highlighted subsets** — changing what is emphasised without refetching the
+map:
+
+3. **Re-test what the client already holds.** The client has points from a previous request, keyed
+   on its region and *k*, and asks which of them pass a filter.
+4. **Annotate a fresh sample.** The client asks for points as usual and receives, per point, a 0/1
+   saying whether it passed the filter.
+
+Both are cheap in the shape the scan already has — route 3's candidate is the held set (tens to
+hundreds of entities, the smallest candidate the scan will ever see), and route 4 is the per-tile
+route of (a) with the per-point verdict *retained* rather than intersected away. Neither needs a new
+structure. What they need is a specification, because they are a change to the served surface and
+three things about them are decisions rather than details:
+
+- **How the client names the set it holds, and it cannot be by `(region, k)` alone.** Re-deriving the
+  same sample server-side from a region and a *k* requires the sample to be reproducible, and
+  [decision 0030](../../decisions/0030-determinism-is-not-a-guarantee.md) declines exactly that:
+  response determinism is an implementation detail and not a guarantee. So route 3 should carry the
+  `tessera_id`s the client holds, which it already has and which are the transport identity by
+  design. That is more bytes on the wire and it rests on nothing that was declined.
+- **The server must re-derive `M_auth` and never trust the claim to hold a point.** A `tessera_id`
+  presented back is a claim about the past, and [decision 0041](../../decisions/0041-pins-become-a-staleness-stamp.md)
+  is unambiguous that a suppression applies to every request the moment it is accepted, whatever
+  stamp was presented. So a point held from before a suppression must come back as *not visible*,
+  not as a filter verdict — the two outcomes have to be distinguishable in the response and the
+  fail-closed one has to be the default.
+- **Route 4 changes which set is sampled, and the design has to say so at the claim.** **I7** holds
+  — sampling still happens after masking — but the sample is drawn from `M_auth` rather than from
+  `M_auth ∧ M_sel`, so it is a *different* sample from the one a filtered viewport request returns.
+  Both are legitimate; which one a request gets must be explicit rather than inferred from whether a
+  filter was supplied.
+
+**On the invariants, the first read is that both are inside the line, and it should be checked
+rather than taken.** The flag is a property of a point already inside `M_auth`, so it is computable
+from inside `M_auth` alone (**I2**). The frontier is unaffected: route 4 computes it on `M_auth` as
+an unfiltered request does, so the filter moves it neither up nor down, which is stricter than
+**I12** requires. And the selectivity a client could estimate by counting flags is a quantity the
+filtered route already publishes exactly (§5.3's masked counts), which is
+[decision 0023](../../decisions/0023-derivable-quantities-are-not-disclosures.md)'s shape — but that
+is an argument to be made in the leak register, not asserted in a memo.
+
+**And the timing property has to survive both.** `filter-index.md` §2.2's guarantee is that the work
+is a function of `(candidate, column)` and never of the value, so a value the principal cannot see
+costs what an absent value costs. That holds for routes 3 and 4 only if they run the *same*
+traversal with a different sink. Implementing either as a special case is how it would be lost.
 
 ---
 
@@ -227,11 +286,10 @@ Two amendments are owed to **normative** documents and should ride their own rev
 this one: compaction §2's table and §3's pass list gain the attribute pass and the band budget;
 write-path §7 and contracts §2.1 gain the coalesce's fourth axis.
 
-**And one thing that is neither, found while checking the above: the decision numbering has forked.**
-This branch carries `0059-filters-compose-as-a-boolean-tree-inside-the-candidate.md` and
-`0060-category-postings-serve-public-listings-and-never-per-viewer-ones.md`, and has no 0058.
-`client/replica-cache` carries `0058-a-single-flight-racer-waits-rather-than-being-refused.md` and a
-**different** 0059, `0059-per-principal-admission-is-not-capped.md`. Both survive a merge — the
-filenames differ — leaving two decisions numbered 0059 in an immutable, one-per-file set that is
-cited by number throughout the corpus. Renumbering one of them costs a rename and its inbound
-citations, and costs far more once either number is cited from a promoted document.
+**The decision numbering had forked, and is fixed.** `main` ends at 0057. Both this branch and
+`client/replica-cache` then minted 0058 onwards independently on the same day, so a merge would have
+produced two different decisions numbered 0059 in a set that is immutable and cited by number. This
+branch's two moved up — filters-compose 0059 → **0060**, category-postings 0060 → **0061** — leaving
+0058 and 0059 to `client/replica-cache`, which holds them already and is where renumbering would
+have meant editing another branch's uncommitted work. The `docs/decisions/README.md` table shows the
+gap at 0058–0059 until that branch merges, which is the honest state rather than a defect.

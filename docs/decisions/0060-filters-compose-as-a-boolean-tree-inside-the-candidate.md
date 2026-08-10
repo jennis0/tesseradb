@@ -1,4 +1,4 @@
-# 0059 — Filters compose as a boolean tree evaluated inside the candidate
+# 0060 — Filters compose as a boolean tree evaluated inside the candidate
 
 **Date:** 2026-08-09 · **Status:** Settled (owner ruling)
 

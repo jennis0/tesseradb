@@ -75,5 +75,5 @@ prevent.
 | [0055](0055-the-folds-fragment-sweep-is-everything-present-at-the-flip.md) | 2026-08-06 | The fold's fragment sweep is everything present at the flip |
 | [0056](0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md) | 2026-08-07 | A fold's schedule is a gated window, not a pure timer |
 | [0057](0057-rows-frozen-is-declined-and-the-staging-list-is-deferred.md) | 2026-08-07 | Rows-frozen is declined, and the flip's staging list is deferred |
-| [0059](0059-filters-compose-as-a-boolean-tree-inside-the-candidate.md) | 2026-08-09 | Filters compose as a boolean tree evaluated inside the candidate; text becomes a column type |
-| [0060](0060-category-postings-serve-public-listings-and-never-per-viewer-ones.md) | 2026-08-09 | A category's postings answer a filter only where the vocabulary is `public`; `per_viewer` keeps the scan, because a hidden scattered value costs 2.1 ms against an absent value's 0.000 |
+| [0060](0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md) | 2026-08-09 | Filters compose as a boolean tree evaluated inside the candidate; text becomes a column type |
+| [0061](0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md) | 2026-08-09 | A category's postings answer a filter only where the vocabulary is `public`; `per_viewer` keeps the scan, because a hidden scattered value costs 2.1 ms against an absent value's 0.000 |

@@ -23,7 +23,7 @@ about value-set size at 25M would be measuring the replication rule, not the dat
 
 | column | type | route |
 |---|---|---|
-| `archive` | category `u8`, `listing = "public"` | the derived postings (decision 0060) |
+| `archive` | category `u8`, `listing = "public"` | the derived postings (decision 0061) |
 | `primary_category` | category `u16`, `listing = "per_viewer"` | the masked scan, and `/v1/categories`' membership |
 | `secondary_category` | category `u16`, `listing = "public"` | **partial presence**, on real data |
 | `first_author` | `utf8` | `eq`, `prefix`, `contains` |

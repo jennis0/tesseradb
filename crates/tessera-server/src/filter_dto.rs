@@ -77,10 +77,10 @@ fn parse_node(
 
     match name.as_str() {
         // `none_of` is named here only so it refuses with its reason rather than as an unknown
-        // column: it is specified and not built (decision 0059), and it carries a rule that must
+        // column: it is specified and not built (decision 0060), and it carries a rule that must
         // ship with it.
         "none_of" => Err(bad(
-            "`none_of` is specified and not built (decision 0059). Negation over a `per_viewer` \
+            "`none_of` is specified and not built (decision 0060). Negation over a `per_viewer` \
              category must be evaluated within the visible vocabulary, or it proves the existence \
              of values the listing hides",
         )),

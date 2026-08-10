@@ -185,7 +185,7 @@ channels are in the leak register (C11, C22, C23).
 **[#43] is largely closed, and what remains of it is one thing.** Categories and strings are
 filterable end to end — a flat entity-indexed value column scanned under the composed candidate,
 per-value Roaring postings derived over it for categories, `all_of`/`any_of` composition
-(decision 0059), the operand on `/v1/viewport`, the per-column operator list on `/v1/meta`, and a
+(decision 0060), the operand on `/v1/viewport`, the per-column operator list on `/v1/meta`, and a
 conformance differential that moves **I12's mask half to covered** — and, since the per-flush
 value-column extent landed, an entity ingested after the build answers a filter on its own value. A
 buffered entity still does not, until its flush; `filter-index.md` §5 rules that under-reporting for
@@ -215,7 +215,7 @@ projection, no file IO"*, which is true of a `public` column and not of a `per_v
 the work is the candidate plus one mapped posting probe per value walked.
 
 The shape is deliberate and worth preserving under pressure: filters are order-independent set
-producers, composed as a boolean tree **evaluated inside the candidate** (decision 0059) — which is
+producers, composed as a boolean tree **evaluated inside the candidate** (decision 0060) — which is
 what keeps every node a subset of the principal's own mask, and I12 a property of the expression's
 shape rather than a check. The leak register can be exhaustive because the *leaves* are enumerable;
 a general expression endpoint over arbitrary predicates could not be. New
