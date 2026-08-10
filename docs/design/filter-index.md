@@ -727,10 +727,15 @@ The mechanics, against the pass's existing shape:
   there, and the never-reused `<id>` rule is what stops two passes truncating each other's mapped
   files. No format change follows: `attr_extents` names paths, never a path convention (§2.5's
   own rule), so the manifest edit is remove-consumed, insert-coalesced, exactly the tier axis's
-  edit. A failed pass leaves the directory an orphan nothing references, the tier axis's posture —
-  ⊘ and, like the tier axis's orphans, it waits on an in-prefix orphan sweep that is **not
-  built**; this axis makes that debt heavier by up to a column-count multiple per failure, stated
-  here rather than discovered.
+  edit. A failed pass, and every successful one, leaves files nothing references — the consumed
+  extents and, on failure, the output directory — which is the tier axis's posture exactly.
+  **They are reclaimed at the fold**, which carries forward only what a manifest names and deletes
+  the superseded prefix whole, so the orphans go with it and no per-axis handling exists or is
+  wanted: measured 739 attribute files and 90.4 MB before a fold, 13 and 72.7 MB after
+  (`probes/2026-08-10-filter-lifecycle/`). **The exposure is therefore one fold interval**, and on
+  this axis it grows with ingest volume rather than with the corpus — ~18 MB over nine passes
+  measured. That is the cost of the coalesce running more often than the fold, stated here so it is
+  sized rather than discovered; nothing about it is unbounded.
 - **Composition is by *replace*, which is a second operation beside `compose`'s append.** The
   successor generation's column replaces the consumed layers with the coalesced one, and its
   correctness condition is *different* from append's: the coalesced layer's presence must **equal**

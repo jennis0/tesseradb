@@ -113,42 +113,51 @@ Two of the five are closed (2026-08-10). `ValueColumn::open` now takes an `Acces
 which is decision 0052 enforced by a signature instead of a comment. The pass's bytes read and
 written are in the dispatch log line and in `/control/status` as `last_attr_bytes_*`. Three remain:
 
-- **The in-prefix orphan sweep** (compaction §7), pre-existing and made heavier by this axis: a
-  failed coalesce or fold leaves a directory per column, and only a fold reclaims it. Measured at
-  ~18 MB after nine passes, tracking ingest volume rather than corpus size.
+- **Orphaned attribute files between folds — and the fold is already what collects them.** A
+  coalesce writes a merged extent and stops naming the eight it consumed; the consumed files stay on
+  disc. Nothing unlinks them as they are orphaned, so they pile up while the corpus is served.
 
-  **It is not the small job its size suggests, which is why it is still here.** The startup sweep
-  that exists deletes orphaned *prefixes* — whole trees `CURRENT` never named, unambiguous because
-  the live prefix is known. An *in-prefix* sweep deletes files from the bundle that is being served,
-  and its correctness rests entirely on enumerating every file any reader could still name. That set
-  is not one manifest: contracts §2.3 keeps older `SEGMENTS-<n>.json` alive precisely so a step-down
-  can serve one, so `named` is a union across them, and the dead-bytes gauge already learned this
-  the expensive way — summing one map alone reported a 1065× orphan ratio. Get the enumeration
-  wrong and the failure is a deleted live file, which is silent until a reader asks for it. It also
-  needs a rule about *when* it may run, since a coalesce writes its files before naming them and a
-  sweep between those two steps deletes the output of the pass in flight. **A specification of
-  `named` and a ruling on the window are what it wants first**; both are owner-shaped, and neither
-  is written.
+  **The reclamation is compaction's, and it works.** A fold writes a new prefix, carries forward only
+  what a manifest names, and deletes the old prefix whole — so every orphan in it goes at once, with
+  no special handling and nothing to enumerate. The lifecycle probe measures exactly that: 739
+  attribute files and 90.4 MB before the fold, **13 files and 72.7 MB after**.
+
+  So there is no missing sweep, and the earlier framing of this as one was wrong. What is left is a
+  sizing question: **the exposure is one fold interval of coalesce output**, ~18 MB per nine passes
+  and tracking ingest volume rather than corpus size. Against a nightly fold that is a day's worth of
+  a small number, and the honest answer is probably that nothing more is needed. If it ever is, the
+  cheap version is a fold that also unlinks what its own plan just superseded, not a general sweep of
+  the live prefix — that would have to enumerate every file a step-down could still name across the
+  older `SEGMENTS-<n>.json`, which is how the dead-bytes gauge once reported a 1065× orphan ratio
+  from a single missing addend.
 
 - **The text-offset bounds check**, implemented, tested and **reverted** — it cost 70% of the scan
   for the reason in §1, which is now understood and pinned. It is redundant while Arrow validates
   offsets on decode; restore it if the R1 digest deferral lands, at which point it stops being
   redundant. Not before: a redundant check bought at any price is still redundant.
 
-- **Numeric absence**, and it is a wrong answer rather than a missing feature. An item with no value
-  for a numeric column **matches a range containing zero**. The cause is one step upstream of where
-  the ⊘ sits: `BatchColumn::decode` copies numeric values out of the Arrow array with `.values()`
-  and **drops the validity buffer**, so absence is indistinguishable from a stored zero by the time
-  `write_column_values` sees it. Text and category columns do check — a null string becomes
-  `ScalarValue::Null`, a null key becomes the reserved code 0 — and the presence bitmap is already
-  there to receive a third case.
+- **An item with no number is stored as zero, so it matches filters it should not.** If an item
+  carries no value for a number column — no score, no price — the build writes 0 and marks the item
+  as having a value. Nothing anywhere records that the number was missing. A viewer filtering for
+  "score between −10 and 10" gets back every item that never had a score at all. **That is a wrong
+  answer, not an absent feature**, which is why it is listed here rather than as a nice-to-have.
 
-  **The fix is shaped but it crosses a decision.** Carrying the validity buffer and skipping nulls
-  into presence closes the *filter* half exactly as the other two families do it. But `by_entity`
-  feeds the **render** tail as well, and a render column is fixed-width with no room for a validity
-  mask (per-point-attributes §2.2) — so what a viewer sees for an absent numeric is a question this
-  fix forces and does not answer. Today it is zero, silently. Someone has to rule whether it stays
-  zero, explicitly, or whether absence is representable there at all.
+  Text and category columns do not have this problem, because each has somewhere to put "nothing".
+  A missing string is stored as an explicit absence, and a missing category uses a code its
+  vocabulary reserves for the purpose. A number has no spare value to reserve — every number is a
+  legal score — so absence has to be recorded *outside* the value. The presence bitmap that each
+  column already carries is exactly that place, and it is already used this way by the other two.
+
+  **Why it is not a two-line change.** The build reads numbers out of the source file and, in doing
+  so, throws away the flag saying which of them were missing. By the time the column is written the
+  information is gone, so the fix starts one step earlier than the problem appears. Keeping the flag
+  is easy in itself.
+
+  The complication is that the same values feed the map's point data as well as the filter's column.
+  A point's slot on the map is a fixed-size number with nowhere to record "missing". So fixing the
+  filter forces a question it cannot answer on its own: **what should the map show for a point with
+  no score?** Today it shows zero and nothing tells the viewer that is what happened. That needs a
+  ruling before the filter half can land, because both are fed from the same values.
 
 ## 6. Not measured, and what each would settle
 
