@@ -1,0 +1,5 @@
+scale,stage,open_ms,attrs_bytes,attrs_files,extent_files,rss_after_open_bytes,rss_after_scan_bytes,layers_archive,layers_author
+2422486,s0-build,6.244,68964251,9,0,39161856,39227392,1,1
+2422486,s1-flushed,12.174,72710075,649,320,43618304,43618304,65,65
+2422486,s2-coalesced,6.575,90361225,739,5,41582592,41660416,2,2
+2422486,s3-folded,6.564,72733547,13,0,41242624,41242624,1,1

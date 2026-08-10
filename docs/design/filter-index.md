@@ -725,12 +725,22 @@ The mechanics, against the pass's existing shape:
   A refusal discards the pass — files become orphans, the consumed entries stand, the next tick
   re-plans. Nothing row-space moves at the swap, so decision 0043 is satisfied by construction.
 
-**What this bounds, modelled from arm 13's constants.** Repeated width-8 coalescing walks the same
-size-tier ladder the segment merge does, so the steady-state layer count per column is tens rather
-than a day's ~960 — which takes the open path from 28 ms per column and ~31,000 files a day to
-~1 ms and a bounded few hundred files, and makes §5.1's "a week without a fold" arithmetic moot:
-the file-count axis no longer waits for the fold at all. The query-axis saving is real and
-unimportant — layers were already microseconds each (measured, §5.1).
+**What this bounds — and the mechanism is not the one this section first claimed.** The conclusion
+holds: repeated coalescing takes the layer count from a day's ~960 to a bounded handful, which is
+what returns the open path and makes §5.1's "a week without a fold" arithmetic moot. The file-count
+axis no longer waits for the fold. The query-axis saving is real and unimportant — layers were
+already microseconds each (measured, §5.1).
+
+**But the decay is linear, not tiered.** An earlier revision said repeated width-8 coalescing walks
+the same size-tier ladder the segment merge does. Measured on real data
+(`probes/2026-08-10-filter-lifecycle/`, 64 extents per column driven to one in nine passes): a pass
+removes **seven extents per column**, every time — because every extent sits below the policy's
+1 MiB size floor and therefore in one size class, so a window is always eight of them and always
+yields one. The ladder needs inputs that *differ* in size class, and a flush's extents do not. That
+is why the floor exists at all — without it each tick would mint its own class and the pass would
+never fire — but it also means the ladder's geometric collapse is not available here, and a
+deployment far behind on coalescing pays passes linear in its backlog rather than logarithmic.
+**"Walks the size-tier ladder": NOT confirmed by measurement — do not claim it is.**
 
 
 ## 6. Deletion, suppression and retirement
@@ -1060,6 +1070,27 @@ The scan is unaffected — 0.24–0.27 ms either way — so the mapping costs no
 resident and resides only what a request touches. Those scan figures are warm-page-cache and are not
 a cold-start claim; what the comparison establishes is that the read path pays its I/O for every
 declared column while the mapped path pays it for the columns actually scanned.
+
+> **⊘ That table is a `u32` measurement and it does not generalise to `utf8`.** Measured per column
+> at 2.5×10⁷ on real data (`probes/2026-08-10-filter-lifecycle/`), resident bytes at open: a 203 MB
+> `i64` column **98 KB**, three category columns 111–143 KB — and a 365 MB `utf8` column
+> **362 MB**, which is the whole file. The cause is not the mapping but what is layered over it:
+> the reader decodes the batch into a `LargeStringArray`, and Arrow validates UTF-8 across every
+> byte of the values buffer at decode, touching every page the map was supposed to leave cold. At
+> 10⁹ that is ~14 GB resident for one text column where this section would lead a reader to size
+> for megabytes. **Fixed-width columns behave exactly as the table says; text does not, and the
+> claim above must not be read as covering it.**
+>
+> The fix is not merely `skip_validation`, and the reason is worth stating so it is not
+> rediscovered as a one-liner. Nothing here depends on Arrow's UTF-8 guarantee — `text_at` converts
+> with a checked `from_utf8` and the byte predicates compare bytes — so *that* half is redundant.
+> But the same switch skips the **offset** validation, and a corrupt offset pair would then reach
+> `&bytes[lo..hi]` and panic on a request path where today it refuses loudly at open. Deferring the
+> byte scan while keeping the offsets checked is the shape that closes this, and it is unbuilt.
+>
+> **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
+> column here, and by decision 0060 they are now on the serving path for a `public` listing. That is
+> correct as designed and is not covered by the table either.
 
 - **Category membership at 0.31–1.01× the render column it indexes** (*measured* at 2.4×10⁶ items; the 10⁹
   figure is *modelled*, and index §4.1 says why the ratio may not hold).
