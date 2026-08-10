@@ -1,4 +1,4 @@
-import {BandCache, type Band, type ReplicaFrame, type TileRect} from '@tessera/client';
+import {BandCache, WORLD_SIZE, type Band, type ReplicaFrame, type TileRect} from '@tessera/client';
 import type {ScalarColumn} from '@tessera/client';
 
 /**
@@ -22,12 +22,16 @@ import type {ScalarColumn} from '@tessera/client';
 /** One tile's contribution to the draw, and the authority it rests on. */
 export type AssembledTile = {
   prefix: bigint;
+  /** The depth `prefix` is addressed at — the band's own, which for a stand-in is not the frame's. */
+  depth: number;
   /**
    * False where the marks came from an ancestor or from descendants, in which case they are a
    * superset of what the definition serves for this tile. Presentation only: no count may be shown
    * against such a tile, and it is excluded from the drawn-count assertion.
    */
   exact: boolean;
+  /** Marks this entry puts on screen — for an exact tile, exactly `served`. */
+  drawn: number;
   /** The server's own counts, present only for an exact tile. */
   counts: {visible: bigint; matched: bigint; served: number} | null;
 };
@@ -94,22 +98,37 @@ export function assembledMarks(assembled: Assembled): number {
  * channel stay exact. Only the presentation layer is stale, and the count channel never reads from
  * it.
  */
+/**
+ * **Stand-in marks over ground that is now exact are dropped here, not left to the settle.** The
+ * held stand-ins ride along, but wherever an exact band now answers, keeping their marks draws the
+ * same ground twice — measured with the density audit as 10^4 tiles at once flashing to ~2x on
+ * every arrival and collapsing at the settle, which at a 10^9 corpus is a continuous shimmer under
+ * any pan. The filter is one pass over the stand-in marks against the exact tiles' grid; dropping
+ * a stand-in mark is presentation, always safe, and these are marks whose ground has just been
+ * answered properly.
+ */
 export function refreshExact(held: Assembled, bands: Band[], version: number): Assembled {
   const tiles: AssembledTile[] = [];
   let exactDrawn = 0;
   let exactServed = 0;
   let visibleInView = 0;
+  const dim = 2 ** held.depth;
+  const covered = new Set<number>();
   for (const band of bands) {
     if (band.ids.length === 0) continue;
     exactDrawn += band.ids.length;
     exactServed += band.served;
     visibleInView += Number(band.visible);
+    covered.add(band.x * dim + band.y);
     tiles.push({
       prefix: band.prefix,
+      depth: band.depth,
       exact: true,
+      drawn: band.ids.length,
       counts: {visible: band.visible, matched: band.matched, served: band.served}
     });
   }
+  const standIn = filterStandIn(held.standIn, held.depth, covered);
   for (const tile of held.tiles) {
     if (!tile.exact) tiles.push(tile);
   }
@@ -119,19 +138,69 @@ export function refreshExact(held: Assembled, bands: Band[], version: number): A
     version,
     standInStale: true,
     bands: bands.filter((band) => band.ids.length > 0),
-    standIn: held.standIn,
+    standIn,
     tiles,
     exactDrawn,
     exactServed,
-    provisional: held.provisional,
+    provisional: standIn.ids.length,
     visibleInView
   };
 }
 
-type Piece = {band: Band; indices: number[] | null};
+/**
+ * The stand-in buffers with every mark on exact ground removed — the identical object when nothing
+ * is removed, which is most folds and what keeps the colour memo and deck's upload skip intact.
+ */
+function filterStandIn(
+  standIn: Assembled['standIn'],
+  depth: number,
+  covered: Set<number>
+): Assembled['standIn'] {
+  if (covered.size === 0 || standIn.ids.length === 0) return standIn;
+  const dim = 2 ** depth;
+  const span = WORLD_SIZE / dim;
+  const {ids, positions} = standIn;
+  const survivors: number[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const tx = Math.floor(positions[i * 2]! / span);
+    const ty = Math.floor(positions[i * 2 + 1]! / span);
+    if (!covered.has(tx * dim + ty)) survivors.push(i);
+  }
+  if (survivors.length === ids.length) return standIn;
+
+  const keptIds = new BigUint64Array(survivors.length);
+  const keptPositions = new Float32Array(survivors.length * 2);
+  for (let o = 0; o < survivors.length; o++) {
+    const i = survivors[o]!;
+    keptIds[o] = ids[i]!;
+    keptPositions[o * 2] = positions[i * 2]!;
+    keptPositions[o * 2 + 1] = positions[i * 2 + 1]!;
+  }
+  const scalars: Record<string, ScalarColumn> = {};
+  for (const [name, column] of Object.entries(standIn.scalars)) {
+    if (column.arrowType === 'bool' || column.arrowType === 'utf8') {
+      const source = column.values as unknown[];
+      scalars[name] = {
+        arrowType: column.arrowType,
+        values: survivors.map((i) => source[i])
+      } as ScalarColumn;
+    } else {
+      const source = column.values as unknown as {[i: number]: unknown};
+      const Ctor = (column.values as unknown as {constructor: new (n: number) => unknown})
+        .constructor;
+      const kept = new Ctor(survivors.length) as unknown as {[i: number]: unknown};
+      for (let o = 0; o < survivors.length; o++) kept[o] = source[survivors[o]!];
+      scalars[name] = {arrowType: column.arrowType, values: kept} as unknown as ScalarColumn;
+    }
+  }
+  return {ids: keptIds, positions: keptPositions, scalars};
+}
+
+type Piece = {band: Band; indices: number[] | null; limit?: number};
 
 function pieceLength(piece: Piece): number {
-  return piece.indices ? piece.indices.length : piece.band.ids.length;
+  const whole = piece.indices ? piece.indices.length : piece.band.ids.length;
+  return piece.limit === undefined ? whole : Math.min(whole, piece.limit);
 }
 
 /**
@@ -154,8 +223,9 @@ function assembleScalar(name: string, pieces: Piece[], total: number): ScalarCol
         continue;
       }
       const source = column.values as unknown[];
+      const len = pieceLength(piece);
       if (piece.indices) for (const i of piece.indices) values.push(source[i]);
-      else values.push(...source);
+      else for (let i = 0; i < len; i++) values.push(source[i]);
     }
     return {arrowType: first.arrowType, values} as ScalarColumn;
   }
@@ -176,7 +246,7 @@ function assembleScalar(name: string, pieces: Piece[], total: number): ScalarCol
       for (const i of piece.indices) out[o++] = source[i];
     } else {
       (out as unknown as {set(v: ArrayLike<number>, o: number): void}).set(
-        column.values as unknown as ArrayLike<number>,
+        (column.values as unknown as {slice(a: number, b: number): ArrayLike<number>}).slice(0, len),
         o
       );
       o += len;
@@ -211,7 +281,9 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
     visibleInView += Number(band.visible);
     tiles.push({
       prefix: band.prefix,
+      depth: band.depth,
       exact: true,
+      drawn: band.ids.length,
       counts: {visible: band.visible, matched: band.matched, served: band.served}
     });
   }
@@ -219,14 +291,69 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
   // Bands from another depth, admitted by the replica only over ground not held at this one. An
   // ancestor is restricted to the wanted region by Morton prefix — sound because a parent's band is
   // a prefix of its own visible set in identity order, so its restriction is a prefix of the
-  // child's. Descendants contribute whole.
+  // child's.
+  //
+  // **A descendant stand-in is density-matched by prefix, per DRAWN TILE, not per band.** Four
+  // children carry ~4x the marks the drawn depth would serve for their parent, so drawing them
+  // whole renders a patch visibly denser than its exactly-covered neighbours. Each band draws only
+  // an id-order prefix of itself — the one subset a client may draw (`delta-serving.md` §7;
+  // anything else makes the cache a second sampler) — sized so the tile's total approximates what
+  // the drawn depth would serve. The sizing must aggregate over the tile: a per-band rule with a
+  // one-mark floor hands a drawn tile holding a thousand five-mark depth-10 bands a thousand marks
+  // where its own depth would serve a handful — patches of the map two hundred times too dense, in
+  // clumps, persisting until the coarse fetch lands. One floor per tile keeps every tile visibly
+  // covered; the largest-remainder split spends the rest where the data is. Ancestors have no
+  // matching move: marks cannot be invented, so their patches stay sparse until data lands, which
+  // reads as loading rather than as wrongness.
+  const fallback: {band: Band; indices: number[] | null; limit: number}[] = [];
+  const groups = new Map<bigint, number[]>();
   for (const {band, clip} of frame.fallback) {
     const indices = BandCache.restrictToRect(band, frame.depth, clip);
     const length = indices ? indices.length : band.ids.length;
     if (length === 0) continue;
-    pieces.push({band, indices});
-    total += length;
-    tiles.push({prefix: band.prefix, exact: false, counts: null});
+    // Truncated in place rather than copied: `restrictToRect` built this array for this call, so
+    // shortening it is free where a `slice` re-copies the kept prefix.
+    if (indices && indices.length > length) indices.length = length;
+    const at = fallback.length;
+    fallback.push({band, indices, limit: length});
+    if (band.depth > frame.depth) {
+      const ancestor = band.prefix >> BigInt(2 * (band.depth - frame.depth));
+      const held = groups.get(ancestor);
+      if (held) held.push(at);
+      else groups.set(ancestor, [at]);
+    }
+  }
+  for (const members of groups.values()) {
+    const shares = members.map(
+      (i) => fallback[i]!.limit / 4 ** (fallback[i]!.band.depth - frame.depth)
+    );
+    const target = Math.max(1, Math.round(shares.reduce((a, s) => a + s, 0)));
+    const floors = shares.map(Math.floor);
+    let remaining = target - floors.reduce((a, n) => a + n, 0);
+    const byFraction = shares
+      .map((s, j) => [s - Math.floor(s), j] as const)
+      .sort((a, b) => b[0] - a[0]);
+    for (const [, j] of byFraction) {
+      if (remaining <= 0) break;
+      floors[j]! += 1;
+      remaining -= 1;
+    }
+    members.forEach((i, j) => {
+      fallback[i]!.limit = Math.min(fallback[i]!.limit, floors[j]!);
+    });
+  }
+  for (const piece of fallback) {
+    if (piece.limit === 0) continue;
+    if (piece.indices && piece.indices.length > piece.limit) piece.indices.length = piece.limit;
+    pieces.push(piece);
+    total += piece.limit;
+    tiles.push({
+      prefix: piece.band.prefix,
+      depth: piece.band.depth,
+      exact: false,
+      drawn: piece.limit,
+      counts: null
+    });
   }
 
   const ids = new BigUint64Array(total);
@@ -243,11 +370,12 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
       }
     } else {
       // **A whole band is a memcpy.** `TypedArray.set` copies in native code; the per-element loop
-      // this replaces was the bulk of a 136 ms assembly at 10^6 marks, and it was copying values
-      // that had already been converted to their final form when the band was built.
-      ids.set(piece.band.ids, o);
-      positions.set(piece.band.positions, o * 2);
-      o += piece.band.ids.length;
+      // this replaces was the bulk of a 136 ms assembly at 10^6 marks. `subarray` honours the
+      // density-matching limit for a descendant drawn whole — a view, no copy.
+      const len = pieceLength(piece);
+      ids.set(piece.band.ids.subarray(0, len), o);
+      positions.set(piece.band.positions.subarray(0, len * 2), o * 2);
+      o += len;
     }
   }
 

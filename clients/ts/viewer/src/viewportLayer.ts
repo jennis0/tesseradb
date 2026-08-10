@@ -1,4 +1,4 @@
-import {OrthographicView, type Layer} from '@deck.gl/core';
+import {OrthographicView, type BinaryAttribute as DeckBinaryAttribute, type Layer} from '@deck.gl/core';
 import {ScatterplotLayer} from '@deck.gl/layers';
 import {
   MARGIN,
@@ -12,8 +12,10 @@ import {
 
   plan,
   worldBbox,
+  rectIntersection,
   TesseraError,
-  type Replica
+  type Replica,
+  type TileRect
 } from '@tessera/client';
 import {
   assemble,
@@ -25,7 +27,7 @@ import {
 } from './assemble.js';
 import {buildColourAttribute, widenDomain, type Encoding} from './colour.js';
 import {readConfig} from './config.js';
-import {MarkSlab} from './slab.js';
+import {MarkSlab, type GpuSlab} from './slab.js';
 import {trace} from './trace.js';
 import type {Store} from './state.js';
 
@@ -97,8 +99,15 @@ const MAX_PREFETCH_PER_PAUSE = 3;
  *
  * Measured on the demo corpus at a 5 × 10^4 mark budget, three bites per pause moved 7.6–12.7 MB
  * per pan — an order more than the view itself needed.
+ *
+ * **Raised 2 MB → 8 MB once absorb was sliced, and made a knob (`?ring=MB`).** The 2 MB bound
+ * protected the main thread from splitting a whole response in one block; slicing removed that
+ * failure mode, and at a 10^9-item corpus under a broad principal 2 MB of anticipation buys almost
+ * no ground. What still argues for a bound at all: the decode worker is serial, so a foreground
+ * response queues behind whatever the ring is decoding; and per-client ring bytes are the fleet's
+ * bandwidth and select CPU, which a local dev loop cannot see. See {@link ViewerConfig}.
  */
-const MAX_PREFETCH_BYTES_PER_PAUSE = 2_000_000;
+const MAX_PREFETCH_BYTES_PER_PAUSE = RENDER.ringBytes;
 
 /**
  * How long after the last arrival the full stand-in derivation runs.
@@ -128,6 +137,8 @@ const DERIVE_MIN_GAP_MS = 120;
 
 /** Floor on the interval between leading-edge requests. Trailing debounce still applies between. */
 const LEADING_EDGE_MIN_GAP_MS = 400;
+/** Past this age an in-flight request is presumed hung and superseded rather than awaited. */
+const IN_FLIGHT_MAX_MS = 5_000;
 /** The server sends `Retry-After: 1`. Bounded, because an unbounded retry amplifies saturation. */
 const MAX_RETRIES = 2;
 
@@ -162,6 +173,10 @@ export class ViewportController {
   private inFlight: AbortController | null = null;
   /** The bbox and depth last asked for, for the covered-view check. */
   private held: {bbox: [number, number, number, number]; depth: number} | null = null;
+  /** What the in-flight request is fetching, for the keep-or-abort decision. */
+  private inFlightAt: {rect: TileRect; depth: number; since: number} | null = null;
+  /** The newest view that arrived while a useful request was flying — fired on completion. */
+  private queued: {view: ViewState; width: number; height: number} | null = null;
   /** Monotonic; a response from an older request is dropped rather than rendered. */
   private generation = 0;
 
@@ -363,7 +378,10 @@ export class ViewportController {
       maxTiles: meta.maxTilesPerRequest,
       visibleInView: lastVisibleInView ?? undefined,
       heldBytes: this.replica.bytes,
-      budgetBytes: this.replica.budgetBytes
+      budgetBytes: this.replica.budgetBytes,
+      // Held during the gesture, released at the settle: the budget's one-step wobbles defer to
+      // the depth on screen while the user moves, and its considered answer wins once they stop.
+      holdDepth: settle ? undefined : this.store.state.assembled?.depth
     });
     // **The frame already on screen may still be the answer, and re-deriving one is not free.**
     // Deriving a frame is per-band work — a region query, then a restriction and a column fold per
@@ -429,6 +447,19 @@ export class ViewportController {
     });
   }
 
+  /**
+   * Redraw for an absorb that happened mid-fetch, so pieces paint as they land.
+   *
+   * A viewport fetch is split into pieces, and each piece's bands are in the replica the moment it
+   * is absorbed — but the fetch's own frame arrives only after the last piece, so without this the
+   * first paint waited for the whole response: measured as ~0.5 s pan-to-paint over a 0.13 s
+   * server answer. The rAF-coalesced redraw folds the new bands in for a few milliseconds, and the
+   * completed fetch still does the full derivation as before.
+   */
+  absorbed(view: ViewState, width: number, height: number): void {
+    this.scheduleRedraw(view, width, height);
+  }
+
   /** Does the drawn buffer already answer this view, at the depth the budget would ask for? */
   private covers(view: ViewState, width: number, height: number): boolean {
     if (!this.held || !this.store.state.assembled) return false;
@@ -472,7 +503,8 @@ export class ViewportController {
       maxTiles: meta.maxTilesPerRequest,
       visibleInView: lastVisibleInView ?? undefined,
       heldBytes: this.replica.bytes,
-      budgetBytes: this.replica.budgetBytes
+      budgetBytes: this.replica.budgetBytes,
+      holdDepth: this.store.state.assembled?.depth
     }).choice.depth;
   }
 
@@ -489,6 +521,8 @@ export class ViewportController {
     this.cancelBackground();
     this.inFlight?.abort();
     this.inFlight = null;
+    this.inFlightAt = null;
+    this.queued = null;
     this.held = null;
     this.movedAt = 0;
     this.velocity = undefined;
@@ -549,7 +583,8 @@ export class ViewportController {
       visibleInView: lastVisibleInView ?? undefined,
       velocity: this.velocity,
       heldBytes: this.replica.bytes,
-      budgetBytes: this.replica.budgetBytes
+      budgetBytes: this.replica.budgetBytes,
+      holdDepth: this.store.state.assembled?.depth
     });
     // **The nearest band with anything novel in it, coarsest last.** The bands are ordered fine and
     // near to coarse and far, so taking the first that has work fills the neighbourhood before the
@@ -593,7 +628,10 @@ export class ViewportController {
         controller.signal,
         undefined,
         1,
-        false
+        false,
+        // Anticipation decodes in its own lane: a ring response must never sit ahead of a
+        // foreground one in a serial worker.
+        true
       );
       // The ring never draws and never calibrates. It is at a margin the user is not looking at,
       // so folding it into either would report a view that is not on screen.
@@ -609,6 +647,31 @@ export class ViewportController {
     }
   }
 
+  /**
+   * Same depth and still-overlapping ground: late, but not wrong — worth letting land.
+   *
+   * Bounded in age, because keeping requests alive removed the implicit kill that aborting gave a
+   * wedged connection: a request older than this is treated as hung and superseded, whatever its
+   * rectangle says.
+   */
+  private inFlightUseful(render: TileRect, depth: number): boolean {
+    return (
+      this.inFlightAt !== null &&
+      performance.now() - this.inFlightAt.since < IN_FLIGHT_MAX_MS &&
+      this.inFlightAt.depth === depth &&
+      rectIntersection(this.inFlightAt.rect, render) !== null
+    );
+  }
+
+  /** Fire the view that arrived while the last request flew, the moment it settles. */
+  private dispatchQueued(): void {
+    this.inFlightAt = null;
+    const next = this.queued;
+    if (!next) return;
+    this.queued = null;
+    void this.request(next.view, next.width, next.height);
+  }
+
   private async request(view: ViewState, width: number, height: number, attempt = 0) {
     const {meta, session, slice, budget, mTarget, lastVisibleInView} = this.store.state;
     if (!meta || !session) return;
@@ -621,16 +684,29 @@ export class ViewportController {
       visibleInView: lastVisibleInView ?? undefined,
       velocity: this.velocity,
       heldBytes: this.replica.bytes,
-      budgetBytes: this.replica.budgetBytes
+      budgetBytes: this.replica.budgetBytes,
+      holdDepth: this.store.state.assembled?.depth
     };
     const planned = plan(inputs);
     const choice = planned.choice;
 
-    // A superseded request must not leave the lag clock running, or every later measurement
-    // accumulates the whole abandoned interaction.
+    // **A pan pipelines requests; it does not abort them.** A response takes a few hundred
+    // milliseconds of wire and decode, and a continuous pan re-schedules every few frames — so
+    // aborting the in-flight request on each schedule meant 62 requests issued and 7 completed in
+    // a measured session, with nothing landing until the gesture paused: the whole of the "pan a
+    // screen before it fills" complaint. A same-depth request whose rectangle still intersects the
+    // current render rect is left to finish — its bands land in the replica and infill
+    // retroactively wherever the view is by then — and the newest view fires the moment it
+    // settles. An abort is still right when the answer would be wrong rather than late: a depth
+    // change, a jump that no longer intersects, or a principal switch (`cancel`).
+    if (this.inFlight && this.inFlightUseful(planned.render, choice.depth)) {
+      this.queued = {view, width, height};
+      return;
+    }
     this.inFlight?.abort();
     const controller = new AbortController();
     this.inFlight = controller;
+    this.inFlightAt = {rect: planned.render, depth: choice.depth, since: performance.now()};
     const generation = ++this.generation;
 
     const s0 = this.store.state.colourBy;
@@ -767,6 +843,12 @@ export class ViewportController {
       });
       this.movedAt = 0;
       this.inFlight = null;
+      // The queued view outranks the old view's margin: it is where the user is NOW. Firing it
+      // here also ends this call, because the new request owns the controller from this point.
+      if (this.queued) {
+        this.dispatchQueued();
+        return;
+      }
 
       // The margin, off the critical path: the screen is already drawn, and this only decides
       // whether the *next* small pan needs the wire. Failures are swallowed for the same reason a
@@ -811,8 +893,10 @@ export class ViewportController {
           // Already drawn; the margin is an optimisation for the next gesture.
         }
       }
+      this.dispatchQueued();
     } catch (error) {
       if (controller.signal.aborted || generation !== this.generation) return;
+      this.inFlightAt = null;
 
       // 429 is now whole-viewport rather than one tile, so a shed request blanks the map. The
       // server sends `Retry-After: 1`; honour it, bounded, because retrying without backoff
@@ -955,6 +1039,68 @@ const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array
 /** Frames whose fidelity checks have run — once per frame object, see the call site. */
 const checkedFrames = new WeakSet<object>();
 
+/**
+ * Per-drawn-tile density between consecutive frames at one depth — the instrument for banding.
+ *
+ * A visual artifact is a **tile whose on-screen density moves**, and nothing else in the trace can
+ * see one: the aggregates say how many marks a frame drew, not that one patch flipped from 40
+ * marks to 8 when its stand-in was replaced. Each frame's tiles are folded onto the drawn depth's
+ * grid (descendants project up; ancestors spread over a block and are skipped as unattributable)
+ * and compared with the previous frame's grid. The transition worth the most is provisional →
+ * exact, where the new count is the server's own answer — so `med`/`pops` measure exactly how
+ * wrong the stand-ins were about the ground they covered, in the units a viewer perceives.
+ *
+ * Trace-only (`?trace=1`): the fold is a map of ~10^4–10^5 entries per derived frame.
+ */
+let lastDensity: {depth: number; tiles: Map<bigint, {drawn: number; exact: boolean}>} | null = null;
+
+function auditDensity(assembled: Assembled): void {
+  const tiles = new Map<bigint, {drawn: number; exact: boolean}>();
+  for (const t of assembled.tiles) {
+    if (t.depth < assembled.depth) continue;
+    const key = t.depth === assembled.depth ? t.prefix : t.prefix >> BigInt(2 * (t.depth - assembled.depth));
+    const held = tiles.get(key);
+    if (held) {
+      held.drawn += t.drawn;
+      held.exact ||= t.exact;
+    } else {
+      tiles.set(key, {drawn: t.drawn, exact: t.exact});
+    }
+  }
+  const prev = lastDensity;
+  lastDensity = {depth: assembled.depth, tiles};
+  if (!prev || prev.depth !== assembled.depth) return;
+
+  let compared = 0;
+  let up = 0;
+  let down = 0;
+  let worst = 1;
+  const pops: number[] = [];
+  for (const [key, cur] of tiles) {
+    const was = prev.tiles.get(key);
+    if (!was || was.drawn === 0 || cur.drawn === 0) continue;
+    compared++;
+    const r = cur.drawn / was.drawn;
+    if (r > 2) up++;
+    else if (r < 0.5) down++;
+    if (r > worst) worst = r;
+    if (1 / r > worst) worst = 1 / r;
+    if (!was.exact && cur.exact) pops.push(r);
+  }
+  if (compared === 0) return;
+  pops.sort((a, b) => a - b);
+  trace.event('density', {
+    depth: assembled.depth,
+    n: compared,
+    up,
+    down,
+    pops: pops.length,
+    // Median provisional→exact ratio, ×100: 100 means the stand-ins matched the served density.
+    med: pops.length > 0 ? Math.round(pops[pops.length >> 1]! * 100) : 0,
+    worst: Math.round(worst * 10) / 10
+  });
+}
+
 function standInColours(assembled: Assembled, encoding: Encoding, key: string): Uint8Array {
   const held = heldStandInColours.get(assembled.standIn);
   if (held && held.key === key) return held.colours;
@@ -1001,6 +1147,39 @@ function binary<T extends ArrayBufferView>(
 }
 
 /**
+ * Attribute descriptors around a partition's own GPU buffers.
+ *
+ * **Keyed by attribute name, not accessor name** — `data.attributes.instancePositions` routes to
+ * `Attribute.setExternalBuffer`, which binds the buffer and uploads nothing; `getPosition` would
+ * route to `setBinaryValue`, deck's own copy-and-upload path, which is the cost being removed. The
+ * accessor shapes match what the typed-array path produced exactly — positions `float32 ×2`
+ * stride 8 (the fp64 low half stays a disabled constant, as it is for an f32 typed array), colours
+ * `unorm8 ×4` — so the shader sees identical bytes either way.
+ *
+ * Memoised on the {@link GpuSlab} object, which the partition keeps stable across appends: an
+ * unchanged partition hands deck the identical descriptor, and `setExternalBuffer` returns on
+ * reference equality before doing anything at all. Span writes happened at absorb time, in the
+ * slab; by the time deck sees the frame there is nothing left to move.
+ */
+type AttributeMap = Record<string, DeckBinaryAttribute>;
+const gpuDescriptors = new WeakMap<GpuSlab, AttributeMap>();
+
+function gpuAttributes(gpu: GpuSlab): AttributeMap {
+  let held = gpuDescriptors.get(gpu);
+  if (!held) {
+    held = {
+      instancePositions: {buffer: gpu.positions, size: 2, type: 'float32', stride: 8, offset: 0},
+      instanceFillColors: {buffer: gpu.colours, size: 4, type: 'unorm8', stride: 4, offset: 0},
+      // Written once at buffer creation — the values depend only on the instance index, so deck's
+      // per-data-change regeneration and 4n-byte re-upload are both skipped. See `slab.ts`.
+      instancePickingColors: {buffer: gpu.picking, size: 4, type: 'uint8', stride: 4, offset: 0}
+    };
+    gpuDescriptors.set(gpu, held);
+  }
+  return held;
+}
+
+/**
  * The mark layers: served marks from the slab, stand-in marks beside them.
  *
  * **Every served mark is drawn.** The length handed to deck.gl is the resident count,
@@ -1041,6 +1220,7 @@ export function buildViewportLayers(store: Store, slab: MarkSlab): Layer[] {
   // one pass per frame object is the same guarantee at a fraction of the cost.
   if (!checkedFrames.has(assembled)) {
     checkedFrames.add(assembled);
+    if (trace.enabled) auditDensity(assembled);
     assertAssemblyMatchesServed(assembled);
     // Every exact band the frame draws must have reached the slab: a band written outside its slot,
     // or a slot gone stale under a partition change, would otherwise thin the picture in a way
@@ -1072,10 +1252,12 @@ export function buildViewportLayers(store: Store, slab: MarkSlab): Layer[] {
         visible: held.active && held.draw.length > 0,
         data: {
           length: held.draw.length,
-          attributes: {
-            getPosition: binary(held.draw.positions, 2),
-            getFillColor: binary(held.draw.colours, 4, true)
-          }
+          attributes: held.draw.gpu
+            ? gpuAttributes(held.draw.gpu)
+            : {
+                getPosition: binary(held.draw.positions, 2),
+                getFillColor: binary(held.draw.colours, 4, true)
+              }
         },
         tesseraIds: held.draw.ids,
         radiusUnits: 'pixels' as const,

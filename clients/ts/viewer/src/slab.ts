@@ -24,11 +24,18 @@
  * band at this depth inside the render rectangle, so a resident band not in the frame is off
  * screen. {@link SLACK} bounds the excess before a partition compacts down to its frame.
  *
- * **What this does NOT do: dirty-span uploads.** deck.gl's binary attribute path compares by
- * reference, so appended marks re-upload the live range. Uploading only the appended span needs a
- * luma.gl `Buffer` owned outside deck's attribute manager — deferred until the arrival upload is
- * shown to be what a user feels.
+ * **Dirty-span uploads, via GPU buffers this slab owns.** deck.gl's binary attribute path compares
+ * by reference and re-uploads the whole live range whenever the reference moves — which, once
+ * pieces paint as they absorb, is several full re-uploads per response: ~12 MB a paint at 10^6
+ * marks, for an append that touched a fraction of it. So when a `Device` is attached, each
+ * partition owns a luma.gl `Buffer` per attribute and writes exactly the span a band landed in;
+ * deck is handed the buffer itself (`data.attributes.instancePositions` routes to
+ * `Attribute.setExternalBuffer`, which binds without copying). The CPU arrays are kept regardless
+ * — they are what growth re-writes from, and what picking reads — and remain the whole story
+ * where no device is attached (tests, and `?gpu=0`).
  */
+import {Buffer as GpuBuffer} from '@luma.gl/core';
+import type {Device} from '@luma.gl/core';
 import type {Band, ScalarColumn} from '@tessera/client';
 import {writeColours, type Encoding} from './colour.js';
 
@@ -70,7 +77,41 @@ export type SlabDraw = {
   positions: Float32Array;
   colours: Uint8Array;
   length: number;
+  /**
+   * The partition's own GPU buffers, when a device is attached — capacity-sized, current to
+   * `length`. **Stable across appends**: the object is recreated only when the buffers themselves
+   * are (growth), which is what lets the layer memoise its attribute descriptors on it and deck
+   * skip `setData` entirely on an unchanged partition.
+   */
+  gpu: GpuSlab | null;
 };
+
+export type GpuSlab = {positions: GpuBuffer; colours: GpuBuffer; picking: GpuBuffer};
+
+/**
+ * deck's picking colour for instance `i` is `i + 1` in three little-endian bytes — a pure function
+ * of the index. deck amortises *generating* that sequence in a global cache but still re-uploads
+ * `4n` bytes of it whenever a layer's data changes, which at 1.7 × 10^6 drawn marks measured
+ * ~210 ms/s of main thread (`bench-pickable` vs `-pickable0`). An owned buffer is written once per
+ * growth and never touched again; the pattern is shared across partitions and grows monotonically,
+ * so the byte-filling loop runs only over indices no partition has ever reached.
+ */
+let pickingPattern = new Uint8Array(0);
+
+function pickingColours(capacity: number): Uint8Array {
+  if (pickingPattern.length < capacity * 4) {
+    const grown = new Uint8Array(capacity * 4);
+    grown.set(pickingPattern);
+    for (let i = pickingPattern.length / 4; i < capacity; i++) {
+      const v = i + 1;
+      grown[i * 4] = v & 255;
+      grown[i * 4 + 1] = (v >> 8) & 255;
+      grown[i * 4 + 2] = (v >> 16) & 255;
+    }
+    pickingPattern = grown;
+  }
+  return pickingPattern.subarray(0, capacity * 4);
+}
 
 type Slot = {from: number; length: number; band: Band};
 
@@ -79,7 +120,8 @@ function emptyDraw(): SlabDraw {
     ids: new BigUint64Array(0),
     positions: new Float32Array(0),
     colours: new Uint8Array(0),
-    length: 0
+    length: 0,
+    gpu: null
   };
 }
 
@@ -87,6 +129,18 @@ function emptyDraw(): SlabDraw {
 class Partition {
   key = '';
   lastUsed = 0;
+  device: Device | null = null;
+  private gpu: GpuSlab | null = null;
+  /**
+   * Marks whose GPU copy is behind their CPU copy, flushed as **one write per attribute per
+   * sync**. A frame at 10^9 scale carries ~10^5 tiny bands, and a `buffer.write` per band is a
+   * driver call per band — measured at 790 ms for one sync of 132k bands, which handed back the
+   * entire cost the owned buffers had just removed. The ranges over-upload the gap between two
+   * disjoint dirty slots, but appends land at the tail so the common flush is exactly the span
+   * that arrived.
+   */
+  private dirtyPos: {from: number; to: number} | null = null;
+  private dirtyCol: {from: number; to: number} | null = null;
   private ids = new BigUint64Array(0);
   private positions = new Float32Array(0);
   private colours = new Uint8Array(0);
@@ -135,6 +189,7 @@ class Partition {
 
     if (compact) {
       this.rebuild(bands, encoding, colourBy);
+      this.flushGpu();
       return this.publish(true, true, true);
     }
     if (appending === 0 && rewrite.length === 0 && !recolour) return this.draw;
@@ -143,6 +198,7 @@ class Partition {
       // Every resident band, not only the frame's: a departed band is still drawn.
       for (const slot of this.slots.values()) {
         writeColours(this.colours, slot.from, slot.length, columnOf(slot.band, colourBy), encoding);
+        this.uploadColours(slot.from, slot.length);
       }
     }
     // A refetch of the same size reuses its slot, so the common re-request neither grows the
@@ -159,6 +215,7 @@ class Partition {
       this.slots.set(band.prefix, {from: this.live, length: band.ids.length, band});
       this.live += band.ids.length;
     }
+    this.flushGpu();
     const moved = appending > 0 || rewrite.length > 0;
     return this.publish(moved, moved, true);
   }
@@ -192,6 +249,68 @@ class Partition {
     this.positions = positions;
     this.colours = colours;
     this.capacity = capacity;
+    this.reserveGpu();
+  }
+
+  /**
+   * Fresh capacity-sized GPU buffers, retained marks re-written from the CPU arrays.
+   *
+   * Also the late-attach path: a device arriving after a partition holds data re-creates from
+   * here, which is why the re-write covers `live` rather than assuming empty.
+   */
+  private reserveGpu(): void {
+    if (!this.device) return;
+    this.destroy();
+    const usage = GpuBuffer.VERTEX | GpuBuffer.COPY_DST;
+    this.gpu = {
+      positions: this.device.createBuffer({byteLength: this.capacity * 8, usage}),
+      colours: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
+      picking: this.device.createBuffer({byteLength: this.capacity * 4, usage})
+    };
+    this.gpu.picking.write(pickingColours(this.capacity), 0);
+    // Everything held is now behind the fresh buffers; the next flush rewrites it whole.
+    if (this.live > 0) {
+      this.dirtyPos = {from: 0, to: this.live};
+      this.dirtyCol = {from: 0, to: this.live};
+    }
+  }
+
+  /** Late device attach: build the buffers now and republish so the next frame binds them. */
+  attach(device: Device): void {
+    this.device = device;
+    if (this.capacity > 0) this.reserveGpu();
+    this.flushGpu();
+    if (this.draw.length > 0 || this.gpu) this.publish(true, true, true);
+  }
+
+  destroy(): void {
+    this.gpu?.positions.destroy();
+    this.gpu?.colours.destroy();
+    this.gpu?.picking.destroy();
+    this.gpu = null;
+  }
+
+  private static widen(held: {from: number; to: number} | null, from: number, to: number) {
+    return held ? {from: Math.min(held.from, from), to: Math.max(held.to, to)} : {from, to};
+  }
+
+  private uploadColours(from: number, count: number): void {
+    if (this.gpu) this.dirtyCol = Partition.widen(this.dirtyCol, from, from + count);
+  }
+
+  /** The accumulated dirty ranges, as one `write` per attribute. Called once per sync. */
+  private flushGpu(): void {
+    if (!this.gpu) return;
+    if (this.dirtyPos) {
+      const {from, to} = this.dirtyPos;
+      this.gpu.positions.write(this.positions.subarray(from * 2, to * 2), from * 8);
+      this.dirtyPos = null;
+    }
+    if (this.dirtyCol) {
+      const {from, to} = this.dirtyCol;
+      this.gpu.colours.write(this.colours.subarray(from * 4, to * 4), from * 4);
+      this.dirtyCol = null;
+    }
   }
 
   /** A band's marks into the slot at `at`. Whole-array `set` calls: a memcpy, not a loop. */
@@ -200,6 +319,8 @@ class Partition {
     this.ids.set(band.ids, at);
     this.positions.set(band.positions, at * 2);
     writeColours(this.colours, at, band.ids.length, columnOf(band, colourBy), encoding);
+    if (this.gpu) this.dirtyPos = Partition.widen(this.dirtyPos, at, at + band.ids.length);
+    this.uploadColours(at, band.ids.length);
   }
 
   /**
@@ -220,7 +341,8 @@ class Partition {
         colours || this.draw.colours.length !== this.live * 4
           ? this.colours.subarray(0, this.live * 4)
           : this.draw.colours,
-      length: this.live
+      length: this.live,
+      gpu: this.gpu
     };
     return this.draw;
   }
@@ -239,6 +361,16 @@ export class MarkSlab {
   private activeSlot = 0;
   private clock = 0;
   private identityKey = '';
+  private device: Device | null = null;
+
+  /**
+   * Give the slab the GPU. From here every partition owns its buffers and uploads spans itself;
+   * without it, the typed-array path carries everything, which is what tests and `?gpu=0` use.
+   */
+  attach(device: Device): void {
+    this.device = device;
+    for (const p of this.parts) p?.attach(device);
+  }
 
   private get active(): Partition | null {
     return this.parts[this.activeSlot] ?? null;
@@ -285,6 +417,7 @@ export class MarkSlab {
     const identity = bands[0]!.identityKey;
     if (identity !== this.identityKey) {
       this.identityKey = identity;
+      for (const p of this.parts) p?.destroy();
       this.parts = this.parts.map(() => null);
     }
 
@@ -301,6 +434,7 @@ export class MarkSlab {
       }
       const fresh = new Partition();
       fresh.key = key;
+      fresh.device = this.device;
       this.parts[slot] = fresh;
     }
     this.activeSlot = slot;
@@ -323,6 +457,7 @@ export class MarkSlab {
         if (i !== this.activeSlot && (lru < 0 || p.lastUsed < this.parts[lru]!.lastUsed)) lru = i;
       }
       if (total <= this.markBudget || lru < 0) return;
+      this.parts[lru]!.destroy();
       this.parts[lru] = null;
     }
   }
@@ -346,6 +481,7 @@ export class MarkSlab {
 
   /** Drop everything — a principal change, or a view with nothing to draw at all. */
   clear(): void {
+    for (const p of this.parts) p?.destroy();
     this.parts = this.parts.map(() => null);
     this.identityKey = '';
     this.activeSlot = 0;

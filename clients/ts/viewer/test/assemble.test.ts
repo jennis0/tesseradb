@@ -13,9 +13,17 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
   const scalars: Record<string, ScalarColumn> = {
     w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}
   };
+  let x = 0;
+  let y = 0;
+  for (let bit = 0; bit < 16; bit++) {
+    x |= Number((prefix >> BigInt(2 * bit)) & 1n) << bit;
+    y |= Number((prefix >> BigInt(2 * bit + 1)) & 1n) << bit;
+  }
   return {
     depth,
     prefix,
+    x,
+    y,
     ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
     codes: BigUint64Array.from({length: n}, () => morton << 32n),
     // World space already — the cell->world conversion happens when a band is built.
@@ -101,14 +109,29 @@ describe('assemble', () => {
     assertAssemblyMatchesServed(out);
   });
 
-  it('unions descendant bands on zoom-out, marked provisional', () => {
+  it('unions descendant bands on zoom-out, density-matched per drawn tile', () => {
     const kids = [band(5, 0n, 2), band(5, 1n, 3)];
     const out = assemble(frame(3, [], kids));
-    expect(out.standIn.ids.length).toBe(5);
-    expect(out.provisional).toBe(5);
+    // Both bands sit under one depth-3 tile, whose own depth would serve ~(2+3)/16 ≈ 0.3 marks —
+    // so the TILE gets the one-mark floor, not each band: a per-band floor is how a thousand tiny
+    // deep bands once handed a coarse tile a thousand marks. The mark drawn is an id-order prefix
+    // of the band with the larger share, the subset delta-serving.md permits.
+    expect(out.standIn.ids.length).toBe(1);
+    expect(out.provisional).toBe(1);
+    // The contribution is a prefix: the band's first id, never a sample.
+    expect([...out.standIn.ids]).toEqual([1n]);
     expect(out.exactServed).toBe(0); // no exact tile contributed, so nothing to assert against
     expect(out.tiles[0]!.counts).toBeNull();
     assertAssemblyMatchesServed(out);
+  });
+
+  it('bounds a drawn tile by its own density however many deep bands stand in for it', () => {
+    // Sixteen five-mark bands four levels down, all under drawn tile 0: the tile's own depth
+    // would serve ~16·5/256 ≈ 0.3 marks. The per-band floor drew sixteen — the "patches at a
+    // totally different zoom level" a rapid zoom-out left behind at 10^9 scale.
+    const kids = Array.from({length: 16}, (_, i) => band(7, BigInt(i), 5));
+    const out = assemble(frame(3, [], kids));
+    expect(out.provisional).toBe(1);
   });
 
   it('mixes exact and provisional tiles without conflating their counts', () => {
@@ -116,10 +139,11 @@ describe('assemble', () => {
     const kids = [band(6, 40n, 2)];
     const out = assemble(frame(4, [exact], kids));
 
-    expect(assembledMarks(out)).toBe(5);
+    // The depth-6 stand-in's tile would serve ~2/16 marks: the per-tile floor gives it 1.
+    expect(assembledMarks(out)).toBe(4);
     expect(out.exactDrawn).toBe(3);
     expect(out.exactServed).toBe(3);
-    expect(out.provisional).toBe(2);
+    expect(out.provisional).toBe(1);
     expect(out.visibleInView).toBe(9); // the exact tile alone
     assertAssemblyMatchesServed(out);
   });
@@ -183,7 +207,9 @@ describe('assertAssemblyMatchesServed', () => {
 
 describe('refreshExact', () => {
   it('folds fresh exact bands in while keeping the stand-ins by reference', () => {
-    const held = assemble(frame(2, [band(2, 0n, 3)], [band(4, 8n, 2)]), ['w']);
+    // The stand-in's marks sit in drawn tile (2,0) — ground no fresh band covers — so the buffers
+    // must survive the fold untouched.
+    const held = assemble(frame(2, [band(2, 0n, 3)], [band(4, 8n, 2, 2, {cx: 32768, cy: 0})]), ['w']);
     const fresh = [band(2, 0n, 3), band(2, 1n, 2)];
 
     const out = refreshExact(held, fresh, 7);
@@ -207,5 +233,17 @@ describe('refreshExact', () => {
     const out = refreshExact(held, [band(2, 0n, 0, 0), band(2, 1n, 2)], 1);
     expect(out.bands).toHaveLength(1);
     expect(out.exactDrawn).toBe(2);
+  });
+
+  it('drops stand-in marks over ground an arriving band now answers exactly', () => {
+    // The stand-in's one density-matched mark sits in drawn tile (0,0); the fold brings an exact
+    // band for that very tile. Keeping the mark would draw the ground twice — the ~2x flash the
+    // density audit measured on every arrival — so the fold removes it.
+    const held = assemble(frame(2, [], [band(4, 0n, 2)]));
+    expect(held.provisional).toBe(1);
+    const out = refreshExact(held, [band(2, 0n, 3)], 1);
+    expect(out.provisional).toBe(0);
+    expect(out.standIn.ids.length).toBe(0);
+    assertAssemblyMatchesServed(out);
   });
 });

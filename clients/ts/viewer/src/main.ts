@@ -107,6 +107,11 @@ let currentView: ViewState = {target: INITIAL_VIEW_STATE.target, zoom: INITIAL_V
 
 const deck = new Deck({
   parent: mapEl,
+  // The slab uploads its own dirty spans from here on; without a device it stays on the
+  // typed-array path, which is also what `?gpu=0` forces. See `slab.ts`.
+  onDeviceInitialized: (device) => {
+    if (config.gpuBuffers) markSlab.attach(device);
+  },
   /**
    * deck.gl's own accounting, once a second, and the only view of what happens after `setProps`.
    *
@@ -461,14 +466,24 @@ async function start() {
     s.mTarget = meta.selection.thetaTargetMarks;
   });
   replica = new Replica(
-    (req, signal) => {
+    (req, signal, background) => {
       requestCount += 1;
-      return client.viewport(store.state.session!.token, {...req, slice: store.state.slice}, signal);
+      return client.viewport(
+        store.state.session!.token,
+        {...req, slice: store.state.slice},
+        signal,
+        background
+      );
     },
     meta.quantisation,
     {
       slice: meta.slices[0]!.id,
-      onPhase: trace.enabled ? (kind, ms, n) => trace.event(kind, {ms, n}) : undefined
+      onPhase: (kind, ms, n) => {
+        if (trace.enabled) trace.event(kind, {ms, n});
+        // A piece of a split response has been absorbed: its bands are drawable NOW, not when the
+        // whole fetch settles — so paint them. rAF-coalesced, and the fold path makes it cheap.
+        if (kind === 'store') controller?.absorbed(currentView, mapEl.clientWidth, mapEl.clientHeight);
+      }
     }
   );
   // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement

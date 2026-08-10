@@ -18,6 +18,24 @@ export type ViewerConfig = {
    */
   radius: number;
   pickable: boolean;
+  /**
+   * Bytes anticipation may absorb per still pause (`?ring=`, in MB).
+   *
+   * A knob rather than a constant because the right value depends on what is invisible from the
+   * client: on a local socket against one server the budget's only real cost is decode-worker
+   * occupancy ahead of foreground fetches, while over a real network and a shared fleet it is
+   * bandwidth and aggregate select CPU — the documented unmeasured costs of the ring. The default
+   * is deliberately modest for that reason; a dev box exploring a large corpus wants more.
+   */
+  ringBytes: number;
+  /**
+   * Whether the slab owns its GPU buffers and uploads dirty spans itself (`?gpu=0` to disable).
+   *
+   * The off switch exists because the external-buffer path leans on deck internals that have
+   * surprised this client before (see the note at the end of `viewportLayer.ts`): if marks ever
+   * misrender, `?gpu=0` restores the typed-array path in one reload and names the culprit.
+   */
+  gpuBuffers: boolean;
 };
 
 /**
@@ -34,6 +52,8 @@ export function readConfig(): ViewerConfig {
   return {
     radius: Number(query?.get('radius') ?? '') || 1.6,
     pickable: query?.get('pickable') !== '0',
+    ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
+    gpuBuffers: query?.get('gpu') !== '0',
     viewerUrl: env.VITE_TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
     sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
     sessionCredential: env.VITE_TESSERA_SESSION_CREDENTIAL ?? ''
