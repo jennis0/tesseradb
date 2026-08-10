@@ -208,8 +208,8 @@ plus the driver's headless suite in CI.
 - **D3 — delete the tile-addressed path** (`tile()`/`scheduleFlush`; verified consumers: two
   unit tests only) and record the rectangle-shaped supersession of the plan's tile-shaped
   Layer 1 in this document rather than repairing the vestige.
-- **D4 — the rename** `@tessera/viewer` → `tessera-vis`, aligning the package with the
-  boundary vocabulary.
+- **D4 — RULED 2026-08-10: no rename.** `tessera-vis` was a stand-in name; the package stays
+  `@tessera/viewer`. This document keeps "vis" as the boundary vocabulary only.
 - **D5 — the anticipation spend the re-arm unlocks.** Fixing the dead ring moves measured
   anticipation from ~0.05 bites per pause toward the designed ≤3 — up to ~60× today's ring
   spend, the fleet cost the look-ahead probe priced at roughly half again the server CPU per
@@ -247,4 +247,5 @@ produced Appendix M.
   D2 restated with the interaction-driven alternative and visibility as an injected input
   (F6); the presented-frame handle added so migration step 1 does not read viewer state (F7).
   Reviewer verdict: ready to bind after these changes; D3's deletion verified safe.
-- Owner decisions D1a–D5 open.
+- 2026-08-10: D4 ruled — no rename; the package stays `@tessera/viewer`.
+- Owner decisions D1a, D1b, D2, D3, D5 open (owner "generally on board").
