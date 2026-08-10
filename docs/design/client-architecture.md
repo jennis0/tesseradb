@@ -249,4 +249,6 @@ produced Appendix M.
   — minutes-scale staleness acceptable, latency-neutrality binding, timer (if any)
   configurable; D3 ruled — delete, with the tile-engine adapter story preserved over
   `fetch`/`read`.
-- **Open: D5** (anticipation spend posture — default budgets vs ramp behind measurement).
+- 2026-08-10: D5 ruled — **start at design budgets, then measure**: the restored ring ships
+  at its designed bites/byte budgets, and the first Appendix M re-measure judges the spend.
+- All decisions ruled. Phase 2 (§6 migration) begins.
