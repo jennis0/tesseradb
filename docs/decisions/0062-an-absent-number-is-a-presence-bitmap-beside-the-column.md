@@ -60,6 +60,16 @@ and §3.2); how merge, flush and the compaction fold carry it; and whether `/con
 a null numeric, which today it does not distinguish. Contracts R4 stays as written — the column
 remains non-nullable — and that is the point of the ruling rather than an exception to it.
 
+**The two halves are separable, and the order is deliberate** (owner, 2026-08-10). The *filter*
+half — keep the source's validity through the build, and let an absent number occupy no slot in the
+filter column, exactly as an absent string already does — is entirely server-side and fixes the
+wrong answer on its own. The *render* half is what needs the bitmap beside `columns.arrow`, a way to
+say "absent" in the points batch, and a client that understands it; it is **deferred while the
+client is under active development**. Until it lands, a render column continues to show zero for an
+absent number, and the two artefacts therefore disagree — the filter says an item has no score while
+the map draws it at 0. That is a narrowing disagreement rather than a leaking one (**I12**), and it
+is stated here so the first person to notice it finds it recorded rather than surprising.
+
 ## Evidence
 
 Stated at `write_column_values` (`crates/tessera-build/src/pipeline.rs`) and at

@@ -944,58 +944,95 @@ fn is_sidecar_deferred(rel: &str) -> bool {
     file == "ext-locator.u32" || (file.starts_with("external-ids-") && file.ends_with(".arrow"))
 }
 
-fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()> {
+/// Verify one named file's size and digest. The per-file half of [`verify_files`], split out so
+/// the sweep can run them concurrently.
+fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
+    let path = safe_join(base, rel_path)?;
+    // The path is still validated (above) even when its bytes are not read here, so an
+    // unsafe `files`-map key cannot hide behind the sidecar's deferral.
+    if is_sidecar_deferred(rel_path) {
+        return Ok(());
+    }
     // Read in fixed-size chunks, never whole: at 10^9 items `columns.arrow` alone is over 20 GB,
     // and slurping every file to hash it would make opening a bundle cost more memory than
-    // serving it. The verification itself is unchanged and unconditional — every named file is
-    // still read in full and hashed, because a bundle whose bytes were not checked is a bundle
-    // whose authorisation data was not checked (fail closed).
+    // serving it. One buffer per file rather than one per sweep, which is what lets the files run
+    // concurrently; at `DIGEST_CHUNK_BYTES` the transient is the buffer times the pool's width.
     let mut buffer = vec![0u8; DIGEST_CHUNK_BYTES];
-    for (rel_path, digest) in files {
-        let path = safe_join(base, rel_path)?;
-        // The path is still validated (above) even when its bytes are not read here, so an
-        // unsafe `files`-map key cannot hide behind the sidecar's deferral.
-        if is_sidecar_deferred(rel_path) {
-            continue;
-        }
-        let mut file = File::open(&path).map_err(|source| StoreError::Io {
+    let mut file = File::open(&path).map_err(|source| StoreError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(|source| StoreError::Io {
             path: path.clone(),
             source,
         })?;
-        let mut hasher = Sha256::new();
-        let mut size = 0u64;
-        loop {
-            let read = file.read(&mut buffer).map_err(|source| StoreError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            size += read as u64;
+        if read == 0 {
+            break;
         }
-        if size != digest.size {
-            return Err(StoreError::FileVerificationFailed {
-                path,
-                reason: format!(
-                    "size mismatch: manifest says {}, file is {size} bytes",
-                    digest.size
-                ),
-            });
-        }
-        let actual = hex_digest(hasher.finalize().as_slice());
-        if actual != digest.sha256 {
-            return Err(StoreError::FileVerificationFailed {
-                path,
-                reason: format!(
-                    "SHA-256 mismatch: manifest says {}, computed {actual}",
-                    digest.sha256
-                ),
-            });
-        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    if size != digest.size {
+        return Err(StoreError::FileVerificationFailed {
+            path,
+            reason: format!(
+                "size mismatch: manifest says {}, file is {size} bytes",
+                digest.size
+            ),
+        });
+    }
+    let actual = hex_digest(hasher.finalize().as_slice());
+    if actual != digest.sha256 {
+        return Err(StoreError::FileVerificationFailed {
+            path,
+            reason: format!(
+                "SHA-256 mismatch: manifest says {}, computed {actual}",
+                digest.sha256
+            ),
+        });
     }
     Ok(())
+}
+
+/// Hash every file the manifest names, in full, before the bundle is served.
+///
+/// The verification is unconditional — a bundle whose bytes were not checked is a bundle whose
+/// authorisation data was not checked (fail closed) — with one exemption, the external-ID sidecar
+/// ([`is_sidecar_deferred`]).
+///
+/// **The sweep is parallel because it is I/O-bound, not hash-bound, and the two have different
+/// remedies.** SHA-256 runs at ~2.3 GB/s on one core with the hardware extensions this CPU has, but
+/// a *serial* read-and-hash delivered only ~310–390 MB/s — so the serial sweep was leaving the
+/// device's queue depth idle, not the CPU. Measured over 4.46 GB in eight files: **11.4–15.0 s
+/// serial against 1.74–1.89 s across eight workers, 6.5–8×**, with the parallel rate landing at
+/// ~2.4–2.6 GB/s, which is the device rather than the hash. (Measured with `sha256sum` and
+/// `xargs -P`, so it sizes the effect rather than this code path exactly.) At 10⁹ with sixteen
+/// declared filter columns `attrs/` alone is ~64 GB, where that ratio is minutes against seconds.
+///
+/// **Deferring the value columns to first touch was considered and declined** (owner ruling,
+/// 2026-08-10). It would have paid off only for columns nobody filters on — every declared column
+/// is opened at generation build, so "first touch" has to mean *first scan* to buy anything, and
+/// that puts a multi-second hash of a 4 GB column on a request path budgeted at 0.5–1 s. The
+/// sidecar's deferral works because its extents are small; a value column is the largest artefact
+/// in the bundle. Parallelism takes the wall clock without touching the fail-closed rule, which is
+/// why `attrs/` is **not** in `is_sidecar_deferred` and contracts §2.4 owes no amendment for it.
+///
+/// **The error is deterministic and does not depend on which worker lost.** Results are collected
+/// and the failure reported is the first in the manifest's own (sorted) order, so a bundle with two
+/// corrupt files refuses with the same message on every run.
+fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()> {
+    use rayon::prelude::*;
+
+    files
+        .par_iter()
+        .map(|(rel_path, digest)| verify_one(base, rel_path, digest))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .find(|outcome| outcome.is_err())
+        .unwrap_or(Ok(()))
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

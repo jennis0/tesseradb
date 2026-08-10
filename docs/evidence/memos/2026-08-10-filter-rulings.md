@@ -234,6 +234,13 @@ below the note that supersedes them and read as current.
 
 ### R5b — Two further routes the viewport wants, and what they turn on
 
+> **Deferred, 2026-08-10 (owner): the client is under active development, and this is the one piece
+> of filter work that is entirely client API.** Everything below stands as the analysis; none of it
+> is built. The two routes add a request shape and a response column, so specifying them against a
+> surface that is still moving would fix the wrong half first. The rest of the filter queue is
+> unaffected — R5's project-vs-per-tile rule is server-internal, and so is the filter half of
+> [decision 0062](../../decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
+
 **Owner requirement, 2026-08-10.** The two routes above both answer *"which entities match?"* and
 hand back a set. A viewport wants two questions neither of them asks, and both exist to support
 **in-screen filtering and highlighted subsets** — changing what is emphasised without refetching the

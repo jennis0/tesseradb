@@ -1003,8 +1003,8 @@ attribute the IO, which is the axis this section's non-disruption argument is ma
 Opening a **folded** bundle costs what opening a built one costs, which is the objective: one
 `values.arrow` map per declared column, presence and postings where they exist, plus any
 carried-forward flight extents — and the digest sweep at O(bytes), dominated by the columns
-themselves (4 GB per `u32` column at 10⁹), whose first-touch deferral is §8's owed contracts
-amendment and not re-argued here. The fail-closed rules are already built and stay: a declared
+themselves (4 GB per `u32` column at 10⁹), which §8 takes in parallel rather than deferring and does
+not re-argue here. The fail-closed rules are already built and stay: a declared
 column whose files are missing refuses to open, an extent named but absent or short refuses, a
 digest mismatch refuses — never "those entities carry no value", the wrong answer in a right
 answer's clothes (§2.5). A fold changes which files those rules bind, never the rules.
@@ -1050,8 +1050,7 @@ regardless by the coalesce policy and the segment ceiling at 64.
 
 Amendments this design owes elsewhere, none of which it makes itself: compaction §2's table and §3's
 pass list gain the attribute pass and the band budget (normative — its own review); write-path §7
-and contracts §2.1's tree gain the coalesce's fourth axis and `coalesced/<id>/attrs/<column>/`; and
-§8's first-touch digest deferral remains contracts §2.4's owed amendment.
+and contracts §2.1's tree gain the coalesce's fourth axis and `coalesced/<id>/attrs/<column>/`.
 
 
 ## 7. Slices
@@ -1124,12 +1123,11 @@ declared column while the mapped path pays it for the columns actually scanned.
 > validation, and a corrupt offset pair would then reach `&bytes[lo..hi]` and panic on a request
 > path where today it refuses at open. It would also buy less than it appears to: `verify_files`
 > hashes every named file in full at open regardless, so Arrow's pass is the *second* read of bytes
-> already in cache. The change with the real win is §8's owed first-touch digest deferral, which
-> removes the first read — and that is an owner ruling, because it narrows a deliberate fail-closed
-> rule. **Note the asymmetry it turns on**: a corrupt *value column* can only narrow `M_sel`, since
-> the scan runs inside the candidate and **I12** holds structurally — but a corrupt *posting* now
-> feeds `/v1/categories`' `per_viewer` visibility predicate (decision 0061), which is a disclosure
-> control. Deferral is arguable for value columns and is not obviously safe for postings.
+> already in cache. Removing that first read by deferring the digest to first touch was **considered
+> and declined** (§8, owner ruling 2026-08-10): every declared column is opened at generation build,
+> so the deferral pays only for columns nobody filters on while charging a multi-second hash of a
+> 4 GB column to the first filter of every column somebody does. The sweep is parallelised instead,
+> which is where its wall clock actually went.
 >
 > **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
 > column here, and by decision 0061 they are now on the serving path for a `public` listing. That is
@@ -1158,17 +1156,24 @@ term rather than removing one, and every artefact this design adds joins the swe
 filterable column, which is the column's own size. Nothing here is small enough to ignore once `attrs/`
 exists.
 
-The corpus already holds the pattern: contracts deviation 9 defers the external-ID sidecar's digests to
-first touch, precisely because digesting it at open would reimpose the sequential read the deviation exists
-to remove. **`attrs/` takes the same deferral**, per file, with the digest checked on first touch before
-any borrowed view is constructed. Record-level validation stays on that first-touch path, which is what
-actually guards the unsafe zero-copy view; the build and each fold validate in full, where the cost is
-already being paid.
+The corpus holds a pattern that looks like the answer and is not: contracts deviation 9 defers the
+external-ID sidecar's digests to first touch, because digesting it at open would reimpose the sequential
+read the deviation exists to remove. **`attrs/` does not take that deferral** (owner ruling, 2026-08-10),
+and the reason is the difference in what "first touch" can mean for each. A sidecar extent is small and is
+opened only when a key falls in it. Every declared filter column, by contrast, is opened at generation
+build (§8) — so deferring to first *open* saves nothing, and deferring to first *scan* puts a multi-second
+hash of a 4 GB column on a request path budgeted at 0.5–1 s. The deferral would buy startup time only for
+columns nobody ever filters on, at the price of a stall on the first filter of every column that anyone
+does.
 
-**This changes the shared reader's contract, and that amendment is owed rather than assumed here.** The
-open-time validation the authorisation reader performs is named in its own safety argument, so relocating
-it is a change to contracts §2.4 and to that module's discharge of an `unsafe` block — not something a
-provisional filter design settles on its own.
+**The cost is taken with concurrency instead, because the sweep was never hash-bound.** SHA-256 runs at
+~2.3 GB/s on one core with the hardware extensions a current CPU has, while the serial sweep measured
+~310–390 MB/s: it was leaving the device's queue depth idle. Hashing the manifest's files in parallel
+measured **6.5–8×** over 4.46 GB (11.4–15.0 s serial against 1.74–1.89 s across eight workers), which puts
+`attrs/`'s share at 10⁹ back into seconds without moving a single byte off the open path. The fail-closed
+rule is therefore unchanged — every named file is still read in full and hashed before the bundle is
+served — and **contracts §2.4 owes no amendment**, the reader's open-time validation staying exactly where
+its `unsafe` safety argument names it.
 
 ---
 
