@@ -1,5 +1,6 @@
 //! The filter artefact's **write** side: the fold's attribute pass — merging a column's layers into
-//! one base — and the derived postings both producers emit through.
+//! one base — the coalesce's extent merge beside it, and the derived postings both producers emit
+//! through.
 //!
 //! # Why this is a crate rather than a module of `tessera-filter`
 //!
@@ -48,6 +49,20 @@
 //! one file an overlap among the inputs is internal to a single layer and invisible to that check
 //! for ever. So the merge checks the union's cardinality against the sum of its inputs' — O(the
 //! containers touched), before a value is written.
+//!
+//! # Two producers of one merge: the fold, and the coalesce
+//!
+//! [`fold_value_column`] and [`coalesce_attr_extents`] are the same linear merge under two
+//! different obligations, so they share it rather than each stating the checks above (§5.2's
+//! "attribute extents are the same shape as delta tiers, and take the same safety argument").
+//! What differs is small and worth naming, because getting either wrong is silent:
+//!
+//! - The fold **retires**: `D₀`'s entities are blanked. A coalesce **retires nothing** — removal is
+//!   Rule F's, and a deleted-but-unfolded entity's value rides through untouched (§5.2, §6).
+//! - The fold may write **no** presence bitmap, which is how a base column says "the entity id is
+//!   the array index". A coalesced extent always writes one: its entities start above the build's
+//!   high-water and need not be contiguous, so a positional read would pair every value with the
+//!   wrong entity (§2.5). The one file whose absence carries meaning is never absent here.
 //!
 //! # One postings emit, not two that agree
 //!
@@ -160,17 +175,77 @@ pub fn fold_value_column(
     values_path: &Path,
     presence_path: &Path,
 ) -> io::Result<bool> {
-    let Some(base) = layers.first() else {
-        return Err(invalid(
-            "the fold's attribute pass was given no layers for a column; a declared column always \
-             has at least its base",
-        ));
-    };
-    // **The family comes from the base column, not from the schema.** The fold rewrites what
-    // exists, and a kind re-derived from the declaration would silently re-type a column whose file
-    // says otherwise; a chunk that disagrees is refused by the writer, which is the second line.
-    let kind = ColumnKind::of(base.codes());
+    let (order, out_presence) = merge_order(layers, tombstones, "the fold's attribute pass")?;
+    // Dense from zero to the bound, and nothing looser: `card == bound` with `max == bound - 1`
+    // over a set of distinct `u32`s is exactly `[0, bound)`.
+    let universal = out_presence.cardinality() == u64::from(bound)
+        && (bound == 0 || out_presence.maximum() == Some(bound - 1));
+    write_merged(
+        layers,
+        &order,
+        tombstones,
+        values_path,
+        presence_path,
+        (!universal).then_some(&out_presence),
+    )?;
+    Ok(!universal)
+}
 
+/// One column's extents merged into one, for the entity-space coalesce (`filter-index.md` §5.2).
+///
+/// `inputs` is a window of one column's own extents, in any order — the merge sorts them by their
+/// entity ranges and refuses an interleaving, exactly as the fold's merge does. What is written is
+/// the same `(entity, value)` relation the inputs carried between them, in one values file and one
+/// presence bitmap: layers are unioned at composition, so their division into files is immaterial
+/// and the pass is a **content-preserving re-encode**.
+///
+/// **A coalesce retires nothing**, so there is no tombstone parameter to pass and no way to spell
+/// one: a deleted-but-unfolded entity's value rides through untouched, because removal is the
+/// fold's (Rule F, write-path §5.4). An extent's presence bitmap is always written, for the reason
+/// [`tessera_filter::write_extent`] gives.
+pub fn coalesce_attr_extents(
+    inputs: &[&ValueColumn],
+    values_path: &Path,
+    presence_path: &Path,
+) -> io::Result<()> {
+    if inputs.len() < 2 {
+        return Err(invalid(format!(
+            "the attribute coalesce was given {} extents; it collapses a window of a column's \
+             extents into one and there is nothing to collapse below two",
+            inputs.len()
+        )));
+    }
+    let (order, presence) = merge_order(inputs, &Bitmap::new(), "the attribute coalesce")?;
+    write_merged(
+        inputs,
+        &order,
+        &Bitmap::new(),
+        values_path,
+        presence_path,
+        Some(&presence),
+    )
+}
+
+/// The layers in the order the linear merge reads them, and the presence the merged column carries.
+///
+/// Both refusals live here rather than at either caller, and neither has a symptom if it is
+/// skipped — the values would be paired with the wrong entities from the first violation onwards,
+/// and every later filter would answer confidently and wrongly.
+///
+/// The empty layers are dropped rather than ordered: an extent for a column no flushed entity
+/// carried a value in is written anyway, so the file set is a function of the schema (§2.5), and
+/// such a layer has no entity range to sort by.
+fn merge_order(
+    layers: &[&ValueColumn],
+    tombstones: &Bitmap,
+    pass: &str,
+) -> io::Result<(Vec<(usize, Bitmap)>, Bitmap)> {
+    if layers.is_empty() {
+        return Err(invalid(format!(
+            "{pass} was given no layers for a column; a declared column always has at least its \
+             base"
+        )));
+    }
     let mut present: Vec<(usize, Bitmap)> = layers
         .iter()
         .enumerate()
@@ -184,9 +259,9 @@ pub fn fold_value_column(
     }
     if union.cardinality() != sum {
         return Err(invalid(format!(
-            "the fold's attribute pass was given layers claiming one entity twice: {} entities \
-             across the layers, {} distinct. Once they collapse into one file the overlap is \
-             invisible to the between-layer check for ever, so it is refused here",
+            "{pass} was given layers claiming one entity twice: {} entities across the layers, {} \
+             distinct. Once they collapse into one file the overlap is invisible to the \
+             between-layer check for ever, so it is refused here",
             sum,
             union.cardinality()
         )));
@@ -197,23 +272,35 @@ pub fn fold_value_column(
     for pair in present.windows(2) {
         let (before, after) = (&pair[0].1, &pair[1].1);
         if before.maximum() >= after.minimum() {
-            return Err(invalid(
-                "the fold's attribute pass was given interleaved layers: entity ids are issued \
-                 monotonically from the high-water (I9), so a layer's entities sit above every \
-                 earlier layer's and the merge is linear. Refused rather than sorted, because a \
-                 sort here would be papering over a broken allocator",
-            ));
+            return Err(invalid(format!(
+                "{pass} was given interleaved layers: entity ids are issued monotonically from the \
+                 high-water (I9), so a layer's entities sit above every earlier layer's and the \
+                 merge is linear. Refused rather than sorted, because a sort here would be papering \
+                 over a broken allocator"
+            )));
         }
     }
+    Ok((present, union.andnot(tombstones)))
+}
 
-    let out_presence = union.andnot(tombstones);
-    // Dense from zero to the bound, and nothing looser: `card == bound` with `max == bound - 1`
-    // over a set of distinct `u32`s is exactly `[0, bound)`.
-    let universal = out_presence.cardinality() == u64::from(bound)
-        && (bound == 0 || out_presence.maximum() == Some(bound - 1));
-
+/// Stream the ordered layers into one column, skipping `tombstones`.
+///
+/// `presence` is the file the reader will address by, or `None` where the caller's convention lets
+/// it be omitted — which is a base column dense from zero, and never an extent.
+fn write_merged(
+    layers: &[&ValueColumn],
+    order: &[(usize, Bitmap)],
+    tombstones: &Bitmap,
+    values_path: &Path,
+    presence_path: &Path,
+    presence: Option<&Bitmap>,
+) -> io::Result<()> {
+    // **The family comes from the first layer, not from the schema.** Both passes rewrite what
+    // exists, and a kind re-derived from the declaration would silently re-type a column whose file
+    // says otherwise; a chunk that disagrees is refused by the writer, which is the second line.
+    let kind = ColumnKind::of(layers[0].codes());
     let mut writer = ValueColumnWriter::create(values_path, presence_path, kind)?;
-    for (layer, layer_present) in &present {
+    for (layer, layer_present) in order {
         let codes = layers[*layer].codes();
         // The kept entities of this layer. A run of them is contiguous in entity space *and* in
         // slot space — every entity in it is present in this layer, so its slots are consecutive —
@@ -233,8 +320,7 @@ pub fn fold_value_column(
             }
         }
     }
-    writer.finish((!universal).then_some(&out_presence))?;
-    Ok(!universal)
+    writer.finish(presence)
 }
 
 /// `len` values from `start`, borrowed rather than copied: every arm is a window onto the layer's
@@ -553,6 +639,112 @@ mod tests {
         )
         .expect_err("an overlap is refused");
         assert!(err.to_string().contains("twice"), "{err}");
+    }
+
+    /// Coalesce `inputs` into one extent and open it back.
+    fn coalesce_to(dir: &Path, tag: &str, inputs: &[&ValueColumn]) -> io::Result<ValueColumn> {
+        let values = dir.join(format!("{tag}-values.arrow"));
+        let presence = dir.join(format!("{tag}-presence.roaring"));
+        coalesce_attr_extents(inputs, &values, &presence)?;
+        ValueColumn::open(&values, Some(&presence), false)
+    }
+
+    /// **A coalesced extent carries exactly the `(entity, value)` triples its inputs carried
+    /// between them**, which is the whole of §5.2's content-preserving claim — asserted over a
+    /// text column, where the merge has to rebase offsets rather than concatenate slices, and over
+    /// a *second* coalesce of the first's output, which is the recursion the per-column selection
+    /// unit is what makes free.
+    #[test]
+    fn a_coalesced_extent_carries_its_inputs_triples_and_coalesces_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Four extents, disjoint and ascending, with a gap between each — the shape a flush
+        // publishes, where the ids are issued from a high-water other slices also draw on.
+        let extent = |base: u32| {
+            let entities: Vec<u32> = (0..3).map(|k| base + k * 2).collect();
+            ValueColumn::partial(
+                Codes::text(
+                    entities
+                        .iter()
+                        .map(|e| format!("value-{e}"))
+                        .collect::<Vec<_>>(),
+                ),
+                bitmap(entities),
+            )
+            .expect("an extent")
+        };
+        let extents: Vec<ValueColumn> = [100u32, 200, 300, 400].into_iter().map(extent).collect();
+        let refs: Vec<&ValueColumn> = extents.iter().collect();
+
+        let first = coalesce_to(dir.path(), "first", &refs[..2]).expect("the coalesce");
+        let second = coalesce_to(dir.path(), "second", &refs[2..]).expect("the coalesce");
+        // The recursion: a coalesced extent is an extent like any other, and the next rung takes
+        // it identically.
+        let again = coalesce_to(dir.path(), "again", &[&first, &second]).expect("the recursion");
+
+        for column in [&first, &second, &again] {
+            for entity in column.present().iter() {
+                let expected = format!("value-{entity}");
+                assert_eq!(
+                    column.text_of(entity),
+                    Some(expected.as_str()),
+                    "entity {entity} reads back another entity's value"
+                );
+            }
+        }
+        let expected: Vec<u32> = extents
+            .iter()
+            .flat_map(|e| e.present().iter().collect::<Vec<_>>())
+            .collect();
+        assert_eq!(again.present().iter().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            first.present().or(&second.present()),
+            again.present(),
+            "the coalesced presence is the union of its inputs', which is what the replace \
+             composition then checks against"
+        );
+    }
+
+    /// **A coalesce retires nothing** (§5.2, §6): removal is the fold's, and a deleted entity is
+    /// still in the overlay rather than in any artefact — so its value must ride through untouched.
+    /// A pass that blanked here would be a third retirement route, which is how Rule S and Rule F
+    /// get conflated.
+    ///
+    /// **Fault injected:** pass a tombstone set through to `write_merged` from
+    /// `coalesce_attr_extents` and this fails on the missing entity.
+    #[test]
+    fn a_coalesce_carries_every_entitys_value_through_including_a_deleted_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first =
+            ValueColumn::partial(codes_u32(vec![10, 11]), bitmap([100, 101])).expect("an extent");
+        // Entity 200 is deleted-but-unfolded: it is in the overlay's `deleted` set, and no
+        // attribute artefact knows that or may act on it.
+        let second =
+            ValueColumn::partial(codes_u32(vec![20, 21]), bitmap([200, 201])).expect("an extent");
+        let out = coalesce_to(dir.path(), "kept", &[&first, &second]).expect("the coalesce");
+        assert_eq!(
+            out.present().iter().collect::<Vec<_>>(),
+            vec![100, 101, 200, 201]
+        );
+        assert_eq!(out.value_of(200).map(|c| c.raw()), Some(20));
+    }
+
+    /// **The duplicate-entity refusal is the coalesce's own too**, for the fold's reason: after the
+    /// merge the eight inputs are one layer, and `FilterColumns::compose`'s between-layer check can
+    /// never see the overlap again — so an I9 violation would be laundered into a clean-looking
+    /// artefact.
+    ///
+    /// **Fault injected:** drop the cardinality comparison in `merge_order` and this writes a file
+    /// holding one entity twice rather than refusing.
+    #[test]
+    fn two_extents_claiming_one_entity_are_refused_by_the_coalesce() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ValueColumn::partial(codes_u32(vec![1, 2]), bitmap([7, 8])).expect("an extent");
+        let clash = ValueColumn::partial(codes_u32(vec![9]), bitmap([8])).expect("an extent");
+        let err =
+            coalesce_to(dir.path(), "clash", &[&first, &clash]).expect_err("an overlap is refused");
+        assert!(err.to_string().contains("twice"), "{err}");
+        // And a single extent is not a window: the pass collapses several into one.
+        assert!(coalesce_to(dir.path(), "alone", &[&first]).is_err());
     }
 
     /// **Interleaved layers are refused rather than sorted.** The merge is linear because entity

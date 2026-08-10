@@ -1,12 +1,15 @@
 //! The **entity-space** coalesce: what a maintenance pass may bound without touching row space.
 //!
-//! Flush appends one delta tier, one external-id run, one locator extent and (when it promotes) one
-//! dictionary extent per tick. Three of those four are terms in a *steady-state* cost:
+//! Flush appends one delta tier, one external-id run, one locator extent, two files per filterable
+//! column and (when it promotes) one dictionary extent per tick. Four of those are terms in a
+//! *steady-state* cost:
 //!
 //! - a fragment build probes **every live tier** per satisfied term (`build_fragment_with_deltas`),
 //! - the ingest duplicate check and the drill-down scan **every run** whose bounds admit the key
 //!   (`ExternalIdSidecar::resolve`, `resolve_many`),
-//! - `Engine::open` reads **every dictionary extent**.
+//! - `Engine::open` reads **every dictionary extent**,
+//! - `FilterColumns::open` maps and composes **every attribute extent**, at a measured 28 ms per
+//!   column at 960 of them and ~31,000 files a day across sixteen columns (filter-index §5.1).
 //!
 //! At a 90 s tick that is ~960 of each per day of sustained ingest. Coalescing them is a
 //! **content-preserving re-encode** — the same postings, the same bindings, the same descriptors in
@@ -29,6 +32,13 @@
 //!   order, and a session's granted terms are resolved once at authorise and never re-resolved. The
 //!   window must be contiguous and land in place, or every ordinal after it shifts and a session
 //!   evaluates a term it was not granted.
+//! - **Attribute extents** take the tiers' argument, and the *unit* is the column: layers are
+//!   unioned at composition, so their division into files is immaterial, and what must not change
+//!   is the set of `(entity, column, value)` triples, which
+//!   [`tessera_filter_write::coalesce_attr_extents`] preserves exactly. The selection is per column
+//!   because that is the identity the format carries — an `AttrExtent` records no flush, and
+//!   filter-index §2.5 forbids recovering one from the path — and because it is what keeps one
+//!   heavy text column from stalling every other column's axis.
 //!
 //! ## What it must never take
 //!
@@ -43,13 +53,15 @@
 //! **A merge retires nothing.** No tombstone is applied and no posting is dropped for a deleted
 //! entity. A pass here that did either has left this module and entered compaction's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
 use tessera_store::coalesce_external_id_runs;
-use tessera_store::manifest::{DictExtent, FileDigest, LocatorExtent, SegmentsManifest};
+use tessera_store::manifest::{
+    AttrExtent, DictExtent, FileDigest, LocatorExtent, SegmentsManifest,
+};
 use tessera_store::merge::size_tier;
 
 /// The tag rule a coalesced tier's postings use. Same constant, same reason, as
@@ -105,11 +117,27 @@ pub(crate) struct CoalescePlan {
     pub(crate) locators: Vec<LocatorExtent>,
     /// Consumed `dict_extents` entries, in list order.
     pub(crate) dicts: Vec<DictExtent>,
+    /// Consumed `attr_extents` entries, one window per column. A pass may take a window in several
+    /// columns and publish them together, so this axis's file set is data-driven where a flush's is
+    /// a function of the schema — deliberately, and filter-index §5.2 says why: that property
+    /// belongs to the flush, where an operator predicts what ingest produces, not to a maintenance
+    /// pass that fires where the policy says there is work.
+    pub(crate) attrs: Vec<AttrWindow>,
+}
+
+/// One column's contiguous window of its own `attr_extents` subsequence.
+#[derive(Debug, Clone)]
+pub(crate) struct AttrWindow {
+    pub(crate) column: String,
+    pub(crate) extents: Vec<AttrExtent>,
 }
 
 impl CoalescePlan {
     pub(crate) fn is_empty(&self) -> bool {
-        self.tiers.is_empty() && self.runs.is_empty() && self.dicts.is_empty()
+        self.tiers.is_empty()
+            && self.runs.is_empty()
+            && self.dicts.is_empty()
+            && self.attrs.is_empty()
     }
 }
 
@@ -142,7 +170,7 @@ pub(crate) fn plan_coalesce(
     };
 
     // ---- tiers: any contiguous same-tier window, because a union has no order ----------------
-    if let Some(window) = select_window(&manifest.deltas, policy, |rel| {
+    if let Some(window) = select_window(&manifest.deltas, policy.width, policy, |rel| {
         (!is_build(rel)).then(|| size_of(rel))
     }) {
         plan.tiers = manifest.deltas[window].to_vec();
@@ -161,7 +189,12 @@ pub(crate) fn plan_coalesce(
         (!is_build(&extent.path) && !is_build(&extent.external_id_run))
             .then(|| size_of(&extent.path) + size_of(&extent.external_id_run))
     };
-    if let Some(window) = select_window(&manifest.locator_extents, policy, locator_size) {
+    if let Some(window) = select_window(
+        &manifest.locator_extents,
+        policy.width,
+        policy,
+        locator_size,
+    ) {
         let extents = &manifest.locator_extents[window];
         let adjacent = extents
             .windows(2)
@@ -180,17 +213,59 @@ pub(crate) fn plan_coalesce(
     }
 
     // ---- dictionary extents: contiguous and in place, because ordinals are positions ----------
-    if let Some(window) = select_window(&manifest.dict_extents, policy, |extent: &DictExtent| {
-        (!is_build(&extent.path)).then(|| size_of(&extent.path))
-    }) {
+    if let Some(window) = select_window(
+        &manifest.dict_extents,
+        policy.width,
+        policy,
+        |extent: &DictExtent| (!is_build(&extent.path)).then(|| size_of(&extent.path)),
+    ) {
         plan.dicts = manifest.dict_extents[window].to_vec();
+    }
+
+    // ---- attribute extents: per column, over that column's own subsequence -------------------
+    //
+    // **No build guard, and none is possible to want.** A built bundle's `attr_extents` is empty
+    // (`SegmentsManifest::attr_extents`): the build writes each column's *base*, which is named in
+    // `MANIFEST.files`, and only a flush or an earlier coalesce writes an extent. So every entry
+    // here is already the pass's to take, and a coalesced one is another entry in the same
+    // subsequence — which is the whole of what makes the recursion free.
+    let mut by_column: BTreeMap<&str, Vec<&AttrExtent>> = BTreeMap::new();
+    for extent in &manifest.attr_extents {
+        by_column
+            .entry(extent.column.as_str())
+            .or_default()
+            .push(extent);
+    }
+    for (column, extents) in by_column {
+        let size = |extent: &&AttrExtent| Some(size_of(&extent.values) + size_of(&extent.presence));
+        // **The width narrows to fit the input cap, and for no other reason.** The cap bounds the
+        // pass transient — the window's values and presence held during the merge — and it applies
+        // per column, so a text column whose values outgrow it stalls *itself* and never its
+        // neighbours. Below the policy's width nothing is selected at all, exactly as on every
+        // other axis: the narrowing answers "this column's extents are too big", never "this
+        // column has too few", which would coalesce pairs at every tick for ever.
+        let uncapped = CoalescePolicy {
+            max_input_bytes: u64::MAX,
+            ..policy
+        };
+        let selected = select_window(&extents, policy.width, uncapped, size).and_then(|_| {
+            (2..=policy.width)
+                .rev()
+                .find_map(|width| select_window(&extents, width, policy, size))
+        });
+        if let Some(window) = selected {
+            plan.attrs.push(AttrWindow {
+                column: column.to_string(),
+                extents: extents[window].iter().map(|e| (*e).clone()).collect(),
+            });
+        }
     }
 
     (!plan.is_empty()).then_some(plan)
 }
 
-/// The first window of `policy.width` consecutive entries that are all eligible, share one size
-/// tier, and total within `policy.max_input_bytes`.
+/// The first window of `width` consecutive entries that are all eligible, share one size tier, and
+/// total within `policy.max_input_bytes`.
 ///
 /// `size_of` returns `None` for an entry this axis may not take — the build's own artefacts —
 /// which both excludes it and breaks the window, so a selection can never straddle one.
@@ -198,16 +273,20 @@ pub(crate) fn plan_coalesce(
 /// **The first qualifying window wins, not the best one**, for the reason `MergePolicy::select`
 /// gives: this is idempotent work on a cadence, and a policy nobody can predict from the manifest
 /// costs more than a marginally better choice buys.
+///
+/// `width` is a parameter rather than `policy.width` throughout because the attribute axis narrows
+/// it to fit its per-column input cap; every other axis passes the policy's own.
 fn select_window<T>(
     entries: &[T],
+    width: usize,
     policy: CoalescePolicy,
     size_of: impl Fn(&T) -> Option<u64>,
 ) -> Option<std::ops::Range<usize>> {
-    if entries.len() < policy.width {
+    if width < 2 || entries.len() < width {
         return None;
     }
-    for start in 0..=entries.len() - policy.width {
-        let window = &entries[start..start + policy.width];
+    for start in 0..=entries.len() - width {
+        let window = &entries[start..start + width];
         let Some(sizes) = window.iter().map(&size_of).collect::<Option<Vec<u64>>>() else {
             continue;
         };
@@ -221,7 +300,7 @@ fn select_window<T>(
         if sizes.iter().sum::<u64>() > policy.max_input_bytes {
             continue;
         }
-        return Some(start..start + policy.width);
+        return Some(start..start + width);
     }
     None
 }
@@ -246,8 +325,18 @@ pub(crate) struct CompletedCoalesce {
     /// The coalesced run's path, and the locator extent covering the consumed extents' union span.
     pub(crate) run: Option<(String, LocatorExtent)>,
     pub(crate) dict: Option<DictExtent>,
+    /// One coalesced extent per window the attribute axis took, **opened** — so publication is a
+    /// pointer push on the executor and cannot fail on IO after the manifest edit, which is
+    /// `crate::flush::FlushedExtent`'s precedent.
+    pub(crate) attrs: Vec<CoalescedAttr>,
     /// Every file this pass wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: BTreeMap<String, FileDigest>,
+}
+
+/// One column's window collapsed into one extent: the manifest entry it becomes, and the reader.
+pub(crate) struct CoalescedAttr {
+    pub(crate) extent: AttrExtent,
+    pub(crate) values: Arc<tessera_filter::ValueColumn>,
 }
 
 /// Why a coalesce produced nothing. **Every failure is "nothing happened, retry next tick"**: the
@@ -345,12 +434,63 @@ pub(crate) fn execute_coalesce(
         })
     };
 
+    // ---- attribute extents: one merged extent per window, under `coalesced/<id>/attrs/<column>/`
+    //
+    // The placement is contracts §2.1's existing precedent for entity-space output belonging to no
+    // segment — the coalesced tier and run already live here — and the never-reused `<id>` is what
+    // stops two passes truncating each other's mapped files. No format change follows:
+    // `attr_extents` names paths and never a path convention (filter-index §2.5).
+    let mut attrs = Vec::with_capacity(plan.attrs.len());
+    for window in &plan.attrs {
+        let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
+        let column_dir = ctx.prefix_dir.join(&column_rel);
+        std::fs::create_dir_all(&column_dir)
+            .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
+        // Mapped, as the flush and the fold map theirs: the merge streams each input's values once
+        // and never holds a column, so what resides is what it touches.
+        let inputs: Vec<tessera_filter::ValueColumn> = window
+            .extents
+            .iter()
+            .map(|extent| {
+                tessera_filter::open_extent(
+                    &ctx.prefix_dir.join(&extent.values),
+                    &ctx.prefix_dir.join(&extent.presence),
+                    true,
+                )
+            })
+            .collect::<std::io::Result<_>>()
+            .map_err(|e| CoalesceFailed(format!("attr extent for '{}': {e}", window.column)))?;
+        let refs: Vec<&tessera_filter::ValueColumn> = inputs.iter().collect();
+
+        let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
+        let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
+        let values_path = ctx.prefix_dir.join(&values_rel);
+        let presence_path = ctx.prefix_dir.join(&presence_rel);
+        tessera_filter_write::coalesce_attr_extents(&refs, &values_path, &presence_path)
+            .map_err(|e| CoalesceFailed(format!("attr coalesce for '{}': {e}", window.column)))?;
+        files.insert(values_rel.clone(), digest_of(&values_path)?);
+        files.insert(presence_rel.clone(), digest_of(&presence_path)?);
+        // Reopened here, on the pool, so the executor's publication is a pointer push — the same
+        // reason a flush opens its extents on the pool.
+        let values = tessera_filter::open_extent(&values_path, &presence_path, true)
+            .map_err(|e| CoalesceFailed(format!("coalesced attr extent: {e}")))?;
+        attrs.push(CoalescedAttr {
+            extent: AttrExtent {
+                column: window.column.clone(),
+                values: values_rel,
+                presence: presence_rel,
+            },
+            values: Arc::new(values),
+        });
+    }
+
     Ok(CompletedCoalesce {
         plan,
         prefix: ctx.prefix,
         tier,
         run,
         dict,
+        attrs,
         files,
     })
 }
@@ -388,13 +528,47 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         Some(at) => at,
         None => return false,
     };
+    // **Per column, within that column's own subsequence.** Every other axis is a contiguous window
+    // of one list; this one is a contiguous window of a *filtered* list, because `attr_extents`
+    // interleaves the columns a flush publishes for. The rebase therefore checks the window is
+    // still contiguous in the subsequence — not in the whole list, which a flush publishing another
+    // column's extent mid-window would break for no reason.
+    if plan.attrs.len() != completed.attrs.len() {
+        return false;
+    }
+    let mut attr_positions: Vec<Vec<usize>> = Vec::with_capacity(completed.attrs.len());
+    for window in &plan.attrs {
+        let subsequence: Vec<usize> = manifest
+            .attr_extents
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.column == window.column)
+            .map(|(i, _)| i)
+            .collect();
+        let listed: Vec<&str> = subsequence
+            .iter()
+            .map(|i| manifest.attr_extents[*i].values.as_str())
+            .collect();
+        let consumed: Vec<&str> = window.extents.iter().map(|e| e.values.as_str()).collect();
+        let Some(at) = window_of(&listed, &consumed, |s| s) else {
+            return false;
+        };
+        attr_positions.push(subsequence[at].to_vec());
+    }
 
+    let attr_paths: Vec<String> = plan
+        .attrs
+        .iter()
+        .flat_map(|w| w.extents.iter())
+        .flat_map(|e| [e.values.clone(), e.presence.clone()])
+        .collect();
     for rel in plan
         .tiers
         .iter()
         .chain(&plan.runs)
         .chain(&locator_paths)
         .chain(&dict_paths)
+        .chain(&attr_paths)
     {
         manifest.files.remove(rel);
     }
@@ -414,6 +588,32 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
     }
     if let Some(extent) = &completed.dict {
         manifest.dict_extents.splice(dicts, [extent.clone()]);
+    }
+    if !completed.attrs.is_empty() {
+        // **Both obligations in one manifest write, and doing one is worse than doing neither**
+        // (filter-index §6.2): the files above and this list. A bundle whose `attr_extents` lost a
+        // window whose bytes were written opens cleanly and answers filters missing every entity
+        // that window held — a wrong answer with no symptom.
+        //
+        // Each coalesced entry lands where its window began. Nothing reads `attr_extents` by
+        // position — the layers are unioned — but a manifest whose bytes depend on when a pass ran
+        // is a bundle identity that does.
+        let removed: BTreeSet<usize> = attr_positions.iter().flatten().copied().collect();
+        let inserts: BTreeMap<usize, &AttrExtent> = attr_positions
+            .iter()
+            .zip(&completed.attrs)
+            .map(|(positions, attr)| (positions[0], &attr.extent))
+            .collect();
+        let mut next = Vec::with_capacity(manifest.attr_extents.len());
+        for (i, extent) in manifest.attr_extents.iter().enumerate() {
+            if let Some(coalesced) = inserts.get(&i) {
+                next.push((*coalesced).clone());
+            }
+            if !removed.contains(&i) {
+                next.push(extent.clone());
+            }
+        }
+        manifest.attr_extents = next;
     }
     true
 }
@@ -533,8 +733,53 @@ mod tests {
                 path: format!("{seg}/terms-0.dict"),
                 records: 1,
             });
+            // Two filterable columns, both extended by every flush — so the list interleaves them
+            // exactly as a flush leaves it, and a selection that read the list rather than a
+            // column's own subsequence would take one of each.
+            for column in COLUMNS {
+                let extent = attr_extent_at(PARTITION, column, &format!("flush-{i}-1"));
+                manifest.files.insert(extent.values.clone(), digest(1024));
+                manifest.files.insert(extent.presence.clone(), digest(64));
+                manifest.attr_extents.push(extent);
+            }
         }
         (manifest, build_files)
+    }
+
+    /// The two filterable columns every fixture manifest carries extents for.
+    const COLUMNS: [&str; 2] = ["title", "department"];
+
+    fn attr_extent_at(partition: &str, column: &str, flush: &str) -> AttrExtent {
+        let dir = format!("partitions/{partition}/attrs/{column}/extents");
+        AttrExtent {
+            column: column.to_string(),
+            values: format!("{dir}/{flush}.arrow"),
+            presence: format!("{dir}/{flush}.roaring"),
+        }
+    }
+
+    /// A completed pass carrying one coalesced extent per planned window, with an opened column
+    /// standing in for the merged one. The reader is real — an empty extent is still a column —
+    /// because `CompletedCoalesce` carries the opened reader and a double there would be a second
+    /// definition of what an extent is.
+    fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<CoalescedAttr> {
+        plan.attrs
+            .iter()
+            .map(|window| CoalescedAttr {
+                extent: AttrExtent {
+                    column: window.column.clone(),
+                    values: format!("{out_rel}/attrs/{}/values.arrow", window.column),
+                    presence: format!("{out_rel}/attrs/{}/presence.roaring", window.column),
+                },
+                values: Arc::new(
+                    tessera_filter::ValueColumn::partial(
+                        tessera_filter::Codes::text(Vec::<String>::new()),
+                        croaring::Bitmap::new(),
+                    )
+                    .expect("an empty extent"),
+                ),
+            })
+            .collect()
     }
 
     /// **The build's own artefacts are never taken**, on any axis. Rewriting a file
@@ -615,6 +860,7 @@ mod tests {
         let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy).expect("a plan");
 
         let dir = tempfile::TempDir::new().unwrap();
+        let attrs = completed_attrs(&plan, "c");
         let completed = CompletedCoalesce {
             tier: Some(tier_at(dir.path())),
             run: Some((
@@ -630,6 +876,7 @@ mod tests {
                 path: "c/terms-0.dict".to_string(),
                 records: 3,
             }),
+            attrs,
             files: [("c/delta.arrow".to_string(), digest(3072))]
                 .into_iter()
                 .collect(),
@@ -659,6 +906,174 @@ mod tests {
         );
     }
 
+    /// **The attribute axis selects per column, over that column's own subsequence.**
+    ///
+    /// The selection unit is the column because that is the identity the format carries — an
+    /// `AttrExtent` records no flush, and filter-index §2.5 forbids recovering one from the path.
+    ///
+    /// **Mutation:** select over `attr_extents` as one list and each window holds both columns'
+    /// extents, which the merge then refuses as interleaved — after the pass has done its IO.
+    #[test]
+    fn the_attribute_axis_selects_a_window_of_each_columns_own_extents() {
+        let (manifest, build_files) = manifest_with(4);
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert_eq!(plan.attrs.len(), 2, "one window per column");
+        for window in &plan.attrs {
+            assert_eq!(window.extents.len(), 3, "the policy's width, per column");
+            assert!(
+                window.extents.iter().all(|e| e.column == window.column),
+                "a window took another column's extent: {:?}",
+                window.extents
+            );
+        }
+    }
+
+    /// **The input cap applies per column, and narrows the window rather than stalling the axis.**
+    ///
+    /// The cap bounds the pass transient — the window's values and presence held during the
+    /// merge — so a text column whose values outgrow it must stall *itself* and never its
+    /// neighbours; and where it can still take a narrower window it takes one, because reverting to
+    /// unbounded file growth is the failure this axis exists to prevent.
+    #[test]
+    fn a_column_over_the_input_cap_narrows_its_window_and_stalls_only_itself() {
+        let (mut manifest, build_files) = manifest_with(4);
+        let mut policy = policy();
+        policy.max_input_bytes = 5 << 20;
+        // `title`'s extents are 2 MiB each: three exceed the cap, two do not. Same size tier
+        // throughout, so it is the cap doing the narrowing and not the ladder.
+        for extent in manifest.attr_extents.iter().filter(|e| e.column == "title") {
+            manifest
+                .files
+                .insert(extent.values.clone(), digest(2 << 20));
+        }
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy).expect("a plan");
+        let window = |column: &str| {
+            plan.attrs
+                .iter()
+                .find(|w| w.column == column)
+                .map(|w| w.extents.len())
+        };
+        assert_eq!(window("title"), Some(2), "narrowed to what fits the cap");
+        assert_eq!(window("department"), Some(3), "the neighbour is unaffected");
+
+        // And a column one extent of which alone exceeds the cap is genuinely uncoalesceable: it
+        // waits for the fold rather than being coalesced over the bound it was given.
+        policy.max_input_bytes = 1 << 20;
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy).expect("a plan");
+        assert!(
+            !plan.attrs.iter().any(|w| w.column == "title"),
+            "a column whose single extent exceeds the cap must not be selected"
+        );
+    }
+
+    /// **Both obligations land in one manifest edit: the files and the `attr_extents` entries.**
+    ///
+    /// Doing one without the other yields a bundle that opens cleanly and answers filters missing
+    /// every entity the consumed window held — a wrong answer with no symptom, and strictly worse
+    /// than a refusal to open (filter-index §6.2).
+    ///
+    /// **Mutation:** drop the `attr_paths` chain from the `files` removal and the consumed digests
+    /// stand; drop the `attr_extents` rebuild and the manifest names the coalesced bytes nowhere.
+    #[test]
+    fn a_coalesced_attr_extent_replaces_its_window_in_both_halves_of_the_manifest() {
+        let (mut manifest, build_files) = manifest_with(4);
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        let consumed: Vec<String> = plan
+            .attrs
+            .iter()
+            .flat_map(|w| w.extents.iter())
+            .flat_map(|e| [e.values.clone(), e.presence.clone()])
+            .collect();
+        let out_rel = "partitions/p0/coalesced/coalesce-1-1";
+        let attrs = completed_attrs(&plan, out_rel);
+        let files: BTreeMap<String, FileDigest> = attrs
+            .iter()
+            .flat_map(|a| {
+                [
+                    (a.extent.values.clone(), digest(3072)),
+                    (a.extent.presence.clone(), digest(96)),
+                ]
+            })
+            .collect();
+        let dir = tempfile::TempDir::new().unwrap();
+        let completed = CompletedCoalesce {
+            tier: Some(tier_at(dir.path())),
+            run: None,
+            dict: None,
+            attrs,
+            files,
+            plan,
+            prefix: "v00000".to_string(),
+        };
+        assert!(rebase_into(&mut manifest, &completed));
+
+        for column in COLUMNS {
+            let listed: Vec<&AttrExtent> = manifest
+                .attr_extents
+                .iter()
+                .filter(|e| e.column == column)
+                .collect();
+            assert_eq!(
+                listed.len(),
+                2,
+                "3 extents became 1, 1 untouched: {listed:?}"
+            );
+            assert_eq!(
+                listed[0].values,
+                format!("{out_rel}/attrs/{column}/values.arrow"),
+                "the coalesced extent takes the window's position in its column's subsequence"
+            );
+        }
+        for rel in &consumed {
+            assert!(
+                !manifest.files.contains_key(rel),
+                "a consumed extent file is still digested: {rel}"
+            );
+        }
+        for attr in &completed.attrs {
+            for rel in [&attr.extent.values, &attr.extent.presence] {
+                assert!(
+                    manifest.files.contains_key(rel),
+                    "the coalesced extent's bytes are named in `attr_extents` but not digested: \
+                     {rel}"
+                );
+            }
+        }
+    }
+
+    /// A window a flush has since moved out from under no longer rebases — and a flush that
+    /// *appends* another column's extent mid-list does not disturb it, because the contiguity that
+    /// matters is contiguity in the column's own subsequence.
+    #[test]
+    fn an_attr_window_rebases_through_another_columns_flush_but_not_through_its_own() {
+        let (mut manifest, build_files) = manifest_with(4);
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        let dir = tempfile::TempDir::new().unwrap();
+        let attrs = completed_attrs(&plan, "c");
+        let completed = CompletedCoalesce {
+            tier: Some(tier_at(dir.path())),
+            run: None,
+            dict: None,
+            attrs,
+            files: BTreeMap::new(),
+            plan,
+            prefix: "v00000".to_string(),
+        };
+
+        // Another column's extent, inserted between two of `title`'s — which is precisely what a
+        // flush publishing both columns produces, and must not discard the pass.
+        let mut interleaved = manifest.clone();
+        interleaved
+            .attr_extents
+            .insert(1, attr_extent_at(PARTITION, "elsewhere", "flush-9-1"));
+        assert!(rebase_into(&mut interleaved, &completed));
+
+        // Its own extent gone, however, is the state the plan was made against being gone.
+        let consumed = completed.plan.attrs[0].extents[1].values.clone();
+        manifest.attr_extents.retain(|e| e.values != consumed);
+        assert!(!rebase_into(&mut manifest, &completed));
+    }
+
     /// A plan whose window is gone no longer rebases, and the publication is discarded rather than
     /// forced — its files orphans nothing references, every consumed entry still standing.
     #[test]
@@ -666,10 +1081,12 @@ mod tests {
         let (mut manifest, build_files) = manifest_with(3);
         let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
         let dir = tempfile::TempDir::new().unwrap();
+        let attrs = completed_attrs(&plan, "c");
         let completed = CompletedCoalesce {
             tier: Some(tier_at(dir.path())),
             run: None,
             dict: None,
+            attrs,
             files: BTreeMap::new(),
             plan,
             prefix: "v00000".to_string(),

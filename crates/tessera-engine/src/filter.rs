@@ -262,7 +262,7 @@ enum Route {
 /// re-open it.
 #[derive(Debug, Clone)]
 struct Layers {
-    layers: Vec<Arc<ValueColumn>>,
+    layers: Vec<Layer>,
     /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
     /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
     covered: Bitmap,
@@ -280,6 +280,37 @@ struct Layers {
     /// for.
     postings: Option<Arc<ColumnPostings>>,
     route: Route,
+}
+
+/// One layer of a column, and the manifest entry it came from.
+///
+/// **The path is carried because a coalesce replaces layers by name** (`filter-index.md` §5.2). A
+/// `ValueColumn` has no identity of its own, so a pass that consumed eight of a column's extents
+/// could not otherwise say which eight of the live generation's layers its output stands for —
+/// and matching them by presence instead would be circular, since presence equality is exactly the
+/// property [`FilterColumns::with_coalesced`] is checking.
+///
+/// `None` is the build's base column, which is named in `MANIFEST.files` rather than in
+/// `attr_extents` and which no entity-space pass may take (`crate::coalesce`'s module doc).
+#[derive(Debug, Clone)]
+struct Layer {
+    values_rel: Option<String>,
+    values: Arc<ValueColumn>,
+}
+
+/// One column's window of extents, and the coalesced extent that replaces them.
+///
+/// Named by the manifest's own paths on both sides, which is what makes the replace ABA-safe
+/// against the flushes that published while the pass ran: a `seg_id` and the paths derived from it
+/// are never reused (contracts §2.1), so a path still listed at publication is still the same bytes.
+#[derive(Debug, Clone)]
+pub struct CoalescedWindow {
+    pub column: String,
+    /// The consumed extents' values paths, as `attr_extents` names them.
+    pub consumed: Vec<String>,
+    /// The coalesced extent's values path.
+    pub values_rel: String,
+    pub values: Arc<ValueColumn>,
 }
 
 /// Why a filter could not be answered.
@@ -422,7 +453,10 @@ impl FilterColumns {
             columns.insert(
                 scalar.name.clone(),
                 Layers {
-                    layers: vec![base],
+                    layers: vec![Layer {
+                        values_rel: None,
+                        values: base,
+                    }],
                     covered,
                     filterable: scalar.filter,
                     postings,
@@ -437,7 +471,7 @@ impl FilterColumns {
                 &prefix_dir.join(&extent.presence),
                 mmap,
             )?;
-            open.compose(&extent.column, Arc::new(column))?;
+            open.compose(&extent.column, &extent.values, Arc::new(column))?;
         }
         Ok(open)
     }
@@ -449,7 +483,12 @@ impl FilterColumns {
     /// the overlap is unreachable — which is exactly why it is checked here rather than reasoned
     /// about at the call site: if I9 ever failed, the symptom would be an entity matching two
     /// values at once and a filter naming either returning it, with nothing to notice.
-    fn compose(&mut self, column: &str, extent: Arc<ValueColumn>) -> std::io::Result<()> {
+    fn compose(
+        &mut self,
+        column: &str,
+        values_rel: &str,
+        extent: Arc<ValueColumn>,
+    ) -> std::io::Result<()> {
         let Some(layers) = self.columns.get_mut(column) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -471,29 +510,122 @@ impl FilterColumns {
             ));
         }
         layers.covered |= present;
-        layers.layers.push(extent);
+        layers.layers.push(Layer {
+            values_rel: Some(values_rel.to_string()),
+            values: extent,
+        });
         Ok(())
     }
 
     /// This generation's columns with one flush's extents added — the successor generation's.
     ///
     /// Cheap by construction: the base columns are `Arc`s, so a flush that published one entity
-    /// clones pointers rather than re-opening a memory-mapped column per declared attribute.
+    /// clones pointers rather than re-opening a memory-mapped column per declared attribute. Each
+    /// extent is `(column, values path, opened column)`, the path being what the manifest names it
+    /// by and what a later coalesce replaces it by.
     pub fn with_extents(
         &self,
-        extents: &[(String, Arc<ValueColumn>)],
+        extents: &[(String, String, Arc<ValueColumn>)],
     ) -> std::io::Result<FilterColumns> {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
         };
-        for (column, extent) in extents {
-            next.compose(column, Arc::clone(extent))?;
+        for (column, values_rel, extent) in extents {
+            next.compose(column, values_rel, Arc::clone(extent))?;
+        }
+        Ok(next)
+    }
+
+    /// This generation's columns with each window of extents **replaced** by the one that carries
+    /// their values — the successor generation's, after an entity-space coalesce (§5.2).
+    ///
+    /// **Replace is not append, and its correctness condition is a different one.** Appending
+    /// checks the new layer is disjoint from what is covered; replacing N layers with one must
+    /// check that the replacement's presence **equals** the union of the ones it consumes. Without
+    /// that, `covered` drifts — the coalesced layer's entities are removed from it with the
+    /// consumed layers and added back only as far as the replacement reaches — and every later
+    /// disjointness check tests against the wrong coverage, silently. The merge's own
+    /// duplicate-entity guard (`tessera_filter_write::coalesce_attr_extents`) makes the mismatch
+    /// unreachable, which is exactly why it is cheap to verify and wrong to assume.
+    ///
+    /// A consumed layer this generation does not hold is a refusal rather than a no-op: the plan
+    /// was made against a manifest, so a layer it names and this process cannot find means the two
+    /// disagree about what the bundle is, and publishing on that basis would serve a column short
+    /// of a window's worth of entities.
+    pub fn with_coalesced(&self, windows: &[CoalescedWindow]) -> std::io::Result<FilterColumns> {
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+        };
+        for window in windows {
+            let Some(layers) = next.columns.get_mut(&window.column) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a coalesce names column '{}', which this generation does not hold",
+                        window.column
+                    ),
+                ));
+            };
+            let mut union = Bitmap::new();
+            for rel in &window.consumed {
+                let Some(layer) = layers
+                    .layers
+                    .iter()
+                    .find(|l| l.values_rel.as_deref() == Some(rel.as_str()))
+                else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "a coalesce for column '{}' consumed extent '{rel}', which this \
+                             generation holds no layer for",
+                            window.column
+                        ),
+                    ));
+                };
+                union |= layer.values.present();
+            }
+            if union != window.values.present() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "the coalesced extent for column '{}' is present for {} entities where the \
+                         {} layers it replaces cover {}; replacing on that would leave the \
+                         column's coverage wrong and every later disjointness check testing \
+                         against it",
+                        window.column,
+                        window.values.present().cardinality(),
+                        window.consumed.len(),
+                        union.cardinality()
+                    ),
+                ));
+            }
+            layers.layers.retain(|l| {
+                l.values_rel
+                    .as_ref()
+                    .is_none_or(|rel| !window.consumed.contains(rel))
+            });
+            layers.layers.push(Layer {
+                values_rel: Some(window.values_rel.clone()),
+                values: Arc::clone(&window.values),
+            });
+            // `covered` is unchanged by construction — the equality above is what says so — so it
+            // is neither recomputed nor adjusted here.
         }
         Ok(next)
     }
 
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
+    }
+
+    /// How many layers this generation serves `column` from — the base plus one per live extent.
+    ///
+    /// **This is where the coalesce's bound is realised, and the manifest is not.** A pass that
+    /// edited the manifest without replacing the live layers would be a bound that arrives only at
+    /// the next restart, which is exactly what `tessera_engine`'s tier-list assertion exists to
+    /// catch on the delta axis.
+    pub fn layer_count(&self, column: &str) -> Option<usize> {
+        self.columns.get(column).map(|c| c.layers.len())
     }
 
     /// Entities in `candidate` whose value for `column` satisfies `operand`.
@@ -531,15 +663,19 @@ impl FilterColumns {
                     detail: e.to_string(),
                 })?
                 .and(candidate);
-            for layer in &column.layers[1..] {
-                out |= scan(layer, operand, candidate);
+            // Every layer that is *not* the base, which is the one the postings cover. Selected by
+            // the absence of a manifest path rather than by position: a coalesce replaces a window
+            // of extents with one layer appended at the end, so "the base is layer 0" would hold
+            // today and stop holding the first time the list is rewritten.
+            for layer in column.layers.iter().filter(|l| l.values_rel.is_some()) {
+                out |= scan(&layer.values, operand, candidate);
             }
             return Ok(out);
         }
 
         let mut out = Bitmap::new();
-        for values in &column.layers {
-            out |= scan(values, operand, candidate);
+        for layer in &column.layers {
+            out |= scan(&layer.values, operand, candidate);
         }
         Ok(out)
     }
@@ -571,7 +707,8 @@ impl FilterColumns {
             .ok_or_else(|| FilterError::MembershipUnavailable(column.to_string()))?;
 
         let mut from_extents = FxHashSet::default();
-        for layer in &layers.layers[1..] {
+        for layer in layers.layers.iter().filter(|l| l.values_rel.is_some()) {
+            let layer = &layer.values;
             for entity in layer.present().and(candidate).iter() {
                 if let Some(code) = layer.value_of(entity) {
                     from_extents.insert(code.raw());

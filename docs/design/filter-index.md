@@ -13,11 +13,12 @@ track; §6.2 names the dependency). **§6.3's rulings are all made** (owner, 202
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
 wire surface (`/v1/meta`'s operand list, the viewport's filter expression, the boolean tree) — and
-the **whole write side bar the coalesce**: a flush appends one extent per filterable column and the
-reader composes base with extents (§5), and the **fold's attribute pass** folds those extents back
-into one base, blanks the deleted entities and rebuilds the derived postings (§6.2). What remains
-unbuilt is the **extent coalesce** (§5.2), which is what bounds the file count *between* folds, and
-two operands: lists, `none_of` and `match` are specified and refuse by name. Marked at each claim.
+the **whole write side**: a flush appends one extent per filterable column and the
+reader composes base with extents (§5); the **extent coalesce** bounds their number between folds,
+as the fourth axis of the engine's entity-space pass (§5.2); and the **fold's attribute pass** folds
+what survives back into one base, blanks the deleted entities and rebuilds the derived postings
+(§6.2). What remains unbuilt is two operands and one family: lists, `none_of` and `match` are
+specified and refuse by name. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4, §6, §9;
@@ -68,8 +69,8 @@ of it (§7).
 > `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
 > them (§2.3). A flush appends an extent per column and a generation composes them (§5), and the
 > **fold folds them back in**, blanks the deleted entities' slots and rebuilds the postings from the
-> folded column (§6.2). Lists, `none_of` and `match` are unbuilt and marked at their claims, as is
-> the extent coalesce (§5.2). Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
+> folded column (§6.2). Lists, `none_of` and `match` are unbuilt and marked at their claims.
+> Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
 > nothing, and a postings file or an extent that will not open refuses rather than reading as "those
 > entities carry no value".
 
@@ -651,8 +652,9 @@ a *file-count* axis rather than a query axis, and the system already has the pas
 
 ### 5.2 The extent coalesce: a fourth axis on the entity-space pass
 
-⊘ **Specified, not implemented.** Today nothing bounds the extent count between folds; the layers
-accumulate at flush rate until the fold consumes them (§6.2).
+⊘ **Built (2026-08-10).** The pass is the engine's entity-space coalesce with this axis added; the
+merge is `tessera_filter_write::coalesce_attr_extents`, the replace is `FilterColumns::with_coalesced`,
+and everything below is what runs.
 
 The engine's entity-space coalesce (write-path §7; `tessera-engine`'s `coalesce` module) already
 bounds three per-flush, entity-space, accumulating axes — delta postings tiers, dictionary extents,
@@ -707,7 +709,7 @@ The mechanics, against the pass's existing shape:
   ⊘ and, like the tier axis's orphans, it waits on an in-prefix orphan sweep that is **not
   built**; this axis makes that debt heavier by up to a column-count multiple per failure, stated
   here rather than discovered.
-- **Composition needs a replace operation, which does not exist: `compose` is append-only.** The
+- **Composition is by *replace*, which is a second operation beside `compose`'s append.** The
   successor generation's column replaces the consumed layers with the coalesced one, and its
   correctness condition is *different* from append's: the coalesced layer's presence must **equal**
   the union of the consumed layers' — tested as a bitmap equality, refused on mismatch — or

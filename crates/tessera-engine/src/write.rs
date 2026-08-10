@@ -5168,6 +5168,37 @@ impl Executor {
             tracing::warn!("discarding a completed coalesce that no longer rebases");
             return;
         }
+        // **Composed before the manifest is written, in the flush's order and for its reason**
+        // (filter-index §5.2): a composition that refuses must not leave a published manifest
+        // naming layers this process cannot serve, and the reverse order commits a manifest whose
+        // own writer then refuses it. The unit carries opened columns, so this cannot fail on IO.
+        let windows: Vec<crate::filter::CoalescedWindow> = completed
+            .attrs
+            .iter()
+            .zip(&completed.plan.attrs)
+            .map(|(attr, window)| crate::filter::CoalescedWindow {
+                column: attr.extent.column.clone(),
+                consumed: window.extents.iter().map(|e| e.values.clone()).collect(),
+                values_rel: attr.extent.values.clone(),
+                values: Arc::clone(&attr.values),
+            })
+            .collect();
+        let filter_columns = match live.filter_columns.with_coalesced(&windows) {
+            Ok(columns) => Arc::new(columns),
+            Err(e) => {
+                self.health
+                    .coalesce_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a completed coalesce's attribute extents would not replace the layers \
+                     they consumed; discarding it rather than publishing a manifest naming a \
+                     column this process cannot serve. Its files are orphans and every consumed \
+                     entry still stands"
+                );
+                return;
+            }
+        };
         // Complete current state, serialised fresh from the overlay this publication carries —
         // the same rule every other manifest write follows (contracts §2.3).
         write_deny_state(&mut manifest, &live.overlay);
@@ -5270,7 +5301,10 @@ impl Executor {
         let next = Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
-            filter_columns: Arc::clone(&live.filter_columns),
+            // The live columns with each consumed window replaced by the layer that carries its
+            // values — the same set of `(entity, value)` pairs in fewer files, so a request holding
+            // the old and one holding the new agree on every answer.
+            filter_columns,
             // **Unchanged, and this is the whole of D2.** Row space did not move, so no
             // projection is stale and no cache key may rotate.
             segments_version: live.segments_version,
@@ -7051,10 +7085,16 @@ impl Executor {
         // an extent covers entities I9 has just issued, which no earlier layer can hold — so this
         // is the same posture as every other flush failure: the files are orphans, the buffer
         // stands, the next tick re-plans.
-        let extents: Vec<(String, Arc<tessera_filter::ValueColumn>)> = completed
+        let extents: Vec<(String, String, Arc<tessera_filter::ValueColumn>)> = completed
             .filter_extents
             .iter()
-            .map(|e| (e.column.clone(), Arc::clone(&e.values)))
+            .map(|e| {
+                (
+                    e.column.clone(),
+                    e.values_rel.clone(),
+                    Arc::clone(&e.values),
+                )
+            })
             .collect();
         let filter_columns = match live.filter_columns.with_extents(&extents) {
             Ok(columns) => Arc::new(columns),

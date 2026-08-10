@@ -82,6 +82,9 @@ bundle/
         external-ids.arrow      #   the coalesced run, with its locator extent beside it
         ext-locator.u32
         terms-0.dict            #   the coalesced dictionary extent
+        attrs/<column>/         #   one window of that column's attribute extents, merged
+          values.arrow          #   (filter-index 5.2); the presence bitmap is never omitted
+          presence.roaring      #   here, an extent's entities being a set rather than [0, n)
       slices/<slice_id>/
         permutation.bin
         segments/<seg_id>/      # the build's one segment, plus flush and merge segments

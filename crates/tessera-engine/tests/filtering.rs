@@ -1000,7 +1000,11 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     );
     let err = fx
         .columns
-        .with_extents(&[("title".to_string(), overlapping)])
+        .with_extents(&[(
+            "title".to_string(),
+            "attrs/title/extents/overlapping.arrow".to_string(),
+            overlapping,
+        )])
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
@@ -1017,7 +1021,11 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     );
     assert!(fx
         .columns
-        .with_extents(&[("no_such_column".to_string(), stray)])
+        .with_extents(&[(
+            "no_such_column".to_string(),
+            "attrs/no_such_column/extents/stray.arrow".to_string(),
+            stray,
+        )])
         .is_err());
 }
 
@@ -2480,4 +2488,376 @@ fn the_flip_maps_the_new_prefixs_columns_and_not_the_superseded_ones() {
         "nothing in this process maps the folded prefix's value columns, so the generation is \
          serving the superseded prefix's mappings — files the reclamation has just unlinked"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The extent coalesce (`filter-index.md` §5.2)
+//
+// Two files per column per flush is ~31,000 a day at sixteen columns, and nothing between folds
+// bounds it. The pass that does is the engine's entity-space coalesce, and these are the claims it
+// has to make good on: the file count comes **down**, every answer is unchanged because the merge
+// is a content-preserving re-encode, the bound survives a restart, a coalesced extent coalesces
+// again, and **nothing retires** — a deleted entity's value rides through, because removal is the
+// fold's (Rule F).
+// ---------------------------------------------------------------------------------------------
+
+/// The coalesce policy's width: a column needs this many extents before a window is selected.
+const COALESCE_WIDTH: usize = 8;
+
+/// One flush per ingested row, with the merge held off so the assertions are about this axis.
+///
+/// The row-space merge is independent and safe beside a coalesce — each discards a plan that no
+/// longer rebases — but not deterministic enough to assert list lengths against.
+fn engine_for_coalesce(fx: &Fixture, tag: &str) -> tessera_engine::Engine {
+    let engine = open_engine_publishing(
+        &fx.bundle,
+        &fx._dir.path().join(format!("cache-{tag}")),
+        &fx._dir.path().join(format!("wal-{tag}")),
+    );
+    engine.set_merge_for_test(false);
+    engine
+}
+
+/// Ingest and flush `COALESCE_WIDTH` rows, then drive the tick the coalesce is selected on and wait
+/// for it to publish. Returns the entities, in ingest order.
+fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
+    let coalesces = engine.write_executor_stats().coalesces;
+    let entities: Vec<u64> = (from..from + COALESCE_WIDTH)
+        .map(|i| {
+            ingest_and_flush_with(
+                engine,
+                &format!("{tag}-{i}"),
+                WalScalar::Utf8(["eng", "sales", "legal"][i % 3].to_string()),
+                WalScalar::Utf8(["xx", "yy", "zz"][i % 3].to_string()),
+                &format!("{tag}-title-{i:02}"),
+                1_000 + i as i32,
+            )
+        })
+        .collect();
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().coalesces <= coalesces {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the coalesce never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    entities
+}
+
+/// This partition's live `attr_extents`, per column.
+fn extents_per_column(fx: &Fixture) -> BTreeMap<String, usize> {
+    let opened = open_bundle(&fx.bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let mut counts = BTreeMap::new();
+    for extent in &opened.partitions[&phash].manifest.attr_extents {
+        *counts.entry(extent.column.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Every filter answer this fixture can express, over the live candidate — the whole surface a
+/// content-preserving re-encode has to leave alone.
+fn every_answer(engine: &tessera_engine::Engine, fx: &Fixture) -> Vec<(String, Vec<u32>)> {
+    let (generation, cand) = live_candidate(engine);
+    let mut out = Vec::new();
+    for key in ["eng", "sales", "legal"] {
+        for (column, codes) in [("department", &fx.codes), ("archive", &fx.archive_codes)] {
+            let code = match column {
+                "department" => codes[key],
+                _ => {
+                    codes[match key {
+                        "eng" => "xx",
+                        "sales" => "yy",
+                        _ => "zz",
+                    }]
+                }
+            };
+            let answer = generation
+                .filter_columns
+                .resolve(
+                    column,
+                    &FilterOperand::Equals(AttrLocalId::new(code)),
+                    &cand,
+                )
+                .expect("answers");
+            out.push((format!("{column}={key}"), answer.iter().collect()));
+        }
+    }
+    for operand in [
+        FilterOperand::TextPrefix("paper-".into()),
+        FilterOperand::TextPrefix("coalesce-title-".into()),
+        FilterOperand::TextContains("title-0".into()),
+    ] {
+        let answer = generation
+            .filter_columns
+            .resolve("title", &operand, &cand)
+            .expect("answers");
+        out.push((format!("title {operand:?}"), answer.iter().collect()));
+    }
+    let answer = generation
+        .filter_columns
+        .resolve(
+            "score",
+            &FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(1_000),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+            &cand,
+        )
+        .expect("answers");
+    out.push(("score >= 1000".to_string(), answer.iter().collect()));
+    out
+}
+
+/// **A window of extents becomes one file per column, and every answer is unchanged** — and a
+/// coalesced extent is coalesced again, which is the recursion the per-column selection unit is
+/// what makes free.
+///
+/// The layers are unioned at composition, so their division into files is immaterial and what must
+/// not change is the set of `(entity, column, value)` triples. Asserted as *every* answer the
+/// fixture can express rather than a sample, because the failure this guards against — a merge that
+/// pairs values with the wrong entities — moves some answers and not others.
+///
+/// **Mutations this kills:** dropping the coalesced extent from `attr_extents` (the post-build
+/// entities stop matching); pushing the coalesced layer without removing the consumed ones (the
+/// disjointness check refuses at the replace); merging in list order rather than in entity order
+/// (the values pair with the wrong entities).
+#[test]
+fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
+    let fx = fixture();
+    let engine = engine_for_coalesce(&fx, "coalesce");
+    let entities = flush_a_window(&engine, "coalesce", 0);
+
+    for (column, count) in extents_per_column(&fx) {
+        assert_eq!(
+            count, 1,
+            "column '{column}' still holds {count} extents where the window collapsed to one"
+        );
+        // **And the live generation serves from the coalesced layer**, base plus one — or the
+        // bound is a manifest edit the running process keeps ignoring until its next restart.
+        assert_eq!(
+            engine.generation().filter_columns.layer_count(&column),
+            Some(2),
+            "column '{column}' is still served from the layers the coalesce replaced"
+        );
+    }
+    let after = every_answer(&engine, &fx);
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let (generation, cand) = live_candidate(&engine);
+    let matched = generation
+        .filter_columns
+        .resolve("department", &FilterOperand::Equals(eng), &cand)
+        .expect("answers");
+    for (i, entity) in entities.iter().enumerate() {
+        assert_eq!(
+            matched.contains(*entity as u32),
+            i % 3 == 0,
+            "entity {entity} (ingested at {i}) answers 'eng' wrongly after the coalesce"
+        );
+    }
+
+    // The recursion: another window's worth of flushes, and the coalesced extent is an entry in
+    // the same per-column subsequence, selected at the next rung identically.
+    let more = flush_a_window(&engine, "again", COALESCE_WIDTH);
+    assert!(engine.write_executor_stats().coalesces >= 2);
+    for (column, count) in extents_per_column(&fx) {
+        assert!(
+            count <= 2,
+            "column '{column}' holds {count} extents; a coalesced extent must coalesce again"
+        );
+    }
+    let (generation, cand) = live_candidate(&engine);
+    let matched = generation
+        .filter_columns
+        .resolve("department", &FilterOperand::Equals(eng), &cand)
+        .expect("answers");
+    for (i, entity) in more.iter().enumerate() {
+        assert_eq!(
+            matched.contains(*entity as u32),
+            (i + COALESCE_WIDTH).is_multiple_of(3),
+            "entity {entity} answers wrongly after the second coalesce"
+        );
+    }
+    // Every answer the first coalesce left, still whole after the second — the first window's
+    // entities are inside the second coalesce's inputs, so this is what says the recursion carried
+    // them rather than re-encoding only the newest layers.
+    let last = every_answer(&engine, &fx);
+    for ((what, before), (_, now)) in after.iter().zip(&last) {
+        assert!(
+            before.iter().all(|e| now.contains(e)),
+            "the second coalesce lost entities from '{what}'"
+        );
+    }
+}
+
+/// **A restart opens what the coalesce committed.** The manifest edit and the live swap must
+/// describe the same bundle, or a process that had coalesced comes back holding a different set of
+/// layers than the one it was serving from — and for this artefact the symptom of getting the
+/// *files* half right and the list half wrong is a bundle that opens cleanly and answers filters
+/// missing every entity the window held (filter-index §6.2).
+#[test]
+fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
+    let fx = fixture();
+    let entities = {
+        let engine = engine_for_coalesce(&fx, "coalesce-restart");
+        flush_a_window(&engine, "restart", 0)
+    };
+
+    let reopened = engine_for_coalesce(&fx, "coalesce-restart-2");
+    let (generation, cand) = live_candidate(&reopened);
+    for (i, entity) in entities.iter().enumerate() {
+        let key = ["eng", "sales", "legal"][i % 3];
+        let answer = generation
+            .filter_columns
+            .resolve(
+                "department",
+                &FilterOperand::Equals(AttrLocalId::new(fx.codes[key])),
+                &cand,
+            )
+            .expect("answers");
+        assert!(
+            answer.contains(*entity as u32),
+            "entity {entity} lost its value to the restart"
+        );
+        let title = generation
+            .filter_columns
+            .resolve(
+                "title",
+                &FilterOperand::TextEquals(format!("restart-title-{i:02}")),
+                &cand,
+            )
+            .expect("answers");
+        assert!(title.contains(*entity as u32));
+    }
+}
+
+/// **A coalesce retires nothing** (§5.2, §6): a deleted-but-unfolded entity's value rides through
+/// untouched, because removal is the fold's alone (Rule F) and the deny model depends on the two
+/// retirement routes never being conflated.
+///
+/// Read from the artefact rather than from an answer, and it has to be: a deleted entity is outside
+/// every candidate, so a pass that *had* blanked it here would be invisible to every filter until
+/// an unsuppress or a restore made it matter.
+///
+/// **Mutation:** hand the overlay's tombstones to `coalesce_attr_extents` and the value is gone.
+#[test]
+fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
+    let fx = fixture();
+    let engine = engine_for_coalesce(&fx, "coalesce-delete");
+    let entities = flush_a_window(&engine, "kept", 0);
+    let deleted = entities[3];
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(deleted),
+            tessera_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    assert!(
+        engine.overlay_depth() > 0,
+        "the tombstone is live, unfolded"
+    );
+    // A second window, so a coalesce runs with the deletion outstanding.
+    flush_a_window(&engine, "kept2", COALESCE_WIDTH);
+
+    let opened = open_bundle(&fx.bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.bundle.join("CURRENT")).unwrap()).unwrap();
+    let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
+    let mut held = None;
+    for extent in &opened.partitions[&phash].manifest.attr_extents {
+        if extent.column != "title" {
+            continue;
+        }
+        let column = tessera_filter::open_extent(
+            &prefix.join(&extent.values),
+            &prefix.join(&extent.presence),
+            false,
+        )
+        .expect("a listed extent opens");
+        if let Some(value) = column.text_of(deleted as u32) {
+            held = Some(value.to_string());
+        }
+    }
+    assert_eq!(
+        held.as_deref(),
+        Some("kept-title-03"),
+        "the deleted entity's value left the corpus at a coalesce; only the fold may retire it \
+         (Rule F), and conflating the two removal rules is fail-open"
+    );
+}
+
+/// **Replacing layers checks presence *equality*, where appending checks disjointness.**
+///
+/// The two conditions are different and only one of them is `compose`'s. A coalesced layer covering
+/// less than the window it replaces would leave `covered` naming entities no layer holds, so every
+/// later disjointness check tests against the wrong coverage — silently, and for the life of the
+/// generation. The merge's own duplicate guard makes the mismatch unreachable, which is exactly why
+/// it is cheap to verify and wrong to assume.
+#[test]
+fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
+    let fx = fixture();
+    let extent = |entities: &[u32]| {
+        let mut presence = Bitmap::new();
+        for e in entities {
+            presence.add(*e);
+        }
+        Arc::new(
+            tessera_filter::ValueColumn::partial(
+                tessera_filter::Codes::text(
+                    entities
+                        .iter()
+                        .map(|e| format!("t-{e}"))
+                        .collect::<Vec<_>>(),
+                ),
+                presence,
+            )
+            .unwrap(),
+        )
+    };
+    let first = "attrs/title/extents/a.arrow".to_string();
+    let second = "attrs/title/extents/b.arrow".to_string();
+    let columns = fx
+        .columns
+        .with_extents(&[
+            ("title".to_string(), first.clone(), extent(&[100, 101])),
+            ("title".to_string(), second.clone(), extent(&[200, 201])),
+        ])
+        .expect("two extents above the build's high-water compose");
+
+    let window =
+        |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
+            column: "title".to_string(),
+            consumed: vec![first.clone(), second.clone()],
+            values_rel: "coalesced/c-1/attrs/title/values.arrow".to_string(),
+            values,
+        };
+    let err = columns
+        .with_coalesced(&[window(extent(&[100, 101, 200]))])
+        .expect_err("a coalesced layer short of its window is refused");
+    assert!(format!("{err}").contains("coverage"), "{err}");
+
+    // And one naming a layer this generation does not hold: the plan and the process disagree
+    // about what the bundle is, which is a refusal rather than a no-op.
+    let mut stray = window(extent(&[100, 101, 200, 201]));
+    stray
+        .consumed
+        .push("attrs/title/extents/never.arrow".to_string());
+    assert!(columns.with_coalesced(&[stray]).is_err());
+
+    // The well-formed replace, which is what the pass actually publishes.
+    let next = columns
+        .with_coalesced(&[window(extent(&[100, 101, 200, 201]))])
+        .expect("the coalesced layer covers exactly its window");
+    let mut cand = Bitmap::new();
+    cand.add_range(0..300);
+    let answer = next
+        .resolve("title", &FilterOperand::TextEquals("t-201".into()), &cand)
+        .expect("answers");
+    assert_eq!(answer.iter().collect::<Vec<_>>(), vec![201]);
 }

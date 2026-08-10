@@ -1049,28 +1049,38 @@ provided run 0 stays listed first — an invariant with an assertion, not a rewr
 **Merge splits, and only one half publishes** (decision 0044's D2).
 
 **The entity-space half is built and published** (`tessera_engine::coalesce`). It coalesces delta
-tiers, external-id runs with their locator extents, and dictionary extents — each on its own
-axis, selected the same way `MergePolicy::select` selects segments: the first window of
-`width` (8) consecutive entries in one power-of-two size class, within an input cap. Size tiering
+tiers, external-id runs with their locator extents, dictionary extents, and **attribute extents**
+— each on its own axis, selected the same way `MergePolicy::select` selects segments: the first
+window of `width` (8) consecutive entries in one power-of-two size class, within an input cap. Size tiering
 is not decoration on any of them: without it the pass re-reads what it produced last round for
 ever, where one size class makes a byte move only as its artefact doubles. It publishes as a
-manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`,
+manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`, `attr_extents`
+and `files`,
 with `n` from the executor's counter and refuse-to-replace standing, **and it bumps no
 `segments_version`** — no row moves, so no projection is stale, no fragment is stale and no cache
 key rotates. Two pieces of live state swap with it, or the bound is only realised at the next
 restart: the generation's tier list and the process's external-id sidecar. Both are
 content-preserving, so a request holding the old and one holding the new agree on every answer.
+The attribute axis swaps a third: the generation's `FilterColumns`, whose consumed layers are
+**replaced** by the coalesced one — and replacing is not appending, so its correctness condition is
+that the coalesced layer's presence *equals* the union of the layers it replaces (filter-index
+§5.2), where appending's is that the new layer is disjoint from them.
 
-Three rules make the axes safe, and they are different rules. Tiers are unioned, so their order
+Four rules make the axes safe, and they are different rules. Tiers are unioned, so their order
 and their division into files are immaterial; what may not change is the set of `(term, entity)`
 pairs. Runs are searched newest-first and a key may sit in several of them (0047's re-binding),
 so the window must be contiguous — a coalesced run at a recency position it did not earn answers
 a stale binding — and the keep-newest rule decides collisions. Dictionary extents are
 **positional**: an ordinal is an index into the concatenation in listed order and a session's
 granted terms are resolved once at authorise, so the window must be contiguous and land in place,
-or a session evaluates a term it was not granted. Across all three, **the build's own artefacts
-are never taken** — they are the entries `MANIFEST.json` digests, rewriting one means a new
-prefix, and the base locator's ordinals are positions in the build's runs.
+or a session evaluates a term it was not granted. Attribute extents take the tiers' argument —
+layers are unioned, so their division into files is immaterial — but the selection unit is the
+**column**, over that column's own subsequence of `attr_extents`, and the merge carries its own
+duplicate-entity refusal: once a window collapses into one file an overlap among its inputs is
+internal to a single layer and invisible to the between-layer disjointness check for ever. Across
+all four, **the build's own artefacts are never taken** — they are the entries `MANIFEST.json`
+digests, rewriting one means a new prefix, and the base locator's ordinals are positions in the
+build's runs.
 
 **The row-space half publishes too, as its own swap** (`tessera_engine::merge`). A merge shortens
 the extent list and permutes row space inside the merged span, so a row id there names a different
