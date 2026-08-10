@@ -592,6 +592,34 @@ extents hold. Both linear in N. What actually accumulates is the *file count*: 2
 week without a fold (~6,700 layers) adds ~110 ms. The pressure that forces the fold is the file
 count and open-time sweep, not the scan.
 
+## Arm 14 (2026-08-10) — the code-shape hazard is a **crate** boundary, not a file one
+
+`realscan`, interleaved against the tree it is measured from, medians of three at 10⁹. The fold's
+attribute pass — a merge and a banded postings emit, neither reachable from a scan — was written as
+a module of `tessera-filter` and cost the universal arms **0.27 → 0.44 ns** per candidate entity,
+with `values.rs` byte-identical bar three visibility keywords. Moving it into `values_writer.rs`,
+the module that exists to keep code out of the hot file, cost exactly the same: **0.44 ns**, and
+the slice-blocked arms doubled from 0.02 to 0.04 ns.
+
+| variant | universal / 1% contiguous | universal / 25% | universal / 1% scattered |
+|---|---|---|---|
+| baseline (`00d464d`) | 0.27 ns | 0.27 ns | 11.8 ns |
+| pass as a module of `tessera-filter` | **0.44 ns** | **0.44 ns** | 12.1 ns |
+| pass inside `values_writer.rs` | **0.44 ns** | 0.45 ns | 10.1 ns |
+| `tessera-filter` untouched bar the accessors | 0.27 ns | 0.27 ns | 10.0 ns |
+| pass in its own crate (`tessera-filter-write`) | 0.26 ns | 0.28 ns | 11.6 ns |
+
+Codegen units are partitioned per **crate**, so the file discipline arms 4 and 6 were won under
+does not reach far enough: what the scan's partitioning is a function of is everything compiled
+into its crate. The write side is therefore a second crate, which restores the constant.
+
+**A second, unused result worth recording, because it is what someone will reach for first.**
+Pinning `codegen-units = 1` on `tessera-filter` also removes the sensitivity — baseline and pass
+then measure 0.31 and 0.32 ns, agreeing within drift — but it *costs* the baseline 0.27 → 0.31 ns
+(+18%): the default partitioning happens to be lucky for this crate today. So the knob buys
+stability at the price of the constant the design is written against, where the crate boundary buys
+both. Stated rather than left for the next regression to rediscover.
+
 ## Method
 
 `layoutprobe` builds one synthetic column of 1,000 distinct `u32` values under three presence

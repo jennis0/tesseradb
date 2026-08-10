@@ -109,6 +109,14 @@ pub(crate) struct PrefixRotation {
     pub(crate) fragments: Arc<FragmentCache>,
     /// The new prefix's external-id sidecar.
     pub(crate) external_index: Arc<ExternalIdIndex>,
+    /// The new prefix's filter columns — **opened over it, never cloned from the live
+    /// generation**, whose mappings are of the superseded prefix's files. A fold rewrites this
+    /// artefact: it blanks the deleted entities' slots, folds every snapshot extent into the base
+    /// and rebuilds the derived postings (`filter-index.md` §6.2), so a cloned column would serve
+    /// pre-fold values out of files the reclamation is about to unlink — safe to hold on POSIX,
+    /// wrong to serve. It travels with the other three for the reason they travel together: a
+    /// request must never see a geometry from one publication and an artefact from another.
+    pub(crate) filter_columns: Arc<crate::filter::FilterColumns>,
     /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
     /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
     /// `tessera_lifecycle::Overlay::retire`: only entities whose row *and* postings this

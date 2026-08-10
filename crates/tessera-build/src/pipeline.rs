@@ -120,14 +120,13 @@
 //!   term, which is the same ascending list the linear build accumulates by walking items in
 //!   entity order.
 
-use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use tessera_authz::{encode_posting, KeyedPostingsSpool};
+use tessera_authz::encode_posting;
 use tessera_filter::{Codes, ColumnKind, ValueColumnWriter};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
@@ -1441,10 +1440,9 @@ pub(crate) fn write_filter_postings(
     write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
 }
 
-/// Entity ids the postings emit holds in flight, at 4 B each: 2²⁶ is a 256 MB flat buffer, and the
-/// cost of a smaller band is one more column scan — measured at ~280 ms per 10⁹ (filter-index
-/// §2.2), so seconds per column even at sixteen bands.
-const POSTINGS_BAND_ROWS: usize = 1 << 26;
+/// Entity ids the postings emit holds in flight — the shared emit's own constant, so the build and
+/// the fold band identically (filter-index §6.2).
+use tessera_filter_write::POSTINGS_BAND_ROWS;
 
 fn write_filter_postings_banded(
     partition_dir: &Path,
@@ -1492,118 +1490,47 @@ fn write_filter_postings_banded(
     Ok(paths)
 }
 
-/// One category column's derived postings, emitted band by band.
+/// The staged attribute values of one category column, as the shared postings emit reads them.
 ///
-/// **The counting pass is what makes the scatter possible without holding the relation.** It gives
-/// each code's exact member count, which lays a band's flat buffer out by prefix sums — so the
-/// emit pass writes each entity to a known slot rather than growing a list per code. Its residue is
-/// one count per distinct code: vocabulary-sized by definition (filter-index §2.3), kilobytes.
-///
-/// **A code is never split across a band**, which is what lets a band be encoded and appended the
-/// moment its scatter finishes; a code larger than the budget forms a band of its own, exactly as
-/// the authorisation build's `band_rows_budget` takes its floor from the largest single term.
-///
-/// The two fail-closed scatter checks are the authorisation emit's, for its reasons: an overflow
-/// check, because one code's entities silently becoming another's is a disclosure; and a short-fill
-/// check **by count rather than by value**, because zero is a valid entity id.
+/// **The emit itself lives in `tessera-filter`** (`fold::write_category_postings`), because the
+/// fold rebuilds these postings from the folded column and filter-index §6.2 makes one writer
+/// rather than two producers that agree the byte-identity argument. What is here is the adaptation:
+/// the build's source is a `ScalarValue` per entity, where the fold's is a value column.
+struct StagedCategory<'a> {
+    values: &'a [ScalarValue],
+    column: &'a str,
+}
+
+impl tessera_filter_write::CategorySource for StagedCategory<'_> {
+    fn for_each(&self, f: &mut dyn FnMut(u32, u32) -> std::io::Result<()>) -> std::io::Result<()> {
+        for (entity, value) in self.values.iter().enumerate() {
+            let code = category_code(value, self.column).map_err(std::io::Error::other)?;
+            // Code 0 is the reserved *absent* code, so an entity carrying it gets no posting. This
+            // is the same zero the entity-major buffer is initialised to, which is safe only
+            // because the reader's count check upstream proves every entity was visited — an
+            // unvisited entity would otherwise be indistinguishable from one with no value.
+            if code == tessera_store::vocabulary::ABSENT_CODE {
+                continue;
+            }
+            f(entity as u32, code)?;
+        }
+        Ok(())
+    }
+}
+
 fn write_category_postings(
     path: &Path,
     column: &str,
     values: &[ScalarValue],
     band_rows: usize,
 ) -> Result<()> {
-    // Code 0 is the reserved *absent* code, so an entity carrying it gets no posting. A code with
-    // no members at all is dropped rather than written empty: the positional format has no such
-    // choice — every ordinal below the largest must exist — but a keyed file addresses by search,
-    // and a missing key already reads as the empty set (filter-index §6).
-    let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
-    for value in values {
-        let code = category_code(value, column)?;
-        if code == tessera_store::vocabulary::ABSENT_CODE {
-            continue;
-        }
-        let slot = counts.entry(code).or_insert(0);
-        *slot = slot.checked_add(1).ok_or_else(|| {
-            BuildError::Invalid(format!(
-                "attribute '{column}': code {code} is carried by more than 2^32 entities, which \
-                 the entity ceiling makes impossible"
-            ))
-        })?;
-    }
-    let codes: Vec<u32> = counts.keys().copied().collect();
-    let rows: Vec<u32> = counts.values().copied().collect();
-    drop(counts);
-
-    let budget = band_rows
-        .max(rows.iter().copied().max().unwrap_or(0) as usize)
-        .max(1);
-    let mut bands: Vec<(usize, usize)> = Vec::new();
-    let mut lo = 0usize;
-    let mut acc = 0usize;
-    for (i, &r) in rows.iter().enumerate() {
-        if acc + r as usize > budget && i > lo {
-            bands.push((lo, i));
-            lo = i;
-            acc = 0;
-        }
-        acc += r as usize;
-    }
-    bands.push((lo, codes.len()));
-
-    let spool_path = path.with_extension("spool");
-    let mut spool = KeyedPostingsSpool::create(&spool_path, SMALL_TERM_THRESHOLD_DEFAULT)
-        .map_err(|e| BuildError::io(&spool_path, e))?;
-    for (lo, hi) in bands {
-        let keys = &codes[lo..hi];
-        let width = hi - lo;
-        let mut offsets: Vec<u64> = Vec::with_capacity(width + 1);
-        let mut total = 0u64;
-        offsets.push(0);
-        for &r in &rows[lo..hi] {
-            total += r as u64;
-            offsets.push(total);
-        }
-        let mut flat: Vec<u32> = vec![0; total as usize];
-        let mut cursor: Vec<u64> = offsets[..width].to_vec();
-        // Entities are swept ascending, so each posting's entity list arrives sorted and
-        // `encode_posting`'s unconditional sortedness check re-verifies the property this loop
-        // established rather than taking it on trust.
-        for (entity, value) in values.iter().enumerate() {
-            let code = category_code(value, column)?;
-            // A code outside this band — including the absent code, which was never counted — is
-            // this band's business only in that it is not.
-            let Ok(local) = keys.binary_search(&code) else {
-                continue;
-            };
-            let slot = &mut cursor[local];
-            if *slot >= offsets[local + 1] {
-                return Err(BuildError::Invalid(format!(
-                    "attribute '{column}': code {code} received more postings than the {} the \
-                     counting pass found",
-                    offsets[local + 1] - offsets[local]
-                )));
-            }
-            flat[*slot as usize] = entity as u32;
-            *slot += 1;
-        }
-        for (local, slot) in cursor.iter().enumerate() {
-            if *slot != offsets[local + 1] {
-                return Err(BuildError::Invalid(format!(
-                    "attribute '{column}': code {} expected {} postings, received {}",
-                    keys[local],
-                    offsets[local + 1] - offsets[local],
-                    slot - offsets[local]
-                )));
-            }
-        }
-        for local in 0..width {
-            let entities = &flat[offsets[local] as usize..offsets[local + 1] as usize];
-            spool
-                .append(keys[local], entities)
-                .map_err(|e| BuildError::io(path, e))?;
-        }
-    }
-    spool.finish(path).map_err(|e| BuildError::io(path, e))
+    tessera_filter_write::write_category_postings(
+        path,
+        column,
+        &StagedCategory { values, column },
+        band_rows,
+    )
+    .map_err(|e| BuildError::io(path, e))
 }
 
 /// Write one column's values in entity order, and its presence bitmap where presence is partial.
@@ -2275,8 +2202,8 @@ mod tests {
 
         // And the postings say what the column says: each code's posting is exactly the entities
         // carrying it, which is what makes one a derivative of the other.
-        let tier = tessera_authz::DeltaTier::open(&dir.path().join("postings-1.arrow"))
-            .expect("open");
+        let tier =
+            tessera_authz::DeltaTier::open(&dir.path().join("postings-1.arrow")).expect("open");
         let mut codes: Vec<u32> = values
             .iter()
             .map(|v| category_code(v, "colour").expect("code"))

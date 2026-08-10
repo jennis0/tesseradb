@@ -22,6 +22,14 @@ deny tessera-wire tessera-authz
 deny tessera-filter tessera-store
 deny tessera-filter tessera-spatial
 deny tessera-server tessera-filter
+# The artefact's write side is a separate crate on measured grounds (its own module doc: code that
+# never runs during a scan still moved the scan's constant 65% from inside `tessera-filter`). It
+# takes the same three denies, for the same reasons — it is the same entity-space artefact, seen
+# from the writing end — plus the one that keeps it off the request path at all.
+deny tessera-filter-write tessera-store
+deny tessera-filter-write tessera-spatial
+deny tessera-server tessera-filter-write
+deny tessera-filter tessera-filter-write
 # lifecycle §7's sync-engine rule, made mechanical (D-D): the engine's intra-request parallelism
 # is rayon's plain-thread pool, never tokio — an async runtime inside a supposedly synchronous
 # engine would reintroduce exactly the reactor-blocking hazard D-A moved off the server's own

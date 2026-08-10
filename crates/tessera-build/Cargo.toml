@@ -18,6 +18,7 @@ tessera-authz = { path = "../tessera-authz" }
 # build-time dependency on a read crate inverts the layering; that stopped being true when the build
 # began emitting the value column rather than only its accelerator.
 tessera-filter = { path = "../tessera-filter" }
+tessera-filter-write = { path = "../tessera-filter-write" }
 # Non-test: the presence bitmap the value column is addressed by (filter-index §2.1).
 croaring = { workspace = true }
 arrow = { workspace = true }

@@ -189,9 +189,12 @@ per-value Roaring postings derived over it for categories, `all_of`/`any_of` com
 conformance differential that moves **I12's mask half to covered** — and, since the per-flush
 value-column extent landed, an entity ingested after the build answers a filter on its own value. A
 buffered entity still does not, until its flush; `filter-index.md` §5 rules that under-reporting for
-one flush interval is safe under **I12**. What remains is the **fold**, which today carries no
-`attrs/` file forward at all, so a folded bundle loses the artefact. Numeric ranges are refused at
-schema parse with the reason named.
+one flush interval is safe under **I12**. The **fold** now carries the artefact: one streaming pass
+per column merges the base and every snapshot extent into a new base, blanks the deleted entities,
+rebuilds each category's postings from the folded column, and carries the flight's extents forward
+in both halves publication owes — the files and the manifest's `attr_extents` (`filter-index.md`
+§6.2). What remains of [#43] is the extent coalesce (§5.2), which bounds the file count between
+folds. Numeric ranges are refused at schema parse with the reason named.
 
 **[#83]'s input now exists.** A `per_viewer` category gets its membership postings whatever its
 `used_for` says, so the artefact §3.3's predicate was waiting on is emitted. `/v1/categories` still

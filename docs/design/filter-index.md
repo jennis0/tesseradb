@@ -13,12 +13,11 @@ track; §6.2 names the dependency). **§6.3's rulings are all made** (owner, 202
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
 categories, strings and numerics; the masked scan behind all nine operators; `entity → value`; the
 wire surface (`/v1/meta`'s operand list, the viewport's filter expression, the boolean tree) — and
-the **flush's half of the write side**: a flush appends one extent per filterable column and the
-reader composes base with extents, so an entity ingested since the build answers a filter on its own
-value (§5). What remains unbuilt is **deletion and the fold's attribute pass** — and today's fold
-*destroys* the artefact rather than leaving it alone (§6) — plus two operands: lists, `none_of` and
-`match` are specified and refuse by name; and the derived category
-postings are emitted, digested and **not read at serving**. Marked at each claim.
+the **whole write side bar the coalesce**: a flush appends one extent per filterable column and the
+reader composes base with extents (§5), and the **fold's attribute pass** folds those extents back
+into one base, blanks the deleted entities and rebuilds the derived postings (§6.2). What remains
+unbuilt is the **extent coalesce** (§5.2), which is what bounds the file count *between* folds, and
+two operands: lists, `none_of` and `match` are specified and refuse by name. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4, §6, §9;
@@ -67,10 +66,10 @@ of it (§7).
 > categories, strings and numerics, in both build implementations and under the manifest digest; a
 > category's derived per-value postings answer `eq` and `in` where its vocabulary is
 > `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
-> them (§2.3). A flush appends an extent per column and a generation composes them (§5).
-> **Deletion is not implemented, and the fold's attribute pass is not either — today's fold destroys
-> the artefact** (§6); lists, `none_of` and `match` are likewise unbuilt; each is marked at its
-> claim. Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
+> them (§2.3). A flush appends an extent per column and a generation composes them (§5), and the
+> **fold folds them back in**, blanks the deleted entities' slots and rebuilds the postings from the
+> folded column (§6.2). Lists, `none_of` and `match` are unbuilt and marked at their claims, as is
+> the extent coalesce (§5.2). Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
 > nothing, and a postings file or an extent that will not open refuses rather than reading as "those
 > entities carry no value".
 
@@ -744,15 +743,11 @@ lost twice in this project's review history, which is why it is restated at ever
 | Deletion | **nothing until the fold** | the overlay's `deleted` set; the flush never writes the row, and the entity ID stays burned (**I9**) |
 | Compaction fold | deleted entities' value slots are blanked; the derived postings are rebuilt whole | the tombstone leaves `deleted` in the fold's own publication (Rule F) |
 
-> **⊘ Specified, not implemented, and the fold is worse than silent about it.** Rules S and F
-> themselves are built and enforced for the authorisation index, and the fold that executes them
-> runs — so a reader may take the *rules* as delivered and must not read this table as saying
-> anything about attribute data. What is *not* true is that a fold leaves the artefact alone: it
-> carries forward exactly the files its new manifest names, `attrs/` is in neither list, and the old
-> prefix is then reclaimed — so a folded bundle has no filter artefact at all and an engine restarting
-> onto one fails to open. Pre-existing, and fail-closed — §6.2 specifies what the fold owes each
-> artefact, and why the gap is closed by building that pass rather than by patching openability back
-> (decision 0048: nothing is deployed, so there is no folded bundle to rescue).
+> **⊘ Built, every row of it.** Rules S and F are enforced for the authorisation index and the fold
+> executes them; the attribute pass (§6.2) is what makes this table true of attribute data too. A
+> suppression changes no attribute artefact — asserted against the folded files, not only against an
+> answer — and a fold blanks exactly `D₀`, the same set its other passes take, rebuilding each
+> category's postings from the folded column.
 
 **Why the fold blanks a deleted entity's slot, and it is not Rule F's reason.** Decision 0050 requires a
 deleted entity to be gone from the *authorisation* term index, and its argument is a fail-open: leave the
@@ -806,13 +801,21 @@ rather than close to it. The fold is no longer the only thing standing between t
 day's ~31,000 files; missing a window costs a bounded steady state, not unbounded growth. The
 non-disruption half is the pass's own cost, sized at the end of this section.
 
-⊘ **Specified, not implemented — none of this pass exists.** What happens instead today is that a
-fold drops `attrs/` entirely and a node restarting onto the folded bundle refuses to open. That is
-the fail-closed shape of unbuilt machinery, and it is **not patched into a working-looking state**:
-no deployment holds a folded bundle that needs rescuing, so under
-[decision 0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md) the only
-thing that closes this gap is the pass itself. A carry-forward that made folded bundles open without
-folding anything would be machinery whose sole justification is a state nothing is in.
+⊘ **Built (2026-08-10), bar one hint.** The pass runs where this section places it — on the fold's
+own thread, after the external-id pass and before the digests — and everything below is what it
+does, with one exception marked at its own paragraph: the `MADV_SEQUENTIAL` asked for there is
+**not** taken, because `ValueColumn::open` has no route to it. What the pass inherits from
+[decision 0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md) is
+the ownership rule — it maps its own inputs and never advises the request path's — rather than the
+hint itself.
+
+**The pass is a crate rather than a module, and that is measured rather than tidy.** Written inside
+`tessera-filter` it cost the scan's universal-contiguous arm **0.27 → 0.44 ns** per candidate entity
+at 10⁹ — 65%, with the hot file byte-identical, and identically whether it sat in a new module or
+inside `values_writer.rs`. Codegen units are partitioned per *crate*, so the file discipline §2.2's
+constants were won under does not reach far enough. The write side is therefore
+`tessera-filter-write`, and with it there the same arms measure 0.26–0.28 ns against a 0.27 ns
+baseline — within drift. §9 records the edges that placement implies.
 
 One pass on the fold's dedicated thread, before the manifests, mirroring compaction §2's
 snapshot/publication split:
@@ -854,13 +857,17 @@ tail the flush marker in §5 records. Where the rebuilt postings serve a *filter
 listing's route under decision 0060 — this rests on the leak-register row 0060 names as a
 condition of itself, **which does not exist yet in Appendix C and is being registered on the
 postings track**; until that row lands, 0060's condition is unmet and this paragraph inherits the
-dependency. The rebuild reuses the build's emit, so there is one postings
-writer, not two that happen to agree; the build's existing column-vs-postings agreement test is the
-equivalence check, applied to the fold's output as it is to the build's. That sharing is also the
-equivalence argument in general: the pass emits through `write_value_column` and the postings
-writer the build uses, so a folded column and a freshly built one over the same live entities are
-the same bytes, and "as close as possible to the single build" is byte-identity rather than a
-tolerance.
+dependency. The rebuild reuses the build's emit — one banded emit over a
+`(entity, code)` source each producer supplies, the build's from its staged values and the fold's
+from the column it has just written, so the postings are a derivative of the artefact of record
+rather than a second opinion about it. That sharing is the equivalence argument in general: the
+pass emits through the same value-column writer the build uses, so a folded column and a freshly
+built one over the same live entities are the same bytes, and "as close as possible to the single
+build" is byte-identity rather than a tolerance — checked as one, at every layering and every band
+size. **The presence bitmap is normalised at the writer** for that reason and not for storage: the
+fold's presence arrives as a union of its layers' and the build's from repeated insertion, and
+croaring serialises the two encodings differently, so the same entity set would otherwise produce
+two different files.
 
 **The timing property survives untouched.** The folded artefact is the same shape the scan already
 reads — a value column with optional presence — so per-request work remains a function of
@@ -869,14 +876,15 @@ and presence is membership, not values, so its post-fold shape discloses nothing
 not already encode.
 
 **At the flip, the filter columns are opened from the new prefix — never cloned from the live
-generation.** The rotation's swap today clones the previous generation's `filter_columns`, which
-are mappings of the *old* prefix's files (the code's own comment records the gap): correct only
-while a rotation carries the same artefact, which is precisely the premise this pass breaks — a
-clone would serve pre-fold values, missing the blanking and the folded extents, from files the
-reclamation is about to unlink (safe to hold on POSIX, wrong to serve). So the filter columns join
-the rotation the way the postings reader and the external-id sidecar already did, for decision
-0050's reason: the swap carries a `FilterColumns::open` over the new prefix — the folded bases
-plus the carried-forward flight extents — and the old mappings die with their last holder.
+generation.** A clone would serve pre-fold values, missing the blanking and the folded extents,
+from files the reclamation is about to unlink (safe to hold on POSIX, wrong to serve). So the
+filter columns join the rotation the way the postings reader and the external-id sidecar already
+did, for decision 0050's reason: the swap carries a `FilterColumns::open` over the new prefix — the
+folded bases plus the carried-forward flight extents — and the old mappings die with their last
+holder. **The symptom of getting this wrong is not a wrong answer**, which is why the test for it
+reads the process's own mappings: a folded entity is outside every candidate, so the stale values a
+cloned column holds are unreachable, and what a clone actually costs is the fold's reason for
+existing — the superseded prefix stays mapped, so the reclamation unlinks names and frees nothing.
 
 **Slice invariance holds through the fold**: the pass is per partition in entity space, reads
 nothing per-slice, and emits nothing per-slice. §7's statement is unchanged by it.
@@ -905,7 +913,7 @@ owns; it must not advise the live generation's `FilterColumns` maps, which are t
 for exactly pass 2's reason. The pass is single-threaded like the rest of the fold; parallelism is
 excluded by owner ruling and not further discussed.
 
-**Memory: banding bounds the transient only because the writers stream — ✔ and they now do.** The
+**Memory: banding bounds the transient only because the writers stream — ✔ and they do.** The
 writers this design called for are built (2026-08-10): `ValueColumnWriter` spools value bytes, and
 a text column's offsets, and assembles the single record batch at `finish` with the spool mapped as
 the array's own buffer; `KeyedPostingsSpool` appends encoded records band by band and assembles the
@@ -943,7 +951,10 @@ where a segment costs a binary search per tile (measured, §5.1). What the pass 
 *visibility*: attribute bytes read and written in the fold's dispatch log line and
 `/control/status`'s fold block, beside the figures already there. (An earlier revision of this
 section promised the *gauges* attribute-bytes terms; that was a trigger where only reporting is
-warranted, and it is withdrawn.)
+warranted, and it is withdrawn.) ⊘ **The bytes are not reported.** What an operator sees today is
+the pass itself in the fold's cost staircase — its wall clock and the resident set it ended at,
+under the name `4a attributes`, in the same dispatch log line as every other pass — which
+attributes time and memory to it but not IO.
 
 #### Start-up
 
@@ -991,7 +1002,8 @@ and a layer costs microseconds to query (measured, §5.1), so there is no latenc
 
 What the pass owes instead is **visibility**: attribute bytes read and written in the fold's dispatch
 log line and `/control/status`'s fold block, beside the figures already there. An operator can see
-the work; nothing dispatches a fold on it. Cost if this is wrong: an axis nobody triggers on, bounded
+the work; nothing dispatches a fold on it. ⊘ Only the pass's *time and memory* are reported so far,
+through the cost staircase it joins as `4a attributes`; the byte terms are owed (§6.2). Cost if this is wrong: an axis nobody triggers on, bounded
 regardless by the coalesce policy and the segment ceiling at 64.
 
 Amendments this design owes elsewhere, none of which it makes itself: compaction §2's table and §3's
@@ -1110,6 +1122,13 @@ tessera-filter`, so the server keeps seeing engine API types only; and `deny tes
 plus `deny tessera-filter tessera-spatial`, so the filter crate stays entity-space and never sees `RowId` —
 the same two edges the authorisation crate is denied, for the same reason.
 
+**The artefact's write side is a second crate, `tessera-filter-write`** — the fold's merge and the
+banded postings emit both producers call — and its reason is the measurement §6.2 records rather
+than symmetry: code that never runs during a scan still moved the scan's constant by 65% from
+inside `tessera-filter`, because codegen units are partitioned per crate. It takes the same three
+denies for the same reasons, plus `deny tessera-filter tessera-filter-write`, which is what keeps
+the dependency one-way and the read crate's codegen a function of its own source.
+
 ---
 
 ## Appendix R — review trail
@@ -1137,6 +1156,17 @@ review's most valuable finding); **lists break one-bit-one-slot addressing** and
 the merge and blanking specifications until §2.6's addressing exists; and §2.3's "unmeasured"
 marker was stale — arm 9 measured the residual and 0060 is built on it. §6.2 also now names its
 dependency on 0060's leak-register row, which is registered on the postings track, not here.
+
+**2026-08-10 — the fold's attribute pass is built**, to §6.2 as written. Two things the design did
+not anticipate, both recorded at their sites. The pass had to become its own **crate**: written
+inside `tessera-filter` it cost the scan 65% with the hot file byte-identical, which is the same
+code-shape hazard that split `extent.rs` out of `values.rs`, one level up — codegen units are
+partitioned per crate, so a file boundary cannot hold it (§6.2, §9). And **the presence bitmap
+needed normalising at the writer** for the byte-identity claim to be true at all: the fold's
+presence arrives as a union of its layers' and the build's from repeated insertion, and croaring
+serialises the two encodings differently, so the same entity set produced two different files
+(§6.2). Two things §6.2 asks for are **not** built and are marked: `MADV_SEQUENTIAL` on the pass's
+own mappings, and the attribute-byte terms in the fold's log line and `/control/status`.
 
 **2026-08-10 — the fold's rulings are closed** (owner). The attribute axis is **reported, never
 triggered on**: compaction §9's OR over four gauges gains no fifth, and this document's earlier

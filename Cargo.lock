@@ -2322,6 +2322,7 @@ dependencies = [
  "tempfile",
  "tessera-authz",
  "tessera-filter",
+ "tessera-filter-write",
  "tessera-plugin",
  "tessera-spatial",
  "tessera-store",
@@ -2369,6 +2370,7 @@ dependencies = [
  "tessera-build",
  "tessera-engine",
  "tessera-filter",
+ "tessera-filter-write",
  "tessera-lifecycle",
  "tessera-plugin",
  "tessera-spatial",
@@ -2387,6 +2389,18 @@ dependencies = [
  "memmap2",
  "tempfile",
  "tessera-authz",
+ "tessera-types",
+]
+
+[[package]]
+name = "tessera-filter-write"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "croaring",
+ "tempfile",
+ "tessera-authz",
+ "tessera-filter",
  "tessera-types",
 ]
 

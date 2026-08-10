@@ -2185,12 +2185,31 @@ pub(crate) fn open_rotation(
     // the cache a deployment's startup refusal exists to bound.
     let fragments = Arc::new(live_fragments.rotate(bundle_identity));
 
+    // **The filter columns are opened over the new prefix**, from its own manifests: the folded
+    // base columns plus whatever attribute extents the publication carried forward from the
+    // fold's flight. Cloning the live generation's would serve the superseded prefix's files —
+    // pre-fold values, missing the blanking, missing the folded extents — and the fold is exactly
+    // the publication that makes that wrong (`filter-index.md` §6.2). A declared column whose
+    // files are missing refuses here rather than reading as "those entities carry no value".
+    let filter_columns = Arc::new(
+        crate::filter::FilterColumns::open(
+            &prefix_dir,
+            &phash,
+            &bundle.manifest.declared_scalars,
+            &bundle.manifest.vocabularies,
+            &partition.manifest.attr_extents,
+            true,
+        )
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
+
     Ok((
         bundle,
         crate::geometry::PrefixRotation {
             postings,
             fragments,
             external_index,
+            filter_columns,
             retired,
         },
     ))

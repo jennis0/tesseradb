@@ -4297,6 +4297,8 @@ impl Executor {
             seg_id: format!("fold-{}-{}", partition_data.segments_n, self.fold_attempt),
             base_postings: Arc::clone(&generation.postings),
             tiers: generation.delta_postings.clone(),
+            declared_scalars: manifest.declared_scalars.clone(),
+            vocabularies: manifest.vocabularies.clone(),
         };
 
         if let Some(trigger) = scheduled {
@@ -4504,6 +4506,12 @@ impl Executor {
                     .iter()
                     .any(|extent| &extent.path == path)
             })
+            || !plan.attr_extents.iter().all(|consumed| {
+                live_manifest
+                    .attr_extents
+                    .iter()
+                    .any(|extent| extent.values == consumed.values)
+            })
         {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
@@ -4535,6 +4543,24 @@ impl Executor {
             .locator_extents
             .iter()
             .filter(|extent| !plan.locator_extents.contains(&extent.path))
+            .cloned()
+            .collect();
+        // **The flight's attribute extents, and the pass consumed every other one** (filter-index
+        // §6.2). Selected by the values path because that is what the plan consumed and what the
+        // fold read; the column name is not an identity here, since a column has many extents.
+        //
+        // Listed order is preserved for the reason it is everywhere else in this set: composition
+        // unions the layers, so their order is immaterial to the answer — but a manifest whose
+        // bytes depend on a set iteration order is a bundle identity that depends on one.
+        let consumed_attrs: FxHashSet<&str> = plan
+            .attr_extents
+            .iter()
+            .map(|extent| extent.values.as_str())
+            .collect();
+        let carried_attrs: Vec<tessera_store::manifest::AttrExtent> = live_manifest
+            .attr_extents
+            .iter()
+            .filter(|extent| !consumed_attrs.contains(extent.values.as_str()))
             .cloned()
             .collect();
 
@@ -4655,7 +4681,14 @@ impl Executor {
             // the fold's flight appended an extent whose ordinals the live dictionary already
             // holds, and dropping it would shift every ordinal after it.
             dict_extents: live_manifest.dict_extents.clone(),
-            attr_extents: Vec::new(),
+            // **Publishing an attribute artefact is two obligations: the files and this list**
+            // (filter-index §6.2). The fold's own base columns are named by convention and
+            // digested in `MANIFEST.json`; a *flight* extent is reachable only through this entry,
+            // so linking its bytes while leaving the list empty produces a bundle that opens
+            // cleanly and silently answers filters without every post-snapshot entity's value — a
+            // wrong answer with no symptom, and strictly worse than a refusal to open. The two
+            // halves are written here, in one manifest write.
+            attr_extents: carried_attrs.clone(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -4731,6 +4764,13 @@ impl Executor {
         carried_rels.extend(carried_runs.iter().cloned());
         carried_rels.extend(carried_locators.iter().map(|e| e.path.clone()));
         carried_rels.extend(carried_tiers.iter().cloned());
+        // Both files of every carried attribute extent — the values *and* the presence bitmap,
+        // whose absence is not "those entities carry no value" but a refusal to open
+        // (`filter-index.md` §2.5).
+        for extent in &carried_attrs {
+            carried_rels.insert(extent.values.clone());
+            carried_rels.insert(extent.presence.clone());
+        }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {
             // A hard link changes nothing about a file's content, so the digest it earned under the
@@ -7360,11 +7400,15 @@ impl Executor {
         let next = Generation {
             prefix,
             vocabularies: Arc::clone(&previous.vocabularies),
-            // ⊘ A prefix rotation publishes a *new* bundle, so its filter columns are the new
-            // prefix's — but nothing reopens them here, so a rotated generation serves the previous
-            // prefix's artefact. Correct today because a rotation carries the same build; it stops
-            // being correct the moment a rotation can change the schema.
-            filter_columns: Arc::clone(&previous.filter_columns),
+            // **A rotation carries the new prefix's own columns**, opened over it by
+            // `open_rotation`; every other publication stays within the live prefix and carries
+            // the live ones. Cloning the previous generation's across a rotation would serve the
+            // superseded prefix's mappings — pre-fold values, the blanking missing, out of files
+            // the reclamation is about to unlink (`filter-index.md` §6.2).
+            filter_columns: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.filter_columns),
+                |r| Arc::clone(&r.filter_columns),
+            ),
             segments_version,
             watermark,
             bundle,

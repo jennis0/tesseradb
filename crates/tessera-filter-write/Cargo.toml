@@ -1,0 +1,14 @@
+[package]
+name = "tessera-filter-write"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tessera-filter = { path = "../tessera-filter" }
+tessera-authz = { path = "../tessera-authz" }
+tessera-types = { path = "../tessera-types" }
+croaring = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+arrow = { workspace = true }

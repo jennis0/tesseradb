@@ -363,7 +363,7 @@ pub(crate) fn owes_value_column(
 /// Does the build write derived postings for this column? Only a category earns them — a string's
 /// values carry no identity a posting could be keyed by, and a numeric's are near-unique
 /// (`filter-index.md` §2.3).
-fn owes_postings(
+pub(crate) fn owes_postings(
     scalar: &tessera_store::manifest::DeclaredScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> bool {

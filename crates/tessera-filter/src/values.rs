@@ -1239,6 +1239,17 @@ impl ValueColumn {
         }
     }
 
+    /// The column's values, in slot order — what the write side slices when it merges layers, and
+    /// what tells it the column's family.
+    ///
+    /// **Slots, not entities**: reaching one from an entity id is [`Self::value_of`]'s business,
+    /// and a caller that indexes this by an entity id has silently assumed universal presence.
+    /// Public because `tessera-filter-write` is a separate crate *deliberately* — see its own
+    /// module doc: nothing that writes this artefact may share a codegen unit with the scan.
+    pub fn codes(&self) -> &Codes {
+        &self.codes
+    }
+
     /// Entities this column holds a value for. `None` presence means the dense range.
     pub fn present(&self) -> Bitmap {
         match &self.presence {

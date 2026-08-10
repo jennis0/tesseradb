@@ -78,7 +78,9 @@ use croaring::Bitmap;
 
 use tessera_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
 use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{FileDigest, SegmentDescriptor};
+use tessera_store::manifest::{
+    AttrExtent, DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor,
+};
 use tessera_store::{
     fold_external_id_runs, fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
 };
@@ -469,6 +471,12 @@ pub(crate) struct FoldPlan {
     pub(crate) runs: Vec<String>,
     /// Every live locator extent's path — consumed with the runs they index.
     pub(crate) locator_extents: Vec<String>,
+    /// Every attribute extent the partition's side-manifest named at the snapshot — **all**
+    /// consumed and folded into the new base columns (filter-index §6.2). Carrying an untouched
+    /// one forward is declined there: it trades the objective — zero extents after a fold — for IO
+    /// the fold can afford, and makes the folded state a function of deletion history rather than
+    /// of the schema.
+    pub(crate) attr_extents: Vec<AttrExtent>,
     /// `D₀` — the plan's tombstone clone. Handed to passes 1–3 whole; never [`executed`].
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity **with a row anywhere in this partition** at the snapshot — the
@@ -734,6 +742,7 @@ pub(crate) fn plan_fold(
             .iter()
             .map(|extent| extent.path.clone())
             .collect(),
+        attr_extents: manifest.attr_extents.clone(),
         tombstones,
         entity_bound,
         dict_len,
@@ -767,6 +776,13 @@ pub(crate) struct FoldContext {
     /// The live base postings and the live tiers — pass 2's inputs.
     pub(crate) base_postings: Arc<PostingsReader>,
     pub(crate) tiers: Vec<Arc<DeltaTier>>,
+    /// The bundle's declared scalars and its vocabularies — the attribute pass's own inputs, and
+    /// the only thing that decides which columns it owes an artefact. Taken from the manifest
+    /// rather than from the directory, for `FilterColumns::open`'s reason: a declared column whose
+    /// files are missing is an error, and a directory scan finds what is there where a declaration
+    /// says what must be.
+    pub(crate) declared_scalars: Vec<DeclaredScalar>,
+    pub(crate) vocabularies: Vec<ManifestVocabulary>,
 }
 
 /// The process's resident set as `/proc/self/status` reports it, in bytes: total, anonymous,
@@ -1043,7 +1059,102 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
     record("3 external ids", &mut cost, &mut mark);
 
-    // ---- pass 4 — the dictionary ---------------------------------------------------------------
+    // ---- pass 4a — the attribute artefact ------------------------------------------------------
+    //
+    // filter-index §6.2. One streaming pass per declared filter column: its base and every
+    // snapshot extent merged in entity order into one new base, `D₀`'s entities blanked — removed
+    // from presence, their value bytes never written — and a category's postings rebuilt whole
+    // from the folded column, which is what makes the accelerator self-retiring rather than a
+    // second durable identity.
+    //
+    // **What only the fold can do here is retention.** A layered column already queries within ~5%
+    // of a single build's (measured, §5.1) and the coalesce bounds the file count continuously
+    // (§5.2), but a deleted entity's *filter* value survives every other pass: its row is gone, so
+    // its render value is gone with it, while the value column is positional and **I9** forbids
+    // renumbering the slot away. This is where those bytes leave the corpus.
+    //
+    // **Nothing here is a third retirement rule.** A suppression touches no attribute artefact at
+    // all (Rule S), and what this executes is exactly `D₀`, the same set passes 1–3 took.
+    for scalar in ctx
+        .declared_scalars
+        .iter()
+        .filter(|d| crate::filter::owes_value_column(d, &ctx.vocabularies))
+    {
+        let column_rel = format!("partitions/{}/attrs/{}", plan.partition, scalar.name);
+        let from_dir = ctx.from_prefix_dir.join(&column_rel);
+        let to_dir = ctx.to_prefix_dir.join(&column_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
+
+        // Mapped, and these are the fold's **own** mappings rather than the live generation's:
+        // decision 0052's rule is that a hint belongs to the mappings the fold owns, and the
+        // request path's `FilterColumns` must not be advised on the fold's behalf. ⊘ The
+        // `MADV_SEQUENTIAL` §6.2 asks for is not taken — `ValueColumn::open` has no route to it —
+        // so what this inherits from the design is the ownership rule, not the hint.
+        let base = tessera_filter::ValueColumn::open_dir(&from_dir, true)
+            .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
+        let mut extents = Vec::new();
+        for extent in plan.attr_extents.iter().filter(|e| e.column == scalar.name) {
+            extents.push(
+                tessera_filter::open_extent(
+                    &ctx.from_prefix_dir.join(&extent.values),
+                    &ctx.from_prefix_dir.join(&extent.presence),
+                    true,
+                )
+                .map_err(|e| failed("pass 4a (attributes: an extent)", &e))?,
+            );
+        }
+        let layers: Vec<&tessera_filter::ValueColumn> =
+            std::iter::once(&base).chain(extents.iter()).collect();
+
+        let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
+        let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
+        let values_path = ctx.to_prefix_dir.join(&values_rel);
+        let presence_path = ctx.to_prefix_dir.join(&presence_rel);
+        let partial = tessera_filter_write::fold_value_column(
+            &layers,
+            &plan.tombstones,
+            // The snapshot's entity space, which is what the folded column covers. A column dense
+            // to this bound writes no presence bitmap at all — the reader's "the entity id is the
+            // array index" — and one deletion below it is what takes that away.
+            u32::try_from(plan.entity_bound).map_err(|_| {
+                FoldFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
+            })?,
+            &values_path,
+            &presence_path,
+        )
+        .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?;
+        written.push((values_rel, values_path.clone()));
+        if partial {
+            written.push((presence_rel, presence_path.clone()));
+        }
+
+        if scalar.vocabulary.is_none() {
+            continue;
+        }
+        // **Rebuilt from the folded column**, read back rather than from the layers it was merged
+        // from: that is what makes the postings a derivative of the artefact of record rather than
+        // a second opinion about it, and it is the same emit the batch build calls.
+        let folded = tessera_filter::ValueColumn::open(
+            &values_path,
+            partial.then_some(presence_path.as_path()),
+            true,
+        )
+        .map_err(|e| failed("pass 4a (attributes: reopening the folded column)", &e))?;
+        let postings_rel = format!("{column_rel}/postings.arrow");
+        let postings_path = ctx.to_prefix_dir.join(&postings_rel);
+        tessera_filter_write::write_category_postings(
+            &postings_path,
+            &scalar.name,
+            &folded,
+            tessera_filter_write::POSTINGS_BAND_ROWS,
+        )
+        .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
+        written.push((postings_rel, postings_path));
+    }
+
+    record("4a attributes", &mut cost, &mut mark);
+
+    // ---- pass 4b — the dictionary --------------------------------------------------------------
     //
     // Carried forward verbatim, hard-linked, never renumbered and never shrunk — and the linking
     // happens at publication with every other carry-forward (compaction §4 step 4), because a fold
@@ -1079,7 +1190,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     }
     let paths: Vec<PathBuf> = written.iter().map(|(_, path)| path.clone()).collect();
     tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
-    // Pass 4 is not marked because it does nothing: the dictionary is carried forward by a link at
+    // Pass 4b is not marked because it does nothing: the dictionary is carried forward by a link at
     // publication, and a zero-cost row in the staircase would read as an unmeasured one.
     record("5 digests + fsync", &mut cost, &mut mark);
 

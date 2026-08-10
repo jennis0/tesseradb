@@ -117,6 +117,21 @@ impl ColumnKind {
     }
 }
 
+/// Serialise a presence bitmap in the **one** encoding every producer of a value column writes.
+///
+/// **The file's bytes must be a function of the entity set alone**, and without this they are a
+/// function of how the producer's bitmap happened to be built: the build's presence arrives from
+/// repeated `add`, where the fold's arrives as a union of its layers' `present()` — already
+/// run-compressed for a universal base — and croaring serialises the two encodings differently.
+/// The same entity set would then produce two different files, which is exactly the byte-identity
+/// `filter-index.md` §6.2 claims between a folded column and a freshly built one. Run-optimising
+/// here settles it in the direction that is also the smaller file.
+fn presence_bytes(presence: &Bitmap) -> Vec<u8> {
+    let mut normalised = presence.clone();
+    normalised.run_optimize();
+    normalised.serialize::<Portable>()
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -231,7 +246,7 @@ pub fn write_value_column(
     write_value_array(values_path, array, ty)?;
 
     if let Some(p) = presence {
-        std::fs::write(presence_path, p.serialize::<Portable>())?;
+        std::fs::write(presence_path, presence_bytes(p))?;
     }
     Ok(())
 }
@@ -555,7 +570,7 @@ impl ValueColumnWriter {
             std::fs::remove_file(path)?;
         }
         if let Some(p) = presence {
-            std::fs::write(&self.presence_path, p.serialize::<Portable>())?;
+            std::fs::write(&self.presence_path, presence_bytes(p))?;
         }
         Ok(())
     }

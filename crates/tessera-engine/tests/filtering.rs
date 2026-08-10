@@ -1126,7 +1126,10 @@ fn a_filtered_viewport_sees_entities_flushed_since_the_session_authorised() {
     let fresh = filtered(&after);
 
     let built = (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64;
-    assert!(built > 0, "the fixture has matching entities before the flush");
+    assert!(
+        built > 0,
+        "the fixture has matching entities before the flush"
+    );
     assert_eq!(
         fresh.points.len() as u64,
         built + 1,
@@ -1142,7 +1145,10 @@ fn a_filtered_viewport_sees_entities_flushed_since_the_session_authorised() {
         stale.points.tessera_ids.iter().copied().collect();
     let fresh_ids: std::collections::HashSet<u64> =
         fresh.points.tessera_ids.iter().copied().collect();
-    assert_eq!(stale_ids, fresh_ids, "and the same identities, not merely as many");
+    assert_eq!(
+        stale_ids, fresh_ids,
+        "and the same identities, not merely as many"
+    );
 }
 
 #[test]
@@ -1928,5 +1934,550 @@ fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
     assert!(
         offered(&engine, &none, "department", 4).is_empty(),
         "and to nobody who cannot"
+    );
+}
+
+// =================================================================================================
+// The fold's attribute pass (`filter-index.md` §6.2)
+// =================================================================================================
+//
+// A fold rewrites a bundle into a new prefix and reclaims the old one, so every artefact it does
+// not carry forward is *gone*. These cases are the attribute half of that: that a folded bundle
+// answers what the pre-fold one answered over the build's entities and the flushed ones alike,
+// that a deleted entity's value bytes leave the corpus while a suppressed one's do not (Rules F and
+// S, which must never be conflated), and that the two obligations publication owes — the files and
+// the manifest's `attr_extents` list — are both discharged. Doing one of those two is worse than
+// doing neither: the bundle then opens cleanly and answers filters short, which is a wrong answer
+// wearing a correct one's clothes.
+
+/// Request a fold and block until it has published, asserting it was not discarded.
+///
+/// `tests/fold.rs`'s helper, duplicated rather than shared: `common` is the fixture module and this
+/// binary's fixture is its own (the one with declared filter columns), so the alternative is
+/// widening `common` for two callers that agree about nothing else.
+fn fold(engine: &tessera_engine::Engine) {
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// One operand per family and per route, answered against `columns` under `candidate`.
+///
+/// **Both routes are here on purpose.** `archive` is `listing = "public"`, so its `eq`/`in` are
+/// answered by the derived postings — which the fold *rebuilds*, where it *merges* the value column
+/// — and `department` is `per_viewer`, so the same values are answered by the scan. A pass that
+/// rebuilt one and lost the other would leave half of this table right.
+fn probe_every_operand(
+    fx: &Fixture,
+    columns: &FilterColumns,
+    candidate: &Bitmap,
+) -> Vec<(String, Vec<u32>)> {
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let sales = AttrLocalId::new(fx.codes["sales"]);
+    let xx = AttrLocalId::new(fx.archive_codes["xx"]);
+    let yy = AttrLocalId::new(fx.archive_codes["yy"]);
+    let at = |v: i128| Endpoint {
+        value: Scalar::Int(v),
+        inclusive: true,
+    };
+    let probes: Vec<(&str, &str, FilterOperand)> = vec![
+        ("department", "eq eng", FilterOperand::Equals(eng)),
+        (
+            "department",
+            "in eng+sales",
+            FilterOperand::In(vec![eng, sales]),
+        ),
+        ("archive", "eq xx (routed)", FilterOperand::Equals(xx)),
+        (
+            "archive",
+            "in xx+yy (routed)",
+            FilterOperand::In(vec![xx, yy]),
+        ),
+        (
+            "title",
+            "eq paper-07",
+            FilterOperand::TextEquals("paper-07".into()),
+        ),
+        (
+            "title",
+            "prefix paper-1",
+            FilterOperand::TextPrefix("paper-1".into()),
+        ),
+        (
+            "title",
+            "contains er-2",
+            FilterOperand::TextContains("er-2".into()),
+        ),
+        (
+            "score",
+            "range 20..=60",
+            FilterOperand::Range {
+                lo: Some(at(20)),
+                hi: Some(at(60)),
+            },
+        ),
+    ];
+    probes
+        .into_iter()
+        .map(|(column, label, operand)| {
+            let answer = columns
+                .resolve(column, &operand, candidate)
+                .expect("a declared column answers");
+            (format!("{column} {label}"), as_vec(&answer))
+        })
+        .collect()
+}
+
+/// **A folded bundle answers exactly what it answered before the fold** — over the build's entities
+/// and over one ingested since it, in every family and on both routes.
+///
+/// This is the case the gap was loudest in: a fold carries forward exactly the files its new
+/// manifest names, `attrs/` was in none of those lists, and the folded bundle had no filter
+/// artefact at all. What makes it a *filter* test rather than an openability one is the flushed
+/// entity: its value lives in an extent, the fold consumes every extent into the new base, and an
+/// answer that lost it would be narrower, safe under **I12**, and indistinguishable from a correct
+/// one.
+///
+/// **Mutations this kills:** dropping the attribute pass (nothing to open — the bundle refuses);
+/// folding the base column and skipping the extents (the flushed entity answers nothing); writing
+/// the new base without blanking (caught by the deletion case below rather than here).
+#[test]
+fn a_folded_bundle_answers_every_filter_it_answered_before() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-answers");
+    let wal = fx._dir.path().join("wal-fold-answers");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let flushed = ingest_and_flush_with(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "paper-77",
+        42,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let before = probe_every_operand(&fx, &generation.filter_columns, &cand);
+    // The reference is the corpus, not the index: the build's own answer for one operand is
+    // checked against the fixture's inputs, so a pass that folded a self-consistent lie fails here
+    // and not only against itself.
+    let build_eng = expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng"));
+    assert!(
+        before[0]
+            .1
+            .iter()
+            .filter(|e| **e != flushed)
+            .copied()
+            .eq(build_eng.iter().copied()),
+        "the pre-fold answer is the corpus's own"
+    );
+    assert!(before[0].1.contains(&flushed));
+    drop(generation);
+
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+
+    let (folded, cand_after) = live_candidate(&engine);
+    assert_eq!(
+        as_vec(&cand_after),
+        as_vec(&cand),
+        "the fold retires nothing here, so the candidate is the same entity set"
+    );
+    let after = probe_every_operand(&fx, &folded.filter_columns, &cand_after);
+    assert_eq!(
+        after, before,
+        "every operand answers what it answered before"
+    );
+    assert_eq!(
+        folded
+            .bundle
+            .partitions
+            .values()
+            .next()
+            .expect("one partition")
+            .manifest
+            .attr_extents
+            .len(),
+        0,
+        "every snapshot extent folded into the base; carrying an untouched one forward is declined"
+    );
+}
+
+/// **A node restarts onto a folded bundle and opens** — the failure the gap produced today, stated
+/// as its own case because it is the one an operator meets first.
+///
+/// A declared column whose files are missing is an *error* rather than an absence
+/// (`FilterColumns::open`), which is what made the missing `attrs/` a loud refusal instead of a
+/// silent one. That rule is unchanged; what the pass changes is which files it binds.
+#[test]
+fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-restart");
+    let wal = fx._dir.path().join("wal-fold-restart");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    ingest_and_flush_with(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("legal".to_string()),
+        WalScalar::Utf8("zz".to_string()),
+        "paper-88",
+        11,
+    );
+    fold(&engine);
+    let (generation, cand) = live_candidate(&engine);
+    let before = probe_every_operand(&fx, &generation.filter_columns, &cand);
+    drop(generation);
+    drop(engine);
+
+    let restarted = open_engine_publishing(&fx.bundle, &cache, &wal);
+    assert_eq!(restarted.generation().prefix, "v00001");
+    let (generation, cand) = live_candidate(&restarted);
+    assert_eq!(
+        probe_every_operand(&fx, &generation.filter_columns, &cand),
+        before,
+        "a restart onto the folded prefix composes exactly what the process that folded it served"
+    );
+}
+
+/// The folded prefix's value column for one attribute, opened directly off disc.
+fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> tessera_filter::ValueColumn {
+    tessera_filter::ValueColumn::open_dir(
+        &fx.bundle
+            .join(prefix)
+            .join("partitions")
+            .join(&fx.phash)
+            .join("attrs")
+            .join(column),
+        false,
+    )
+    .expect("the folded column opens")
+}
+
+/// **A deleted entity is gone from every predicate after the fold, and its bytes are gone with
+/// it** (Rule F, and the retention asymmetry §6 gives as the reason for blanking).
+///
+/// The masked scan would never have visited its slot — the fold has already removed it from
+/// `M_auth` — so this is not a correctness repair but a *retention* one: after a fold the item's
+/// render value is gone because its row is gone, while its filter value would persist because the
+/// slot is positional and **I9** forbids renumbering it away. The byte assertion is what makes that
+/// a test rather than a claim.
+///
+/// **Mutations this kills:** blanking by writing a sentinel over the slot (the title's bytes are
+/// still in `values.arrow`); skipping `D₀` in the presence bitmap but not in the values (every
+/// value after the deleted entity is paired with the wrong entity, so the surviving titles move);
+/// rebuilding the postings from the pre-fold column (the deleted entity is still a member).
+#[test]
+fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-delete");
+    let wal = fx._dir.path().join("wal-fold-delete");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Sources 2 and 8 carry the same department and archive values and the titles `paper-02` and
+    // `paper-08`: one is deleted and the other is the survivor every assertion is read against, so
+    // "gone" cannot be satisfied by emptying the column.
+    let deleted = fx.entity_of[&2];
+    let survivor = fx.entity_of[&8];
+    assert_eq!(department_of(2), department_of(8));
+    assert_eq!(archive_of(2), archive_of(8));
+    let dept = AttrLocalId::new(fx.codes[department_of(2).expect("source 2 carries one")]);
+    let arch = AttrLocalId::new(fx.archive_codes[archive_of(2).expect("source 2 carries one")]);
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(deleted),
+            tessera_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    fold(&engine);
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the tombstone retired in the fold's own publication (Rule F)"
+    );
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    for (column, operand) in [
+        ("department", FilterOperand::Equals(dept)),
+        ("archive", FilterOperand::Equals(arch)),
+        ("title", FilterOperand::TextPrefix("paper-".into())),
+        ("title", FilterOperand::TextEquals(title_of(2))),
+    ] {
+        let answer = columns.resolve(column, &operand, &cand).expect("answers");
+        assert!(
+            !answer.contains(deleted as u32),
+            "the deleted entity still matches {column}"
+        );
+    }
+    assert!(columns
+        .resolve("department", &FilterOperand::Equals(dept), &cand)
+        .unwrap()
+        .contains(survivor as u32));
+
+    // The artefact itself: no slot, no bytes, no posting.
+    let titles = folded_column(&fx, "v00001", "title");
+    assert_eq!(titles.text_of(deleted as u32), None);
+    assert_eq!(titles.text_of(survivor as u32).unwrap(), title_of(8));
+    let bytes = std::fs::read(
+        fx.bundle
+            .join("v00001")
+            .join("partitions")
+            .join(&fx.phash)
+            .join("attrs/title/values.arrow"),
+    )
+    .expect("the folded column is on disc");
+    let needle = title_of(2);
+    assert!(
+        !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+        "the deleted entity's value bytes are still in the folded column — blanking is removal \
+         from presence and no value bytes, never a sentinel over them"
+    );
+
+    let postings = tessera_filter::ColumnPostings::open_keyed(
+        &fx.bundle
+            .join("v00001")
+            .join("partitions")
+            .join(&fx.phash)
+            .join("attrs/archive/postings.arrow"),
+    )
+    .expect("the rebuilt postings open");
+    let members = postings.entities(arch).expect("the code has members");
+    assert!(!members.contains(deleted as u32), "and no posting names it");
+    assert!(members.contains(survivor as u32));
+}
+
+/// **A suppression changes no attribute artefact at all** (Rule S), and the fold is where that is
+/// most easily got wrong — the two removal rules have been conflated twice in this project's review
+/// history, and giving a suppression any retirement route is fail-open.
+///
+/// So the folded column still holds the suppressed entity's value and the rebuilt postings still
+/// name it; what hides the item is the overlay, which the fold leaves standing. The unsuppress at
+/// the end is what proves the value was still there to be revealed rather than merely unreachable.
+#[test]
+fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-suppress");
+    let wal = fx._dir.path().join("wal-fold-suppress");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let suppressed = fx.entity_of[&2];
+    let arch = AttrLocalId::new(fx.archive_codes[archive_of(2).expect("source 2 carries one")]);
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(suppressed),
+            tessera_lifecycle::wal::ChangeOp::Suppress,
+        )
+        .expect("a suppression is accepted");
+    fold(&engine);
+    assert_eq!(
+        engine.overlay_depth(),
+        1,
+        "Rule S: a suppression never retires, and the fold does not execute one"
+    );
+
+    let titles = folded_column(&fx, "v00001", "title");
+    assert_eq!(
+        titles.text_of(suppressed as u32).map(|s| s.to_string()),
+        Some(title_of(2)),
+        "the suppressed entity keeps its slot and its bytes: no attribute artefact changes for a \
+         suppression"
+    );
+    let postings = tessera_filter::ColumnPostings::open_keyed(
+        &fx.bundle
+            .join("v00001")
+            .join("partitions")
+            .join(&fx.phash)
+            .join("attrs/archive/postings.arrow"),
+    )
+    .expect("the rebuilt postings open");
+    assert!(postings
+        .entities(arch)
+        .expect("members")
+        .contains(suppressed as u32));
+
+    // Hidden by the overlay throughout, and revealed by the unsuppress — which is only possible
+    // because the artefact still holds the value.
+    let (generation, cand) = live_candidate(&engine);
+    assert!(!cand.contains(suppressed as u32), "still hidden");
+    drop(generation);
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(suppressed),
+            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+        )
+        .expect("an unsuppress is accepted");
+    let (generation, cand) = live_candidate(&engine);
+    assert!(generation
+        .filter_columns
+        .resolve("title", &FilterOperand::TextEquals(title_of(2)), &cand)
+        .expect("answers")
+        .contains(suppressed as u32));
+}
+
+/// **An extent published during the fold's flight survives it, is listed, and is composed.**
+///
+/// This is publication's two obligations in one case. The extent's *files* are hard-linked into the
+/// new prefix and its *entry* is written into the new `SEGMENTS-<n>.json`'s `attr_extents`; either
+/// one alone is worse than neither. Files without the entry produce a bundle that opens cleanly and
+/// answers filters missing every post-snapshot entity — a wrong answer with no symptom — and the
+/// entry without the files is a refusal at the next open.
+///
+/// **Mutations this kills:** publishing `attr_extents: Vec::new()` (the mid-flight entity answers
+/// nothing, here and after a restart); leaving the extent's files out of the carry-forward set (the
+/// new prefix does not open once the old one is reclaimed).
+#[test]
+fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-flight");
+    let wal = fx._dir.path().join("wal-fold-flight");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let before = engine.write_executor_stats();
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !engine.fold_is_holding_for_test() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never reached its hold"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Accepted and flushed *after* the fold's snapshot: its extent is post-snapshot, so the pass
+    // never saw it and publication must carry it.
+    let mid_flight = ingest_and_flush_with(
+        &engine,
+        "mid-flight",
+        WalScalar::Utf8("sales".to_string()),
+        WalScalar::Utf8("yy".to_string()),
+        "paper-66",
+        7,
+    ) as u32;
+    engine.set_fold_paused_for_test(false);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold discarded"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let (generation, cand) = live_candidate(&engine);
+    let partition = generation
+        .bundle
+        .partitions
+        .values()
+        .next()
+        .expect("one partition");
+    let extents = &partition.manifest.attr_extents;
+    assert!(
+        !extents.is_empty(),
+        "the flight's extents are named in the folded manifest — the list is half of publishing \
+         an attribute artefact, and the half that fails silently"
+    );
+    for extent in extents {
+        for rel in [&extent.values, &extent.presence] {
+            assert!(
+                fx.bundle.join("v00001").join(rel).exists(),
+                "{rel} is named by the folded manifest but is not under the new prefix"
+            );
+        }
+    }
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "title",
+            &FilterOperand::TextEquals("paper-66".into()),
+            &cand
+        )
+        .expect("answers")
+        .contains(mid_flight));
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "archive",
+            &FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["yy"])),
+            &cand
+        )
+        .expect("answers")
+        .contains(mid_flight));
+    drop(generation);
+
+    // And after a restart, which is what reads the list rather than the process's own composition.
+    drop(engine);
+    let restarted = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let (generation, cand) = live_candidate(&restarted);
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "department",
+            &FilterOperand::Equals(AttrLocalId::new(fx.codes["sales"])),
+            &cand
+        )
+        .expect("answers")
+        .contains(mid_flight));
+}
+
+/// **The flip opens the filter columns over the new prefix**, rather than cloning the live
+/// generation's.
+///
+/// The clone is the shape this replaced, and its symptom is not a wrong answer — a folded entity is
+/// outside every candidate anyway, so the values a stale column serves are unreachable — which is
+/// exactly why it needs a test that looks at the *mappings* rather than at an answer. What a clone
+/// costs is the fold's reason for existing: the superseded prefix's files stay mapped for the
+/// process's lifetime, so the reclamation unlinks directory entries and frees nothing, and the
+/// bundle keeps a second copy of every value column on disc until a restart.
+///
+/// Linux-only, and skipped rather than failed elsewhere: `/proc/self/maps` is the only route to the
+/// question, and the alternative — asserting on an answer — is the thing that does not work here.
+#[test]
+fn the_flip_maps_the_new_prefixs_columns_and_not_the_superseded_ones() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-maps");
+    let wal = fx._dir.path().join("wal-fold-maps");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let Ok(before) = std::fs::read_to_string("/proc/self/maps") else {
+        return;
+    };
+    let folded_attrs = fx
+        .bundle
+        .join("v00001")
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .display()
+        .to_string();
+    assert!(!before.contains(&folded_attrs));
+
+    fold(&engine);
+    let after = std::fs::read_to_string("/proc/self/maps").expect("maps");
+    assert!(
+        after.contains(&folded_attrs),
+        "nothing in this process maps the folded prefix's value columns, so the generation is \
+         serving the superseded prefix's mappings — files the reclamation has just unlinked"
     );
 }
