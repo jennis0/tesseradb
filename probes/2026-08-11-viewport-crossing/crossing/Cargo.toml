@@ -1,0 +1,18 @@
+[package]
+name = "crossing"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: not a member of the repo workspace, for the reason `layoutprobe` gives — the gate's
+# `cargo test --workspace` should never build a probe harness.
+[workspace]
+
+[dependencies]
+croaring = "2"
+# The **real** Feistel, not a model of it. Route B's per-row cost is dominated by the inversion,
+# so measuring a stand-in would measure the stand-in.
+tessera-types = { path = "../../../crates/tessera-types" }
+
+[profile.release]
+opt-level = 3
+debug = false

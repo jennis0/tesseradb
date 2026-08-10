@@ -17,7 +17,7 @@ the pre-existing WAL and overlay ones and not filter work.
 
 | | Ruling | **Ruled** | Unblocks |
 |---|---|---|---|
-| **R1** | Defer `attrs/` digests to first touch? | **Value columns yes, postings no** (option b) | Open time at 10⁹; the reverted bounds check |
+| **R1** | Defer `attrs/` digests to first touch? | **No — parallelise the sweep instead** (superseding the earlier (b); see below) | Open time at 10⁹ |
 | **R2** | Where the fold's flip opens `FilterColumns` | **Keep as built** — post-flip (option a) | Nothing — closes a stated conflict |
 | **R3** | Isolate the scan in its own crate? | **Neither, yet — the cause is under investigation.** The owner's reading is that a never-called function moving a constant 65% indicates something is wrong rather than something to route around, and no remedy is chosen before the mechanism is known | The order of every §5 gap |
 | **R4** | An r-letter for the contracts tree lines? | **Leave it** (option c) — no letter, no annotation | Nothing |
@@ -70,22 +70,26 @@ check on the reader; it is not new machinery.
 | **b** | Defer `values.arrow` and `presence.roaring`; keep `postings.arrow` in the open sweep | Takes the term that dominates — postings are 6–12 MB per column against 4 GB — and leaves the disclosure control verified before serving |
 | **c** | Defer nothing | Open time stays O(corpus bytes) per declared column |
 
-**Ruled: (b)** (owner, 2026-08-10). It takes essentially all of the win, because the postings are three orders of
-magnitude smaller than the columns they accelerate, and it leaves 0061's predicate resting on bytes
-that were checked before anything was served. Under (b) the deferral is per file with the digest
-checked on first touch *before* any borrowed view is constructed, and record-level validation moves
-onto that same first-touch path — which is what actually guards the unsafe zero-copy view.
+**First ruled (b), then withdrawn on a question the options had not asked** (owner, 2026-08-10):
+*how long is startup actually?* The answer dissolved the choice.
 
-**What (b) obliges.** An amendment to **contracts §2.4** and to the shared reader's own safety
-argument — the open-time validation is named in that module's discharge of an `unsafe` block, so
-relocating it is a contracts change and not something a provisional filter design settles
-(`filter-index.md` §8 says as much). Contracts §2.4 already records the amendment as owed.
+**Deferral buys nothing here, because "first touch" cannot mean what it means for the sidecar.** A
+sidecar extent is small and is opened only when a key falls in it. Every declared filter column, by
+contrast, is opened at generation build (§8) — so deferring to first *open* saves nothing at all, and
+deferring to first *scan* charges a multi-second hash of a 4 GB column to a request path budgeted at
+0.5–1 s. It would pay off only for columns nobody ever filters on.
 
-**And it re-opens one reverted change.** The text-offset bounds check is implemented, tested and
-reverted; it is redundant only while Arrow validates offsets on decode, and it cost **70% of the
-scan** for R3's reason. If (a) or (b) lands, whoever restores it must re-derive whether it is still
-redundant on the first-touch path and pay R3's A/B discipline to land it. That coupling is why R1
-and R3 want ruling together.
+**Ruled instead: parallelise the sweep, defer nothing.** Measurement says it was never hash-bound —
+SHA-256 runs at ~2.3 GB/s on one core with this CPU's extensions, while the serial read-and-hash
+delivered ~310–390 MB/s, leaving the device's queue depth idle. Hashing the manifest's files
+concurrently measured **6.5–8×** over 4.46 GB (11.4–15.0 s serial against 1.74–1.89 s across eight
+workers), which puts `attrs/`'s share at 10⁹ back into seconds. The fail-closed rule is untouched,
+**contracts §2.4 owes no amendment** after all, and the whole sweep benefits rather than `attrs/`
+alone — `columns.arrow` is 20+ GB at 10⁹ and was in the same serial loop.
+
+**The reverted text-offset bounds check stays reverted.** It is redundant while Arrow validates
+offsets on decode, and nothing above changes that — the deferral that would have made it
+non-redundant is not happening.
 
 ---
 
@@ -225,6 +229,14 @@ A threshold hard-coded from the contiguous constant will project too much on sca
 **Ruled: (a)** (owner, 2026-08-10), with the threshold set from the *scattered* constant rather than
 the contiguous one until a scattered arm runs, so the rule errs toward the route whose cost is
 bounded by the viewport.
+
+**The scattered arm has since run, and it moved the rule rather than confirming it**
+([`viewport-crossing`](../../../probes/2026-08-11-viewport-crossing/results.md), 2026-08-11). Arm 3's
+per-tile constant was measured against a materialised `row_to_entity` array the system does not have;
+the real crossing is a Feistel per row at ~17–25 ns, making the route 3–9× dearer than published. The
+two-route design stands and the per-tile route still wins decisively for broad filters, but the
+crossover sits between 10⁵ and 10⁶ against a 300,000-row viewport rather than at the ~75,000 the
+quarter-rule gives. Surface §4 now carries both constants and the ⊘ explaining what changed.
 
 **One correction to make either way.** §4's closing paragraphs still assert that a filter operand's
 projection is principal-independent and "computed once and shared across every principal". The ⊘

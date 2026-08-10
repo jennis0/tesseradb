@@ -196,23 +196,48 @@ enumerates its values at all (index §2.3).
 
 ## 4. From entity space to row space
 
-**The rule is measured, and it is one line:** *project the result only when it is smaller than about a
-quarter of the viewport's row count; otherwise test membership per tile and project nothing.*
+**The rule is measured, and it is one line:** *project the result while it is no larger than the
+viewport's row count; beyond that test membership per tile and project nothing.*
 
-At 10⁹ ([`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/) arm 3), a
-projection costs **~27 ns per set bit** and a per-tile membership test **~6–22 ns per viewport row**.
-The crossover is just those two constants — a result of ~10⁵ against a 300,000-row viewport.
+Two constants set it, and the second is not the one an earlier revision quoted. A projection costs
+**~20–30 ns per set bit** and scales with the result
+([`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/) arm 3 at 10⁹ and
+[`probes/2026-08-11-viewport-crossing/`](../../probes/2026-08-11-viewport-crossing/) at 10⁸ agree on
+this). A per-tile test costs **~20–29 ns per viewport row** on a contiguous result and **~57–106 ns**
+on a scattered one.
+
+> **⊘ The 6–22 ns/row this section quoted before 2026-08-11 was a route the system cannot build.**
+> Arm 3's per-tile test indexes a materialised `row_to_entity` array, and none exists: `permutation.bin`
+> is entity→row, and the only crossing back is the row's `tessera_id` through `IdentityKey::invert` —
+> a 4-round Feistel costing **~17–25 ns per row**, which dominates wherever the rest of the loop is
+> cheap. The real route is 3–9× the idealised one, so the crossover moves by roughly that factor: at a
+> 300,000-row viewport it sits between 10⁵ and 10⁶, not at the ~75,000 a quarter-rule gives. The
+> per-tile route still wins decisively where it matters — 216 ms against 32 ms at a 10⁷ result — but
+> it is not free, and a threshold set from the old constant sends work to it far too early.
+>
+> **A Morton-cell → entity pre-filter was measured and refused** in the same campaign: a bitmap per
+> coarse cell holding the entities whose rows fall in it, so a filtered viewport would be an
+> intersection in entity space with no per-row crossing at all. It is the slowest of the three routes
+> at every point measured and its structure is *larger* than the inverse permutation it emulates
+> (3.2–7.9 B/entity against 4 B). A cell's entity set is scattered in entity space — entity ids are
+> assigned in permission-signature order, uncorrelated with position — so the union over a viewport's
+> cells touches every container and costs O(corpus), which is exactly what it was meant to avoid. The
+> property that makes authorisation postings compress works against it.
 
 The asymmetry is the whole point. A projection scales with **the result**; a per-tile test scales with
 **the viewport**, which is already bounded by the drawn-mark budget (§7.2), so it scales with neither
 the corpus nor how much the filter matched. Projecting a 10⁸-entity result costs **2,779 ms — more
-than the 730 ms scan that produced it**, so for any broad filter the projection was the dominant term
+than the 730 ms scan that produced it**, so for any broad filter the projection is the dominant term
 and this removes it. The route that remains for narrow results is cheap precisely because they are
 narrow: 3.8 ms at 10⁵.
 
-**The per-bit constant is shape-dependent and no figure here may be quoted flat.** This arm's results
-are contiguous, the cheap end for a gather. The corpus's 127 ns/set-bit point (`probes/results.md` §6)
-is ~4.7× it and is the likely shape of a scattered result.
+**Both constants are shape-dependent and neither may be quoted flat.** Arm 3's results are contiguous,
+the cheap end for a gather *and* for a membership test. The corpus's 127 ns/set-bit point
+(`probes/results.md` §6) is ~4.7× its projection constant and is the likely shape of a scattered
+result; the per-tile constant moves by a similar factor in the same direction (34–60 ns/row idealised
+scattered against 2.2–9.2 contiguous). **They move together**, which is why the crossover is more
+stable than either constant — but a threshold hard-coded from the contiguous pair is wrong on both
+sides at once.
 
 > **⊘ §4.1–§4.5 below are superseded and retained only as a record.** They specify a **shared
 > projection cache**: an operand projected once, principal-independently, reused across principals.
