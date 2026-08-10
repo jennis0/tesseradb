@@ -170,11 +170,13 @@ suspicion was right on both counts:
   wrong answer and "recovers about half" was luck. §6.2's performance rationale for the
   `tessera-filter-write` split is withdrawn; the split stands on audit separation.
 
-⊘ **What remains is a profile decision, unmade:** `-C llvm-args=-align-all-functions=6` pins
-function starts to 64 bytes at no measurable baseline cost, and is independently confirmed to put
-all four hot symbols on residue 0 where unpinned they sit at 16, 0, 48, 0. It was measured on
-`realscan` alone and wants re-running against the real `tessera` binary, on a quiet machine, before
-the workspace profile is changed.
+**Applied** (owner, 2026-08-10): `-C llvm-args=-align-all-functions=6` pins function starts to 64
+bytes, in `.cargo/config.toml`. Confirmed on the shipped `tessera` binary rather than on a probe —
+unpinned, the scan's twenty-six `pack_run` monomorphisations sit across all four 16-byte residues
+with eight on the two that measure slow; pinned, all twenty-six sit on the fast one. That check is
+`nm` and arithmetic, so it holds whatever the machine is doing. ⊘ **The timing half is not
+re-confirmed**: the flag's ~no-cost figure was measured on `realscan` alone, and the machine has not
+been quiet enough since to interleave the arms against the real binary.
 
 ---
 

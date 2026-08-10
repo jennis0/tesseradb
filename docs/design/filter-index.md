@@ -249,25 +249,27 @@ check per element. Because the ranges are a function of `(candidate, presence)` 
 cannot skip work whatever it is testing for — so adding a family adds a comparison and cannot add a
 channel.
 
-**These constants are a property of the hot loops' *addresses*, and the fast value above is one of
-two.** An unrelated addition to `tessera-filter` moves them 30–70% — three times from code that
+**These constants were a property of the hot loops' *addresses*, and the figures above are the
+value the build now pins.** An unrelated addition to `tessera-filter` moved them 30–70% — three times from code that
 never runs during a scan, once from a function never called at all — and the mechanism is
 instruction-address alignment, not code generation
 ([`scan-constant-sensitivity`](../evidence/memos/2026-08-11-scan-constant-sensitivity.md)):
 the perturbed builds emit the hot functions instruction-for-instruction identical and merely place
 them elsewhere, and padding the crate's text with inert bytes reproduces the whole effect as a
 function of shift mod 64. Over the layouts measured the packing path's constant takes **~0.25–0.28
-or ~0.42–0.44 ns and nothing between**, two of the four 16-byte residues landing on each. **Read
-every figure in this section as the favourable draw**; an unlucky link of byte-identical scan code
-costs 65% more. The memory-bound cells — every scattered candidate — are immune, which is why the
-9.6 ns and the scattered text figures carry no such caveat.
+or ~0.42–0.44 ns and nothing between**, two of the four 16-byte residues landing on each — so an
+unlucky link of byte-identical scan code cost 65% more, and every figure in this section is the
+favourable value rather than an average. The memory-bound cells — every scattered candidate — are
+immune, which is why the 9.6 ns and the scattered text figures carry no such caveat.
 
-⊘ **The remedy is identified and not applied.** Pinning function starts to 64 bytes
-(`-C llvm-args=-align-all-functions=6`) closes the channel by which unrelated code reaches the
-constant, at no measurable baseline cost against `codegen-units = 1`'s ~15%; it is a workspace
-profile change and is not made here. Until it is, **any change to this crate must be A/B'd
-interleaved before its constants are believed** — and even after it, a change to the hot files
-themselves still relocates their own blocks and still needs the discipline.
+**The channel is closed at the build: function starts are pinned to 64 bytes**
+(`-C llvm-args=-align-all-functions=6`, in `.cargo/config.toml` with the argument for why), at no
+measurable baseline cost against `codegen-units = 1`'s ~15% and +0.14% binary size. Unpinned, the
+scan's twenty-six `pack_run` monomorphisations in the shipped `tessera` binary sit across all four
+16-byte residues — eight of them on the two that measure slow; pinned, all twenty-six sit on the
+fast one. **What it does not do is make the scan immune to its own edits**: a change to `values.rs`
+or `pack.rs` still relocates those blocks, so anything touching the hot files still needs the
+interleaved A/B discipline the memo describes. What no longer needs it is everything else.
 
 The typed change carries a caveat worth stating at the site, because the obvious form of it is a
 regression: **a scattered candidate is one-element runs**, and building a slice iterator per run

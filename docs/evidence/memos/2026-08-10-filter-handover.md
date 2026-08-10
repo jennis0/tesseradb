@@ -33,12 +33,16 @@ Only the compute-bound cells are affected; every memory-bound one is immune.
 
 **A crate containing only the scan is *not* the answer**, which is what this memo said before the
 cause was known: a crate boundary re-rolls the layout rather than pinning it, which is exactly why
-moving the symbol "recovered about half". ⊘ The remedy is `-C llvm-args=-align-all-functions=6`,
-identified and **not applied** — a workspace profile change, unmade.
+moving the symbol "recovered about half". The remedy is `-C llvm-args=-align-all-functions=6`, and
+it is **applied** — `.cargo/config.toml`, which carries the argument.
 
-Until it is applied: **A/B interleaved against a `HEAD` build, medians of three, before believing
-any number** — `probes/2026-08-08-filter-layout/layoutprobe`'s `realscan` and `textscan` are the
-harness, run-to-run drift is ~5% on a quiet machine, and this one is often not quiet.
+So the trap is narrower than it was, and the part that remains is the part you are most likely to
+walk into: **an edit to `values.rs` or `pack.rs` still relocates their own blocks**, so anything
+touching the hot files still wants **A/B interleaved against a `HEAD` build, medians of three,
+before any number is believed** — `probes/2026-08-08-filter-layout/layoutprobe`'s `realscan` and
+`textscan` are the harness, run-to-run drift is ~5% on a quiet machine, and this one is often not
+quiet: a background browser or a resident `tessera serve` has been measured taking the same binary
+across a 1.75× spread.
 
 ## 2. Unbuilt operands and one family
 
