@@ -193,15 +193,26 @@ one flush interval is safe under **I12**. The **fold** now carries the artefact:
 per column merges the base and every snapshot extent into a new base, blanks the deleted entities,
 rebuilds each category's postings from the folded column, and carries the flight's extents forward
 in both halves publication owes — the files and the manifest's `attr_extents` (`filter-index.md`
-§6.2). What remains of [#43] is the extent coalesce (§5.2), which bounds the file count between
-folds. Numeric ranges are refused at schema parse with the reason named.
+§6.2). The **extent coalesce** bounds the file count between folds as the fourth axis of the engine's
+entity-space pass (§5.2), so growth no longer waits for a fold. **Numeric ranges are built** — a
+scan at the column's own precision, all four bounds. All three write paths are verified on real data
+at 2.4×10⁶ and 2.5×10⁷ against an independently decoded oracle
+([`probes/2026-08-10-filter-lifecycle/`](../probes/2026-08-10-filter-lifecycle/)).
 
-**[#83]'s input now exists.** A `per_viewer` category gets its membership postings whatever its
-`used_for` says, so the artefact §3.3's predicate was waiting on is emitted. `/v1/categories` still
-refuses rather than filtering — that is engine work, not an absent artefact — and one amendment is
-owed with it: contracts §3.2 classifies the endpoint outside the compute-admission gate on the
-grounds that it does *"no mask composition, no projection, no file IO"*, and the gate needs the
-session's fragment and a bitmap intersection per value.
+**What remains of [#43] is two operands and one family** — `none_of`, `match` and multi-valued
+attributes, each refusing by name — and they are not equal in cost: lists need their own addressing
+before the fold's blanking and the coalesce's merge are sound for them, and `none_of` inverts the
+positivity property every "degrades safely under I12" argument in `filter-index.md` §5 rests on. The
+open work is handed over in
+[`2026-08-10-filter-handover.md`](evidence/memos/2026-08-10-filter-handover.md).
+
+**[#83] is closed.** A `per_viewer` category gets its membership postings whatever its `used_for`
+says, and `/v1/categories` now derives visibility from them rather than refusing — composing the
+candidate, filtering the page **before** it is cut, and offering a value carried only by entities
+ingested since the build. The amendment it owed landed with it: contracts §3.2 had classified the
+endpoint outside the compute-admission gate on the grounds that it does *"no mask composition, no
+projection, no file IO"*, which is true of a `public` column and not of a `per_viewer` one, where
+the work is the candidate plus one mapped posting probe per value walked.
 
 The shape is deliberate and worth preserving under pressure: filters are order-independent set
 producers, composed as a boolean tree **evaluated inside the candidate** (decision 0059) — which is
