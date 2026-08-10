@@ -171,6 +171,10 @@ export class TesseraClient {
     });
     if (!response.ok) await fail(response);
     const bytes = new Uint8Array(await response.arrayBuffer());
+    // Read BEFORE decode: the worker path transfers the buffer zero-copy, which detaches it —
+    // `byteLength` afterwards is 0, and every byte ledger downstream (the anticipation budget,
+    // the traces, the ring-spend measurement) silently read that zero.
+    const size = bytes.byteLength;
     const stage = response.headers.get('x-tessera-stage-ns');
     this.decoder ??= this.opts.decoder ?? createDecoder();
     return {
@@ -186,7 +190,7 @@ export class TesseraClient {
       contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
       pin: response.headers.get('x-tessera-pin'),
       stale: response.headers.get('x-tessera-stale') === '1',
-      bytes: bytes.byteLength
+      bytes: size
     };
   }
 
