@@ -193,6 +193,18 @@ export function bandSplitter(
         if (served === 0) continue;
         const end = offset + served;
         const ids = result.ids.slice(offset, end);
+        // **Ascending order asserted at the one gate every band passes.** Every prefix operation
+        // in the client — eviction truncation, density-matched subsets, the declaration bound —
+        // rests on the wire's ascending-identity contract (contracts §3.2); until here it was an
+        // unchecked premise (review, Question E). O(n) over bytes already being copied.
+        for (let p = 1; p < ids.length; p++) {
+          if (ids[p]! <= ids[p - 1]!) {
+            throw new Error(
+              `band ${tile.tile}: ids out of ascending order at ${p} — every client subset rule ` +
+                `rests on this, so a violation must refuse loudly rather than serve quietly.`
+            );
+          }
+        }
         // Already in world space — the decoder produced it, which in a browser means a worker did.
         const positions = result.world.slice(offset * 2, end * 2);
         const scalars = sliceScalars(result.scalars, offset, end);
