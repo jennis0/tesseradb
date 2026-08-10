@@ -1078,6 +1078,73 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
 /// This is the first assertion that the filter reaches the *served* answer rather than an
 /// entity-space bitmap a test built itself. The expected set comes from the fixture's inputs, and
 /// the comparison is on `tessera_id` rather than row, because the served order is the engine's.
+/// **A filtered viewport composes the fragment brought forward, not the session's own.**
+///
+/// A session's fragment is fixed at authorise, and composition treats every entity below the live
+/// watermark as fragment-resident — so composing a filter against the session's own fragment omits
+/// everything flushed since it authorised. That failure is *narrowing*, which **I12** permits, and
+/// that is exactly what makes it dangerous: the response is a correct-looking subset with no error
+/// anywhere. The unfiltered path has always brought the fragment forward; this pins the filtered
+/// one to the same rule.
+///
+/// Asserted by agreement between two sessions rather than by a count alone: one authorised before
+/// the flush and one after must answer the same filtered viewport identically, which is the
+/// property, and the count then says the flushed entity is genuinely in both.
+#[test]
+fn a_filtered_viewport_sees_entities_flushed_since_the_session_authorised() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-vp-stale");
+    let wal = fx._dir.path().join("wal-vp-stale");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Authorised *before* the flush: this session's own fragment cannot contain the new entity.
+    let before = engine.authorise(&full_coverage_credential()).unwrap();
+
+    ingest_and_flush(
+        &engine,
+        "post-build-vp",
+        WalScalar::Utf8("eng".to_string()),
+        "paper-99",
+        42,
+    );
+
+    // Authorised after it, so its own fragment already holds the entity — the control.
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
+    let filtered = |session: &tessera_engine::Session| {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("department", eng.clone())),
+            )
+            .expect("a filtered viewport answers")
+    };
+
+    let stale = filtered(&before);
+    let fresh = filtered(&after);
+
+    let built = (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64;
+    assert!(built > 0, "the fixture has matching entities before the flush");
+    assert_eq!(
+        fresh.points.len() as u64,
+        built + 1,
+        "the flushed entity carries `eng` and is served to a session that post-dates it"
+    );
+    assert_eq!(
+        stale.points.len(),
+        fresh.points.len(),
+        "a session authorised before the flush sees the same filtered set as one authorised after"
+    );
+
+    let stale_ids: std::collections::HashSet<u64> =
+        stale.points.tessera_ids.iter().copied().collect();
+    let fresh_ids: std::collections::HashSet<u64> =
+        fresh.points.tessera_ids.iter().copied().collect();
+    assert_eq!(stale_ids, fresh_ids, "and the same identities, not merely as many");
+}
+
 #[test]
 fn a_filtered_viewport_serves_only_matching_marks() {
     let fx = fixture();

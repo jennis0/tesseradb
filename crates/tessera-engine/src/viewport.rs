@@ -907,8 +907,19 @@ impl Engine {
         // missing is the cheap route for the broad case, which is a latency gap and not a
         // correctness one.
         let mask = if let Some(expr) = &req.filter {
+            // **The fragment is brought forward, not read off the session.** A session's own
+            // fragment is fixed at authorise, and composition treats entities below the live
+            // watermark as fragment-resident — so composing against the stale one silently omits
+            // every entity flushed since, and a filtered viewport under a long-lived session
+            // under-reports. Narrowing, and safe under **I12**, which is exactly what makes it the
+            // dangerous kind: the answer is indistinguishable from a correct one. `/v1/categories`
+            // takes the same care for the same reason.
+            //
+            // This costs nothing here: `session_geometry` above has already resolved the same
+            // fragment on this request, so this is the identity short-circuit or a cache hit.
+            let fragment = self.fragment_for(session, &generation)?;
             let candidate = crate::filter::candidate(
-                &session.fragment,
+                &fragment,
                 &session.satisfied,
                 &generation.overlay,
                 &generation.buffer,
