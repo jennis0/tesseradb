@@ -615,7 +615,7 @@ mod tests {
         let column = ValueColumn::open(
             &dir.path().join("text-values.arrow"),
             Some(&dir.path().join("text-presence.roaring")),
-            false,
+            tessera_filter::Access::Read,
         )
         .expect("the folded column opens");
         assert_eq!(column.text_of(0), Some("alpha"));
@@ -646,7 +646,7 @@ mod tests {
         let values = dir.join(format!("{tag}-values.arrow"));
         let presence = dir.join(format!("{tag}-presence.roaring"));
         coalesce_attr_extents(inputs, &values, &presence)?;
-        ValueColumn::open(&values, Some(&presence), false)
+        ValueColumn::open(&values, Some(&presence), tessera_filter::Access::Read)
     }
 
     /// **A coalesced extent carries exactly the `(entity, value)` triples its inputs carried

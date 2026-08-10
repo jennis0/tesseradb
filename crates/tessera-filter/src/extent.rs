@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
 
-use crate::values::{Codes, ValueColumn};
+use crate::values::{Access, Codes, ValueColumn};
 use crate::values_writer::write_value_column;
 
 /// Where a column's per-flush extents live, under the column's own directory.
@@ -79,7 +79,7 @@ pub fn write_extent(
 pub fn open_extent(
     values_path: &Path,
     presence_path: &Path,
-    mmap: bool,
+    access: Access,
 ) -> io::Result<ValueColumn> {
-    ValueColumn::open(values_path, Some(presence_path), mmap)
+    ValueColumn::open(values_path, Some(presence_path), access)
 }

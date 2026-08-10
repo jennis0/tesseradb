@@ -627,7 +627,7 @@ fn write_filter_extents(
                     ))
                 })
         };
-        let values = tessera_filter::open_extent(&values_path, &presence_path, true)
+        let values = tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
             .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
         out.push(FlushedExtent {
             column: spec.name.clone(),

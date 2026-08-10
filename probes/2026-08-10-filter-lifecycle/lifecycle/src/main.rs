@@ -765,7 +765,7 @@ fn main() {
             let postings_bytes = std::fs::metadata(dir.join("postings.arrow"))
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let opened = tessera_filter::ValueColumn::open_dir(&dir, true).expect("column opens");
+            let opened = tessera_filter::ValueColumn::open_dir(&dir, tessera_filter::Access::Mapped).expect("column opens");
             let after_values = rss_bytes();
             let postings = (postings_bytes > 0)
                 .then(|| tessera_filter::ColumnPostings::open_keyed(&dir.join("postings.arrow")));

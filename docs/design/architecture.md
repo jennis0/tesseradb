@@ -542,7 +542,7 @@ The naive implementation gets the direction wrong. `M_sel ⊆ M_auth`, so filter
 | The same fragment on disk, engine-local directory | (bundle manifest digest, auth-plugin hash, satisfied term set) — §2.3's canonical key | nothing — content-addressed |
 | Row-space permutation of a mask fragment | + (slice, segment-set version) | compaction |
 | Servable-label set (containment decisions) | (auth-data hash, auth-plugin version, overlay version) | overlay change |
-| Filter results | (filter identity, partition, segment-set version) | ingest — shared across all principals |
+| Filter results | **not cached, and not shareable** — an operand is evaluated *under the candidate*, so a result is `M_sel` and principal-specific (filter-index §2.2, filter-surface §4) | — |
 | `M_sel` and the frontier | (token, filter query, overlay version) | every keystroke |
 
 Two things this table has to get right. The cached mask is the **pre-composition** fragment, because `M_auth` is composed at fetch time from the live set (**I1**) and cannot be cached as such. And containment decisions depend on `M_auth`, which the overlay changes under a live token — so a deletion must invalidate them, which is what the overlay version is for.

@@ -1273,12 +1273,12 @@ impl ValueColumn {
     /// and a filter reporting items as carrying values they do not have. The presence file's
     /// existence *is* the signal that addressing is not positional, so the two must be resolved
     /// together.
-    pub fn open_dir(dir: &Path, mmap: bool) -> io::Result<Self> {
+    pub fn open_dir(dir: &Path, access: Access) -> io::Result<Self> {
         let presence = dir.join(PRESENCE_FILE);
         Self::open(
             &dir.join(VALUES_FILE),
             presence.exists().then_some(presence.as_path()),
-            mmap,
+            access,
         )
     }
 
@@ -1290,8 +1290,12 @@ impl ValueColumn {
     /// worst (probe `2026-08-08-filter-layout`). Roaring also wants its own owned representation to
     /// answer a rank in the scan's inner loop, so mapping it would buy little and cost the run-merge
     /// its structure.
-    pub fn open(values_path: &Path, presence_path: Option<&Path>, mmap: bool) -> io::Result<Self> {
-        let codes = read_values(values_path, mmap)?;
+    pub fn open(
+        values_path: &Path,
+        presence_path: Option<&Path>,
+        access: Access,
+    ) -> io::Result<Self> {
+        let codes = read_values(values_path, access)?;
         match presence_path {
             None => Ok(ValueColumn::universal(codes)),
             Some(path) => {
@@ -1311,6 +1315,39 @@ impl ValueColumn {
     }
 }
 
+/// How a value column's bytes are obtained, and what the caller promises about its access pattern.
+///
+/// This is an enum rather than the `bool` it replaced because there are three cases and two of them
+/// are both "mapped": the distinction the third makes is **whose** mapping it is. Decision 0052
+/// rules that the fold's page-cache mitigation is a hint on mappings *the fold owns*, and that it
+/// must never be applied to the request path's — so the advice cannot be a property of the file, or
+/// of a global setting, and has to arrive from the caller that knows which of the two it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Read into one owned buffer. For a caller that wants the bytes off the file system, and for
+    /// the writers' own read-backs in tests.
+    Read,
+    /// Mapped, faulted on demand, no advice. **The request path's mode** — a scan touches the part
+    /// of the column its candidate covers and residency follows the working set rather than the
+    /// declared schema (§8).
+    Mapped,
+    /// Mapped and advised `MADV_SEQUENTIAL`. For a background pass that streams a column **exactly
+    /// once** through a mapping it owns: the readahead suits the access and the drop-behind is the
+    /// point, since the pages are not wanted afterwards and the request path's are.
+    MappedSequential,
+}
+
+impl Access {
+    /// `None` to read, `Some(sequential)` to map.
+    fn mapped(self) -> Option<bool> {
+        match self {
+            Access::Read => None,
+            Access::Mapped => Some(false),
+            Access::MappedSequential => Some(true),
+        }
+    }
+}
+
 /// Read a value column's Arrow IPC file **without copying its values**.
 ///
 /// When `mmap` is set the file is mapped and the batch decoded straight out of the mapping; when it
@@ -1324,17 +1361,24 @@ impl ValueColumn {
 /// concatenated. Concatenating would copy — which is the whole cost this exists to avoid — and there
 /// is no bundle that holds a multi-batch value column: the writer emits one batch, and pre-release
 /// there is no past to be compatible with (decision 0048).
-fn read_values(path: &Path, mmap: bool) -> io::Result<Codes> {
+fn read_values(path: &Path, access: Access) -> io::Result<Codes> {
     use arrow::array::{Array, LargeStringArray};
     use arrow::datatypes::DataType;
 
-    let buffer = if mmap {
+    let buffer = if let Some(sequential) = access.mapped() {
         let file = std::fs::File::open(path)?;
         // SAFETY: the same argument as `PostingsReader::open`'s mmap arm. `arc` owns the mapping
         // for as long as any `Buffer` built from it is alive — it is captured as the buffer's
         // `Allocation` — the mapping is valid for `len` bytes for its whole lifetime, and
         // `memmap2::Mmap` never returns a null base pointer.
         let mapping = unsafe { memmap2::Mmap::map(&file) }?;
+        if sequential {
+            // **A hint, and a failure to give it is not a failure to open**
+            // (decision 0052): the advice is an optimisation for a caller that streams the column
+            // once, and a kernel that declines it leaves a correct mapping behind. Erroring here
+            // would let an advisory call fail a fold.
+            let _ = mapping.advise(memmap2::Advice::Sequential);
+        }
         let len = mapping.len();
         let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
         let ptr = std::ptr::NonNull::new(arc.as_ptr() as *mut u8)
@@ -2199,7 +2243,7 @@ mod tests {
         let presence = dir.path().join("presence.roaring");
         let codes = Codes::text(["alpha".to_string(), "".to_string(), "gamma".to_string()]);
         write_value_column(&values, &presence, &codes, None).unwrap();
-        let column = ValueColumn::open(&values, None, false).unwrap();
+        let column = ValueColumn::open(&values, None, Access::Read).unwrap();
         assert_eq!(column.text_of(0), Some("alpha"));
         assert_eq!(column.text_of(1), Some(""));
         assert_eq!(column.text_of(2), Some("gamma"));
@@ -2221,7 +2265,7 @@ mod tests {
         let codes = Codes::U32(vec![5, 6, 7].into());
         let present = candidate([2, 4, 8]);
         write_value_column(&values, &presence, &codes, Some(&present)).unwrap();
-        let column = ValueColumn::open(&values, Some(&presence), false).unwrap();
+        let column = ValueColumn::open(&values, Some(&presence), Access::Read).unwrap();
         assert_eq!(column.value_of(4), Some(AttrLocalId::new(6)));
         assert_eq!(column.value_of(3), None);
         assert_eq!(column.present().iter().collect::<Vec<_>>(), vec![2, 4, 8]);
@@ -2229,7 +2273,7 @@ mod tests {
         // Universal presence writes no bitmap and reads back without one.
         let values2 = dir.path().join("v2.arrow");
         write_value_column(&values2, &presence, &Codes::U8(vec![9, 8].into()), None).unwrap();
-        let dense = ValueColumn::open(&values2, None, false).unwrap();
+        let dense = ValueColumn::open(&values2, None, Access::Read).unwrap();
         assert_eq!(dense.value_of(0), Some(AttrLocalId::new(9)));
         assert_eq!(dense.value_of(5), None);
     }
@@ -2257,8 +2301,8 @@ mod tests {
             let values = dir.path().join(format!("{name}.arrow"));
             write_value_column(&values, &presence, &codes, None).unwrap();
 
-            let mapped = ValueColumn::open(&values, None, true).unwrap();
-            let read = ValueColumn::open(&values, None, false).unwrap();
+            let mapped = ValueColumn::open(&values, None, Access::Mapped).unwrap();
+            let read = ValueColumn::open(&values, None, Access::Read).unwrap();
             let all = candidate(0..4);
 
             for slot in 0..4u32 {

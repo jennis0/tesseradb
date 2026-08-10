@@ -2172,7 +2172,7 @@ fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> tessera_filter::Va
             .join(&fx.phash)
             .join("attrs")
             .join(column),
-        false,
+        tessera_filter::Access::Read,
     )
     .expect("the folded column opens")
 }
@@ -2777,7 +2777,7 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
         let column = tessera_filter::open_extent(
             &prefix.join(&extent.values),
             &prefix.join(&extent.presence),
-            false,
+            tessera_filter::Access::Read,
         )
         .expect("a listed extent opens");
         if let Some(value) = column.text_of(deleted as u32) {

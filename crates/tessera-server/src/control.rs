@@ -1833,6 +1833,13 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // ratio: an operator with the numerator (`overlay.retirable`) and the denominator can form
         // it, and a third derived number is a third thing to keep consistent.
         //
+        // **`last_attr_bytes_*` are reported and never triggered on** (`filter-index.md` §6.2). The
+        // attribute pass is the fold's streaming term — ~12 GB per `u32` column at 10⁹ read,
+        // written and re-read for the digest — and the staircase attributes its time and residency
+        // but not its IO, which is the axis the non-disruption claim is made on. They are not
+        // gauges twice over: §5.2's coalesce bounds the extent axis continuously, and what escapes
+        // it moves with the segment axis compaction §9 already gauges.
+        //
         // **The dead-bytes gauge is deliberately absent.** It is a walk of the live prefix, and the
         // schedule pays for it at most once per tick and only when every cheaper route has
         // declined; recomputing it on every `/control/status` poll would make an operator's
@@ -1845,6 +1852,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "fold_requested": executor.fold_requested,
             "last_secs": executor.last_fold_secs,
             "last_rss_bytes": executor.last_fold_rss,
+            "last_attr_bytes_read": executor.last_fold_attr_read,
+            "last_attr_bytes_written": executor.last_fold_attr_written,
             "passes": state.engine.last_fold_passes()
                 .iter()
                 .map(|p| serde_json::json!({

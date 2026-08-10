@@ -316,6 +316,11 @@ pub struct ExecutorHealth {
     /// what a deployment has, and probe P1 is what says how far under the true peak it sits.
     pub(crate) last_fold_secs: AtomicU64,
     pub(crate) last_fold_rss: AtomicU64,
+    /// The last fold's attribute pass IO (`filter-index.md` §6.2's reported-never-triggered-on
+    /// ruling). The staircase says what pass 4a cost in time and residency; these say what it cost
+    /// in bytes, which is the axis its non-disruption argument is made on.
+    pub(crate) last_fold_attr_read: AtomicU64,
+    pub(crate) last_fold_attr_written: AtomicU64,
     /// The last fold's staircase, pass by pass — what the two gauges above are a reduction of.
     ///
     /// **The gauges alarm and this diagnoses**, which is why both exist: `last_fold_rss` says the
@@ -647,6 +652,8 @@ pub struct ExecutorStats {
     /// Both 0 before the first fold.
     pub last_fold_secs: u64,
     pub last_fold_rss: u64,
+    pub last_fold_attr_read: u64,
+    pub last_fold_attr_written: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
@@ -813,6 +820,8 @@ impl ExecutorHealth {
             fold_ended_unix: AtomicU64::new(0),
             last_fold_secs: AtomicU64::new(0),
             last_fold_rss: AtomicU64::new(0),
+            last_fold_attr_read: AtomicU64::new(0),
+            last_fold_attr_written: AtomicU64::new(0),
             last_fold_passes: Mutex::new(Vec::new()),
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
@@ -934,6 +943,8 @@ impl ExecutorHealth {
             fold_requested: self.fold_requested.load(Ordering::SeqCst),
             last_fold_secs: self.last_fold_secs.load(Ordering::Relaxed),
             last_fold_rss: self.last_fold_rss.load(Ordering::Relaxed),
+            last_fold_attr_read: self.last_fold_attr_read.load(Ordering::Relaxed),
+            last_fold_attr_written: self.last_fold_attr_written.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -4977,6 +4988,12 @@ impl Executor {
         self.health
             .last_fold_rss
             .store(staircase_rss, Ordering::Relaxed);
+        self.health
+            .last_fold_attr_read
+            .store(completed.attr_bytes_read, Ordering::Relaxed);
+        self.health
+            .last_fold_attr_written
+            .store(completed.attr_bytes_written, Ordering::Relaxed);
         *lock_recover(&self.health.last_fold_passes) = completed.cost.clone();
         tracing::info!(
             prefix = %completed.prefix,
@@ -4987,6 +5004,8 @@ impl Executor {
             passes = %passes,
             fold_secs,
             staircase_rss,
+            attr_bytes_read = completed.attr_bytes_read,
+            attr_bytes_written = completed.attr_bytes_written,
             "a compaction fold published: the bundle is one base segment per partition-slice, one \
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"

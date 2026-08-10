@@ -401,6 +401,16 @@ pub(crate) fn owes_postings(
     scalar.vocabulary.is_some() && owes_value_column(scalar, vocabularies)
 }
 
+/// The request path's two modes, and only those: `MappedSequential` is the fold's and is
+/// deliberately unreachable from here (decision 0052).
+fn request_access(mmap: bool) -> tessera_filter::Access {
+    if mmap {
+        tessera_filter::Access::Mapped
+    } else {
+        tessera_filter::Access::Read
+    }
+}
+
 impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
     /// side-manifest names.
@@ -418,6 +428,13 @@ impl FilterColumns {
     /// Mapped, the pages are faulted in by the scans that touch them and reclaimable under
     /// pressure. The engine passes `true`; tests that build a column and read it back in the same
     /// process pass `false`, exactly as they do for `PostingsReader::open`.
+    ///
+    /// **It stays a `bool` where the reader beneath it takes a three-way [`tessera_filter::Access`],
+    /// and that is the point.** The third case is `MappedSequential`, the fold's `MADV_SEQUENTIAL`,
+    /// and [decision 0052](../../../docs/decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md)
+    /// rules that it belongs only to mappings the fold owns and must never be applied to these —
+    /// which are the request path's. A `bool` here cannot express it, so the rule is enforced by the
+    /// signature rather than by a comment asking the next caller to remember it.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
@@ -433,7 +450,7 @@ impl FilterColumns {
             .filter(|d| owes_value_column(d, vocabularies))
         {
             let dir = partition_dir.join("attrs").join(&scalar.name);
-            let base = Arc::new(ValueColumn::open_dir(&dir, mmap)?);
+            let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
             let covered = base.present();
             // Opened whenever the build owed them, and a missing file is an error for the same
             // reason a missing value column is: the manifest digests them, so absence means the
@@ -469,7 +486,7 @@ impl FilterColumns {
             let column = tessera_filter::open_extent(
                 &prefix_dir.join(&extent.values),
                 &prefix_dir.join(&extent.presence),
-                mmap,
+                request_access(mmap),
             )?;
             open.compose(&extent.column, &extent.values, Arc::new(column))?;
         }

@@ -987,10 +987,11 @@ where a segment costs a binary search per tile (measured, §5.1). What the pass 
 *visibility*: attribute bytes read and written in the fold's dispatch log line and
 `/control/status`'s fold block, beside the figures already there. (An earlier revision of this
 section promised the *gauges* attribute-bytes terms; that was a trigger where only reporting is
-warranted, and it is withdrawn.) ⊘ **The bytes are not reported.** What an operator sees today is
-the pass itself in the fold's cost staircase — its wall clock and the resident set it ended at,
-under the name `4a attributes`, in the same dispatch log line as every other pass — which
-attributes time and memory to it but not IO.
+warranted, and it is withdrawn.) An operator sees the pass in the fold's cost staircase — its wall clock and the resident
+set it ended at, under the name `4a attributes` — and beside it the bytes the pass read and wrote,
+in the same dispatch log line and as `last_attr_bytes_read` / `last_attr_bytes_written` in
+`/control/status`'s compaction block. The staircase attributes time and memory to the pass; these
+attribute the IO, which is the axis this section's non-disruption argument is made on.
 
 #### Start-up
 

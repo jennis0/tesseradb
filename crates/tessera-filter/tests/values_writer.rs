@@ -170,7 +170,7 @@ fn a_partial_column_streams_its_presence_bitmap_too() {
     let opened = ValueColumn::open(
         &dir.path().join("streamed.arrow"),
         Some(&dir.path().join("streamed.roaring")),
-        false,
+        tessera_filter::Access::Read,
     )
     .expect("open");
     assert_eq!(opened.value_of(11).map(|v| v.raw()), Some(0));

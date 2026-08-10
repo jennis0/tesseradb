@@ -235,14 +235,10 @@ per-viewport path, the system dies*.
 The mask itself avoids this because the cached projection is of the **fragment**, which does not change for
 a session's lifetime. A filter cannot use that trick, because a filter *is* the thing that changes.
 
-**What makes it affordable is that a filter operand's projection is principal-independent.** Entity→row is
-a property of the slice's permutation and nothing else, so the projected operand is computed once and
-shared across every principal — which is why §8.5's cache table already marks filter results *shared across
-all principals*.
-
-**It amortises across principals and repeated operands — not across keystrokes.** `smi`, `smit` and `smith`
-are three operand identities and three misses. A cache claiming keystroke amortisation would be measured
-against a workload it never serves.
+**What makes it affordable is that the broad results are never projected at all** — the rule at the head
+of this section, not a cache. A filter operand's projection is *not* principal-independent and cannot be
+shared: the operand is evaluated under the candidate (`filter-index.md` §2.2), so its result is `M_sel`.
+The architecture's cache table says so.
 
 ### 4.1 Publication: extend, rebase, rebuild
 

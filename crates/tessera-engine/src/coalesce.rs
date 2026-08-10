@@ -455,7 +455,7 @@ pub(crate) fn execute_coalesce(
                 tessera_filter::open_extent(
                     &ctx.prefix_dir.join(&extent.values),
                     &ctx.prefix_dir.join(&extent.presence),
-                    true,
+                    tessera_filter::Access::Mapped,
                 )
             })
             .collect::<std::io::Result<_>>()
@@ -472,7 +472,7 @@ pub(crate) fn execute_coalesce(
         files.insert(presence_rel.clone(), digest_of(&presence_path)?);
         // Reopened here, on the pool, so the executor's publication is a pointer push — the same
         // reason a flush opens its extents on the pool.
-        let values = tessera_filter::open_extent(&values_path, &presence_path, true)
+        let values = tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
             .map_err(|e| CoalesceFailed(format!("coalesced attr extent: {e}")))?;
         attrs.push(CoalescedAttr {
             extent: AttrExtent {

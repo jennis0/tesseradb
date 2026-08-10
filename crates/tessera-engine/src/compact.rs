@@ -844,6 +844,11 @@ pub(crate) struct CompletedFold {
     /// One [`PassCost`] per pass, in execution order — the fold's own account of what it spent,
     /// logged at publication and reduced to two gauges on `/control/status`.
     pub(crate) cost: Vec<PassCost>,
+    /// Attribute bytes pass 4a read and wrote (`filter-index.md` §6.2). **Reported, never
+    /// triggered on** — the staircase attributes time and residency to the pass but not its IO,
+    /// and IO is the term the non-disruption argument rests on.
+    pub(crate) attr_bytes_read: u64,
+    pub(crate) attr_bytes_written: u64,
 }
 
 /// Why a fold produced nothing. **Every failure discards the fold** (compaction §3, pass 5): its
@@ -1075,6 +1080,16 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     //
     // **Nothing here is a third retirement rule.** A suppression touches no attribute artefact at
     // all (Rule S), and what this executes is exactly `D₀`, the same set passes 1–3 took.
+    // **The pass reports its IO, because §6.2 asks for reporting and not for a gauge.** The
+    // staircase already attributes time and resident bytes to `4a attributes`; what it cannot show
+    // is that the pass is a *streaming* cost — ~12 GB per `u32` column at 10⁹, read, written and
+    // re-read for the digest — which is the term the non-disruption argument turns on. Bytes, not a
+    // trigger: §5.2's coalesce bounds the extent axis continuously and the segment axis is gauged
+    // already, so there is nothing here for a threshold to do.
+    let mut attr_read = 0u64;
+    let mut attr_written = 0u64;
+    let file_len = |path: &std::path::Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
     for scalar in ctx
         .declared_scalars
         .iter()
@@ -1085,23 +1100,31 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
 
-        // Mapped, and these are the fold's **own** mappings rather than the live generation's:
-        // decision 0052's rule is that a hint belongs to the mappings the fold owns, and the
-        // request path's `FilterColumns` must not be advised on the fold's behalf. ⊘ The
-        // `MADV_SEQUENTIAL` §6.2 asks for is not taken — `ValueColumn::open` has no route to it —
-        // so what this inherits from the design is the ownership rule, not the hint.
-        let base = tessera_filter::ValueColumn::open_dir(&from_dir, true)
-            .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
+        // **Advised `MADV_SEQUENTIAL`, and these are the fold's own mappings** rather than the live
+        // generation's: decision 0052's rule is that the hint belongs to the mappings the fold
+        // owns, and the request path's `FilterColumns` must never be advised on the fold's behalf —
+        // which its signature makes unexpressible. The merge below streams each layer exactly once
+        // in entity order, so the readahead suits the access and the drop-behind is the point: these
+        // pages are not wanted again, and the request path's are.
+        let base = tessera_filter::ValueColumn::open_dir(
+            &from_dir,
+            tessera_filter::Access::MappedSequential,
+        )
+        .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
+        attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
+            + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
         let mut extents = Vec::new();
         for extent in plan.attr_extents.iter().filter(|e| e.column == scalar.name) {
             extents.push(
                 tessera_filter::open_extent(
                     &ctx.from_prefix_dir.join(&extent.values),
                     &ctx.from_prefix_dir.join(&extent.presence),
-                    true,
+                    tessera_filter::Access::MappedSequential,
                 )
                 .map_err(|e| failed("pass 4a (attributes: an extent)", &e))?,
             );
+            attr_read += file_len(&ctx.from_prefix_dir.join(&extent.values))
+                + file_len(&ctx.from_prefix_dir.join(&extent.presence));
         }
         let layers: Vec<&tessera_filter::ValueColumn> =
             std::iter::once(&base).chain(extents.iter()).collect();
@@ -1123,8 +1146,10 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             &presence_path,
         )
         .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?;
+        attr_written += file_len(&values_path);
         written.push((values_rel, values_path.clone()));
         if partial {
+            attr_written += file_len(&presence_path);
             written.push((presence_rel, presence_path.clone()));
         }
 
@@ -1134,10 +1159,14 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         // **Rebuilt from the folded column**, read back rather than from the layers it was merged
         // from: that is what makes the postings a derivative of the artefact of record rather than
         // a second opinion about it, and it is the same emit the batch build calls.
+        // **Mapped without the hint, unlike the merge's inputs above.** The banded emit scans this
+        // column once per band (§6.2), and `MADV_SEQUENTIAL`'s drop-behind would turn every band
+        // after the first into a re-read of bytes this pass has just written and still has in cache.
+        // The advice is right for a single stream and wrong for a repeated one.
         let folded = tessera_filter::ValueColumn::open(
             &values_path,
             partial.then_some(presence_path.as_path()),
-            true,
+            tessera_filter::Access::Mapped,
         )
         .map_err(|e| failed("pass 4a (attributes: reopening the folded column)", &e))?;
         let postings_rel = format!("{column_rel}/postings.arrow");
@@ -1149,6 +1178,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             tessera_filter_write::POSTINGS_BAND_ROWS,
         )
         .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
+        attr_written += file_len(&postings_path);
         written.push((postings_rel, postings_path));
     }
 
@@ -1202,6 +1232,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         external_id_run,
         base_segment_bytes,
         cost,
+        attr_bytes_read: attr_read,
+        attr_bytes_written: attr_written,
     })
 }
 

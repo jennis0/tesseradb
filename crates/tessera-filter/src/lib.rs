@@ -50,5 +50,5 @@ mod values_writer;
 
 pub use column::{resolve_union, ColumnPostings};
 pub use extent::{extent_paths, open_extent, write_extent, EXTENTS_DIR};
-pub use values::{Codes, Endpoint, Scalar, ValueColumn, PRESENCE_FILE, VALUES_FILE};
+pub use values::{Access, Codes, Endpoint, Scalar, ValueColumn, PRESENCE_FILE, VALUES_FILE};
 pub use values_writer::{write_value_column, ColumnKind, ValueColumnWriter};

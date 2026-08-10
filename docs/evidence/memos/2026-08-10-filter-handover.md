@@ -107,22 +107,48 @@ and contracts §2.1 gain the coalesce's fourth axis.
 
 ## 5. Known gaps, each marked ⊘ at its claim
 
-- **`MADV_SEQUENTIAL`** on the fold pass's own mappings. The *ownership* half of decision 0052 is
-  honoured — the pass maps its own inputs and never advises the request path's maps — but the hint
-  itself needs a route through `ValueColumn::open`, which means touching the hot file (see §1).
-- **Attribute byte terms** in the fold's dispatch log line and `/control/status`, which §6.3's
-  reported-never-triggered ruling asks for. The pass reports its time and RSS; the byte terms are
-  not there.
-- **The in-prefix orphan sweep** (compaction §7), pre-existing and now heavier: a failed coalesce or
-  fold leaves a directory per column, and only a fold reclaims it. Measured at ~18 MB after nine
-  passes, tracking ingest volume rather than corpus size.
+Two of the five are closed (2026-08-10). `ValueColumn::open` now takes an `Access` rather than a
+`mmap` bool, so the fold's pass 4a takes `MADV_SEQUENTIAL` on the layers it streams once — and
+`FilterColumns::open` keeps its bool precisely so the hint stays unexpressible on the request path,
+which is decision 0052 enforced by a signature instead of a comment. The pass's bytes read and
+written are in the dispatch log line and in `/control/status` as `last_attr_bytes_*`. Three remain:
+
+- **The in-prefix orphan sweep** (compaction §7), pre-existing and made heavier by this axis: a
+  failed coalesce or fold leaves a directory per column, and only a fold reclaims it. Measured at
+  ~18 MB after nine passes, tracking ingest volume rather than corpus size.
+
+  **It is not the small job its size suggests, which is why it is still here.** The startup sweep
+  that exists deletes orphaned *prefixes* — whole trees `CURRENT` never named, unambiguous because
+  the live prefix is known. An *in-prefix* sweep deletes files from the bundle that is being served,
+  and its correctness rests entirely on enumerating every file any reader could still name. That set
+  is not one manifest: contracts §2.3 keeps older `SEGMENTS-<n>.json` alive precisely so a step-down
+  can serve one, so `named` is a union across them, and the dead-bytes gauge already learned this
+  the expensive way — summing one map alone reported a 1065× orphan ratio. Get the enumeration
+  wrong and the failure is a deleted live file, which is silent until a reader asks for it. It also
+  needs a rule about *when* it may run, since a coalesce writes its files before naming them and a
+  sweep between those two steps deletes the output of the pass in flight. **A specification of
+  `named` and a ruling on the window are what it wants first**; both are owner-shaped, and neither
+  is written.
+
 - **The text-offset bounds check**, implemented, tested and **reverted** — it cost 70% of the scan
-  for the reason in §1. It is redundant while Arrow validates offsets on decode; restore it if the
-  digest deferral above lands, at which point it stops being redundant.
-- **Numeric absence.** A plain numeric column has no representation for "no value" — every bit
-  pattern is legal — so an item with no score is stored as zero and **matches a range containing
-  zero**. Stated at `write_column_values` and in §2.1. Fixing it needs the null-aware attribute
-  reader the string column's own ⊘ already names.
+  for the reason in §1, which is now understood and pinned. It is redundant while Arrow validates
+  offsets on decode; restore it if the R1 digest deferral lands, at which point it stops being
+  redundant. Not before: a redundant check bought at any price is still redundant.
+
+- **Numeric absence**, and it is a wrong answer rather than a missing feature. An item with no value
+  for a numeric column **matches a range containing zero**. The cause is one step upstream of where
+  the ⊘ sits: `BatchColumn::decode` copies numeric values out of the Arrow array with `.values()`
+  and **drops the validity buffer**, so absence is indistinguishable from a stored zero by the time
+  `write_column_values` sees it. Text and category columns do check — a null string becomes
+  `ScalarValue::Null`, a null key becomes the reserved code 0 — and the presence bitmap is already
+  there to receive a third case.
+
+  **The fix is shaped but it crosses a decision.** Carrying the validity buffer and skipping nulls
+  into presence closes the *filter* half exactly as the other two families do it. But `by_entity`
+  feeds the **render** tail as well, and a render column is fixed-width with no room for a validity
+  mask (per-point-attributes §2.2) — so what a viewer sees for an absent numeric is a question this
+  fix forces and does not answer. Today it is zero, silently. Someone has to rule whether it stays
+  zero, explicitly, or whether absence is representable there at all.
 
 ## 6. Not measured, and what each would settle
 
