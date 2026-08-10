@@ -125,6 +125,19 @@ describe('assemble', () => {
     assertAssemblyMatchesServed(out);
   });
 
+  it('admits no stand-in over a tile an exact band answers, whatever coverage says', () => {
+    // The replica clips stand-ins by coverage RECTS; exact bands can precede their rect. The
+    // assembly is the last line: a descendant whose drawn tile is exactly answered contributes
+    // nothing — the disagreement between the two granularities oscillated thousands of tiles up
+    // to 12x per frame through an arrival stream.
+    const exact = band(3, 0n, 4);
+    const kid = band(5, 0n, 8); // projects to drawn tile (0,0) — the exact band's own tile
+    const out = assemble(frame(3, [exact], [kid]));
+    expect(out.provisional).toBe(0);
+    expect(out.exactDrawn).toBe(4);
+    assertAssemblyMatchesServed(out);
+  });
+
   it('bounds a drawn tile by its own density however many deep bands stand in for it', () => {
     // Sixteen five-mark bands four levels down, all under drawn tile 0: the tile's own depth
     // would serve ~16·5/256 ≈ 0.3 marks. The per-band floor drew sixteen — the "patches at a
@@ -151,7 +164,9 @@ describe('assemble', () => {
   it('folds a column across exact bands and stand-ins alike', () => {
     // The colour domain and the category ranks are accumulators, so they fold rather than needing
     // the concatenated column exact bands no longer build.
-    const out = assemble(frame(2, [band(2, 0n, 2), band(2, 1n, 3)], [band(4, 8n, 1)]), ['w']);
+    // The stand-in sits at drawn tile (0,1) — ground neither exact band answers, so it survives
+    // the exact-supersession rule.
+    const out = assemble(frame(2, [band(2, 0n, 2), band(2, 1n, 3)], [band(4, 32n, 1)]), ['w']);
     const seen = foldBandColumn(out, 'w', [] as number[], (held, values) => [
       ...held,
       ...(values.values as Uint32Array)

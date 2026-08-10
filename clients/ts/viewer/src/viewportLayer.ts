@@ -139,19 +139,26 @@ const checkedFrames = new WeakSet<object>();
  *
  * Trace-only (`?trace=1`): the fold is a map of ~10^4–10^5 entries per derived frame.
  */
-let lastDensity: {depth: number; tiles: Map<bigint, {drawn: number; exact: boolean}>} | null = null;
+type DensityCell = {drawn: number; exact: boolean; exactDrawn: number; standIn: number; maxSrc: number};
+let lastDensity: {depth: number; tiles: Map<bigint, DensityCell>} | null = null;
 
 function auditDensity(assembled: Assembled): void {
-  const tiles = new Map<bigint, {drawn: number; exact: boolean}>();
+  const tiles = new Map<bigint, DensityCell>();
   for (const t of assembled.tiles) {
     if (t.depth < assembled.depth) continue;
     const key = t.depth === assembled.depth ? t.prefix : t.prefix >> BigInt(2 * (t.depth - assembled.depth));
-    const held = tiles.get(key);
-    if (held) {
-      held.drawn += t.drawn;
-      held.exact ||= t.exact;
+    let held = tiles.get(key);
+    if (!held) {
+      held = {drawn: 0, exact: false, exactDrawn: 0, standIn: 0, maxSrc: assembled.depth};
+      tiles.set(key, held);
+    }
+    held.drawn += t.drawn;
+    if (t.exact) {
+      held.exact = true;
+      held.exactDrawn += t.drawn;
     } else {
-      tiles.set(key, {drawn: t.drawn, exact: t.exact});
+      held.standIn += t.drawn;
+      if (t.depth > held.maxSrc) held.maxSrc = t.depth;
     }
   }
   const prev = lastDensity;
@@ -163,6 +170,7 @@ function auditDensity(assembled: Assembled): void {
   let down = 0;
   let worst = 1;
   const pops: number[] = [];
+  let worstCell: {r: number; was: DensityCell; cur: DensityCell} | null = null;
   for (const [key, cur] of tiles) {
     const was = prev.tiles.get(key);
     if (!was || was.drawn === 0 || cur.drawn === 0) continue;
@@ -172,9 +180,24 @@ function auditDensity(assembled: Assembled): void {
     else if (r < 0.5) down++;
     if (r > worst) worst = r;
     if (1 / r > worst) worst = 1 / r;
+    if ((worstCell?.r ?? 0) < Math.max(r, 1 / r)) worstCell = {r: Math.max(r, 1 / r), was, cur};
     if (!was.exact && cur.exact) pops.push(r);
   }
   if (compared === 0) return;
+  // A burst names its worst offender: how the tile's marks decompose on each side of the jump —
+  // exact vs stand-in, and how deep the stand-ins' source bands sit. The aggregate said the
+  // zoom-out overdraw exists; this says which mechanism supplied the excess marks.
+  if ((up > 100 || worst > 4) && worstCell) {
+    trace.event('overdraw', {
+      depth: assembled.depth,
+      r: Math.round(worstCell.r * 10) / 10,
+      wasExact: worstCell.was.exactDrawn,
+      wasStand: worstCell.was.standIn,
+      curExact: worstCell.cur.exactDrawn,
+      curStand: worstCell.cur.standIn,
+      src: worstCell.cur.maxSrc - assembled.depth
+    });
+  }
   pops.sort((a, b) => a - b);
   trace.event('density', {
     depth: assembled.depth,

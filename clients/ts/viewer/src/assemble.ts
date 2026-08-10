@@ -305,10 +305,50 @@ export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assem
   // covered; the largest-remainder split spends the rest where the data is. Ancestors have no
   // matching move: marks cannot be invented, so their patches stay sparse until data lands, which
   // reads as loading rather than as wrongness.
+  // **Ground with an exact band admits no stand-in, whatever the coverage rects say.** The
+  // replica clips stand-ins to *uncovered* ground at rect granularity, but exact bands can be in
+  // the store before their piece's rect is marked covered — the absorb hook fires first — and a
+  // derive in that window drew dense deep stand-ins over freshly exact ground at whole-piece
+  // scale, which the next fold then stripped: measured as thousands of tiles oscillating up to
+  // 12x per frame through an arrival stream, on screen as squares that would not reduce on
+  // zoom-out. The exact set itself is the authority both tiers share; testing it here makes the
+  // derive agree with the fold by construction rather than by rect bookkeeping being in step.
+  const dim = 2 ** frame.depth;
+  const exactTiles = new Set<number>();
+  for (const band of frame.exact) {
+    if (band.ids.length > 0) exactTiles.add(band.x * dim + band.y);
+  }
+  const span = WORLD_SIZE / dim;
+
   const fallback: {band: Band; indices: number[] | null; limit: number}[] = [];
   const groups = new Map<bigint, number[]>();
   for (const {band, clip} of frame.fallback) {
-    const indices = BandCache.restrictToRect(band, frame.depth, clip);
+    if (band.depth > frame.depth) {
+      // A descendant projects to exactly one drawn tile: answered exactly means skipped whole.
+      const shift = band.depth - frame.depth;
+      if (exactTiles.has((band.x >> shift) * dim + (band.y >> shift))) continue;
+    }
+    let indices = BandCache.restrictToRect(band, frame.depth, clip);
+    if (band.depth < frame.depth && exactTiles.size > 0) {
+      // An ancestor spans many drawn tiles; its marks over exact ones are filtered per mark —
+      // the same integer-grid test the fold filter uses, so the two paths cannot disagree.
+      const kept: number[] = [];
+      const candidates = indices ?? band.ids.length;
+      const p = band.positions;
+      const test = (i: number) =>
+        !exactTiles.has(Math.floor(p[i * 2]! / span) * dim + Math.floor(p[i * 2 + 1]! / span));
+      if (indices) {
+        for (const i of indices) if (test(i)) kept.push(i);
+        if (kept.length < indices.length) indices = kept;
+      } else {
+        let dropped = false;
+        for (let i = 0; i < (candidates as number); i++) {
+          if (test(i)) kept.push(i);
+          else dropped = true;
+        }
+        if (dropped) indices = kept;
+      }
+    }
     const length = indices ? indices.length : band.ids.length;
     if (length === 0) continue;
     // Truncated in place rather than copied: `restrictToRect` built this array for this call, so
