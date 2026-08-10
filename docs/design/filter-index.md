@@ -249,6 +249,15 @@ check per element. Because the ranges are a function of `(candidate, presence)` 
 cannot skip work whatever it is testing for — so adding a family adds a comparison and cannot add a
 channel.
 
+**These constants are a property of the crate's *contents*, not only of the scan's code.** Seven
+times during this work an unrelated addition to `tessera-filter` moved them 30–70% — three of those
+from code that never runs during a scan, and once from a function that was never called at all.
+Probe arm 16 measures the remedies and none is general: `inline(always)` fixes an individual case,
+one codegen unit fixes the presence path and not the packing path, and a crate boundary recovers
+about half. **Any change to that crate must be A/B'd interleaved before its constants are
+believed.** The structural answer — a crate holding only the scan, with nothing left to perturb it —
+is named there, unbuilt and unpriced.
+
 The typed change carries a caveat worth stating at the site, because the obvious form of it is a
 regression: **a scattered candidate is one-element runs**, and building a slice iterator per run
 costs more than the direct index it replaces — measured at +20% on the scattered arm before a
