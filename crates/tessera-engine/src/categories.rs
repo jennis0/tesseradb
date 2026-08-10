@@ -23,13 +23,25 @@
 //! so the set is served as authored to any principal with a session.
 //!
 //! `listing = "per_viewer"` is the C11 channel: a value is visible iff at least one item carrying
-//! it is (§3.3), derived per request from inside `M_auth`, never maintained. **⊘ That predicate is
-//! specified and not built** — it needs a per-`(column, code)` entity-space membership set, sized
-//! at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`) — so a
-//! `per_viewer` column is **refused here rather than served**
-//! ([`EngineError::VocabularyVisibilityUnbuilt`]). Serving it unfiltered would publish value names
-//! on nobody's authority, and serving it empty would be indistinguishable from a principal who may
-//! see none of them, which is the one answer a viewer must not be given by mistake.
+//! it is (§3.3), derived per request from inside `M_auth`, never maintained. The per-`(column,
+//! code)` membership sets it needs are the category's derived postings, which the build writes for
+//! every `per_viewer` column whatever its `used_for` says (`filter-index.md` §2.3) — so the
+//! predicate is `members(code) ∩ candidate ≠ ∅` against the *composed* candidate, the same
+//! entity-space set a filter is evaluated under. **Derivation self-retires**: a value whose last
+//! visible member is suppressed stops being offered with no third retirement rule, which is why
+//! §3.3 rejects a maintained union.
+//!
+//! **The postings cover the base build alone**, so the extents a flush writes are swept too — a
+//! value carried only by entities ingested since the build must still be offered to a principal who
+//! can see one of them. A **buffered** entity is not covered: it has no row and no extent, so it
+//! contributes no membership until its flush. That is `filter-index.md` §5's ruling in its
+//! vocabulary form — a bounded lag of one flush interval that only ever *withholds* a value, never
+//! offers one.
+//!
+//! Where those member sets are not there at all, the column is **refused rather than served**
+//! ([`EngineError::VocabularyVisibilityUnavailable`]). Serving it unfiltered would publish value
+//! names on nobody's authority, and serving it empty would be indistinguishable from a principal
+//! who may see none of them, which is the one answer a viewer must not be given by mistake.
 //!
 //! ## Two request forms, one gate
 //!
@@ -161,49 +173,96 @@ impl Engine {
 
         // The gate, before a single value is read — and before the two request forms diverge, so
         // that neither can acquire a route around it.
-        match vocabulary.listing() {
-            Listing::Public => {}
+        //
+        // **A `public` set has no predicate at all**, and that is the whole of the difference: the
+        // names came from an artefact someone wrote, so there is nothing to derive and no mask to
+        // consult. A `per_viewer` set is derived from inside `M_auth` per request, per §3.3.
+        let candidate = match vocabulary.listing() {
+            Listing::Public => None,
             Listing::PerViewer => {
-                let _ = session;
-                return Err(EngineError::VocabularyVisibilityUnbuilt {
-                    column: column.to_string(),
-                });
+                // **The session's own fragment is not enough.** It is a snapshot taken at
+                // authorise, and composition treats entities below the live watermark as
+                // fragment-resident — so a value carried only by entities a flush has published
+                // since would be derived as invisible from the stale one, and a viewer would be
+                // told a value they can see does not exist.
+                let fragment = self.fragment_for(session, &generation)?;
+                Some(crate::filter::candidate(
+                    &fragment,
+                    &session.satisfied,
+                    &generation.overlay,
+                    &generation.buffer,
+                ))
             }
-        }
+        };
+        let membership = match &candidate {
+            None => None,
+            Some(candidate) => Some(
+                generation
+                    .filter_columns
+                    .category_membership(column, candidate)
+                    .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
+                        column: column.to_string(),
+                        detail: e.to_string(),
+                    })?,
+            ),
+        };
+        // `Ok(true)` for a `public` column, uniformly — the two request forms below then share one
+        // filter, which is what keeps the gate from being reachable through one door and not the
+        // other.
+        let visible = |code: u32| -> Result<bool> {
+            match &membership {
+                None => Ok(true),
+                Some(membership) => membership.carries(code).map_err(|e| {
+                    EngineError::VocabularyVisibilityUnavailable {
+                        column: column.to_string(),
+                        detail: e.to_string(),
+                    }
+                }),
+            }
+        };
 
         let (values, next) = match query {
             CategoryQuery::Codes(codes) => {
                 // Walked once in key order rather than probed per code: the map is keyed by key,
                 // so a per-code probe would need a reverse index built per request anyway, and the
                 // walk keeps the response in the same order the paged form returns.
-                let values = vocabulary
-                    .bindings()
-                    .filter(|(_, code)| codes.contains(code))
-                    .map(|(key, code)| CategoryValue {
+                let mut values = Vec::new();
+                for (key, code) in vocabulary.bindings() {
+                    if !codes.contains(&code) || !visible(code)? {
+                        continue;
+                    }
+                    values.push(CategoryValue {
                         code,
                         key: key.to_string(),
                         label: vocabulary.label_of(key).map(str::to_string),
-                    })
-                    .collect();
+                    });
+                }
                 (values, None)
             }
             CategoryQuery::Page { after, limit } => {
-                let mut page: Vec<CategoryValue> = vocabulary
-                    .bindings()
-                    .filter(|(key, _)| after.is_none_or(|a| *key > a))
-                    // One more than asked for, so "is there another page" is answered by what was
-                    // read rather than by a second count over the set.
-                    .take(limit.saturating_add(1))
-                    .map(|(key, code)| CategoryValue {
+                // **Filtered before the page is cut, never after.** Taking `limit` values and then
+                // dropping the invisible ones would return short pages whose length is a count of
+                // what the principal cannot see — a per-page disclosure of exactly what `listing`
+                // withholds — and would terminate the walk early, hiding visible values behind
+                // invisible ones.
+                let mut page: Vec<CategoryValue> = Vec::new();
+                let mut next = None;
+                for (key, code) in vocabulary.bindings() {
+                    if after.is_some_and(|a| key <= a) || !visible(code)? {
+                        continue;
+                    }
+                    // One past the page, read rather than counted: "is there another page" is
+                    // answered by the walk instead of by a second pass over the set.
+                    if page.len() == limit {
+                        next = Some(page.last().expect("limit > 0").key.clone());
+                        break;
+                    }
+                    page.push(CategoryValue {
                         code,
                         key: key.to_string(),
                         label: vocabulary.label_of(key).map(str::to_string),
-                    })
-                    .collect();
-                let next = (page.len() > limit).then(|| {
-                    page.truncate(limit);
-                    page.last().expect("limit > 0").key.clone()
-                });
+                    });
+                }
                 (page, next)
             }
         };

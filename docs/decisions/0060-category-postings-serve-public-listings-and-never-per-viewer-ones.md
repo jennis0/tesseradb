@@ -6,6 +6,21 @@
 architecture §4 (I2) and Appendix C (C4, C8, C11),
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/) arms 2 and 9.
 
+> **Correction, 2026-08-10 — the channel is wider than the arm-2 sentence below implies, and the
+> ruling is unchanged.** "Arm 2 measured a hidden *correlated* value as flat — 0.000 ms whether it
+> had no members or 250 million" is true of the probe, which intersected two bitmaps directly. It is
+> **not true of the shipped reader**: `resolve_union` copies the posting through `fast_or` and
+> run-optimises it before the intersection, and that work is proportional to the value's *total*
+> member set whatever the candidate. Measured over the shipped readers at 10⁸, a hidden correlated
+> value covering a quarter of the corpus costs **1.26 ms** against **0.000 ms** for a value with no
+> members. So the timing separates hidden-with-members from absent for the correlated shape too, not
+> only the scattered one.
+>
+> Nothing about the decision moves — it is bounded to `public`, where what the timing distinguishes
+> is a fact `/v1/categories` already publishes, and it is the reason `per_viewer` keeps the scan. The
+> operative measurement is **Appendix C's C24 row**, which carries both figures; this note exists so
+> the arm-2 sentence is not read as the bound.
+
 ## The decision
 
 A category column's derived per-value postings may answer a filter **when the column's vocabulary

@@ -17,15 +17,33 @@
 //! moves the obligation earlier, which is both simpler and stricter: a result that was never
 //! scanned cannot be forgotten to be composed.
 //!
-//! # Why the work carries no timing channel
+//! # Why the work carries no timing channel — and the one column where it does, by declaration
 //!
-//! Resolution walks the candidate and tests the values it selects, so the work is a function of
+//! A scan walks the candidate and tests the values it selects, so the work is a function of
 //! `(candidate, column)` and never of the value sought. A value the principal cannot see costs what
 //! a value that does not exist costs — per-point-attributes §3.8's requirement that the two be
-//! indistinguishable *in work*, obtained structurally rather than by padding. The one place that
-//! could be given away is the accelerator: a category's derived posting is intersected rather than
-//! scanned, and `probes/2026-08-08-filter-layout/` measures that pair at 0.000 ms alike for a
-//! valueless value and a hidden 250M-member one, because Roaring short-circuits on container keys.
+//! indistinguishable *in work*, obtained structurally rather than by padding.
+//!
+//! **A category's derived postings answer `eq` and `in` where, and only where, the column's
+//! vocabulary is `listing = "public"`** (decision 0060). Postings resolve over the whole corpus and
+//! are then intersected with the candidate, where the scan takes the candidate as its input — so
+//! their work is a function of the *value named*. `probes/2026-08-08-filter-layout/` arm 9 measures
+//! a hidden, scattered 10⁷-member value at **2.1 ms** intersected where an absent value costs
+//! **0.000 ms**: a scattered value's members meet every container even when no bits do. Under
+//! `per_viewer` that difference is a disclosure of exactly what the declaration withholds, so a
+//! `per_viewer` column keeps the scan. Under `public` the value set is served to every principal
+//! alike by `/v1/categories`, so the timing distinguishes only a fact the client already holds —
+//! registered as leak-register row **C24**.
+//!
+//! **The route is fixed at open from the declaration**, never chosen per request, per principal or
+//! from a statistic: §8.2 forbids a statistics-driven route because it makes execution time a
+//! function of how much the principal can see. [`Layers::route`] is therefore a field, not an
+//! argument.
+//!
+//! **Postings cover the base build and nothing since**, so the routed answer is
+//! `postings ∩ candidate` unioned with a *scan* of every extent layer. Answering from the postings
+//! alone would omit every entity ingested since the build — narrower, safe under **I12**, and
+//! indistinguishable from a correct answer, which is the failure this subsystem exists to avoid.
 //!
 //! # A column is layers, because the corpus grows and the build's column does not
 //!
@@ -61,13 +79,14 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
-use tessera_filter::ValueColumn;
+use tessera_filter::{resolve_union, ColumnPostings, ValueColumn};
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
 /// dependency on the filter crate — `check-layers.sh` denies `tessera-server` that edge, to keep the
 /// server on engine API types only, and an operand's *values* are part of this crate's API surface
 /// even though the column they are compared against is not.
 pub use tessera_filter::{Endpoint, Scalar};
+use tessera_store::manifest::Listing;
 use tessera_types::{AttrLocalId, TermId};
 
 use crate::compose::verdict;
@@ -208,17 +227,35 @@ impl FilterExpr {
 
 /// One bundle's filter columns, keyed by declared column name.
 ///
-/// Opened once per generation, not per request. A column absent from the map is one the schema did
-/// not declare filterable — [`FilterColumns::resolve`] returns `None` for it, which the surface
-/// turns into a refusal naming the column rather than an empty operand: an *undeclared* column is a
-/// caller error, where an unresolvable *value* is an empty operand (`filter-surface.md` §2.1).
+/// Opened once per generation, not per request.
+///
+/// **Membership is not filterability.** The map holds every column the build wrote a value column
+/// for — which includes a `listing = "per_viewer"` category that is not declared filterable, since
+/// its postings are what `/v1/categories` derives value visibility from. [`FilterColumns::resolve`]
+/// gates on [`Layers::filterable`] rather than on presence, so such a column is refused exactly as
+/// an undeclared one is: an *undeclared* column is a caller error, where an unresolvable *value* is
+/// an empty operand (`filter-surface.md` §2.1).
 #[derive(Debug, Default)]
 pub struct FilterColumns {
     columns: BTreeMap<String, Layers>,
 }
 
-/// One column as it is scanned: the build's base column, then one layer per flush that has
-/// published since (see this module's header).
+/// How a category operand is answered on one column — decided at open from the declaration alone.
+///
+/// **Not a tuning knob and not a per-request choice.** See this module's header and decision 0060:
+/// the postings' work is a function of the value named, which is a disclosure under
+/// `listing = "per_viewer"` and a published fact under `listing = "public"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Every operand is answered by scanning the value column, layer by layer.
+    Scan,
+    /// `eq` and `in` over the base are answered by intersecting the derived postings; every other
+    /// operand, and every extent layer, is scanned.
+    Postings,
+}
+
+/// One column as it is served: the build's base column, then one layer per flush that has
+/// published since (see this module's header), plus the derived postings where the column has them.
 ///
 /// `Arc` per layer because a publication builds the next generation's columns from the live ones —
 /// the base is a memory map of a multi-gigabyte file, and the flush that added one entity must not
@@ -229,6 +266,20 @@ struct Layers {
     /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
     /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
     covered: Bitmap,
+    /// **Declared `used_for = "filter"`.** A column may be held here without being filterable: a
+    /// `listing = "per_viewer"` category owes membership postings whatever its `used_for` says
+    /// (`filter-index.md` §2.3), and `/v1/categories` reads them from here. [`FilterColumns::resolve`]
+    /// refuses such a column exactly as it refuses an undeclared one, so holding it opens no
+    /// operand the schema did not declare.
+    filterable: bool,
+    /// The base build's per-value postings, where the column has them: every category column whose
+    /// vocabulary is `per_viewer`, and every category column declared filterable.
+    ///
+    /// Held whatever the route, because the membership question `/v1/categories` asks is answered
+    /// from these on a `per_viewer` column that the *filter* route deliberately does not use them
+    /// for.
+    postings: Option<Arc<ColumnPostings>>,
+    route: Route,
 }
 
 /// Why a filter could not be answered.
@@ -239,6 +290,15 @@ pub enum FilterError {
     UndeclaredColumn(String),
     /// The expression nests deeper than [`MAX_FILTER_DEPTH`].
     TooDeep { depth: usize, max: usize },
+    /// A routed column's postings could not be read. **Fail-closed**: the alternative — falling
+    /// back to the scan — would answer correctly and hide that the bundle's accelerator is
+    /// unreadable, and the alternative to *that* — an empty result — says no entity carries the
+    /// value. Neither is distinguishable from a right answer, so this refuses.
+    PostingsUnreadable { column: String, detail: String },
+    /// The column has no derived membership postings, so the `per_viewer` visibility predicate
+    /// cannot be evaluated for it. Fail-closed for the reason `categories.rs` gives: an empty value
+    /// set is what a principal who may see none of them is told.
+    MembershipUnavailable(String),
 }
 
 impl std::fmt::Display for FilterError {
@@ -252,11 +312,63 @@ impl std::fmt::Display for FilterError {
                 "the filter expression nests {depth} deep; the limit is {max}. Refused rather than \
                  flattened, which would answer a different question"
             ),
+            FilterError::PostingsUnreadable { column, detail } => write!(
+                f,
+                "column '{column}' is routed through its derived postings and they could not be \
+                 read ({detail}); refused rather than answered short"
+            ),
+            FilterError::MembershipUnavailable(column) => write!(
+                f,
+                "column '{column}' carries no derived membership postings, so its per-viewer value \
+                 visibility cannot be derived"
+            ),
         }
     }
 }
 
 impl std::error::Error for FilterError {}
+
+/// The `listing` of the vocabulary a column draws from, or `None` where it is not a category.
+///
+/// Read from the **vocabulary**, which is the object that carries it. A column naming a vocabulary
+/// the manifest does not hold is refused at seed (`Vocabularies::seed`), so the `None` this returns
+/// for one means "not a category" and nothing else.
+fn listing_of(
+    scalar: &tessera_store::manifest::DeclaredScalar,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> Option<Listing> {
+    let name = scalar.vocabulary.as_deref()?;
+    vocabularies
+        .iter()
+        .find(|v| v.name == name)
+        .map(|v| v.listing)
+}
+
+/// Does the build write a value column for this column?
+///
+/// **The mirror of `tessera_build`'s `postings_are_owed`, and it must stay one.** Reading a file set
+/// the build did not write is a refusal at open; failing to read one it did write is a column whose
+/// values are on disk and unserved. Two reasons, and the second is the one a reader will not expect:
+/// `used_for = "filter"` is the obvious one, and `listing = "per_viewer"` is the other — that
+/// control's gate is membership-derived (per-point-attributes §3.3) and the member sets it needs are
+/// the postings derived from this column, so it gets both whatever its `used_for` says
+/// (`filter-index.md` §2.3).
+pub(crate) fn owes_value_column(
+    scalar: &tessera_store::manifest::DeclaredScalar,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> bool {
+    scalar.filter || listing_of(scalar, vocabularies) == Some(Listing::PerViewer)
+}
+
+/// Does the build write derived postings for this column? Only a category earns them — a string's
+/// values carry no identity a posting could be keyed by, and a numeric's are near-unique
+/// (`filter-index.md` §2.3).
+fn owes_postings(
+    scalar: &tessera_store::manifest::DeclaredScalar,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> bool {
+    scalar.vocabulary.is_some() && owes_value_column(scalar, vocabularies)
+}
 
 impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
@@ -279,20 +391,42 @@ impl FilterColumns {
         prefix_dir: &Path,
         partition: &str,
         declared: &[tessera_store::manifest::DeclaredScalar],
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
         let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
-        for scalar in declared.iter().filter(|d| d.filter) {
+        for scalar in declared
+            .iter()
+            .filter(|d| owes_value_column(d, vocabularies))
+        {
             let dir = partition_dir.join("attrs").join(&scalar.name);
             let base = Arc::new(ValueColumn::open_dir(&dir, mmap)?);
             let covered = base.present();
+            // Opened whenever the build owed them, and a missing file is an error for the same
+            // reason a missing value column is: the manifest digests them, so absence means the
+            // bundle is not what its manifest says. A column routed through postings that silently
+            // fell back to the scan would answer correctly and hide a broken artefact; one that
+            // read an absent file as the empty set would answer that no entity carries the value.
+            let postings = owes_postings(scalar, vocabularies)
+                .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
+                .transpose()?;
+            let route = if postings.is_some()
+                && listing_of(scalar, vocabularies) == Some(Listing::Public)
+            {
+                Route::Postings
+            } else {
+                Route::Scan
+            };
             columns.insert(
                 scalar.name.clone(),
                 Layers {
                     layers: vec![base],
                     covered,
+                    filterable: scalar.filter,
+                    postings,
+                    route,
                 },
             );
         }
@@ -377,15 +511,79 @@ impl FilterColumns {
         operand: &FilterOperand,
         candidate: &Bitmap,
     ) -> Result<Bitmap, FilterError> {
+        let name = column;
         let column = self
             .columns
-            .get(column)
-            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+            .get(name)
+            .filter(|layers| layers.filterable)
+            .ok_or_else(|| FilterError::UndeclaredColumn(name.to_string()))?;
+
+        // **The routed pair, and the split between them is the whole of decision 0060.** The base
+        // build's answer comes from the postings; every extent layer is scanned, because no flush
+        // writes postings and an answer from the postings alone would omit every entity ingested
+        // since the build.
+        if let (Route::Postings, Some(postings), Some(values)) =
+            (column.route, column.postings.as_ref(), codes_of(operand))
+        {
+            let mut out = resolve_union(postings, values)
+                .map_err(|e| FilterError::PostingsUnreadable {
+                    column: name.to_string(),
+                    detail: e.to_string(),
+                })?
+                .and(candidate);
+            for layer in &column.layers[1..] {
+                out |= scan(layer, operand, candidate);
+            }
+            return Ok(out);
+        }
+
         let mut out = Bitmap::new();
         for values in &column.layers {
             out |= scan(values, operand, candidate);
         }
         Ok(out)
+    }
+
+    /// The membership question `/v1/categories` asks of a `per_viewer` column: which of this
+    /// column's values does at least one entity in `candidate` carry (per-point-attributes §3.3)?
+    ///
+    /// **Derived, never maintained**, and evaluated entirely inside the composed verdict — so a
+    /// value whose last visible member was suppressed stops being offered without a third
+    /// retirement rule.
+    ///
+    /// **The postings are the base build's, so the extents are swept here, once.** A value carried
+    /// only by entities ingested since the build must still be offered to a principal who can see
+    /// one of them; deriving that per value would rescan the extents per value, so the sweep
+    /// collects the codes the candidate's extent entities carry in a single pass and the per-value
+    /// test is then a bitmap intersection against the postings plus a set lookup.
+    pub fn category_membership<'a>(
+        &'a self,
+        column: &str,
+        candidate: &'a Bitmap,
+    ) -> Result<CategoryMembership<'a>, FilterError> {
+        let layers = self
+            .columns
+            .get(column)
+            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        let postings = layers
+            .postings
+            .as_ref()
+            .ok_or_else(|| FilterError::MembershipUnavailable(column.to_string()))?;
+
+        let mut from_extents = FxHashSet::default();
+        for layer in &layers.layers[1..] {
+            for entity in layer.present().and(candidate).iter() {
+                if let Some(code) = layer.value_of(entity) {
+                    from_extents.insert(code.raw());
+                }
+            }
+        }
+        Ok(CategoryMembership {
+            column: column.to_string(),
+            postings,
+            candidate,
+            from_extents,
+        })
     }
 
     /// Compose several operands: `candidate ∧ op₁ ∧ … ∧ opₙ`.
@@ -446,6 +644,57 @@ impl FilterColumns {
                 Ok(out)
             }
         }
+    }
+}
+
+/// One column's value-visibility predicate for one principal, at one generation.
+///
+/// Built by [`FilterColumns::category_membership`]; see its doc for why the extents are swept up
+/// front and the postings probed per value.
+pub struct CategoryMembership<'a> {
+    column: String,
+    postings: &'a ColumnPostings,
+    candidate: &'a Bitmap,
+    /// The codes the candidate's *post-build* entities carry — the half no posting covers.
+    from_extents: FxHashSet<u32>,
+}
+
+impl CategoryMembership<'_> {
+    /// Is `code` carried by at least one entity this principal may see?
+    ///
+    /// The extent half is answered first because it is a hash lookup against a set the sweep
+    /// already built, and because a value minted since the build has no posting at all — asking the
+    /// postings first would be a file read per such value for an answer already in hand.
+    pub fn carries(&self, code: u32) -> Result<bool, FilterError> {
+        if code == UNRESOLVABLE_VALUE.raw() {
+            // The reserved *absent* sentinel: never drawn, never bound to a key, and carried by
+            // exactly the entities that carry no value. It is not a value and is never visible.
+            return Ok(false);
+        }
+        if self.from_extents.contains(&code) {
+            return Ok(true);
+        }
+        let members = self
+            .postings
+            .entities(AttrLocalId::new(code))
+            .map_err(|e| FilterError::PostingsUnreadable {
+                column: self.column.clone(),
+                detail: e.to_string(),
+            })?;
+        Ok(members.intersect(self.candidate))
+    }
+}
+
+/// The vocabulary codes an operand names, or `None` where the operand is not a category one.
+///
+/// The match is on the operand's *shape*, never on the values it carries: a category column reaches
+/// the postings for `eq` and `in` alike and for nothing else, so the route cannot become a function
+/// of which value was asked for.
+fn codes_of(operand: &FilterOperand) -> Option<&[AttrLocalId]> {
+    match operand {
+        FilterOperand::Equals(v) => Some(std::slice::from_ref(v)),
+        FilterOperand::In(vs) => Some(vs),
+        _ => None,
     }
 }
 

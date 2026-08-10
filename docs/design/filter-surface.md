@@ -39,10 +39,10 @@ Three things decide the design, and none of them is the index.
   principal cannot see has leaked it. §3.2 states the channel this design accepts and what actually bounds
   it.
 
-> **⊘ Specified, not implemented — all of it.** `/v1/meta` publishes `filter_operands` as an empty list,
-> no viewport request carries an operand, and `listing = "per_viewer"` is refused rather than filtered at
-> `/v1/categories`. Every one of those is fail-closed: a filter cannot be expressed, so nothing narrows;
-> a value set that cannot be gated is withheld entirely rather than served ungated.
+> **⊘ Specified, not implemented — all of it.** `/v1/meta` publishes `filter_operands` as an empty list
+> and no viewport request carries an operand. That is fail-closed: a filter cannot be expressed, so
+> nothing narrows. `listing = "per_viewer"` **is** filtered at `/v1/categories` by §3.3's membership
+> predicate.
 
 ---
 
@@ -570,12 +570,13 @@ currently classified as outside the compute-admission gate because its work is a
 in-memory map with no mask composition, no projection and no file IO. The gate above needs the session's
 fragment and a bitmap intersection per value, so the classification flips — an amendment owed on promotion.
 
-> **⊘ The member sets now exist; the predicate does not.** The batch build emits per-value postings for
-> every `per_viewer` category, so the input this gate was waiting on is present. Nothing evaluates the
-> predicate yet, so `/v1/categories` still **refuses** a `per_viewer` column rather than filtering it —
-> serving it empty would be indistinguishable from a correctly-computed empty answer. `listing = "public"`
-> publishes normally. So the disclosure control is enforced today, but only in the fail-closed direction,
-> and what remains is engine work rather than an absent artefact.
+> **Built.** The batch build emits per-value postings for every `per_viewer` category and
+> `/v1/categories` evaluates the predicate above against them, unioned with the value-column extents a
+> flush writes — so a value carried only by entities ingested since the build is still offered. A column
+> whose member sets cannot be read is refused rather than served empty, which would be indistinguishable
+> from a correctly-computed empty answer. `listing = "public"` publishes as authored. The compute-admission
+> amendment this section names is **landed in contracts §3.2**, which now states the `per_viewer` cost
+> rather than the `public` one for both.
 
 ---
 

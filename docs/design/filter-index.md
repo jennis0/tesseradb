@@ -58,20 +58,21 @@ the candidate mask and the column, never of the value — which is what makes a 
 nonexistent one indistinguishable **in work**, as per-point-attributes §3.8 requires (§2.2).
 
 Two further consequences. The artefact is the same one per-point-attributes §3.3 needs for vocabulary
-visibility, so building it closes the `listing = "per_viewer"` refusal rather than deferring it. And it
+visibility, so building it closed the `listing = "per_viewer"` refusal rather than deferring it. And it
 is **entity-space, so it is slice-invariant**: a slice attaches, populates or drops without touching any
 of it (§7).
 
 > **⊘ Built: the read path for every family, and ingest.** The value column, its presence bitmap,
 > the masked scan behind every operator each family declares, and `entity → value` all exist for
 > categories, strings and numerics, in both build implementations and under the manifest digest; a
-> category's derived per-value postings are emitted and digested but not read at serving. A flush
-> appends an extent per column and a generation composes them (§5). **Deletion is not implemented,
-> and the fold's attribute pass is not either — today's fold destroys the artefact** (§6); lists,
-> `none_of` and `match` are likewise unbuilt; each is marked at its claim.
-> Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows nothing, a
-> value set that cannot be gated is withheld entirely, and an extent that will not open refuses
-> rather than reading as "those entities carry no value".
+> category's derived per-value postings answer `eq` and `in` where its vocabulary is
+> `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
+> them (§2.3). A flush appends an extent per column and a generation composes them (§5).
+> **Deletion is not implemented, and the fold's attribute pass is not either — today's fold destroys
+> the artefact** (§6); lists, `none_of` and `match` are likewise unbuilt; each is marked at its
+> claim. Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
+> nothing, and a postings file or an extent that will not open refuses rather than reading as "those
+> entities carry no value".
 
 ### 1.1 What this deliberately does not do
 
@@ -301,8 +302,27 @@ only if the principal can see an item carrying it (per-point-attributes §3.3). 
 *are* these postings. Deriving them instead by scanning the value column per request is inside a
 *filter's* latency budget but not inside `/v1/categories`', and it would falsify contracts §3.2's
 compute-admission justification for that endpoint — "no mask composition, no projection, no file IO".
-So a `per_viewer` category gets postings whatever its `used_for` says, and a `public` one does not,
-because a published value set is served as authored and derives no membership at all.
+So a `per_viewer` category gets postings whatever its `used_for` says, where a `public` one gets them
+only from `used_for = "filter"` — a published value set is served as authored and derives no membership
+at all.
+
+**The postings answer a filter only under `listing = "public"`** (decision 0060). Under `per_viewer`
+they exist for the membership question above and the *filter* is answered by the masked scan, for the
+timing reason the note below this section records. The route is a function of the **declaration** —
+never of the request, the principal, or any statistic, which §8.2 forbids because a statistics-driven
+route makes execution time a function of how much the principal can see — so it is fixed at schema time
+and identical for every viewer. It is registered as leak-register row **C24**, which decision 0060 makes
+a condition of itself.
+
+**A routed answer is `postings ∩ candidate` unioned with a scan of every extent layer.** The postings
+cover the base build's entity range and no flush writes any (§5), so an answer taken from them alone
+would omit every entity ingested since — narrower, safe under **I12**, and *indistinguishable from a
+correct one*, which is the failure this artefact's whole composition rule exists to avoid. The same
+union is what `/v1/categories`' membership question takes: a value carried only by post-build entities
+must still be offered to a principal who can see one of them. **A postings file the manifest names but
+that will not open is a refusal**, never a fall back to the scan and never an empty answer — the first
+would answer correctly while hiding a broken artefact, and the second would say no entity carries the
+value.
 
 Measured at 10⁹, the same predicate answered by intersection rather than scan costs **3.56 ms at 25%
 coverage** and **49.5 ms in the worst cell measured** (a scattered posting whose value covers a quarter
@@ -588,13 +608,26 @@ reachable value *matches*, so the same failures — a lost layer, a lagging flus
 review that ever lifts that fence must therefore revisit layer composition and every start-up
 failure mode in §6.2 under the inverted sign, and this paragraph is the tripwire that forces it.
 
-> **⊘ Built, except the accelerator's tail.** A flush writes one extent per filterable column —
-> including one for a column no flushed entity carries a value in, so the file set is a function of
-> the schema rather than of the data — names both files in the partition's side-manifest, digests
-> them, and composes them onto the live generation's columns before the manifest commits. A
-> category's derived postings still cover `[0, fold_watermark)` and **the un-folded tail is not
-> scanned and unioned in**: they are not read at serving at all (§2.3), so nothing depends on it
-> yet, and the scan over base ∪ extents is the whole answer.
+> **⊘ Built, and the accelerator's tail is answered by scanning it.** A flush writes one extent per
+> column that **owes a value column** — `used_for = "filter"`, *or* a category whose vocabulary is
+> `listing = "per_viewer"`, which is the build's own `postings_are_owed` rule mirrored on the write
+> side (§2.3). It writes one for a column no flushed entity carries a value in too, so the file set
+> is a function of the schema rather than of the data; it names both files in the partition's
+> side-manifest, digests them, and composes them onto the live generation's columns before the
+> manifest commits.
+>
+> **The two halves of that rule have to agree, and for a while they did not.** The build owed a
+> `per_viewer` render-only category its postings — that column's postings are not an accelerator but
+> the evidence §3.3's visibility predicate is derived from — while the flush selected extents on
+> `used_for` alone. A value first carried by an entity ingested after the build then existed in no
+> artefact any reader consults, so `/v1/categories` could never offer it, permanently and with no
+> symptom. One predicate now serves the flush's selection and the reader's open.
+>
+> A category's derived postings still cover `[0, fold_watermark)` only, because nothing writes
+> postings for an extent. **The un-folded tail is scanned instead**: a routed filter unions the
+> postings' answer with a scan of the extent layers, and `/v1/categories` sweeps those layers for the
+> codes their entities carry (§2.3). Both are exact; what the tail costs is a scan proportional to
+> the extents, which §5.2's coalesce and §6's fold are what bound.
 
 ### 5.1 What layer accumulation costs, and what bounds it
 

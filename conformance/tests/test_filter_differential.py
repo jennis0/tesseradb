@@ -146,12 +146,19 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
     operands = catalogue_server.meta(token)["filter_operands"]
     by_column = {entry["column"]: entry for entry in operands}
 
-    assert set(by_column) == {"department", "title"}, (
-        f"filter_operands names {sorted(by_column)} — the two declared filter columns, no more "
+    assert set(by_column) == {"department", "archive", "title"}, (
+        f"filter_operands names {sorted(by_column)} — the three declared filter columns, no more "
         "(fx_key is render-only) and no fewer"
     )
     assert by_column["department"]["family"] == "category"
     assert set(by_column["department"]["operands"]) == {"eq", "in"}
+    # **The route is invisible on the wire, and that is the assertion.** `archive` is `public` and
+    # `department` is `per_viewer`, so decision 0060 answers the first from its derived postings and
+    # the second by scanning — and `/v1/meta` publishes the same family and the same operand list
+    # for both. A client cannot see which route it will take, and must not be able to: the routing
+    # is a property of the deployment's declaration, never of the query surface.
+    assert by_column["archive"]["family"] == "category"
+    assert set(by_column["archive"]["operands"]) == {"eq", "in"}
     # "string", not "utf8": the *type* is `utf8` and the *family* is string (filter-index §2.6's
     # family table). Contracts §3.2 names the block but not the family spellings, so the design's
     # family vocabulary is the authority this asserts.
@@ -325,6 +332,84 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
         "the solo control failed — a single-member value was not served, so the five empty "
         "bodies above may just be a filter that matches nothing"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# The postings route (decision 0060) — the same sets by a different construction
+# ---------------------------------------------------------------------------------------------
+
+
+ROUTED_EXPRS = [
+    ("eq by key", {"archive": {"eq": "red"}}),
+    ("eq by code", {"archive": {"eq": 22}}),
+    ("in, key and code mixed", {"archive": {"in": ["red", 33]}}),
+    ("in over the whole vocabulary", {"archive": {"in": ["red", "green", "blue", "void"]}}),
+    # A declared value planted nowhere. On the routed side this is a keyed postings file with no
+    # record for the code, which must read as the empty set and never as an error — and never as
+    # the *whole* set, which is what a reader that treated a missing record as "unconstrained"
+    # would produce.
+    ("a declared value with no members", {"archive": {"eq": "void"}}),
+]
+
+
+@pytest.mark.parametrize("name,expr", ROUTED_EXPRS, ids=[n for n, _ in ROUTED_EXPRS])
+@pytest.mark.parametrize(
+    "case_name", ["full_100pct", "crossover_above", "sparse_0_01pct"]
+)
+def test_a_public_category_answers_exactly_what_the_definition_says(
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases, case_name, name, expr
+):
+    """**The routed differential.** `archive` is `listing = "public"`, so decision 0060 answers its
+    `eq` and `in` from the column's derived per-value postings — a corpus-wide set intersected with
+    the candidate — where `department` is answered by scanning the candidate's values. The oracle
+    has one evaluation for both, so agreement here is agreement between two constructions rather
+    than a transcription.
+
+    Run over three principals of different coverage, because the two routes differ in *where* the
+    mask enters: the scan takes the candidate as its input, and the postings meet it afterwards. A
+    routed answer that forgot the intersection agrees with the definition for the full-coverage
+    principal and disagrees for every other, so a single-principal test would miss exactly the
+    defect the route can have.
+    """
+    case = sweep_cases[case_name]
+    token = catalogue_server.authorise(list(case.grants))["token"]
+    m_auth = set(case.entities)
+    m_sel = filt.evaluate(expr, catalogue_filter_columns, m_auth)
+
+    raw = catalogue_server.viewport(
+        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+    )
+    assert _served_entities(raw) == m_sel, f"{case_name} / {name}"
+
+    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    tiles = _tiles_by_id(decode_viewport(raw)[0])
+    assert {t: m for t, (_v, m, _s) in tiles.items() if m} == expected_matched, (
+        f"{case_name} / {name}: the per-tile matched counts disagree with the definition"
+    )
+
+
+def test_the_two_routes_compose_with_each_other(
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases
+):
+    """A `public` leaf and a `per_viewer` leaf in one expression. The two are evaluated by
+    different constructions and must still intersect and union as sets — a routed leaf that
+    returned a set outside the candidate would show up here first, since the conjunction's later
+    leaf is evaluated under the earlier one's result."""
+    case = sweep_cases["crossover_above"]
+    token = catalogue_server.authorise(list(case.grants))["token"]
+    m_auth = set(case.entities)
+
+    for expr in (
+        {"all_of": [{"archive": {"eq": "red"}}, {"department": {"in": ["alpha", "beta"]}}]},
+        {"any_of": [{"archive": {"eq": "void"}}, {"department": {"eq": "solo"}}]},
+        {"all_of": [{"archive": {"in": ["red", "green"]}}, {"title": {"prefix": "smi"}}]},
+    ):
+        m_sel = filt.evaluate(expr, catalogue_filter_columns, m_auth)
+        raw = catalogue_server.viewport(
+            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+        )
+        assert _served_entities(raw) == m_sel, expr
+        assert m_sel <= m_auth, "I12: a filter may not widen the mask"
 
 
 # ---------------------------------------------------------------------------------------------

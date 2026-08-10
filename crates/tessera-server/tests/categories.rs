@@ -8,9 +8,11 @@
 //!   the two forms are separate code paths, so nothing but a test keeps them agreeing.
 //! - **An unresolvable code is omitted, never refused.** "No such code" and "a value you cannot
 //!   see" must be one outcome (per-point-attributes §3.8).
-//! - **A `per_viewer` column is refused, not served.** ⊘ The §3.3 predicate is unbuilt; serving
-//!   the set unfiltered is the C11 disclosure, and serving it *empty* would be indistinguishable
-//!   from a correctly-computed empty answer.
+//! - **A `per_viewer` column is filtered per principal**, by §3.3's membership predicate: a value is
+//!   offered iff the principal can see an item carrying it. Serving the set unfiltered is the C11
+//!   disclosure; serving it empty for a principal who *does* have members is the availability
+//!   failure on the other side, and only a fixture whose values cut across the term model tells the
+//!   two apart.
 
 mod common;
 
@@ -31,6 +33,13 @@ const N: u64 = 64;
 /// One `public` category and one `per_viewer` one, so a single fixture exercises both sides of the
 /// gate. `archive`'s five values exceed the test server's page size of 4, which is what puts the
 /// cursor on the ordinary path rather than only on a contrived one.
+///
+/// `department`'s ten values interleave in key order: the odd-numbered ones are carried only by
+/// items every principal can see, the even-numbered ones only by items the narrow principal cannot
+/// (`terms_of` grants term `1` on `e % 3 == 0`). So the narrow principal is offered five values with
+/// four invisible ones interleaved between them, which is what forces the walk to filter *before* it
+/// cuts a page: taking the page first and filtering it after would return two values and stop.
+/// `d00` is declared and carried by nothing at all — the empty-value case, offered to nobody.
 const SCHEMA_TOML: &str = r#"
 [[attribute]]
 name       = "archive"
@@ -54,7 +63,17 @@ used_for   = ["render"]
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
-  finance = 7
+  d00 = 100
+  d01 = 101
+  d02 = 102
+  d03 = 103
+  d04 = 104
+  d05 = 105
+  d06 = 106
+  d07 = 107
+  d08 = 108
+  d09 = 109
+  d10 = 110
 
 [[attribute]]
 name     = "score"
@@ -65,6 +84,16 @@ used_for = ["render"]
 /// Five archives, so several codes are live and no code is the only one present.
 fn archive_of(entity: u64) -> &'static str {
     ["astro", "cond", "hep", "math", "quant"][(entity % 5) as usize]
+}
+
+/// Odd-numbered departments on the items the narrow principal can see, even-numbered ones on the
+/// rest — see [`SCHEMA_TOML`]. `d00` is carried by nothing.
+fn department_of(entity: u64) -> String {
+    if entity.is_multiple_of(3) {
+        format!("d{:02}", 1 + 2 * ((entity / 3) % 5))
+    } else {
+        format!("d{:02}", 2 + 2 * (entity % 5))
+    }
 }
 
 fn write_points(path: &Path, n: u64) {
@@ -80,7 +109,7 @@ fn write_points(path: &Path, n: u64) {
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
-    let departments: Vec<&str> = ids.iter().map(|_| "finance").collect();
+    let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
     let scores: Vec<f32> = ids.iter().map(|e| (e % 97) as f32 * 0.5).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -142,6 +171,32 @@ async fn serve(tmp: &TempDir) -> (TestServer, String) {
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
     (server, token)
+}
+
+/// Every key a column offers this principal, paged to exhaustion through the server's own cursor.
+async fn page_all(server: &TestServer, token: &str, path: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let url = match &after {
+            Some(cursor) => format!("{path}?after={cursor}"),
+            None => path.to_string(),
+        };
+        let (status, body) = get(server, token, &url).await;
+        assert_eq!(status, 200, "{url}: {body}");
+        keys.extend(
+            body["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["key"].as_str().unwrap().to_string()),
+        );
+        match body["next"].as_str() {
+            Some(cursor) => after = Some(cursor.to_string()),
+            None => break,
+        }
+    }
+    keys
 }
 
 async fn get(server: &TestServer, token: &str, path: &str) -> (u16, serde_json::Value) {
@@ -268,33 +323,113 @@ async fn enumeration_pages_in_key_order_and_the_cursor_resumes() {
     );
 }
 
-/// **⊘ Specified, not implemented** (per-point-attributes §3.3). Until the per-`(column, code)`
-/// membership set exists, a `per_viewer` column is refused.
+/// **A `per_viewer` value is offered iff the principal can see an item carrying it** (§3.3).
 ///
-/// **Both request forms**, because they are separate code paths in the handler and a gate applied
-/// to one is the disclosure reached through the other.
+/// Two principals over one fixture: term `0` reaches every item, term `1` only `e % 3 == 0`. The
+/// even-numbered departments are carried exclusively by items the narrow principal cannot see, so
+/// they are values that certainly exist, that the wide principal is offered, and that this one must
+/// not be. `d00` is carried by nothing and is offered to neither — the empty-value case.
 #[tokio::test]
-async fn a_per_viewer_column_is_refused_by_both_request_forms() {
+async fn a_per_viewer_value_set_is_filtered_per_principal() {
     let tmp = TempDir::new().unwrap();
-    let (server, token) = serve(&tmp).await;
+    let (server, wide) = serve(&tmp).await;
+    let narrow = authorise(&server, &["1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
-    for path in [
-        "/v1/categories/department",
-        "/v1/categories/department?codes=7",
-    ] {
-        let (status, body) = get(&server, &token, path).await;
-        assert_eq!(status, 500, "{path}: {body}");
-        assert_eq!(body["error"], "fail-closed", "{path}: {body}");
-        assert!(
-            body["detail"].as_str().unwrap().contains("per_viewer"),
-            "the refusal must name why: {body}"
-        );
-        // The refusal must not leak what it declined to gate.
-        assert!(
-            !body.to_string().contains("finance"),
-            "a refused per_viewer column must not carry its values: {body}"
-        );
-    }
+    assert_eq!(
+        page_all(&server, &wide, "/v1/categories/department").await,
+        vec!["d01", "d02", "d03", "d04", "d05", "d06", "d07", "d08", "d09", "d10"],
+    );
+    assert_eq!(
+        page_all(&server, &narrow, "/v1/categories/department").await,
+        vec!["d01", "d03", "d05", "d07", "d09"],
+        "a value whose every member is outside this principal's mask must not be offered"
+    );
+}
+
+/// **One gate, both request forms.** Bulk lookup and enumeration are separate walks in the engine,
+/// so a gate applied to one is the existence oracle reached through the other. An invisible value's
+/// code must come back exactly as an unbound code does: omitted, with a 200.
+#[tokio::test]
+async fn the_membership_gate_applies_to_both_request_forms() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _wide) = serve(&tmp).await;
+    let narrow = authorise(&server, &["1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 101 is visible to this principal, 102 exists but none of its members are, 100 is declared and
+    // carried by nobody, 199 is bound to nothing at all.
+    let (status, body) = get(
+        &server,
+        &narrow,
+        "/v1/categories/department?codes=100,101,102,199",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let keys: Vec<&str> = body["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, vec!["d01"], "{body}");
+}
+
+/// **The page is cut after the gate, never before.** The narrow principal's five visible values have
+/// four invisible ones interleaved between them, so a walk that took a page and then filtered it
+/// would return two values on the first page and stop — short pages whose length is itself a count
+/// of what the principal cannot see.
+#[tokio::test]
+async fn a_per_viewer_page_is_filled_with_visible_values() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _wide) = serve(&tmp).await;
+    let narrow = authorise(&server, &["1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, first) = get(&server, &narrow, "/v1/categories/department").await;
+    assert_eq!(status, 200, "{first}");
+    let keys: Vec<&str> = first["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["d01", "d03", "d05", "d07"],
+        "the page must be filled to the server's ceiling of 4 with *visible* values: {first}"
+    );
+    assert_eq!(first["next"].as_str(), Some("d07"), "{first}");
+}
+
+/// **A principal who can see nothing is offered nothing — with a 200, not a refusal.** An empty
+/// value set is a real answer here: it is exactly what this principal's derivation yields. The
+/// refusal is reserved for a predicate that could not be *evaluated*, which is a different thing and
+/// must stay distinguishable in the server's own behaviour.
+#[tokio::test]
+async fn a_principal_who_can_see_nothing_is_offered_an_empty_set() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _wide) = serve(&tmp).await;
+    let none = authorise(&server, &[]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body) = get(&server, &none, "/v1/categories/department").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["values"].as_array().unwrap().is_empty(), "{body}");
+    assert!(body["next"].is_null(), "{body}");
+    // And the `public` column is still served in full to that same principal, which is the whole
+    // difference between the two listings.
+    let (status, body) = get(&server, &none, "/v1/categories/archive").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["values"].as_array().unwrap().len(), 4, "{body}");
 }
 
 /// 404 covers "no such column" and "a column that is not a category" identically. `/v1/meta` is

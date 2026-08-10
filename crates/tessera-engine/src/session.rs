@@ -352,20 +352,19 @@ pub enum EngineError {
     MultiPartitionSlice(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
-    /// `/v1/categories` was asked for a column whose vocabulary is `listing = "per_viewer"`.
-    ///
-    /// **⊘ Specified, not implemented** (per-point-attributes §3.3; decision 0013). Filtering a
-    /// value set per principal needs a per-`(column, code)` entity-space membership set, which no
-    /// build emits yet. Until it does, this is a refusal.
+    /// `/v1/categories` was asked for a `listing = "per_viewer"` column whose per-`(column, code)`
+    /// membership sets could not be read — they are the column's derived postings, and either the
+    /// bundle carries none for it or the file failed to read.
     ///
     /// **Refused rather than served empty**, which is the fail-closed choice that is also the
     /// honest one. An empty value set is a real answer — it is what a principal who may see none
-    /// of these values is told — so returning it here would make an unbuilt predicate
+    /// of these values is told — so returning it here would make an underivable predicate
     /// indistinguishable from a correctly-applied one, and a viewer would render a blank legend as
     /// though it had been computed. Serving the set *unfiltered* is the other direction and is the
     /// C11 disclosure itself.
-    VocabularyVisibilityUnbuilt {
+    VocabularyVisibilityUnavailable {
         column: String,
+        detail: String,
     },
     /// A `/v1/viewport` request's `(zoom, bbox)` spans more tiles than this engine will serve.
     ///
@@ -458,12 +457,12 @@ impl std::fmt::Display for EngineError {
                  EngineError::MultiPartitionSlice's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
-            EngineError::VocabularyVisibilityUnbuilt { column } => write!(
+            EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
                 f,
-                "column '{column}' declares `listing = \"per_viewer\"`, and per-viewer vocabulary \
-                 visibility is specified and not implemented (per-point-attributes §3.3): \
-                 deriving it needs a per-(column, code) membership set that no build emits yet. \
-                 This column's values are refused rather than published unfiltered"
+                "column '{column}' declares `listing = \"per_viewer\"`, and its per-viewer value \
+                 visibility could not be derived ({detail}). This column's values are refused \
+                 rather than published unfiltered, and rather than served empty — an empty value \
+                 set is what a principal who may see none of them is told"
             ),
             EngineError::TooManyTiles { demanded, limit } => write!(
                 f,
@@ -853,6 +852,7 @@ impl Engine {
                     &prefix_dir,
                     &partition,
                     &bundle.manifest.declared_scalars,
+                    &bundle.manifest.vocabularies,
                     &extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the

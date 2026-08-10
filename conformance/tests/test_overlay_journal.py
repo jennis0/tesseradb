@@ -565,6 +565,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             # inert here: nothing in this module filters, and attribute ingest writes no
             # artefact today (filter-index §5 ⊘).
             pa.field("department", pa.utf8()),
+            pa.field("archive", pa.utf8()),
             pa.field("title", pa.utf8()),
         ]
     )
@@ -576,6 +577,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.array([access] * rows, pa.utf8()),
             pa.array(cat.ingest_fx_keys(rows), pa.uint64()),
             pa.array(["alpha"] * rows, pa.utf8()),
+            pa.array(["red"] * rows, pa.utf8()),
             pa.array([f"ingested-{i}" for i in range(rows)], pa.utf8()),
         ],
         schema=schema,

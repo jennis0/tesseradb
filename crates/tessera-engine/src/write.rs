@@ -2821,6 +2821,15 @@ pub(crate) fn scalar_schema_of(
 /// category key's vocabulary), and `scalar_schema_of` deliberately narrows to render columns — so
 /// building this from that list would read a filter column's value out of a neighbouring column's
 /// slot wherever the two differ, which is most schemas.
+///
+/// **A `listing = "per_viewer"` category is here whether or not it is declared filterable**, and
+/// that is the same rule the build applies when it decides which columns owe a value column and
+/// derived postings (`filter-index.md` §2.3). Its member sets are what `/v1/categories` derives
+/// value visibility from, and the postings cover the build alone — so without an extent, a value
+/// carried only by entities ingested since the build would never be offered to a principal who can
+/// see one of them. The set of columns a flush writes extents for and the set the reader composes
+/// are the same predicate, `filter::owes_value_column`, or the reader refuses an extent for a
+/// column it does not hold.
 pub(crate) fn filter_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<crate::flush::FilterColumnSpec> {
@@ -2828,7 +2837,7 @@ pub(crate) fn filter_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.filter)
+        .filter(|(_, d)| crate::filter::owes_value_column(d, &manifest.vocabularies))
         .map(|(index, d)| crate::flush::FilterColumnSpec {
             index,
             name: d.name.clone(),

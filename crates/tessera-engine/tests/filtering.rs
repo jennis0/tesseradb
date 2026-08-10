@@ -40,8 +40,16 @@ const N: u64 = 60;
 /// The whole declared extent, so a depth-0 request covers every item.
 const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
-/// A `u8` category and a per-item string. The category is `per_viewer`, which is the shape that
-/// also owes membership postings; the string is `filter`-only, which is the shape that owes none.
+/// Two `u8` categories and a per-item string. `department` is `per_viewer`, which is the shape that
+/// owes membership postings *and* keeps the scan for filtering (decision 0060); `archive` is
+/// `public`, which is the shape whose filter is routed through those postings. The two carry the
+/// same value distribution under different names, so the routed answer and the scanned one are
+/// comparable value by value. The string is `filter`-only, which is the shape that owes no postings
+/// at all.
+///
+/// `ops` and `ww` are declared and carried by nothing, which is the empty-value case: a code the
+/// vocabulary binds, that no posting holds, and that no principal may be offered until something
+/// carries it.
 const SCHEMA_TOML: &str = r#"
 [[attribute]]
 name       = "department"
@@ -54,6 +62,20 @@ listing    = "per_viewer"
   eng = 1
   sales = 2
   legal = 3
+  ops = 4
+
+[[attribute]]
+name       = "archive"
+type       = "category"
+width      = "u8"
+used_for   = ["render", "filter"]
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  xx = 11
+  yy = 22
+  zz = 33
+  ww = 44
 
 [[attribute]]
 name     = "title"
@@ -82,6 +104,18 @@ fn department_of(e: u64) -> Option<&'static str> {
     }
 }
 
+/// The `public` column's value, one-to-one with the `per_viewer` one's. Two columns carrying the
+/// same partition of the corpus under different `listing`s is what makes the routed answer and the
+/// scanned answer comparable set for set.
+fn archive_of(e: u64) -> Option<&'static str> {
+    match department_of(e) {
+        Some("eng") => Some("xx"),
+        Some("sales") => Some("yy"),
+        Some("legal") => Some("zz"),
+        _ => None,
+    }
+}
+
 /// A numeric column, decorrelated from both the term model and the department cycle.
 fn score_of(e: u64) -> i32 {
     (e as i32 * 7) % 100
@@ -97,6 +131,7 @@ fn write_points(path: &Path) {
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         Field::new("department", DataType::Utf8, true),
+        Field::new("archive", DataType::Utf8, true),
         Field::new("title", DataType::Utf8, true),
         Field::new("score", DataType::Int32, false),
     ]));
@@ -107,6 +142,10 @@ fn write_points(path: &Path) {
         .iter()
         .map(|&e| department_of(e).map(|s| s.to_string()))
         .collect();
+    let archives: Vec<Option<String>> = ids
+        .iter()
+        .map(|&e| archive_of(e).map(|s| s.to_string()))
+        .collect();
     let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
     let batch = RecordBatch::try_new(
@@ -116,6 +155,7 @@ fn write_points(path: &Path) {
             Arc::new(Float64Array::from(xs)),
             Arc::new(Float64Array::from(ys)),
             Arc::new(StringArray::from(departments)),
+            Arc::new(StringArray::from(archives)),
             Arc::new(StringArray::from(titles)),
             Arc::new(arrow::array::Int32Array::from(scores)),
         ],
@@ -161,6 +201,18 @@ struct Fixture {
     entity_of: BTreeMap<u64, u64>,
     columns: FilterColumns,
     codes: HashMap<String, u32>,
+    /// The `public` column's bindings, kept apart from `department`'s because the two vocabularies
+    /// mint independently and a shared map would silently resolve one column's key against the
+    /// other's code space.
+    archive_codes: HashMap<String, u32>,
+    prefix: String,
+    /// The manifest's own view of the columns, snapshotted at build. Kept so a test that has
+    /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
+    /// digest, so it refuses first and the reader under test is never reached.
+    phash: String,
+    declared: Vec<tessera_store::manifest::DeclaredScalar>,
+    vocabularies: Vec<tessera_store::manifest::ManifestVocabulary>,
+    extents: Vec<tessera_store::manifest::AttrExtent>,
 }
 
 fn fixture() -> Fixture {
@@ -206,6 +258,7 @@ fn fixture() -> Fixture {
         &bundle.join(&prefix),
         &phash,
         &opened.manifest.declared_scalars,
+        &opened.manifest.vocabularies,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
@@ -213,16 +266,20 @@ fn fixture() -> Fixture {
         true,
     )
     .expect("declared filter columns open");
-    let codes = opened
-        .manifest
-        .vocabularies
-        .iter()
-        .find(|v| v.name == "department")
-        .expect("the manifest records the vocabulary")
-        .values
-        .iter()
-        .map(|v| (v.key.clone(), v.code))
-        .collect();
+    let bindings = |name: &str| -> HashMap<String, u32> {
+        opened
+            .manifest
+            .vocabularies
+            .iter()
+            .find(|v| v.name == name)
+            .expect("the manifest records the vocabulary")
+            .values
+            .iter()
+            .map(|v| (v.key.clone(), v.code))
+            .collect()
+    };
+    let codes = bindings("department");
+    let archive_codes = bindings("archive");
 
     Fixture {
         _dir: dir,
@@ -230,6 +287,12 @@ fn fixture() -> Fixture {
         entity_of,
         columns,
         codes,
+        archive_codes,
+        prefix,
+        phash: phash.clone(),
+        declared: opened.manifest.declared_scalars.clone(),
+        vocabularies: opened.manifest.vocabularies.clone(),
+        extents: opened.partitions[&phash].manifest.attr_extents.clone(),
     }
 }
 
@@ -482,6 +545,19 @@ fn ingest_and_flush(
     title: &str,
     score: i32,
 ) -> u64 {
+    ingest_and_flush_with(engine, external, department, WalScalar::U8(0), title, score)
+}
+
+/// As [`ingest_and_flush`], but naming the `public` column's value too — the case the routed filter
+/// and `/v1/categories`' extent sweep both have to see.
+fn ingest_and_flush_with(
+    engine: &tessera_engine::Engine,
+    external: &str,
+    department: WalScalar,
+    archive: WalScalar,
+    title: &str,
+    score: i32,
+) -> u64 {
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
@@ -494,6 +570,7 @@ fn ingest_and_flush(
         // A category arrives as its **key**, never a code (contracts §2.4).
         scalars: vec![
             department,
+            archive,
             WalScalar::Utf8(title.to_string()),
             WalScalar::I32(score),
         ],
@@ -882,6 +959,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &prefix,
             &phash,
             &opened.manifest.declared_scalars,
+            &opened.manifest.vocabularies,
             extents,
             true,
         )
@@ -962,7 +1040,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares three columns.
+        // The schema declares four columns.
         scalars: vec![WalScalar::Utf8("eng".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -970,7 +1048,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
         .expect_err("a short row is refused");
     assert!(
-        format!("{err}").contains("carries 1 scalars, but the schema declares 3"),
+        format!("{err}").contains("carries 1 scalars, but the schema declares 4"),
         "{err}"
     );
 
@@ -984,6 +1062,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         y: 5.0,
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
             WalScalar::Utf8("paper-98".to_string()),
             WalScalar::I32(43),
         ],
@@ -1315,5 +1394,472 @@ fn a_range_composes_with_a_category_and_a_string() {
         expected(&fx, &[ALL_TERM], |e| score_of(e) >= 50
             && (department_of(e) == Some("eng")
                 || title_of(e).starts_with("paper-1")))
+    );
+}
+
+// =================================================================================================
+// The category postings route (decision 0060) and `/v1/categories` under `per_viewer`
+// =================================================================================================
+
+/// Where the build wrote one column's derived postings.
+fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
+    fx.bundle
+        .join(&fx.prefix)
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .join(column)
+        .join("postings.arrow")
+}
+
+/// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
+/// the route is decided and the file mapped at open.
+fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
+    FilterColumns::open(
+        &fx.bundle.join(&fx.prefix),
+        &fx.phash,
+        &fx.declared,
+        &fx.vocabularies,
+        &fx.extents,
+        true,
+    )
+}
+
+/// **A `public` category answers `eq` and `in` exactly as the corpus says**, under a real mask.
+///
+/// The reference is the fixture's own inputs, so a routed answer that read the wrong posting, or
+/// that forgot to intersect with the candidate, fails here rather than agreeing with itself.
+#[test]
+fn a_public_category_route_agrees_with_the_corpus_under_a_real_mask() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+    let terms = [SUBSET_TERM];
+
+    let xx = AttrLocalId::new(fx.archive_codes["xx"]);
+    let yy = AttrLocalId::new(fx.archive_codes["yy"]);
+    let ww = AttrLocalId::new(fx.archive_codes["ww"]);
+
+    let got = fx
+        .columns
+        .resolve("archive", &FilterOperand::Equals(xx), &cand)
+        .unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &terms, |e| archive_of(e) == Some("xx"))
+    );
+    assert!(got.andnot(&cand).is_empty(), "I12: inside the candidate");
+
+    let both = fx
+        .columns
+        .resolve("archive", &FilterOperand::In(vec![xx, yy]), &cand)
+        .unwrap();
+    assert_eq!(
+        as_vec(&both),
+        expected(&fx, &terms, |e| matches!(
+            archive_of(e),
+            Some("xx") | Some("yy")
+        ))
+    );
+
+    // A declared value nothing carries is an empty answer, not an error: a keyed postings file
+    // drops empty records, so this is the `None` arm of `posting_at` reaching the surface.
+    assert!(fx
+        .columns
+        .resolve("archive", &FilterOperand::Equals(ww), &cand)
+        .unwrap()
+        .is_empty());
+    // As is the reserved absent sentinel, which no entity may match on either route.
+    assert!(fx
+        .columns
+        .resolve(
+            "archive",
+            &FilterOperand::Equals(AttrLocalId::new(0)),
+            &cand
+        )
+        .unwrap()
+        .is_empty());
+}
+
+/// **The route is the declaration, and this is the assertion that proves it.**
+///
+/// Both columns carry the same partition of the corpus. Each column's postings file is rewritten
+/// with a deliberately wrong mapping — every code claiming entity 0 and nothing else — and the two
+/// then answer differently: the `public` column returns the corrupted postings' answer, because it
+/// is routed through them; the `per_viewer` column returns the *correct* answer, because decision
+/// 0060 keeps it on the scan. Nothing else in this file can tell the two routes apart, since a
+/// working route and a working scan agree by construction.
+#[test]
+fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    // Every code in both vocabularies, mapped to entity 0 alone.
+    for (column, codes) in [("archive", &fx.archive_codes), ("department", &fx.codes)] {
+        let mut entries: Vec<(u32, Vec<u32>)> =
+            codes.values().map(|&code| (code, vec![0u32])).collect();
+        entries.sort_by_key(|(code, _)| *code);
+        tessera_authz::write_delta_tier_at(&postings_path(&fx, column), &entries, 32).unwrap();
+    }
+    let columns = reopen(&fx).expect("the rewritten files are well-formed and open");
+
+    let archived = columns
+        .resolve(
+            "archive",
+            &FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["xx"])),
+            &cand,
+        )
+        .unwrap();
+    assert_eq!(
+        as_vec(&archived),
+        vec![0u32],
+        "a `public` column must answer from its postings — this is what decision 0060 buys, and \
+         with the file corrupted it is the only way the answer can be this"
+    );
+
+    let departmental = columns
+        .resolve(
+            "department",
+            &FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            &cand,
+        )
+        .unwrap();
+    assert_eq!(
+        as_vec(&departmental),
+        expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng")),
+        "a `per_viewer` column must be answered by the masked scan, whatever its postings say: \
+         the postings' work is a function of the value named, which is the disclosure \
+         `listing = \"per_viewer\"` exists to prevent (decision 0060)"
+    );
+    assert!(
+        departmental.cardinality() > 1,
+        "the fixture must make the two answers distinguishable"
+    );
+}
+
+/// **A routed column still sees everything ingested since the build.**
+///
+/// The postings cover `[0, entity_id_high_water)` and no flush writes any, so an answer taken from
+/// them alone would omit every entity flushed since — narrower, safe under I12, and
+/// indistinguishable from a correct answer. Several flushes, because one extent working is not the
+/// property: the property is that they accumulate.
+#[test]
+fn a_routed_public_category_unions_the_postings_with_every_extent() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-routed-extents");
+    let wal = fx._dir.path().join("wal-routed-extents");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let first = ingest_and_flush_with(
+        &engine,
+        "routed-1",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "routed-alpha",
+        1,
+    ) as u32;
+    let second = ingest_and_flush_with(
+        &engine,
+        "routed-2",
+        WalScalar::Utf8("sales".to_string()),
+        WalScalar::Utf8("yy".to_string()),
+        "routed-beta",
+        2,
+    ) as u32;
+    // `ww` is declared and carried by nothing in the build, so this entity is its *only* member —
+    // the case a postings-only answer gets exactly backwards.
+    let third = ingest_and_flush_with(
+        &engine,
+        "routed-3",
+        WalScalar::Utf8("legal".to_string()),
+        WalScalar::Utf8("ww".to_string()),
+        "routed-gamma",
+        3,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    let code = |key: &str| AttrLocalId::new(fx.archive_codes[key]);
+    let hits = |operand: FilterOperand| columns.resolve("archive", &operand, &cand).unwrap();
+
+    let xx = hits(FilterOperand::Equals(code("xx")));
+    assert!(xx.contains(first), "the first flush's entity is missing");
+    assert!(!xx.contains(second));
+    assert!(!xx.contains(third));
+    // And the base build's members are still there, so the union is a union and not a replacement.
+    assert!(
+        xx.cardinality() > 1,
+        "the build's own `xx` members must survive the union with the extents"
+    );
+
+    assert!(hits(FilterOperand::Equals(code("yy"))).contains(second));
+
+    let ww = hits(FilterOperand::Equals(code("ww")));
+    assert_eq!(
+        as_vec(&ww),
+        vec![third],
+        "a value whose only member arrived after the build must still be found"
+    );
+
+    let any = hits(FilterOperand::In(vec![code("xx"), code("ww")]));
+    assert!(any.contains(first) && any.contains(third) && !any.contains(second));
+}
+
+/// **A routed column whose postings cannot be read refuses**, rather than degrading to the scan or
+/// to "no entity carries this value". Both would answer, and one of them would answer *correctly* —
+/// which is worse, because the artefact would be broken with nothing to notice.
+#[test]
+fn a_public_column_with_unreadable_postings_refuses_to_open() {
+    let fx = fixture();
+    let path = postings_path(&fx, "archive");
+    let held = std::fs::read(&path).unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        reopen(&fx).is_err(),
+        "a declared column whose postings are missing must refuse at open"
+    );
+
+    std::fs::write(&path, &held[..held.len() / 2]).unwrap();
+    assert!(
+        reopen(&fx).is_err(),
+        "a truncated postings file must refuse at open"
+    );
+
+    std::fs::write(&path, &held).unwrap();
+    assert!(reopen(&fx).is_ok(), "restored, it opens again");
+}
+
+/// **A `per_viewer` category column is not filterable merely because it is held.**
+///
+/// The map now carries every column the build wrote a value column for, which includes a
+/// `per_viewer` category declared `render`-only — its postings are what `/v1/categories` derives
+/// visibility from. Holding it must open no operand the schema did not declare, so `resolve` gates
+/// on the declaration and not on presence. (`department` here *is* declared filterable; the guard
+/// is asserted at the seam it protects, in `filter.rs`'s `Layers::filterable`.)
+#[test]
+fn a_column_the_schema_did_not_declare_filterable_is_still_refused() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    assert!(matches!(
+        fx.columns.resolve(
+            "no_such_column",
+            &FilterOperand::Equals(AttrLocalId::new(1)),
+            &cand
+        ),
+        Err(FilterError::UndeclaredColumn(_))
+    ));
+}
+
+// =================================================================================================
+// `/v1/categories` under `listing = "per_viewer"` (per-point-attributes §3.3)
+// =================================================================================================
+
+/// Every value `column` offers this principal, in key order, paged at `limit` so the cursor is
+/// exercised on the ordinary path rather than only on a contrived one.
+fn offered(
+    engine: &tessera_engine::Engine,
+    session: &tessera_engine::Session,
+    column: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = engine
+            .categories(
+                session,
+                column,
+                tessera_engine::CategoryQuery::Page {
+                    after: after.as_deref(),
+                    limit,
+                },
+            )
+            .expect("the column is served")
+            .expect("the column is a category");
+        keys.extend(page.values.iter().map(|v| v.key.clone()));
+        match page.next {
+            Some(cursor) => after = Some(cursor),
+            None => break,
+        }
+    }
+    keys
+}
+
+/// **A value is offered iff the principal can see an item carrying it** (§3.3), derived per request
+/// and never maintained.
+///
+/// `legal` is the assertion that matters: the subset principal's items are exactly `e % 3 == 0`,
+/// and none of those carries `legal` — so a value that certainly exists, and that a wider principal
+/// is offered, is withheld from this one. `ops` is declared and carried by nobody, so it is offered
+/// to neither: the empty-value case, which membership-derivation answers by hiding.
+#[test]
+fn a_per_viewer_value_is_offered_only_where_a_visible_item_carries_it() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats");
+    let wal = fx._dir.path().join("wal-cats");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+
+    let wide = engine.authorise(&full_coverage_credential()).unwrap();
+    let narrow = engine.authorise(&subset_credential()).unwrap();
+    let none = engine.authorise(&zero_credential()).unwrap();
+
+    assert_eq!(
+        offered(&engine, &wide, "department", 2),
+        ["eng", "legal", "sales"]
+    );
+    assert_eq!(offered(&engine, &narrow, "department", 2), ["eng", "sales"]);
+    assert!(
+        offered(&engine, &none, "department", 2).is_empty(),
+        "a principal who can see nothing is offered nothing — and is told so with a real answer, \
+         since an empty value set is what that principal's derivation yields"
+    );
+
+    // Cross-check the fixture rather than trusting the arithmetic above: `legal` must genuinely be
+    // a value the narrow principal has no member of, or this test asserts nothing.
+    assert!((0..N)
+        .filter(|e| terms_of(*e).contains(&SUBSET_TERM))
+        .all(|e| department_of(e) != Some("legal")));
+}
+
+/// **One gate, both request forms.** Bulk lookup and enumeration are separate walks, and a gate
+/// applied to one is the existence oracle reached through the other.
+#[test]
+fn both_category_request_forms_apply_the_membership_gate() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-forms");
+    let wal = fx._dir.path().join("wal-cats-forms");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let narrow = engine.authorise(&subset_credential()).unwrap();
+
+    let asked: Vec<u32> = ["eng", "sales", "legal", "ops"]
+        .iter()
+        .map(|k| fx.codes[*k])
+        .collect();
+    let page = engine
+        .categories(
+            &narrow,
+            "department",
+            tessera_engine::CategoryQuery::Codes(&asked),
+        )
+        .unwrap()
+        .unwrap();
+    let keys: Vec<&str> = page.values.iter().map(|v| v.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["eng", "sales"],
+        "a code naming a value this principal has no member of must be omitted, exactly as an \
+         unbound code is — the two must be one outcome"
+    );
+}
+
+/// **The page is cut after the gate, never before.** Filtering a page once it has been taken
+/// returns short pages whose length counts what the principal cannot see, and terminates the walk
+/// early — here it would drop `sales` entirely, since `ops` is invisible and sits between.
+#[test]
+fn a_per_viewer_page_is_filtered_before_it_is_cut() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-page");
+    let wal = fx._dir.path().join("wal-cats-page");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let wide = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let first = engine
+        .categories(
+            &wide,
+            "department",
+            tessera_engine::CategoryQuery::Page {
+                after: None,
+                limit: 2,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let keys: Vec<&str> = first.values.iter().map(|v| v.key.as_str()).collect();
+    assert_eq!(keys, ["eng", "legal"]);
+    assert_eq!(
+        first.next.as_deref(),
+        Some("legal"),
+        "a third visible value remains — `ops` sits between it and this page in key order and \
+         must not be allowed to end the walk"
+    );
+
+    let second = engine
+        .categories(
+            &wide,
+            "department",
+            tessera_engine::CategoryQuery::Page {
+                after: Some("legal"),
+                limit: 2,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let keys: Vec<&str> = second.values.iter().map(|v| v.key.as_str()).collect();
+    assert_eq!(keys, ["sales"]);
+    assert!(second.next.is_none());
+}
+
+/// **A `public` vocabulary is served as authored, to every principal alike** — including a value
+/// nothing carries, and including a principal who can see nothing. It derives no membership at all,
+/// which is why its filter may be routed through the postings (decision 0060) while a `per_viewer`
+/// one may not.
+#[test]
+fn a_public_vocabulary_is_served_as_authored_to_every_principal() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-public");
+    let wal = fx._dir.path().join("wal-cats-public");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+
+    for credential in [
+        full_coverage_credential(),
+        subset_credential(),
+        zero_credential(),
+    ] {
+        let session = engine.authorise(&credential).unwrap();
+        assert_eq!(
+            offered(&engine, &session, "archive", 3),
+            ["ww", "xx", "yy", "zz"],
+            "a `public` set is an authored assertion, so every principal is served the same one"
+        );
+    }
+}
+
+/// **A value carried only by entities ingested since the build is still offered.**
+///
+/// The membership postings cover `[0, entity_id_high_water)` and no flush writes any, so deriving
+/// visibility from them alone would withhold a value the principal can plainly see — the same
+/// omission the routed filter has to avoid, in the endpoint that publishes the legend. `ops` is
+/// declared and carried by nothing in the build, so the flushed entity is its only member.
+#[test]
+fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-flush");
+    let wal = fx._dir.path().join("wal-cats-flush");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let wide = engine.authorise(&full_coverage_credential()).unwrap();
+    let none = engine.authorise(&zero_credential()).unwrap();
+    assert!(
+        !offered(&engine, &wide, "department", 4).contains(&"ops".to_string()),
+        "nothing carries `ops` in the build"
+    );
+
+    ingest_and_flush_with(
+        &engine,
+        "ops-1",
+        WalScalar::Utf8("ops".to_string()),
+        WalScalar::U8(0),
+        "ops-paper",
+        9,
+    );
+
+    assert_eq!(
+        offered(&engine, &wide, "department", 4),
+        ["eng", "legal", "ops", "sales"],
+        "the flushed entity's value must be offered to a principal who can see it"
+    );
+    assert!(
+        offered(&engine, &none, "department", 4).is_empty(),
+        "and to nobody who cannot"
     );
 }

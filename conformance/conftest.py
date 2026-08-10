@@ -80,6 +80,15 @@ def catalogue_filter_columns():
             },
             codes=dict(cat.DEPARTMENT_CODES),
         ),
+        # The `public` counterpart: the same definition, over the column whose operands the engine
+        # answers from its derived postings rather than by scanning (decision 0060). The oracle has
+        # one evaluation and the engine has two, which is what makes the routed answer testable.
+        "archive": CategoryColumn(
+            values={
+                e: key for e in range(cat.N_ITEMS) if (key := cat.archive_of(e)) is not None
+            },
+            codes=dict(cat.ARCHIVE_CODES),
+        ),
         "title": StringColumn(
             values={
                 e: text for e in range(cat.N_ITEMS) if (text := cat.title_of(e)) is not None

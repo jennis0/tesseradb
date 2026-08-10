@@ -182,6 +182,7 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             # key; the values are inert here — nothing in this module filters, and attribute
             # ingest writes no artefact today (filter-index §5 ⊘).
             pa.field("department", pa.utf8()),
+            pa.field("archive", pa.utf8()),
             pa.field("title", pa.utf8()),
         ]
     )
@@ -193,6 +194,7 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.array(accesses, type=pa.utf8()),
             pa.array(ingest_fx_keys(len(external_ids)), type=pa.uint64()),
             pa.array(["alpha"] * len(external_ids), type=pa.utf8()),
+            pa.array(["red"] * len(external_ids), type=pa.utf8()),
             pa.array([f"ingested-{i}" for i in range(len(external_ids))], type=pa.utf8()),
         ],
         schema=schema,

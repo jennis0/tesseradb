@@ -141,6 +141,15 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # principal provably cannot see a member of. `hollow` is declared and planted nowhere: a known
 # value with no members anywhere, the third outcome that must be indistinguishable from the
 # other two.
+#
+# **`archive` is the `public` counterpart, and it exists to be *routed*.** Decision 0060 answers a
+# category operand from the column's derived postings where the vocabulary is `public` and from the
+# masked scan where it is `per_viewer` — two evaluation routes that must produce the same sets. A
+# corpus carrying only a `per_viewer` category exercises one of them, so the differential would
+# ratify the scan and say nothing about the route that replaced it. `archive` cycles on a fourth
+# period (`(source_id // 5) % 3`), decorrelated from the term blocks, the department cycle's 6 and
+# the title cycle's 12; `void` is declared and planted nowhere, which is the routed reading of an
+# absent keyed record.
 SCHEMA_TOML = """\
 [[attribute]]
 name     = "fx_key"
@@ -163,6 +172,19 @@ listing    = "per_viewer"
   hollow = 6
 
 [[attribute]]
+name       = "archive"
+type       = "category"
+width      = "u8"
+used_for   = ["filter"]
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  red   = 11
+  green = 22
+  blue  = 33
+  void  = 44
+
+[[attribute]]
 name     = "title"
 type     = "utf8"
 used_for = ["filter"]
@@ -181,6 +203,15 @@ DEPARTMENT_CODES: dict[str, int] = {
     "hollow": 6,
 }
 
+# The `public` column's pinning, kept separate because each column owns its own code space
+# (filter-index §2.2): one shared map would resolve one column's key against the other's codes.
+ARCHIVE_CODES: dict[str, int] = {
+    "red": 11,
+    "green": 22,
+    "blue": 33,
+    "void": 44,
+}
+
 # The one entity carrying `solo` — a single-member value, inside `cross_lo` so the crossover
 # principals can see it. Chosen not to collide with the absence rule below.
 DEPARTMENT_SOLO_ID = 69_000
@@ -192,6 +223,7 @@ DEPARTMENT_SOLO_ID = 69_000
 # with nothing.
 DEPARTMENT_ABSENT_STRIDE = 101
 TITLE_ABSENT_STRIDE = 103
+ARCHIVE_ABSENT_STRIDE = 107
 
 
 def department_of(source_id: int) -> str | None:
@@ -206,6 +238,15 @@ def department_of(source_id: int) -> str | None:
     if high_tail.start <= source_id < high_tail.stop:
         return "omega"
     return ("alpha", "beta", "gamma")[(source_id // 2) % 3]
+
+
+def archive_of(source_id: int) -> str | None:
+    """`archive` as planted — the `public` column, whose operands the engine answers from the
+    derived postings rather than by scanning (decision 0060). Same contract as [`department_of`]:
+    what the entity was *given*, upstream of what the build stored."""
+    if source_id % ARCHIVE_ABSENT_STRIDE == 0:
+        return None
+    return ("red", "green", "blue")[(source_id // 5) % 3]
 
 
 # The four stems cycle with period 12 (stride 3 × 4 stems) — a third period, decorrelated from
@@ -613,6 +654,7 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 "department": pa.array(
                     [department_of(i) for i in range(N_ITEMS)], type=pa.string()
                 ),
+                "archive": pa.array([archive_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 "title": pa.array([title_of(i) for i in range(N_ITEMS)], type=pa.string()),
             }
         ),
@@ -677,13 +719,15 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
+        # 5: the corpus gained a `public` category, `archive`, so the differential covers the
+        # postings route decision 0060 opened as well as the scan (2026-08-10).
         # 4: the corpus gained the two filter columns (`department`, `title`) and their planting
         # rules (2026-08-09). The `schema` key alone would force the rebuild — the declaration's
         # content is in the receipt — but the planted *values* are a function of the strides and
         # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
         # version moves with them.
         # 3: the bundle gained a declared `fx_key` column (2026-08-07).
-        "recipe_version": 4,
+        "recipe_version": 5,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -703,6 +747,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
             "department_absent_stride": DEPARTMENT_ABSENT_STRIDE,
             "title_absent_stride": TITLE_ABSENT_STRIDE,
             "title_stems": list(_TITLE_STEMS),
+            "archive_absent_stride": ARCHIVE_ABSENT_STRIDE,
         },
         # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
         # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt
