@@ -636,3 +636,47 @@ preceded by an untimed warm pass. Roaring sizes are *serialised* (`Portable`), w
 bundle would store, not the in-memory footprint.
 
 Reproduce: `cargo build --release && ./target/release/layoutprobe 1000000 100000000 1000000000`.
+
+## Arm 16 — the scan's constants are hostage to codegen layout, and local fixes do not hold
+
+Attempting a small, wanted safety change — validating a text column's offsets once at open, so a
+corrupt offset refuses there instead of reaching `&bytes[lo..hi]` on a request path — cost the
+**universal** scan arms 70% at 10⁹, with not a line of the scan touched:
+
+| | HEAD | + a validator in `values.rs` |
+|---|---|---|
+| universal / 1% contiguous | 2.44 ms | **4.16** |
+| universal / 25% broad | 62.4 ms | **105.7** |
+| universal / 1% scattered | 92.9 ms | 94.1 |
+| slice-blocked (all three) | 0.23 / 5.7 / 15.0 | 0.43 / 10.5 / 15.1 |
+
+**The function is never called and the regression is identical.** Deleting the call while leaving the
+function in the crate reproduces it exactly (4.18 / 105.66), so this is codegen perturbation from the
+symbol existing — not the check's work, and not its call site.
+
+Four remedies, measured, none sufficient:
+
+| remedy | universal contiguous | universal broad | slice-blocked |
+|---|---|---|---|
+| `codegen-units = 1` on the crate | 4.21 (no change) | 105.9 (no change) | **fixed** — 0.24 / 5.80 |
+| `#[inline(always)]` on `for_each_slot_run` | 4.18 | 104.6 | unaffected |
+| `#[inline(always)]` on `walk_typed` | 4.22 | 105.7 | unaffected |
+| move the symbol to another crate | **3.08** | **78.7** | unaffected |
+
+Moving it out — the technique that fixed the equivalent regression when the fold's pass was written —
+recovers about half and leaves ~26%. **The change was reverted rather than shipped**, because the
+check it buys is redundant while Arrow validates on decode, and 26% of the scan is not a price worth
+paying for a guard against a failure that is currently unreachable.
+
+**What this says about the crate.** Seven regressions of this shape have now occurred during the
+filter work, three of them from code that never executes during a scan. `#[inline(always)]` fixes the
+individual case and does not prevent the next, because the next is somewhere else; one codegen unit
+fixes the presence path and not the packing path; a crate boundary fixes most but not all. The scan's
+published constants (§2.2) are therefore **a property of the crate's current contents**, not of the
+scan's code, and any change to `tessera-filter` — including one that adds nothing to the hot path —
+must be A/B'd interleaved before it is believed.
+
+The structural answer, unbuilt and unpriced: put the scan in a crate that contains **only** the scan,
+so there is nothing left to perturb it. That is a larger change than any of the above and wants
+measuring rather than assuming, given this arm's record of remedies that looked obvious and were not.
+
