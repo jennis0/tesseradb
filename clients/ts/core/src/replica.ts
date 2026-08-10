@@ -429,7 +429,7 @@ export class Replica {
    * let an item suppressed since the held band was fetched survive into a band the client now marks
    * fresh (`delta-serving.md` §7).
    */
-  private dueForRevalidation(): boolean {
+  dueForRevalidation(): boolean {
     const after = this.opts.revalidateAfterMs ?? 60_000;
     return this.now() - this.validatedAt >= after;
   }
