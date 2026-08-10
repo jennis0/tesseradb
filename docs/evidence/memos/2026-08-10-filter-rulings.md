@@ -235,29 +235,59 @@ map:
 4. **Annotate a fresh sample.** The client asks for points as usual and receives, per point, a 0/1
    saying whether it passed the filter.
 
-Both are cheap in the shape the scan already has — route 3's candidate is the held set (tens to
-hundreds of entities, the smallest candidate the scan will ever see), and route 4 is the per-tile
-route of (a) with the per-point verdict *retained* rather than intersected away. Neither needs a new
-structure. What they need is a specification, because they are a change to the served surface and
-three things about them are decisions rather than details:
+Both are cheap in the shape the scan already has — the candidate is the *sample*, tens to hundreds
+of entities, the smallest candidate the scan will ever see — and route 4 is the per-tile route of
+(a) with the per-point verdict *retained* rather than intersected away. Neither needs a new
+structure.
 
-- **How the client names the set it holds, and it cannot be by `(region, k)` alone.** Re-deriving the
-  same sample server-side from a region and a *k* requires the sample to be reproducible, and
-  [decision 0030](../../decisions/0030-determinism-is-not-a-guarantee.md) declines exactly that:
-  response determinism is an implementation detail and not a guarantee. So route 3 should carry the
-  `tessera_id`s the client holds, which it already has and which are the transport identity by
-  design. That is more bytes on the wire and it rests on nothing that was declined.
+**And because the selection is deterministic, these are one route with two payload modes rather
+than two routes.** Both compute the same thing: re-derive the sample for `(region, k)` at the
+current generation, evaluate the operand over it, and return a verdict per point. They differ only
+in whether the points travel with the verdicts (route 4, for a fresh view) or are assumed already
+held (route 3, which is route 4 minus the payload). Specifying them as one thing is what stops the
+two from drifting into two selections that disagree.
+
+What they need is a specification, because they are a change to the served surface and three things
+about them are decisions rather than details:
+
+- **The held set is named by `(region, k, generation)`, and the server re-derives it.** The
+  selection is a pure function of the visible mask and the tile: §7.2 takes the visible row ids in
+  the tile's range straight from the bitmap and keeps the lowest by identity, and priority is a
+  keyed per-point constant that is *mask-independent* — so the same viewport and *k* against the
+  same generation and the same idset yield exactly the same set. The generation belongs in the key
+  because that is the whole of "up to an update": a flush, a merge, a fold or an accepted
+  suppression is what changes the answer, and the corpus already has the vocabulary for saying so
+  (the staleness stamp, [decision 0041](../../decisions/0041-pins-become-a-staleness-stamp.md), and
+  the view key, [decision 0029](../../decisions/0029-view-key.md)).
+
+  **[Decision 0030](../../decisions/0030-determinism-is-not-a-guarantee.md) does not stand in the
+  way of this, and reading it as though it did is the error to avoid.** What it declines to promise
+  is byte-stable *ordering and encoding* — "two byte-different encodings of the same served set are
+  equally correct" — not which set is served. Membership is deterministic by construction; the
+  sequence it arrives in is not promised. **What that does forbid is a bare positional reply**: a
+  flags-only payload aligned by index to what the client holds depends on the ordering 0030 declines
+  to guarantee, so a future reordering would silently mislabel every point. The verdicts are keyed
+  by `tessera_id`. Route 4 is unaffected — its column travels beside the points in one response and
+  is self-aligned.
 - **The server must re-derive `M_auth` and never trust the claim to hold a point.** A `tessera_id`
   presented back is a claim about the past, and [decision 0041](../../decisions/0041-pins-become-a-staleness-stamp.md)
   is unambiguous that a suppression applies to every request the moment it is accepted, whatever
   stamp was presented. So a point held from before a suppression must come back as *not visible*,
   not as a filter verdict — the two outcomes have to be distinguishable in the response and the
   fail-closed one has to be the default.
-- **Route 4 changes which set is sampled, and the design has to say so at the claim.** **I7** holds
-  — sampling still happens after masking — but the sample is drawn from `M_auth` rather than from
-  `M_auth ∧ M_sel`, so it is a *different* sample from the one a filtered viewport request returns.
-  Both are legitimate; which one a request gets must be explicit rather than inferred from whether a
-  filter was supplied.
+- **In route 4 the filter is a reported column and never a predicate on selection.** The sample is
+  the one an unfiltered request would return — drawn from `M_auth`, with `k` marks chosen exactly as
+  §7.2 chooses them — and the filter contributes one boolean per returned point and nothing else.
+  **I7** is untouched, because the filter never enters the sampling step at all. Implementing this
+  as "filter, then sample" or "sample, then top up with matches" would be a different feature and a
+  worse one.
+
+  **The consequence to state at the claim** is a product one rather than a security one: route 4
+  answers *"of the marks you would see anyway, which pass"*, so a filter matching a rare value can
+  highlight nothing in a tile that genuinely contains matches — the selection had no reason to
+  prefer them. That is the correct behaviour for shading a map the viewer is already looking at, and
+  the wrong tool for finding where the matches are. Route (a)'s filtered viewport is what answers
+  the second question, and the surface should make it obvious which is which.
 
 **On the invariants, the first read is that both are inside the line, and it should be checked
 rather than taken.** The flag is a property of a point already inside `M_auth`, so it is computable
