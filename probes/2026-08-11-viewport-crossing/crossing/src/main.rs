@@ -156,6 +156,47 @@ fn route_per_tile_real(
     out
 }
 
+/// Route B, **batched**: invert a whole tile's rows into a small buffer, then test membership over
+/// it. Same answer, different instruction schedule — the question is whether the ~17-25 ns per row
+/// the interleaved form costs is the Feistel itself or the pipeline stalling on a branchy,
+/// cache-missing `contains` between two independent inversions. The buffer is one tile wide
+/// (4 KB at 1,000 rows), so it stays in L1 and adds no memory term worth naming.
+fn route_per_tile_batched(
+    result: &Bitmap,
+    tessera_id_by_row: &[u64],
+    key: &IdentityKey,
+    tiles: &[(u32, u32)],
+    scratch: &mut Vec<u32>,
+) -> Bitmap {
+    let mut out = Bitmap::new();
+    for &(lo, hi) in tiles {
+        scratch.clear();
+        for row in lo..hi {
+            let id = tessera_id_by_row[row as usize];
+            let (_shard, entity) = key.invert(tessera_types::TesseraId::new(id));
+            scratch.push(entity.raw() as u32);
+        }
+        for (offset, &entity) in scratch.iter().enumerate() {
+            if result.contains(entity) {
+                out.add(lo + offset as u32);
+            }
+        }
+    }
+    out
+}
+
+/// Diagnostic only — not an answer. The cost of *reading* the `tessera_id` column over the
+/// viewport, with no inversion and no membership test, so the two terms can be attributed.
+fn gather_only(tessera_id_by_row: &[u64], tiles: &[(u32, u32)]) -> u64 {
+    let mut acc = 0u64;
+    for &(lo, hi) in tiles {
+        for row in lo..hi {
+            acc = acc.wrapping_add(tessera_id_by_row[row as usize]);
+        }
+    }
+    acc
+}
+
 fn route_coarse(
     result: &Bitmap,
     cells: &[Bitmap],
@@ -268,8 +309,12 @@ fn main() {
             let bi = route_per_tile_ideal(&result, &row_to_entity, &tiles);
             let br = route_per_tile_real(&result, &tessera_id_by_row, &key, &tiles);
             let c = route_coarse(&result, &cells, cell_width, &entity_to_row, &tiles, &view);
+            let mut scratch: Vec<u32> = Vec::with_capacity(tile_width);
+            let bb =
+                route_per_tile_batched(&result, &tessera_id_by_row, &key, &tiles, &mut scratch);
             assert_eq!(a, bi, "project and per-tile-ideal disagree");
             assert_eq!(a, br, "project and per-tile-real disagree");
+            assert_eq!(a, bb, "project and per-tile-batched disagree");
             assert_eq!(a, c, "project and coarse disagree");
             let answer = a.cardinality();
 
@@ -277,6 +322,8 @@ fn main() {
                 ("project", Vec::new(), card as f64),
                 ("per_tile_ideal", Vec::new(), rows_in_view as f64),
                 ("per_tile_real", Vec::new(), rows_in_view as f64),
+                ("per_tile_batched", Vec::new(), rows_in_view as f64),
+                ("gather_only", Vec::new(), rows_in_view as f64),
                 ("coarse_prefilter", Vec::new(), rows_in_view as f64),
             ];
             for _ in 0..ROUNDS {
@@ -298,6 +345,20 @@ fn main() {
                 timings[2].1.push(t.elapsed().as_secs_f64() * 1e3);
 
                 let t = Instant::now();
+                std::hint::black_box(route_per_tile_batched(
+                    &result,
+                    &tessera_id_by_row,
+                    &key,
+                    &tiles,
+                    &mut scratch,
+                ));
+                timings[3].1.push(t.elapsed().as_secs_f64() * 1e3);
+
+                let t = Instant::now();
+                std::hint::black_box(gather_only(&tessera_id_by_row, &tiles));
+                timings[4].1.push(t.elapsed().as_secs_f64() * 1e3);
+
+                let t = Instant::now();
                 std::hint::black_box(route_coarse(
                     &result,
                     &cells,
@@ -306,7 +367,7 @@ fn main() {
                     &tiles,
                     &view,
                 ));
-                timings[3].1.push(t.elapsed().as_secs_f64() * 1e3);
+                timings[5].1.push(t.elapsed().as_secs_f64() * 1e3);
             }
 
             for (route, samples, unit) in timings {

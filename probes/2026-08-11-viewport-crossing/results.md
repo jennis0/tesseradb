@@ -48,6 +48,24 @@ The property that makes authorisation postings compress works directly against i
 too coarse at 1,000-row tiles. The table above is the re-run with cells matched to the tile width,
 which is the structure's best case.)*
 
+**4. The inversion cannot be amortised away, so the lookup table is the only lever.** Inverting a
+whole tile into a scratch buffer before testing membership recovers essentially nothing — 6.00 ms
+interleaved against 6.22 ms batched on a contiguous result, i.e. slightly *worse*; the scattered
+cells move 10–40% and in the wrong direction to matter. The cost is the four Feistel rounds
+themselves, not a stalled pipeline. Attribution over a 300,000-row viewport:
+
+| term | per row |
+|---|---|
+| reading `tessera_id` (sequential within a tile, prefetched) | **~0.4 ns** |
+| `IdentityKey::invert` | **~17.5 ns** |
+| membership test | 2.3 ns contiguous, ~36 ns scattered |
+
+So the column read is free and the inversion is the whole gap between the idealised route and the
+real one. **A materialised `row_to_entity` removes it**: 6.00 → 0.68 ms on a contiguous result and
+18.5 → 11.1 ms on a scattered one, for 4 bytes per row per *slice* — shared across every filter
+column, since it is a property of the geometry and not of any attribute. Mapped rather than read, a
+viewport touches ~1.2 MB of it.
+
 ## The corrected picture
 
 | | cost | scales with |
@@ -69,6 +87,16 @@ So the two-route design still stands and the per-tile route still wins decisivel
 216 ms against 32 ms at a 10⁷ result. What changes is **where the switch sits**: between 10⁵ and 10⁶
 against a 300,000-row viewport, not at the 75,000 the quarter-rule would give.
 
+**Raising the crossover does not make the per-tile route optional, and the sweep above is the case
+that decides it.** The candidate here is universal, which *is* a 100%-coverage principal — so the
+result axis swept is what a high-coverage viewer actually produces. The crossover lands at ~10⁶
+matches against a 10⁸ corpus, **1%**; a principal seeing half the corpus and filtering to a tenth of
+what they see sits at 5×10⁶, well past it. The scaling is what settles it: project scales with the
+result, so a 10⁸-match result is ~2.2 s at 10⁹ and outside §2.2's 0.5–1 s filter budget outright,
+while the per-tile route scales with the viewport and stays in tens of milliseconds however much
+matched. **A deployment with mid-to-high coverage principals has no alternative to it at scale** —
+which is also why the ~17.5 ns inversion is worth removing rather than tolerating.
+
 ## What this does not settle
 
 - **Scale.** 10⁸, not 10⁹. Arm 3's project constant agrees across the two scales, which is the one
@@ -76,10 +104,15 @@ against a 300,000-row viewport, not at the 75,000 the quarter-rule would give.
 - **The `tessera_id` read is modelled as an indexed gather over a `Vec<u64>`**, not as a read of a
   mapped Arrow column with a candidate-driven access pattern. The Feistel cost is real; the memory
   term around it is optimistic if anything.
-- **The candidate is universal.** Every route here tests every row in the viewport, where the engine
-  would test only the visible ones. That favours no route in particular but shrinks every absolute
-  figure.
+- **The candidate is universal**, deliberately — it is the high-coverage principal, the case the
+  route exists for. Every route here therefore tests every row in the viewport where the engine
+  would test only the visible ones, which favours no route in particular but shrinks every absolute
+  figure for a sparser principal.
 - **Single-threaded**, on a machine running a browser at ~800% CPU throughout. Ratios were stable
   across three rounds; the absolutes are a ceiling on a quiet machine.
-- **Whether the per-tile route can amortise the inversion.** 17–25 ns per row is a Feistel per row.
-  Nothing here tested inverting once per *tile* into a reusable buffer, or a cheaper crossing.
+- **A cheaper crossing than the Feistel.** Batching is refuted above; nothing here tested a
+  different construction.
+- **The lookup table's maintenance cost.** Row ids renumber at every merge and every fold, so the
+  table is rewritten by both. Neither the rewrite nor the base-plus-extent variant — a small table
+  written per merge and fused into the base at the fold, which is the shape the attribute extents,
+  the dictionary extents and the external-id runs all already use — is measured here.
