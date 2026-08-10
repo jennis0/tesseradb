@@ -148,7 +148,9 @@ export class TesseraClient {
   async viewport(
     token: string,
     req: ViewportRequest,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** Route decode to the speculative lane — see {@link Decoder.decode}. */
+    background = false
   ): Promise<ViewportResponse> {
     const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom};
     if (req.bbox) body.bbox = req.bbox;
@@ -172,7 +174,7 @@ export class TesseraClient {
     const stage = response.headers.get('x-tessera-stage-ns');
     this.decoder ??= this.opts.decoder ?? createDecoder();
     return {
-      result: await this.decoder.decode(bytes),
+      result: await this.decoder.decode(bytes, background),
       timings: {
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),

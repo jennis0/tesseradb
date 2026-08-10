@@ -12,12 +12,21 @@ import type {ViewportResult} from './types.js';
  * consumer that never draws (the golden capture, a Node script) wants it.
  */
 export type Decoder = {
-  decode(bytes: Uint8Array): Promise<ViewportResult>;
-  /** Release the worker, if there is one. */
+  /**
+   * `background` routes speculative work to its own lane where the implementation has one.
+   *
+   * **A foreground response must never queue behind an anticipatory one.** The worker decoder is
+   * serial per worker, and anticipation moves multi-megabyte responses — so one shared lane is a
+   * priority inversion: the bytes the user is waiting on sit behind bytes nobody asked for yet.
+   * Two workers, one per lane, and the flag is the routing.
+   */
+  decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
+  /** Release the workers, if there are any. */
   close(): void;
 };
 
 export function inlineDecoder(): Decoder {
+  // Synchronous, so there is no queue to invert and the flag is meaningless here.
   return {
     decode: async (bytes) => decodeViewport(bytes),
     close: () => {}
@@ -25,59 +34,90 @@ export function inlineDecoder(): Decoder {
 }
 
 /**
- * Decode in a worker, one request at a time.
+ * Decode in workers: two foreground lanes and a lazy background one.
  *
- * **Serialised rather than pooled.** Decoding is CPU-bound, so a pool would only help on a machine
- * with cores to spare and would multiply peak memory by its size; what matters here is that the
- * work is off the *render* thread, not that it is parallel. One worker also keeps ordering trivial.
+ * Each lane is serial — what matters is that the work is off the *render* thread and that a
+ * split response's pieces can overlap, not that decoding is wide. See the lane notes below for
+ * why two and not more.
  *
  * Returns `null` where `Worker` is unavailable, so the caller falls back rather than failing.
  */
 export function workerDecoder(): Decoder | null {
   if (typeof Worker === 'undefined') return null;
 
-  let worker: Worker;
-  try {
-    worker = new Worker(new URL('./decode.worker.js', import.meta.url), {type: 'module'});
-  } catch {
-    // A bundler that cannot resolve the worker URL, or a runtime that forbids module workers.
-    return null;
+  /** One serial lane: a worker, its pending map, and its id counter. */
+  function lane(): {decode: (bytes: Uint8Array) => Promise<ViewportResult>; close: () => void} | null {
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./decode.worker.js', import.meta.url), {type: 'module'});
+    } catch {
+      // A bundler that cannot resolve the worker URL, or a runtime that forbids module workers.
+      return null;
+    }
+    let nextId = 1;
+    const pending = new Map<number, {resolve: (r: ViewportResult) => void; reject: (e: Error) => void}>();
+    worker.onmessage = (event: MessageEvent<{id: number; result?: ViewportResult; error?: string}>) => {
+      const {id, result, error} = event.data;
+      const waiter = pending.get(id);
+      if (!waiter) return;
+      pending.delete(id);
+      if (error !== undefined) waiter.reject(new Error(error));
+      else waiter.resolve(result!);
+    };
+    worker.onerror = (event) => {
+      // A worker that has died cannot answer anything outstanding, and leaving those promises
+      // pending would hang every caller rather than surfacing the failure.
+      const failure = new Error(`decode worker failed: ${event.message}`);
+      for (const waiter of pending.values()) waiter.reject(failure);
+      pending.clear();
+    };
+    return {
+      decode(bytes) {
+        // The buffer is transferred, so the caller must not read it afterwards — `client.ts` reads
+        // it once, here, and never again. When the view owns its whole buffer — the fetch path
+        // always does, its bytes coming straight from `response.arrayBuffer()` — the transfer is
+        // zero-copy; the slice exists only for a view into a larger buffer, where transferring
+        // would detach bytes the caller still holds.
+        const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
+        const buffer = (
+          whole ? bytes.buffer : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+        ) as ArrayBuffer;
+        const id = nextId++;
+        return new Promise<ViewportResult>((resolve, reject) => {
+          pending.set(id, {resolve, reject});
+          worker.postMessage({id, bytes: buffer}, [buffer]);
+        });
+      },
+      close() {
+        worker.terminate();
+        for (const waiter of pending.values()) waiter.reject(new Error('decoder closed'));
+        pending.clear();
+      }
+    };
   }
 
-  let nextId = 1;
-  const pending = new Map<number, {resolve: (r: ViewportResult) => void; reject: (e: Error) => void}>();
-
-  worker.onmessage = (event: MessageEvent<{id: number; result?: ViewportResult; error?: string}>) => {
-    const {id, result, error} = event.data;
-    const waiter = pending.get(id);
-    if (!waiter) return;
-    pending.delete(id);
-    if (error !== undefined) waiter.reject(new Error(error));
-    else waiter.resolve(result!);
-  };
-  worker.onerror = (event) => {
-    // A worker that has died cannot answer anything outstanding, and leaving those promises pending
-    // would hang every caller rather than surfacing the failure.
-    const failure = new Error(`decode worker failed: ${event.message}`);
-    for (const waiter of pending.values()) waiter.reject(failure);
-    pending.clear();
-  };
+  // **Two foreground lanes, round-robin.** A split viewport response arrives as several pieces,
+  // and painting pieces as they land only helps if their decodes overlap — one serial lane made
+  // piece 2 wait out piece 1's ~100-300 ms. Two is deliberate: decode is CPU-bound, so a wide pool
+  // buys parallelism the cores may not have while multiplying peak transferred memory.
+  const foreground = [lane(), lane()].filter((l) => l !== null);
+  if (foreground.length === 0) return null;
+  let next = 0;
+  // Created on first use: a consumer that never anticipates never pays for the third worker.
+  let backgroundLane: ReturnType<typeof lane> | undefined;
 
   return {
-    decode(bytes) {
-      // The buffer is transferred, so the caller must not read it afterwards — `client.ts` reads it
-      // once, here, and never again.
-      const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      const id = nextId++;
-      return new Promise<ViewportResult>((resolve, reject) => {
-        pending.set(id, {resolve, reject});
-        worker.postMessage({id, bytes: copy}, [copy]);
-      });
+    decode(bytes, background = false) {
+      if (background) {
+        backgroundLane ??= lane();
+        if (backgroundLane) return backgroundLane.decode(bytes);
+      }
+      next = (next + 1) % foreground.length;
+      return foreground[next]!.decode(bytes);
     },
     close() {
-      worker.terminate();
-      for (const waiter of pending.values()) waiter.reject(new Error('decoder closed'));
-      pending.clear();
+      for (const l of foreground) l.close();
+      backgroundLane?.close();
     }
   };
 }

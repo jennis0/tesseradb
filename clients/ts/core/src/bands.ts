@@ -311,6 +311,7 @@ export class BandCache {
   private covered: Coverage[] = [];
   private identityKey: string | null = null;
   private held = 0;
+  private heldPoints = 0;
 
   constructor(private readonly budgetBytes: number) {}
 
@@ -322,11 +323,12 @@ export class BandCache {
    * Points held, which is the figure to size a replica against — bytes hide how much of the budget
    * is per-band overhead rather than payload, and bands here are small (`m_target` is single
    * digits, so a band is ~10 points) so that overhead is not a rounding error.
+   *
+   * A maintained counter, not a walk: this is read on every store update, and a walk scaled with
+   * the 10^5 bands a long session holds rather than with the update that asked.
    */
   get points(): number {
-    let n = 0;
-    for (const band of this.bands.values()) n += band.ids.length;
-    return n;
+    return this.heldPoints;
   }
 
   get bandCount(): number {
@@ -392,10 +394,14 @@ export class BandCache {
     }
     const key = bandKey(band.depth, band.prefix);
     const previous = this.bands.get(key);
-    if (previous) this.held -= previous.bytes;
+    if (previous) {
+      this.held -= previous.bytes;
+      this.heldPoints -= previous.ids.length;
+    }
     this.bands.set(key, band);
     this.index(band, key);
     this.held += band.bytes;
+    this.heldPoints += band.ids.length;
     this.changes++;
   }
 
@@ -423,6 +429,7 @@ export class BandCache {
     this.changes++;
     this.identityKey = null;
     this.held = 0;
+    this.heldPoints = 0;
   }
 
   /**
@@ -645,6 +652,7 @@ export class BandCache {
     const scalars = sliceScalars(band.scalars, 0, keep);
     const bytes = bandBytes(ids, positions, scalars);
     this.held += bytes - band.bytes;
+    this.heldPoints += keep - band.ids.length;
     this.changes++;
     const truncated = bandKey(band.depth, band.prefix);
     const kept: Band = {...band, ids, positions, scalars, heldBelow: ids[keep - 1]! + 1n, bytes};

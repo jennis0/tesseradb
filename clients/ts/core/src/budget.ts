@@ -33,6 +33,8 @@ export type BudgetInputs = {
    * unsaturated model predicts millions.
    */
   visibleInView?: number;
+  /** Answer for this exact depth (hysteresis at the caller) — `maxTiles` still binds. */
+  force?: number;
 };
 
 export type DepthChoice = {
@@ -83,8 +85,23 @@ export function tileRectOfBbox(
  * 14 of its 1,366 marks at depth 0 against 1,001 at depth 3.
  */
 export function chooseDepth(inputs: BudgetInputs): DepthChoice {
-  const {budget, mTarget, worldBbox, maxTiles, visibleInView} = inputs;
+  const {budget, mTarget, worldBbox, maxTiles, visibleInView, force} = inputs;
   const wantedTiles = Math.max(1, budget / Math.max(1, mTarget));
+
+  // A forced depth still answers with its own tile count and prediction — the caller is deciding
+  // hysteresis, not arithmetic, and `maxTiles` remains a hard bound whatever the caller holds.
+  if (force !== undefined) {
+    const tiles = tilesInBbox(worldBbox, force);
+    if (tiles <= maxTiles) {
+      const predicted = tiles * mTarget;
+      return {
+        depth: force,
+        tiles,
+        predictedMarks: visibleInView === undefined ? predicted : Math.min(predicted, visibleInView),
+        limitedBy: 'budget'
+      };
+    }
+  }
 
   let depth = MIN_DEPTH;
   let limitedBy: DepthChoice['limitedBy'] = 'maxDepth';

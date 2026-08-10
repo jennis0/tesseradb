@@ -21,6 +21,23 @@ import {rectArea, type TileRect} from './rects.js';
  * strictly needs is sound because §7.2's prefixes nest — a deeper answer is a superset of the
  * shallower one, so nothing pops when the user arrives there — and it is why look-ahead can be a
  * client-side choice at all.
+ *
+ * **Three dials, deliberately separate.** Anticipation has three independent quantities that are
+ * easy to conflate into one knob, and each has its own owner:
+ *
+ * - **Where** to anticipate — this file: geometry, velocity bias, depth grading. A prediction, and
+ *   only prediction quality should shape it.
+ * - **How fast** to fetch it — the caller's pacing (bites and bytes per pause, `?ring=`). A
+ *   transport and decode throttle; it must never redefine the region, only the rate, which is why
+ *   the region resumes across pauses via `novelIn` rather than being recomputed truncated.
+ * - **How much** to keep — the replica's byte budget. Retention, enforced by eviction, whatever
+ *   was fetched.
+ *
+ * One coupling is retained knowingly: {@link ringMargin} widens the ring as the replica fills, so
+ * reach grows with how much of the retention budget is unspent. That is retention pressure
+ * steering prediction, and it is kept because an empty cache wants its first ring close-in whatever
+ * the prediction says — but it is the seam to revisit if reach ever needs to answer to prediction
+ * alone.
  */
 
 export type Viewport = {
@@ -43,6 +60,8 @@ export type PlannerInputs = {
   visibleInView?: number;
   /** World units per millisecond, signed, from recent movement. Biases the ring downwind. */
   velocity?: [number, number];
+  /** The depth currently drawn; a one-step budget disagreement defers to it. See {@link plan}. */
+  holdDepth?: number;
   /** What the replica holds and what it may hold — sizes the ring. See {@link ringMargin}. */
   heldBytes?: number;
   budgetBytes?: number;
@@ -174,10 +193,21 @@ export function worldBbox(
  * resolution of what the user is actually looking at.
  */
 export function plan(inputs: PlannerInputs): Plan {
-  const {viewport, budget, mTarget, maxTiles, visibleInView, velocity} = inputs;
+  const {viewport, budget, mTarget, maxTiles, visibleInView, velocity, holdDepth} = inputs;
 
   const visible = worldBbox(viewport, 1);
-  const choice = chooseDepth({budget, mTarget, worldBbox: visible, maxTiles, visibleInView});
+  let choice = chooseDepth({budget, mTarget, worldBbox: visible, maxTiles, visibleInView});
+  // **A one-step disagreement defers to the depth already drawn.** `visibleInView` varies with the
+  // ground under the view, so panning across a density boundary flip-flops the budget's choice
+  // between neighbours — measured as `8 9 8 8 9 8` across consecutive derivations, each flip
+  // redrawing the view from a different partition's coverage, which reads as the map changing its
+  // mind about how many points a zoom level has. One step is a calibration wobble; two is a real
+  // zoom, and a real zoom also changes the viewport enough that the budget's answer moves by more
+  // than one. The caller clears `holdDepth` on gesture pauses, so the hold never outlives the
+  // interaction that needed it.
+  if (holdDepth !== undefined && Math.abs(choice.depth - holdDepth) === 1) {
+    choice = chooseDepth({budget, mTarget, worldBbox: visible, maxTiles, visibleInView, force: holdDepth});
+  }
 
   const foreground: PlannedFetch = {
     kind: 'foreground',

@@ -151,7 +151,9 @@ export class Replica {
         tiles?: bigint[];
         k?: number;
       },
-      signal?: AbortSignal
+      signal?: AbortSignal,
+      /** Speculative work rides its own decode lane — see `Decoder.decode`. */
+      background?: boolean
     ) => Promise<ViewportResponse>,
     private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
@@ -306,7 +308,14 @@ export class Replica {
      * stand-ins are one arrival stale, which is drawable, and the full derivation runs when the
      * gesture pauses. `false` returns `fallback: []`; it never changes what is fetched or stored.
      */
-    standIns = true
+    standIns = true,
+    /**
+     * Whether these fetches are anticipation rather than something the user is waiting for.
+     *
+     * Routed to the decoder's speculative lane, so a multi-megabyte ring response never delays a
+     * foreground decode behind it — the priority inversion a serial worker otherwise builds in.
+     */
+    background = false
   ): Promise<ReplicaFrame> {
     const plan =
       this.opts.cache === false
@@ -326,15 +335,42 @@ export class Replica {
     // thread** — during which a pan the user had already made sat queued behind it and measured
     // 7.5 s, against its own server time of 5 ms and its own response of 212 KB. Nothing was slow
     // except the size of one bite.
-    const pieces = plan.fetch.flatMap((r) => splitRect(r, MAX_TILES_PER_REQUEST));
-    for (const rect of pieces.slice(0, maxRequests)) {
+    // **Centre-first, and pipelined.** The first piece to land is the first thing painted, so the
+    // pieces are ordered by distance from the render centre — the part of the screen being looked
+    // at fills first, and the periphery follows. And piece N+1 goes on the wire while piece N
+    // decodes and absorbs: fetched serially, a four-piece viewport paid Σ(wire + decode + absorb)
+    // with the server idle between pieces — measured as 0.6–2 s pan-to-paint on novel ground over
+    // 60–100 ms of server time. The decode pool has two foreground lanes for exactly this overlap;
+    // absorbing stays serial on this thread, so main-thread pressure is unchanged.
+    const cx = (render.x0 + render.x1) / 2;
+    const cy = (render.y0 + render.y1) / 2;
+    const pieces = plan.fetch
+      .flatMap((r) => splitRect(r, MAX_TILES_PER_REQUEST))
+      .slice(0, maxRequests)
+      .sort((a, b) => {
+        const da = (a.x0 + a.x1) / 2 - cx;
+        const db = (b.x0 + b.x1) / 2 - cx;
+        const ea = (a.y0 + a.y1) / 2 - cy;
+        const eb = (b.y0 + b.y1) / 2 - cy;
+        return da * da + ea * ea - (db * db + eb * eb);
+      });
+    const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
-      response = await this.fetchViewport({slice: this.opts.slice, zoom: depth, bbox, k}, signal);
+      const fetching = this.fetchViewport({slice: this.opts.slice, zoom: depth, bbox, k}, signal, background);
+      // The loop below may throw out of an earlier piece (an abort, a shed request) while this one
+      // is still flying; its refusal is then nobody's answer and must not surface as unhandled.
+      fetching.catch(() => {});
+      return fetching;
+    };
+    let pending = pieces.length > 0 ? request(pieces[0]!) : null;
+    for (let i = 0; i < pieces.length; i++) {
+      response = await pending!;
+      pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
       fetched = fetched.concat(await this.absorb(response, depth, k));
       // Marked only after the bands are in. A region marked covered before its points are held
       // would let the next plan subtract ground whose data never arrived.
       if (this.opts.cache !== false && k > 0) {
-        this.cache.markCovered(rect, depth, this.contentKey, k);
+        this.cache.markCovered(pieces[i]!, depth, this.contentKey, k);
       }
     }
 
