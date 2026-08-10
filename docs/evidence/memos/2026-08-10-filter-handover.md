@@ -153,11 +153,19 @@ written are in the dispatch log line and in `/control/status` as `last_attr_byte
   information is gone, so the fix starts one step earlier than the problem appears. Keeping the flag
   is easy in itself.
 
-  The complication is that the same values feed the map's point data as well as the filter's column.
-  A point's slot on the map is a fixed-size number with nowhere to record "missing". So fixing the
-  filter forces a question it cannot answer on its own: **what should the map show for a point with
-  no score?** Today it shows zero and nothing tells the viewer that is what happened. That needs a
-  ruling before the filter half can land, because both are fed from the same values.
+  The complication is that the same values feed the map's point data as well as the filter's column,
+  and the map's columns are contractually non-nullable — the reader refuses a nullable one outright,
+  which is what lets it hand back flat slices with no per-value branch. So fixing the filter forces
+  a question about the map: what does a point with no score carry?
+
+  **Ruled** ([decision 0062](../../decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
+  owner, 2026-08-10): a presence bitmap beside the column, for render columns as for filter columns.
+  The values stay flat and non-nullable and the bitmap says which slots mean anything — one
+  mechanism for absence across both artefacts, and no change to the contract the read path rests on.
+  A validity buffer, a declared sentinel and a float NaN payload were each considered and declined
+  there. **The ruling settles the representation; the design is not written** — what the file is
+  called, how the manifest names it, how the wire says "absent", and how flush, merge and the fold
+  carry it are all open, and 0062 lists them.
 
 ## 6. Not measured, and what each would settle
 

@@ -77,3 +77,4 @@ prevent.
 | [0057](0057-rows-frozen-is-declined-and-the-staging-list-is-deferred.md) | 2026-08-07 | Rows-frozen is declined, and the flip's staging list is deferred |
 | [0060](0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md) | 2026-08-09 | Filters compose as a boolean tree evaluated inside the candidate; text becomes a column type |
 | [0061](0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md) | 2026-08-09 | A category's postings answer a filter only where the vocabulary is `public`; `per_viewer` keeps the scan, because a hidden scattered value costs 2.1 ms against an absent value's 0.000 |
+| [0062](0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md) | 2026-08-10 | An absent number is a presence bitmap beside the column, not a sentinel and not a validity buffer |
