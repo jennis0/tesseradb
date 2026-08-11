@@ -63,9 +63,11 @@ fn fold(
 ) -> (tessera_store::FoldRowSpaceOutput, PathBuf, PathBuf) {
     let output_dir = root.join("out-seg");
     let permutation_path = root.join("permutation.bin");
+    let row_entity_path = root.join(tessera_store::ROW_ENTITY_FILE);
     let out = fold_row_space(
         &output_dir,
         &permutation_path,
+        &row_entity_path,
         FoldRowSpaceSpec {
             inputs,
             identity_key: &key(),

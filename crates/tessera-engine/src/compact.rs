@@ -925,6 +925,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
         let permutation_rel = format!("{slice_rel}/permutation.bin");
         let permutation_path = ctx.to_prefix_dir.join(&permutation_rel);
+        let row_entity_rel = format!("{slice_rel}/{}", tessera_store::ROW_ENTITY_FILE);
+        let row_entity_path = ctx.to_prefix_dir.join(&row_entity_rel);
 
         let inputs: Vec<FoldSegmentInput> = slice
             .segments
@@ -937,6 +939,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         let out = fold_row_space(
             &segment_dir,
             &permutation_path,
+            &row_entity_path,
             FoldRowSpaceSpec {
                 inputs: &inputs,
                 identity_key: &ctx.identity_key,
@@ -959,6 +962,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         }
         base_segment_bytes = base_segment_bytes.max(slice_bytes);
         written.push((permutation_rel, permutation_path));
+        written.push((row_entity_rel, row_entity_path));
 
         segments.push(SegmentDescriptor {
             slice: slice.slice.clone(),

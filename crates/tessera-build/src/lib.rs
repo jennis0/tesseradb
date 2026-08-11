@@ -557,9 +557,19 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         .map_err(|e| BuildError::io(&permutation_path, e))?;
     fsync_file(&permutation_path)?;
 
+    // The other direction, for the filtered viewport's per-tile route
+    // (`tessera_store::row_entity`). `row_order` is already the row→entity vector, so this writes
+    // what the permutation was just scattered from rather than deriving anything.
+    let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let rows_by_index: Vec<u32> = row_order.iter().map(|e| e.raw() as u32).collect();
+    tessera_store::write_row_entity(&row_entity_path, &rows_by_index)
+        .map_err(|e| BuildError::io(&row_entity_path, e))?;
+    fsync_file(&row_entity_path)?;
+
     // ---- 8. manifests ------------------------------------------------------------------
     other_paths.extend([
         permutation_path,
+        row_entity_path,
         segment_dir.join("columns.arrow"),
         segment_dir.join("morton.u32"),
     ]);

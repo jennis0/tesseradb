@@ -444,16 +444,49 @@ fn open_prefix(
                     );
                     ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
                     let permutation = Permutation::load(&perm_path)?;
+
+                    // `row-entity.u32` beside it, the other direction
+                    // (`crate::row_entity`). **Optional, and its absence is not a refusal**: it is
+                    // an optimisation for the filtered viewport's per-tile route, and a slice
+                    // without one still answers every query through the projecting route. Where it
+                    // *is* named, it is verified like any other file — an unverifiable table is a
+                    // refusal, because a wrong row→entity mapping would put another entity's
+                    // filter verdict on a row.
+                    let row_entity_rel = format!(
+                        "partitions/{}/slices/{}/{}",
+                        partition_desc.phash,
+                        seg_desc.slice,
+                        crate::row_entity::ROW_ENTITY_FILE
+                    );
+                    let row_entity = if segments_manifest.files.contains_key(&row_entity_rel)
+                        || manifest.files.contains_key(&row_entity_rel)
+                    {
+                        let path = slice_dir.join(crate::row_entity::ROW_ENTITY_FILE);
+                        ensure_verified(
+                            &row_entity_rel,
+                            &segments_manifest,
+                            &manifest.files,
+                            &path,
+                        )?;
+                        Some(std::sync::Arc::new(crate::row_entity::RowToEntity::load(
+                            &path,
+                        )?))
+                    } else {
+                        None
+                    };
+
                     // The first segment named for a slice is its build segment: `permutation.bin`
                     // addresses that one's row space, and every later segment arrives as an
                     // extent above it.
+                    let mut row_space =
+                        RowSpace::new(std::sync::Arc::new(permutation), seg_desc.row_count);
+                    if let Some(table) = row_entity {
+                        row_space = row_space.with_row_entity(table);
+                    }
                     slices.insert(
                         seg_desc.slice.clone(),
                         SliceData {
-                            row_space: RowSpace::new(
-                                std::sync::Arc::new(permutation),
-                                seg_desc.row_count,
-                            ),
+                            row_space,
                             segments: Vec::new(),
                         },
                     );

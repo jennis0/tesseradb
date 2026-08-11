@@ -256,6 +256,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/entities/external-ids-0.arrow",
         "partitions/default/entities/ext-locator.u32",
         "partitions/default/slices/s0/permutation.bin",
+        "partitions/default/slices/s0/row-entity.u32",
         "partitions/default/slices/s0/segments/seg-0/columns.arrow",
         "partitions/default/slices/s0/segments/seg-0/morton.u32",
     ] {
@@ -267,7 +268,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        8,
+        9,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 

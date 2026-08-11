@@ -1242,6 +1242,14 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     .map_err(|e| BuildError::io(&permutation_path, e))?;
     fsync_file(&permutation_path)?;
 
+    // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted rows
+    // the permutation was scattered from.
+    let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let rows_by_index: Vec<u32> = rows.iter().map(|r| r.entity).collect();
+    tessera_store::write_row_entity(&row_entity_path, &rows_by_index)
+        .map_err(|e| BuildError::io(&row_entity_path, e))?;
+    fsync_file(&row_entity_path)?;
+
     let columns_path = segment_dir.join("columns.arrow");
     {
         // Built and released one column at a time: the record batch itself is the largest thing
@@ -1297,7 +1305,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     timer.end(BuildStage::SegmentWrite, n);
 
     // ---- 11. manifests ---------------------------------------------------------------
-    let mut other_paths = vec![postings_path, permutation_path, columns_path, morton_path];
+    let mut other_paths = vec![
+        postings_path,
+        permutation_path,
+        row_entity_path,
+        columns_path,
+        morton_path,
+    ];
     other_paths.extend(filter_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);

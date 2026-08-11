@@ -13,6 +13,7 @@ pub mod merge;
 pub mod pairs;
 pub mod permutation;
 pub mod read;
+pub mod row_entity;
 pub mod reclaim;
 mod segment_cursor;
 mod sidecar;
@@ -29,6 +30,7 @@ pub use manifest_write::{
 };
 pub use pairs::PairsParquetWriter;
 pub use permutation::{Permutation, RowSpace, SegmentExtent};
+pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 pub use read::{
     open_bundle, open_written_prefix, tile_ranges, tile_ranges_all, tile_ranges_within, Bundle,
     ColumnsRef, MortonSlice, PartitionData, ScalarSlice, SegmentData, SliceData,

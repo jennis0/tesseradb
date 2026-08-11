@@ -494,6 +494,16 @@ impl SegmentExtent {
 #[derive(Debug, Clone)]
 pub struct RowSpace {
     base: Arc<Permutation>,
+    /// `row-entity.u32` for the base, when the slice published one — the row→entity direction, for
+    /// the filtered viewport's per-tile route ([`crate::row_entity`]). `None` where a slice has no
+    /// table, in which case [`Self::entity_of`] answers `None` and the caller falls back to the
+    /// projecting route rather than to a wrong answer.
+    base_inverse: Option<Arc<crate::row_entity::RowToEntity>>,
+    /// The same direction for the rows *above* the base, derived from the extents' own mappings on
+    /// first use and thrown away whenever an extent is added. Materialised rather than searched
+    /// because the caller is a per-row path; bounded by the flushed tail, which the merge ladder
+    /// bounds in turn.
+    extent_inverse: std::sync::OnceLock<Vec<u32>>,
     /// The build segment's row count — the base owns `[0, base_rows)`. Not derivable from the
     /// permutation, whose `bound` is an entity-space width and may exceed its row count.
     base_rows: u32,
@@ -507,10 +517,65 @@ impl RowSpace {
     pub fn new(base: Arc<Permutation>, base_rows: u32) -> Self {
         RowSpace {
             base,
+            base_inverse: None,
+            extent_inverse: std::sync::OnceLock::new(),
             base_rows,
             extents: Vec::new(),
             total_rows: base_rows as u64,
         }
+    }
+
+    /// This row space with the base's `row-entity.u32` attached.
+    ///
+    /// Additive rather than a constructor parameter: a row space is correct without it — every
+    /// caller that only crosses entity→row is unaffected — and the table is an optimisation for
+    /// the one path that crosses the other way.
+    pub fn with_row_entity(mut self, table: Arc<crate::row_entity::RowToEntity>) -> Self {
+        self.base_inverse = Some(table);
+        self
+    }
+
+    /// The entity occupying `row`, or `None` when this row space cannot answer — either `row` is
+    /// out of range, or the slice published no `row-entity.u32` and the base cannot be inverted
+    /// without one.
+    ///
+    /// **`None` is "ask another way", not "no entity".** Every row has an entity by construction;
+    /// a `None` here means the caller must fall back to the projecting route, and treating it as an
+    /// absence would silently drop rows from a filtered viewport.
+    pub fn entity_of(&self, row: RowId) -> Option<EntityId> {
+        let raw = row.raw();
+        if raw >= self.total_rows as u32 {
+            return None;
+        }
+        if raw < self.base_rows {
+            return self.base_inverse.as_ref()?.entity_of(row);
+        }
+        let table = self
+            .extent_inverse
+            .get_or_init(|| self.build_extent_inverse());
+        table
+            .get((raw - self.base_rows) as usize)
+            .map(|&e| EntityId::new(e as u64))
+    }
+
+    /// Invert every extent's `rows` into one flat table covering `[base_rows, total_rows)`.
+    ///
+    /// Extents are disjoint and their `row_base`s continue row space exactly (`with_extent`
+    /// enforces both), so the flat table is dense and each extent writes only its own span.
+    fn build_extent_inverse(&self) -> Vec<u32> {
+        let span = (self.total_rows - self.base_rows as u64) as usize;
+        let mut out = vec![0u32; span];
+        for extent in &self.extents {
+            for (offset, &row) in extent.rows.iter().enumerate() {
+                if row == ROW_ABSENT {
+                    continue;
+                }
+                let absolute = extent.row_base as u64 + row as u64;
+                let at = (absolute - self.base_rows as u64) as usize;
+                out[at] = (extent.entity_lo + offset as u64) as u32;
+            }
+        }
+        out
     }
 
     /// This row space plus one more segment, sharing the base.
@@ -543,6 +608,10 @@ impl RowSpace {
         extents.push(extent);
         Some(RowSpace {
             base: Arc::clone(&self.base),
+            // The base table survives — the base's rows are exactly what an extent does not touch.
+            // The derived tail does not: it covers the extents, and this call changes them.
+            base_inverse: self.base_inverse.clone(),
+            extent_inverse: std::sync::OnceLock::new(),
             base_rows: self.base_rows,
             extents,
             total_rows,
@@ -586,9 +655,12 @@ impl RowSpace {
         extents.extend_from_slice(&self.extents[start + seg_ids.len()..]);
         Some(RowSpace {
             base: Arc::clone(&self.base),
+            base_inverse: self.base_inverse.clone(),
+            // Row-count preserving, but not extent-preserving: a merge replaces a run of extents
+            // with one, so the tail this derived is stale even though its length is not.
+            extent_inverse: std::sync::OnceLock::new(),
             base_rows: self.base_rows,
             extents,
-            // Row-count preserving, by the check above.
             total_rows: self.total_rows,
         })
     }

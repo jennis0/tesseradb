@@ -158,6 +158,7 @@ const OP: &str = "fold_row_space";
 pub fn fold_row_space(
     output_dir: &Path,
     permutation_path: &Path,
+    row_entity_path: &Path,
     spec: FoldRowSpaceSpec<'_>,
 ) -> Result<FoldRowSpaceOutput> {
     let mut cursors: Vec<SegmentCursor> = Vec::with_capacity(spec.inputs.len());
@@ -177,6 +178,13 @@ pub fn fold_row_space(
         path: permutation_path.to_path_buf(),
         source,
     };
+
+    // The row→entity table beside the permutation (`crate::row_entity`). Accumulated here rather
+    // than derived afterwards because this loop *is* the row order: emitting a row and recording
+    // its entity are the same event, so a second pass could only disagree with this one. A `u32`
+    // per surviving row — the same 4 GB per 10⁹ rows the permutation costs, and the reason the
+    // filtered viewport can walk a tile without a Feistel per row.
+    let mut row_entity: Vec<u32> = Vec::new();
 
     let mut writer = SegmentWriter::create(output_dir, spec.scalar_schema).map_err(columns_io)?;
     let mut permutation =
@@ -239,6 +247,7 @@ pub fn fold_row_space(
             })
             .map_err(columns_io)?;
         permutation.set(entity, row_count).map_err(perm_io)?;
+        row_entity.push(entity_u32);
         row_count = row_count
             .checked_add(1)
             .ok_or_else(|| StoreError::MalformedBundle {
@@ -249,6 +258,12 @@ pub fn fold_row_space(
     let rows = writer.finish().map_err(columns_io)?;
     debug_assert_eq!(rows as u32, row_count);
     permutation.finish().map_err(perm_io)?;
+    crate::row_entity::write_row_entity(row_entity_path, &row_entity).map_err(|source| {
+        StoreError::Io {
+            path: row_entity_path.to_path_buf(),
+            source,
+        }
+    })?;
     // The inputs' mappings are dropped last, matching `execute_merge`: nothing after this point
     // reads them, so there is nothing to gain from dropping them earlier, and keeping the order
     // parallel is one less thing a reader has to reconcile between the two functions.
