@@ -661,7 +661,7 @@ fn parse_ingest_batch(
                     // there — 0 for every numeric width — so reading without this check stores an
                     // item with no score as one scoring zero, present and indistinguishable. It
                     // then matches `{gte: -10, lte: 10}`, which is a wrong answer rather than a
-                    // missing feature (decision 0062). Every other family has somewhere in band to
+                    // missing feature (decision 0064). Every other family has somewhere in band to
                     // put absence; a number has no spare bit pattern, so it travels beside the
                     // value as `WalScalar::Null`.
                     None if col.is_null(i) => WalScalar::Null,

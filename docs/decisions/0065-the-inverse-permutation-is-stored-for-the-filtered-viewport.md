@@ -1,4 +1,4 @@
-# 0063 — The inverse permutation is stored, because a filtered viewport asks it per row
+# 0065 — The inverse permutation is stored, because a filtered viewport asks it per row
 
 **Date:** 2026-08-11 · **Status:** Settled (owner ruling)
 

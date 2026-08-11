@@ -310,7 +310,7 @@ pub(crate) fn execute_flush(
                 ))
             })?;
             // Non-nullable on the render side (contracts R4): an item that carries no value for
-            // this column is drawn at the type's zero until decision 0062's render half lands. The
+            // this column is drawn at the type's zero until decision 0064's render half lands. The
             // *filter* extent written from the same buffered row does record the absence, which is
             // the narrowing disagreement `or_render_placeholder` documents.
             scalars.push(to_scalar_value(value).or_render_placeholder(*ty));
@@ -655,7 +655,7 @@ fn write_filter_extents(
 /// item carrying it gets no slot at all. Every other family has no spare value to spend — every bit
 /// pattern of a number is a legal number, and contracts §2.4 refuses the empty string on the ingest
 /// plane precisely because an unset field and a client bug both produce it — so absence travels as
-/// `WalScalar::Null` and lands in the presence bitmap (decision 0062).
+/// `WalScalar::Null` and lands in the presence bitmap (decision 0064).
 ///
 /// A value of the wrong shape for its declared column **fails the flush** rather than being
 /// dropped: the commit window narrows a category key to its declared width before the row is

@@ -57,7 +57,7 @@ check on the reader; it is not new machinery.
   entity outside the candidate cannot be added to a result. The failure mode is a viewer seeing
   fewer items than they are entitled to, which is the fail-closed direction.
 - A corrupt **posting** does not have that property any more. Under
-  [decision 0061](../../decisions/0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md)
+  [decision 0063](../../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md)
   the derived postings feed `/v1/categories`' `per_viewer` visibility predicate. That is a
   disclosure control, and a disclosure control computed from unverified bytes is not obviously safe
   in either direction.
@@ -237,7 +237,7 @@ the real crossing is a Feistel per row at ~17–25 ns, making the route 3–9× 
 
 **Built, 2026-08-11.** The array arm 3 assumed now exists — `row-entity.u32`, 4 bytes per row per
 slice and shared across every filter column
-([decision 0063](../../decisions/0063-the-inverse-permutation-is-stored-for-the-filtered-viewport.md))
+([decision 0065](../../decisions/0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md))
 — so the Feistel is off the per-row path and the route costs what arm 3 said it would. The rule is
 `PER_TILE_CROSSING_RATIO = 3`: project while the result is no more than three times the viewport's
 row count, test per tile past that. Three is the scattered end of the measured 1–5× band, honouring
@@ -260,7 +260,7 @@ below the note that supersedes them and read as current.
 > is built. The two routes add a request shape and a response column, so specifying them against a
 > surface that is still moving would fix the wrong half first. The rest of the filter queue is
 > unaffected — R5's project-vs-per-tile rule is server-internal, and so is the filter half of
-> [decision 0062](../../decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
+> [decision 0064](../../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 
 **Owner requirement, 2026-08-10.** The two routes above both answer *"which entities match?"* and
 hand back a set. A viewport wants two questions neither of them asks, and both exist to support
@@ -353,10 +353,14 @@ Two amendments are owed to **normative** documents and should ride their own rev
 this one: compaction §2's table and §3's pass list gain the attribute pass and the band budget;
 write-path §7 and contracts §2.1 gain the coalesce's fourth axis.
 
-**The decision numbering had forked, and is fixed.** `main` ends at 0057. Both this branch and
-`client/replica-cache` then minted 0058 onwards independently on the same day, so a merge would have
-produced two different decisions numbered 0059 in a set that is immutable and cited by number. This
-branch's two moved up — filters-compose 0059 → **0060**, category-postings 0060 → **0061** — leaving
-0058 and 0059 to `client/replica-cache`, which holds them already and is where renumbering would
-have meant editing another branch's uncommitted work. The `docs/decisions/README.md` table shows the
-gap at 0058–0059 until that branch merges, which is the honest state rather than a defect.
+**The decision numbering forked twice against `client/replica-cache`, and is fixed.** Both branches
+minted from 0058 independently on the same day, which in a set that is immutable and cited by number
+would have merged as two different decisions under one number. `client/replica-cache` reached `main`
+first and holds **0058–0061**, so this branch's five moved up rather than that one's four — the
+branch that has not yet landed is the one it costs least to renumber, and doing it in the other
+direction would have meant editing another branch's committed history.
+
+Final numbers here, after both passes: filters-compose **0062**, category-postings **0063**,
+absent-number **0064**, inverse-permutation **0065**, `none_of` **0066**. Nothing outside this branch
+ever cited the intermediate numbers, so no external reference is stale — but a reader of this memo's
+own history should know that the citations in the commits before the merge name the older ones.

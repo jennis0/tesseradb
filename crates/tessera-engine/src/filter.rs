@@ -25,7 +25,7 @@
 //! indistinguishable *in work*, obtained structurally rather than by padding.
 //!
 //! **A category's derived postings answer `eq` and `in` where, and only where, the column's
-//! vocabulary is `listing = "public"`** (decision 0061). Postings resolve over the whole corpus and
+//! vocabulary is `listing = "public"`** (decision 0063). Postings resolve over the whole corpus and
 //! are then intersected with the candidate, where the scan takes the candidate as its input — so
 //! their work is a function of the *value named*. `probes/2026-08-08-filter-layout/` arm 9 measures
 //! a hidden, scattered 10⁷-member value at **2.1 ms** intersected where an absent value costs
@@ -183,12 +183,12 @@ pub const UNRESOLVABLE_VALUE: AttrLocalId = AttrLocalId::new(0);
 
 /// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.
 ///
-/// **Any boolean combination, evaluated inside the candidate** (decision 0060). Every node returns a
+/// **Any boolean combination, evaluated inside the candidate** (decision 0062). Every node returns a
 /// subset of the candidate — a leaf does, and union and intersection of subsets are subsets — so
 /// **I12**'s "a filter narrows `M_sel` and never widens it" is a property of the shape rather than a
 /// check, and no expression can name a set outside the principal's own mask.
 ///
-/// `NoneOf` is deliberately absent: it needs the `per_viewer` rule decision 0060 records — negation
+/// `NoneOf` is deliberately absent: it needs the `per_viewer` rule decision 0062 records — negation
 /// over a gated category must be evaluated *within the visible vocabulary*, or it becomes an
 /// existence oracle over the values `listing` hides.
 #[derive(Debug, Clone, PartialEq)]
@@ -216,7 +216,7 @@ pub enum FilterExpr {
     ///   matches nothing, so a lost value under-reports and under-reporting narrows. Under a
     ///   complement those same failures *widen*. Requiring presence keeps the sign: a value that
     ///   cannot be read is not a value that fails the predicate.
-    /// - **C11**, decision 0060's existence oracle. `none_of: [every value I was offered]` returning
+    /// - **C11**, decision 0062's existence oracle. `none_of: [every value I was offered]` returning
     ///   a non-empty set would prove there exist values the principal was not shown. It cannot here:
     ///   evaluation is inside the candidate, and an entity in the candidate carrying value *v* is
     ///   itself the witness that makes *v* visible under C11's derivation, so *v* was offered. The
@@ -311,7 +311,7 @@ pub struct FilterColumns {
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
 ///
-/// **Not a tuning knob and not a per-request choice.** See this module's header and decision 0061:
+/// **Not a tuning knob and not a per-request choice.** See this module's header and decision 0063:
 /// the postings' work is a function of the value named, which is a disclosure under
 /// `listing = "per_viewer"` and a published fact under `listing = "public"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,7 +755,7 @@ impl FilterColumns {
             .filter(|layers| layers.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(name.to_string()))?;
 
-        // **The routed pair, and the split between them is the whole of decision 0061.** The base
+        // **The routed pair, and the split between them is the whole of decision 0063.** The base
         // build's answer comes from the postings; every extent layer is scanned, because no flush
         // writes postings and an answer from the postings alone would omit every entity ingested
         // since the build.
@@ -870,7 +870,7 @@ impl FilterColumns {
     /// negation, unioned across the layers exactly as a scan is.
     ///
     /// **A scan of every layer, never the postings**, even for a column whose `eq` is routed
-    /// (decision 0061). Presence derived from postings would be a union over every code in the
+    /// (decision 0063). Presence derived from postings would be a union over every code in the
     /// vocabulary — O(values) file reads to answer a question the value column answers in one
     /// intersection per layer — and it would answer it only for the base, since no flush writes
     /// postings.

@@ -142,7 +142,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # value with no members anywhere, the third outcome that must be indistinguishable from the
 # other two.
 #
-# **`archive` is the `public` counterpart, and it exists to be *routed*.** Decision 0061 answers a
+# **`archive` is the `public` counterpart, and it exists to be *routed*.** Decision 0063 answers a
 # category operand from the column's derived postings where the vocabulary is `public` and from the
 # masked scan where it is `per_viewer` — two evaluation routes that must produce the same sets. A
 # corpus carrying only a `per_viewer` category exercises one of them, so the differential would
@@ -242,7 +242,7 @@ def department_of(source_id: int) -> str | None:
 
 def archive_of(source_id: int) -> str | None:
     """`archive` as planted — the `public` column, whose operands the engine answers from the
-    derived postings rather than by scanning (decision 0061). Same contract as [`department_of`]:
+    derived postings rather than by scanning (decision 0063). Same contract as [`department_of`]:
     what the entity was *given*, upstream of what the build stored."""
     if source_id % ARCHIVE_ABSENT_STRIDE == 0:
         return None
@@ -720,7 +720,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
         # 5: the corpus gained a `public` category, `archive`, so the differential covers the
-        # postings route decision 0061 opened as well as the scan (2026-08-10).
+        # postings route decision 0063 opened as well as the scan (2026-08-10).
         # 4: the corpus gained the two filter columns (`department`, `title`) and their planting
         # rules (2026-08-09). The `schema` key alone would force the rebuild — the declaration's
         # content is in the receipt — but the planted *values* are a function of the strides and

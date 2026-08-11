@@ -226,7 +226,7 @@ A differential failure is a defect until proven a fixture bug. The oracle change
 ## Appendix R — Review record
 
 **r9** (2026-08-09) moves one row of §4.6, with the test that moves it: **I12's mask half is
-covered**. The filter surface landed (decision 0060; contracts §3.2 r26), and
+covered**. The filter surface landed (decision 0062; contracts §3.2 r26), and
 `conformance/tests/test_filter_differential.py` runs the differential in the form
 [`filter-surface.md`](filter-surface.md) §9 specifies, against a new definitional oracle module,
 `reference/oracle/filters.py` — a per-entity walk over the **fixture's own planted values**,

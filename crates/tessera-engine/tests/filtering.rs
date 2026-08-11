@@ -41,7 +41,7 @@ const N: u64 = 60;
 const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// Two `u8` categories and a per-item string. `department` is `per_viewer`, which is the shape that
-/// owes membership postings *and* keeps the scan for filtering (decision 0061); `archive` is
+/// owes membership postings *and* keeps the scan for filtering (decision 0063); `archive` is
 /// `public`, which is the shape whose filter is routed through those postings. The two carry the
 /// same value distribution under different names, so the routed answer and the scanned one are
 /// comparable value by value. The string is `filter`-only, which is the shape that owes no postings
@@ -129,7 +129,7 @@ fn score_of(e: u64) -> i32 {
 /// A numeric column **with absences**, and the one place this corpus exercises them.
 ///
 /// Every third item carries no bonus, and the values that *are* carried straddle zero — which is
-/// the whole point. Absence used to be stored as `0` and marked present (decision 0062), so an item
+/// the whole point. Absence used to be stored as `0` and marked present (decision 0064), so an item
 /// with no bonus matched every range containing zero; a fixture whose values were all positive
 /// could not tell the two apart.
 fn bonus_of(e: u64) -> Option<i32> {
@@ -606,7 +606,7 @@ fn ingest_and_flush_with(
             WalScalar::Utf8(title.to_string()),
             WalScalar::I32(score),
             // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
-            // how an ingested item says it carries no value for a column (decision 0062).
+            // how an ingested item says it carries no value for a column (decision 0064).
             bonus,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
@@ -1609,7 +1609,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
     }
 }
 
-/// **Decision 0060's C11 existence oracle, closed by construction.**
+/// **Decision 0062's C11 existence oracle, closed by construction.**
 ///
 /// The attack: `none_of: [every value I was offered]` returning a non-empty set would prove there
 /// exist values of a `per_viewer` category the principal was not shown. It cannot, and not because
@@ -1872,10 +1872,10 @@ fn a_numeric_range_agrees_with_the_corpus() {
 /// which is why it is asserted against a range straddling zero rather than any range at all —
 /// against `[1, 10]` the broken and the fixed build agree, and the test would pass on both.
 ///
-/// [Decision 0062]: absence is the presence bitmap beside the column, which is the same mechanism
+/// [Decision 0064]: absence is the presence bitmap beside the column, which is the same mechanism
 /// the other two families already use.
 ///
-/// [Decision 0062]: ../../../../docs/decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md
+/// [Decision 0064]: ../../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md
 #[test]
 fn an_item_with_no_number_matches_no_range_not_even_one_containing_zero() {
     let fx = fixture();
@@ -2037,7 +2037,7 @@ fn a_range_composes_with_a_category_and_a_string() {
 }
 
 // =================================================================================================
-// The category postings route (decision 0061) and `/v1/categories` under `per_viewer`
+// The category postings route (decision 0063) and `/v1/categories` under `per_viewer`
 // =================================================================================================
 
 /// Where the build wrote one column's derived postings.
@@ -2125,7 +2125,7 @@ fn a_public_category_route_agrees_with_the_corpus_under_a_real_mask() {
 /// with a deliberately wrong mapping — every code claiming entity 0 and nothing else — and the two
 /// then answer differently: the `public` column returns the corrupted postings' answer, because it
 /// is routed through them; the `per_viewer` column returns the *correct* answer, because decision
-/// 0060 keeps it on the scan. Nothing else in this file can tell the two routes apart, since a
+/// 0063 keeps it on the scan. Nothing else in this file can tell the two routes apart, since a
 /// working route and a working scan agree by construction.
 #[test]
 fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
@@ -2151,7 +2151,7 @@ fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
     assert_eq!(
         as_vec(&archived),
         vec![0u32],
-        "a `public` column must answer from its postings — this is what decision 0061 buys, and \
+        "a `public` column must answer from its postings — this is what decision 0063 buys, and \
          with the file corrupted it is the only way the answer can be this"
     );
 
@@ -2167,7 +2167,7 @@ fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
         expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng")),
         "a `per_viewer` column must be answered by the masked scan, whatever its postings say: \
          the postings' work is a function of the value named, which is the disclosure \
-         `listing = \"per_viewer\"` exists to prevent (decision 0061)"
+         `listing = \"per_viewer\"` exists to prevent (decision 0063)"
     );
     assert!(
         departmental.cardinality() > 1,
@@ -2443,7 +2443,7 @@ fn a_per_viewer_page_is_filtered_before_it_is_cut() {
 
 /// **A `public` vocabulary is served as authored, to every principal alike** — including a value
 /// nothing carries, and including a principal who can see nothing. It derives no membership at all,
-/// which is why its filter may be routed through the postings (decision 0061) while a `per_viewer`
+/// which is why its filter may be routed through the postings (decision 0063) while a `per_viewer`
 /// one may not.
 #[test]
 fn a_public_vocabulary_is_served_as_authored_to_every_principal() {

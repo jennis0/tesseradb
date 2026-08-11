@@ -825,7 +825,7 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
 /// One batch's worth of a declared column, decoded to the shape the row loop indexes, together
 /// with the source's own record of which rows carry nothing.
 ///
-/// **The null buffer is kept rather than dropped, and that is the whole of decision 0062's build
+/// **The null buffer is kept rather than dropped, and that is the whole of decision 0064's build
 /// half.** Every numeric variant below is built from `values()`, which is the values buffer alone:
 /// a null slot holds whatever is in it, which for every Arrow numeric is `0`. Reading that back
 /// stores an item with no score as one scoring zero — present, and indistinguishable from a real
@@ -1011,7 +1011,7 @@ impl BatchColumn {
         // `Text` carries the source's null through itself. Everything else is a number, whose every
         // bit pattern is a legal value — so the source's null buffer is the only thing that
         // distinguishes "carries no score" from "scores zero", and reading `values()` past it
-        // silently makes the two the same (decision 0062).
+        // silently makes the two the same (decision 0064).
         if self.nulls.as_ref().is_some_and(|n| n.is_null(row))
             && !matches!(
                 self.values,

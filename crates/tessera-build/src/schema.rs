@@ -262,14 +262,14 @@ impl Schema {
                 )));
             }
             check_column_name(&decl.name)?;
-            // **Column names and filter combinators share one namespace** (decision 0060). A leaf
+            // **Column names and filter combinators share one namespace** (decision 0062). A leaf
             // in a filter expression is a column name directly — there is no wrapper object — so a
             // column called `any_of` would be ambiguous with the combinator at request time.
             // Refused at the build instead, where it is one error against one declaration rather
             // than a request that means two things.
             if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
                 return Err(schema_error(format!(
-                    "attribute '{}': that name is a filter combinator (decision 0060), and a \
+                    "attribute '{}': that name is a filter combinator (decision 0062), and a \
                      filter expression names columns directly, so a column may not take one. \
                      Reserved: all_of, any_of, none_of",
                     decl.name

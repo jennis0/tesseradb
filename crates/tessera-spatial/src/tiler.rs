@@ -44,7 +44,7 @@ impl ScalarValue {
     /// This value as a **render** column holds it — `columns.arrow`, which is contractually
     /// non-nullable (contracts R4) and has nowhere to put [`ScalarValue::Null`].
     ///
-    /// ⊘ **Absence is lost here, deliberately and visibly.** [Decision 0062] rules that a render
+    /// ⊘ **Absence is lost here, deliberately and visibly.** [Decision 0064] rules that a render
     /// column records absence in a presence bitmap beside it, exactly as a filter column does, and
     /// **defers the render half while the client is under active development**: it needs a file, a
     /// manifest entry, a way for the points batch to say "absent", and a client that understands
@@ -57,7 +57,7 @@ impl ScalarValue {
     /// linear build, the streaming build and the flush — cannot come to disagree about it, and so
     /// the render half has one call site to delete when it lands.
     ///
-    /// [Decision 0062]: ../../../docs/decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md
+    /// [Decision 0064]: ../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md
     pub fn or_render_placeholder(&self, ty: ScalarType) -> ScalarValue {
         if !matches!(self, ScalarValue::Null) {
             return self.clone();

@@ -1,10 +1,10 @@
-# 0064 — `none_of` requires a value and names one column, which is what makes a negation safe
+# 0066 — `none_of` requires a value and names one column, which is what makes a negation safe
 
 **Date:** 2026-08-11 · **Status:** Settled (owner ruling — build `none_of`)
 
 ## Context
 
-[Decision 0060](0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md) specified `none_of`
+[Decision 0062](0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md) specified `none_of`
 and did not build it, behind one stated rule: over a `per_viewer` category a set-complement negation
 is an existence oracle, because
 
@@ -35,13 +35,13 @@ The property is asserted rather than asserted-about — `tests/filtering.rs` bui
 entity, which is in the candidate and in no layer, and requires that it match no negation. Under the
 complement reading that test fails, along with four others.
 
-**The C11 oracle closes by construction, and needs no extra intersection.** 0060 prescribed
+**The C11 oracle closes by construction, and needs no extra intersection.** 0062 prescribed
 evaluating within the visible vocabulary — "carries some value I may see, other than these" — as a
 separate mitigation. It is not separate: evaluation already happens inside the candidate, and an
 entity in the candidate carrying value *v* is *itself* the witness that makes *v* visible under
 C11's derivation (a value is visible iff at least one of its members is in `M_auth`). So every value
 reachable in a `none_of` result was offered, and `none_of: [every offered value]` is empty. The
-presence requirement **is** the intersection 0060 asked for, arrived at from the other side.
+presence requirement **is** the intersection 0062 asked for, arrived at from the other side.
 
 The fixture pins that this is not vacuous: the subset principal sees `e % 3 == 0`, every item
 carrying `legal` falls outside it, so `legal` is a value the corpus genuinely carries and that
@@ -70,7 +70,7 @@ express "carries no value"; adding it would be a new positive operand (`absent`)
 
 ## Consequences
 
-- A negation always takes the **scan** route, never a category's derived postings (decision 0061).
+- A negation always takes the **scan** route, never a category's derived postings (decision 0063).
   Presence from postings would be a union over every code — O(values) file reads for what the value
   column answers in one intersection per layer — and would cover only the base, since no flush
   writes postings.

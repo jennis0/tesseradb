@@ -1628,7 +1628,7 @@ fn write_column_values(
         }
     } else {
         // **A number's absence is the presence bitmap, because a number has no spare value to
-        // spend** (decision 0062). A category reserves code 0 out of its vocabulary and a string
+        // spend** (decision 0064). A category reserves code 0 out of its vocabulary and a string
         // carries an explicit null; every bit pattern of an integer is a legal integer, so there is
         // nothing in band to mean "no score". The bitmap beside the column is where it goes, which
         // is the same mechanism the other two families already use — so absence has one
@@ -1834,7 +1834,7 @@ fn permute_attribute_tail(
             column
                 .push(
                     // A render column is non-nullable, so an absent value is drawn at the type's
-                    // zero until decision 0062's render half lands — see `or_render_placeholder`.
+                    // zero until decision 0064's render half lands — see `or_render_placeholder`.
                     values[entity as usize].or_render_placeholder(attribute.ty),
                     &attribute.name,
                 )

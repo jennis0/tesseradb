@@ -7,7 +7,7 @@ built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
 width other than `u32` and on a string column, a ruling on surface §4's measured
-project-vs-per-tile rule, and decision 0061's leak-register row landing (in flight on the postings
+project-vs-per-tile rule, and decision 0063's leak-register row landing (in flight on the postings
 track; §6.2 names the dependency). **§6.3's rulings are all made** (owner, 2026-08-10). Measured input:
 [`../../probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Built so far:** the **read path, for every family** — the value column and its presence bitmap for
@@ -30,7 +30,7 @@ attribute indexing); decisions [0013](../decisions/0013-mark-specified-vs-implem
 [0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md),
 [0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
 [0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
-[0061](../decisions/0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
+[0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **index §n**. The companion read-side design is
@@ -94,8 +94,8 @@ manufacture a value set for a type that has none. §2.5 argues the distinction.
 column, and none of these matches it* — which is a positive predicate, and has to be: a complement
 would put every entity with an *unreachable* value into the result and invert §5's failure
 arithmetic. It names one column, for the same reason. Decisions
-[0060](../decisions/0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md) and
-[0064](../decisions/0064-none-of-requires-a-value-and-names-one-column.md); §5 carries the argument.
+[0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md) and
+[0066](../decisions/0066-none-of-requires-a-value-and-names-one-column.md); §5 carries the argument.
 
 ---
 
@@ -329,12 +329,12 @@ So a `per_viewer` category gets postings whatever its `used_for` says, where a `
 only from `used_for = "filter"` — a published value set is served as authored and derives no membership
 at all.
 
-**The postings answer a filter only under `listing = "public"`** (decision 0061). Under `per_viewer`
+**The postings answer a filter only under `listing = "public"`** (decision 0063). Under `per_viewer`
 they exist for the membership question above and the *filter* is answered by the masked scan, for the
 timing reason the note below this section records. The route is a function of the **declaration** —
 never of the request, the principal, or any statistic, which §8.2 forbids because a statistics-driven
 route makes execution time a function of how much the principal can see — so it is fixed at schema time
-and identical for every viewer. It is registered as leak-register row **C24**, which decision 0061 makes
+and identical for every viewer. It is registered as leak-register row **C24**, which decision 0063 makes
 a condition of itself.
 
 **A routed answer is `postings ∩ candidate` unioned with a scan of every extent layer.** The postings
@@ -371,7 +371,7 @@ buys nothing, so it is not adopted.
 > **The case an earlier revision marked unmeasured is now measured, and the residual is real**
 > (probe arm 9): a scattered posting whose containers the candidate meets while no bits match costs
 > ~2 ms per operand at 10⁹ against ~0 for an absent value — container-proportional work for an
-> empty result. That measurement is what decision 0061 is built on: a `per_viewer` column never
+> empty result. That measurement is what decision 0063 is built on: a `per_viewer` column never
 > takes the postings route, because under that control the ~2 ms *is* the disclosure, while under
 > `listing = "public"` what the timing distinguishes is a fact `/v1/categories` already serves.
 
@@ -629,7 +629,7 @@ positive predicate, so any failure that loses values under-reports, under-report
 and **I12** absorbs it.
 
 **`none_of` is positive because it requires a value, and that is why it is expressible at all**
-([decision 0064](../decisions/0064-none-of-requires-a-value-and-names-one-column.md)). It means
+([decision 0066](../decisions/0066-none-of-requires-a-value-and-names-one-column.md)). It means
 *carries a value in this column, and none of these predicates matches it* — evaluated as
 `present ∩ candidate ∖ matched`, never as `candidate ∖ matched`. Under the complement reading an
 entity with no reachable value would *match*, so a lost layer, a lagging flush or a blanked slot
@@ -639,10 +639,10 @@ sign is preserved rather than argued around, and `tests/filtering.rs` asserts it
 entity — in the candidate, in no layer — which is the reachable-value failure the design actually
 has.
 
-The same requirement closes decision 0060's C11 existence oracle without a second mechanism: an
+The same requirement closes decision 0062's C11 existence oracle without a second mechanism: an
 entity in the candidate carrying value *v* is itself the witness that makes *v* visible under C11's
 derivation, so a result can only ever reach values the principal was offered, and
-`none_of: [every value I was offered]` is empty by construction. The "one extra intersection" 0060
+`none_of: [every value I was offered]` is empty by construction. The "one extra intersection" 0062
 anticipated is not needed — the presence requirement it prescribed *is* the intersection.
 
 **A negation names exactly one column**, refused otherwise. It has to require presence in the column
@@ -912,9 +912,9 @@ holds unchanged.
 **A category's postings are rebuilt whole from the folded column** — the self-retiring derivation
 §2.3 requires, and after the rebuild they cover the new `fold_watermark`, closing the un-folded
 tail the flush marker in §5 records. Where the rebuilt postings serve a *filter* — a `public`
-listing's route under decision 0061 — this rests on the leak-register row 0060 names as a
+listing's route under decision 0063 — this rests on the leak-register row 0062 names as a
 condition of itself, **which does not exist yet in Appendix C and is being registered on the
-postings track**; until that row lands, 0061's condition is unmet and this paragraph inherits the
+postings track**; until that row lands, 0063's condition is unmet and this paragraph inherits the
 dependency. The rebuild reuses the build's emit — one banded emit over a
 `(entity, code)` source each producer supplies, the build's from its staged values and the fold's
 from the column it has just written, so the postings are a derivative of the artefact of record
@@ -1147,7 +1147,7 @@ declared column while the mapped path pays it for the columns actually scanned.
 > which is where its wall clock actually went.
 >
 > **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
-> column here, and by decision 0061 they are now on the serving path for a `public` listing. That is
+> column here, and by decision 0063 they are now on the serving path for a `public` listing. That is
 > correct as designed and is not covered by the table either.
 
 - **Category membership at 0.31–1.01× the render column it indexes** (*measured* at 2.4×10⁶ items; the 10⁹
@@ -1252,8 +1252,8 @@ sites: **positivity** — every "degrades safely under I12" argument holds only 
 is positive, so lifting `none_of`'s fence must revisit §5.2/§6.2 under the inverted sign (§5, the
 review's most valuable finding); **lists break one-bit-one-slot addressing** and are excluded from
 the merge and blanking specifications until §2.6's addressing exists; and §2.3's "unmeasured"
-marker was stale — arm 9 measured the residual and 0060 is built on it. §6.2 also now names its
-dependency on 0061's leak-register row, which is registered on the postings track, not here.
+marker was stale — arm 9 measured the residual and 0062 is built on it. §6.2 also now names its
+dependency on 0063's leak-register row, which is registered on the postings track, not here.
 
 **2026-08-10 — the fold's attribute pass is built**, to §6.2 as written. Two things the design did
 not anticipate, both recorded at their sites. The pass had to become its own **crate**: written

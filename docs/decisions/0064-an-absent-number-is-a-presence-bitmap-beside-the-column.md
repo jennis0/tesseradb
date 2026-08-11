@@ -1,4 +1,4 @@
-# 0062 — An absent number is a presence bitmap beside the column, not a sentinel and not a validity buffer
+# 0064 — An absent number is a presence bitmap beside the column, not a sentinel and not a validity buffer
 
 **Date:** 2026-08-10 · **Status:** Settled (owner ruling)
 

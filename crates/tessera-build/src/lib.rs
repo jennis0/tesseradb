@@ -534,7 +534,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // **Unconditional, where it used to be skipped when every column rendered.** It also
     // substitutes the render placeholder for an absent value: `columns.arrow` is non-nullable
     // (contracts R4), and a `ScalarValue::Null` reaching its writer is a typed error rather than a
-    // drawn point. See `ScalarValue::or_render_placeholder` for what is lost and why decision 0062
+    // drawn point. See `ScalarValue::or_render_placeholder` for what is lost and why decision 0064
     // defers recovering it.
     {
         let render: Vec<(bool, ScalarType)> = args

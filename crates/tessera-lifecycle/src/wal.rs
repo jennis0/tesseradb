@@ -137,7 +137,7 @@ pub enum WalScalar {
     /// every bit pattern of a number is a legal number, and the empty string is one a corpus may
     /// hold — so absence has to travel beside the value rather than inside it. Without this variant
     /// an item ingested with no score is stored as `0` and marked present, and then matches a range
-    /// containing zero ([decision 0062](../../../docs/decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md)).
+    /// containing zero ([decision 0064](../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md)).
     Null,
 }
 

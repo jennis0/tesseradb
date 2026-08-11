@@ -60,7 +60,7 @@ Then, depending on what you are after:
 - **How filtering works.** [`filter-index.md`](filter-index.md) for the attribute artefact the
   operands read, and [`filter-surface.md`](filter-surface.md) for what a query does with it. Both are
   provisional, and the **category and string families are built** end to end — value column, masked
-  scan, boolean composition (decision 0060), the viewport operand, and a conformance differential
+  scan, boolean composition (decision 0062), the viewport operand, and a conformance differential
   that covers I12's mask half. Numeric ranges, ingest and the fold are not. `per-point-attributes.md`
   covers the `render` placement.
 - **How any of it is checked.** [`conformance.md`](conformance.md).

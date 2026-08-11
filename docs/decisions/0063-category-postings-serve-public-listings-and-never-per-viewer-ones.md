@@ -1,4 +1,4 @@
-# 0061 — A category's postings serve a `public` listing and never a `per_viewer` one
+# 0063 — A category's postings serve a `public` listing and never a `per_viewer` one
 
 **Date:** 2026-08-09 · **Status:** Ruled by the owner.
 **Reads with:** [`filter-index.md`](../design/filter-index.md) §2.3,

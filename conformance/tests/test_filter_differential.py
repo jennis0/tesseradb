@@ -26,7 +26,7 @@ What this module covers:
   `all_of`/`any_of` tree, against brute force; plus two algebraically equal spellings of one
   expression, which must serve identical responses.
 - **Refusals** — an unknown *column* is a `422`; an unknown *value* is not; `none_of` and
-  `match` are `422` because they are unbuilt (decision 0060), and an operator outside the
+  `match` are `422` because they are unbuilt (decision 0062), and an operator outside the
   column's family is a `422` because a refusal is a function of the request and the deployment's
   schema, never of the viewer's data (§10.6).
 
@@ -153,7 +153,7 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
     assert by_column["department"]["family"] == "category"
     assert set(by_column["department"]["operands"]) == {"eq", "in"}
     # **The route is invisible on the wire, and that is the assertion.** `archive` is `public` and
-    # `department` is `per_viewer`, so decision 0061 answers the first from its derived postings and
+    # `department` is `per_viewer`, so decision 0063 answers the first from its derived postings and
     # the second by scanning — and `/v1/meta` publishes the same family and the same operand list
     # for both. A client cannot see which route it will take, and must not be able to: the routing
     # is a property of the deployment's declaration, never of the query surface.
@@ -335,7 +335,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
 
 
 # ---------------------------------------------------------------------------------------------
-# The postings route (decision 0061) — the same sets by a different construction
+# The postings route (decision 0063) — the same sets by a different construction
 # ---------------------------------------------------------------------------------------------
 
 
@@ -359,7 +359,7 @@ ROUTED_EXPRS = [
 def test_a_public_category_answers_exactly_what_the_definition_says(
     catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases, case_name, name, expr
 ):
-    """**The routed differential.** `archive` is `listing = "public"`, so decision 0061 answers its
+    """**The routed differential.** `archive` is `listing = "public"`, so decision 0063 answers its
     `eq` and `in` from the column's derived per-value postings — a corpus-wide set intersected with
     the candidate — where `department` is answered by scanning the candidate's values. The oracle
     has one evaluation for both, so agreement here is agreement between two constructions rather
@@ -495,7 +495,7 @@ def test_an_unknown_column_refuses_and_an_unknown_value_does_not(
 
 
 def test_the_unbuilt_operators_refuse_by_name(catalogue_server, sweep_cases):
-    """Decision 0060 and decision 0013: `none_of` and `match` are specified and unbuilt, so
+    """Decision 0062 and decision 0013: `none_of` and `match` are specified and unbuilt, so
     naming either is a `422` — never an ignored clause, which would answer a different question
     while looking like an answer to this one."""
     case = sweep_cases["crossover_below"]

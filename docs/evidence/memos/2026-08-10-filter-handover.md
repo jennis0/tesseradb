@@ -5,8 +5,8 @@ nothing.
 **Reads with:** [`filter-index.md`](../../design/filter-index.md) (r7, Provisional — the
 specification for the artefact and its lifecycle), [`filter-surface.md`](../../design/filter-surface.md),
 decisions [0039](../../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
-[0060](../../decisions/0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
-[0061](../../decisions/0061-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
+[0062](../../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
+[0063](../../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
 and the measurement campaigns in [`probes/2026-08-08-filter-layout/`](../../../probes/2026-08-08-filter-layout/)
 (arms 1–16) and [`probes/2026-08-10-filter-lifecycle/`](../../../probes/2026-08-10-filter-lifecycle/).
 
@@ -48,14 +48,14 @@ across a 1.75× spread.
 
 One of the three is now built; the other two refuse by name, which is the fail-closed shape.
 
-**`none_of` is built** (2026-08-11, [decision 0064](../../decisions/0064-none-of-requires-a-value-and-names-one-column.md)),
+**`none_of` is built** (2026-08-11, [decision 0066](../../decisions/0066-none-of-requires-a-value-and-names-one-column.md)),
 and the two fences came down together because one requirement answers both. It means *carries a
 value in this column, and none of these matches it* — a **positive** predicate, so §5's failure
 arithmetic never inverts: an entity whose value is unreachable is absent from `present` and matches
-nothing, exactly as it matches no `eq`. That is also decision 0060's C11 mitigation, arrived at from
+nothing, exactly as it matches no `eq`. That is also decision 0062's C11 mitigation, arrived at from
 the other side — evaluation inside the candidate makes a carrying entity the witness for its own
 value's visibility, so `none_of: [every offered value]` is empty by construction and the "one extra
-intersection" 0060 anticipated is the presence requirement itself. A negation names one column,
+intersection" 0062 anticipated is the presence requirement itself. A negation names one column,
 refused otherwise. Five tests carry it, each verified to fail under the complement reading.
 
 **`match`** is specified and unbuilt; nothing depends on it.
@@ -93,7 +93,7 @@ rulings closed. One thing stands between it and normative:
   campaign swept `u32` and text separately and never crossed them.
 
 Surface §4's project-vs-per-tile rule was the second, and it is **ruled and built** (2026-08-11,
-decision 0063): both routes exist, `row-entity.u32` carries the crossing, and the threshold is three
+decision 0065): both routes exist, `row-entity.u32` carries the crossing, and the threshold is three
 times the viewport's rows. Surface §4 itself is still Provisional pending an owner ruling on the rule
 it now describes.
 
@@ -134,7 +134,7 @@ absence gap closed on 2026-08-11 and is recorded below with the half of it that 
   (§3), so it stays out. A redundant check bought at any price is still redundant.
 
 - **An item with no number no longer matches filters it should not** — fixed 2026-08-11, on both
-  write paths, [decision 0062](../../decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md)'s
+  write paths, [decision 0064](../../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md)'s
   filter half. The build kept the source's null buffer instead of dropping it, the ingest plane
   gained a `WalScalar::Null`, and absence lands in the presence bitmap beside the column — the same
   place a category's reserved code 0 and a string's explicit null already put it, so all three
