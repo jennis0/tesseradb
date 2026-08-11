@@ -46,17 +46,17 @@ across a 1.75× spread.
 
 ## 2. Unbuilt operands and one family
 
-Each refuses by name today, which is the fail-closed shape; none is a silent gap.
+One of the three is now built; the other two refuse by name, which is the fail-closed shape.
 
-**`none_of`** is fenced by [decision 0060](../../decisions/0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md)
-— a negation over a gated vocabulary is an existence oracle, and its C11 rule must be built with it.
-**There is a second reason, added later, that is easy to miss and more dangerous**: §5 records
-*positivity* as a load-bearing property. Every "this failure degrades safely under **I12**" argument
-in the design — a lost layer, a lagging flush, a blanked slot, a missing extent — holds *only*
-because every shipped operand is positive, so an entity whose value is unreachable matches nothing
-and the result narrows. Under `none_of` those same failures **widen**. Whoever lifts that fence must
-revisit layer composition and every start-up failure mode in §6.2 under the inverted sign, not just
-the vocabulary gating.
+**`none_of` is built** (2026-08-11, [decision 0064](../../decisions/0064-none-of-requires-a-value-and-names-one-column.md)),
+and the two fences came down together because one requirement answers both. It means *carries a
+value in this column, and none of these matches it* — a **positive** predicate, so §5's failure
+arithmetic never inverts: an entity whose value is unreachable is absent from `present` and matches
+nothing, exactly as it matches no `eq`. That is also decision 0060's C11 mitigation, arrived at from
+the other side — evaluation inside the candidate makes a carrying entity the witness for its own
+value's visibility, so `none_of: [every offered value]` is empty by construction and the "one extra
+intersection" 0060 anticipated is the presence requirement itself. A negation names one column,
+refused otherwise. Five tests carry it, each verified to fail under the complement reading.
 
 **`match`** is specified and unbuilt; nothing depends on it.
 
@@ -103,11 +103,12 @@ and contracts §2.1 gain the coalesce's fourth axis.
 
 ## 5. Known gaps, each marked ⊘ at its claim
 
-Two of the five are closed (2026-08-10). `ValueColumn::open` now takes an `Access` rather than a
+Three of the five are closed. `ValueColumn::open` now takes an `Access` rather than a
 `mmap` bool, so the fold's pass 4a takes `MADV_SEQUENTIAL` on the layers it streams once — and
 `FilterColumns::open` keeps its bool precisely so the hint stays unexpressible on the request path,
 which is decision 0052 enforced by a signature instead of a comment. The pass's bytes read and
-written are in the dispatch log line and in `/control/status` as `last_attr_bytes_*`. Three remain:
+written are in the dispatch log line and in `/control/status` as `last_attr_bytes_*`. The numeric
+absence gap closed on 2026-08-11 and is recorded below with the half of it that remains. Two remain:
 
 - **Orphaned attribute files between folds — and the fold is already what collects them.** A
   coalesce writes a merged extent and stops naming the eight it consumed; the consumed files stay on
@@ -132,36 +133,21 @@ written are in the dispatch log line and in `/control/status` as `last_attr_byte
   offsets on decode, and the digest deferral that would have made it non-redundant was declined
   (§3), so it stays out. A redundant check bought at any price is still redundant.
 
-- **An item with no number is stored as zero, so it matches filters it should not.** If an item
-  carries no value for a number column — no score, no price — the build writes 0 and marks the item
-  as having a value. Nothing anywhere records that the number was missing. A viewer filtering for
-  "score between −10 and 10" gets back every item that never had a score at all. **That is a wrong
-  answer, not an absent feature**, which is why it is listed here rather than as a nice-to-have.
+- **An item with no number no longer matches filters it should not** — fixed 2026-08-11, on both
+  write paths, [decision 0062](../../decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md)'s
+  filter half. The build kept the source's null buffer instead of dropping it, the ingest plane
+  gained a `WalScalar::Null`, and absence lands in the presence bitmap beside the column — the same
+  place a category's reserved code 0 and a string's explicit null already put it, so all three
+  families now record absence one way. Verified by mutation: the tests fail if the decode drops
+  validity, and fail if the flush gives an absent value a slot.
 
-  Text and category columns do not have this problem, because each has somewhere to put "nothing".
-  A missing string is stored as an explicit absence, and a missing category uses a code its
-  vocabulary reserves for the purpose. A number has no spare value to reserve — every number is a
-  legal score — so absence has to be recorded *outside* the value. The presence bitmap that each
-  column already carries is exactly that place, and it is already used this way by the other two.
-
-  **Why it is not a two-line change.** The build reads numbers out of the source file and, in doing
-  so, throws away the flag saying which of them were missing. By the time the column is written the
-  information is gone, so the fix starts one step earlier than the problem appears. Keeping the flag
-  is easy in itself.
-
-  The complication is that the same values feed the map's point data as well as the filter's column,
-  and the map's columns are contractually non-nullable — the reader refuses a nullable one outright,
-  which is what lets it hand back flat slices with no per-value branch. So fixing the filter forces
-  a question about the map: what does a point with no score carry?
-
-  **Ruled** ([decision 0062](../../decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-  owner, 2026-08-10): a presence bitmap beside the column, for render columns as for filter columns.
-  The values stay flat and non-nullable and the bitmap says which slots mean anything — one
-  mechanism for absence across both artefacts, and no change to the contract the read path rests on.
-  A validity buffer, a declared sentinel and a float NaN payload were each considered and declined
-  there. **The ruling settles the representation; the design is not written** — what the file is
-  called, how the manifest names it, how the wire says "absent", and how flush, merge and the fold
-  carry it are all open, and 0062 lists them.
+  **The render half is still open, and is the deferred one.** `columns.arrow` is non-nullable
+  (contracts R4) and 0062 defers its bitmap while the client is under development, so an absent
+  number still *draws* at the type's zero. The two artefacts therefore disagree — the filter says an
+  item has no score while the map draws it at 0 — which is narrowing rather than leaking (**I12**),
+  and the substitution now lives in one named place (`ScalarValue::or_render_placeholder`) so the
+  render half has a single call site to delete. What 0062 still owes: the file's name, its manifest
+  entry, how the points batch says "absent", and how flush, merge and the fold carry it.
 
 ## 6. Not measured, and what each would settle
 

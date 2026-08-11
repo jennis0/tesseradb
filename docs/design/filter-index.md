@@ -90,11 +90,12 @@ set because a category *has* one. No other family does, so none acquires a listi
 list, and in particular **no prefix autocomplete** — offering suggestions over a string column would
 manufacture a value set for a type that has none. §2.5 argues the distinction.
 
-**Negation is not an operand.** §8.2 composes by intersection, and `NOT` is a different shape: its
-result is principal-dependent by construction, so it can never share a cached projection, and it
-inverts a superset into a subset — the unsafe direction for any family producing one. It also
-inverts the failure arithmetic every safety argument here leans on: §5's positivity property, which
-any design lifting the fence must revisit first.
+**Negation requires a value; it is not a complement.** `none_of` means *carries a value in this
+column, and none of these matches it* — which is a positive predicate, and has to be: a complement
+would put every entity with an *unreachable* value into the result and invert §5's failure
+arithmetic. It names one column, for the same reason. Decisions
+[0060](../decisions/0060-filters-compose-as-a-boolean-tree-inside-the-candidate.md) and
+[0064](../decisions/0064-none-of-requires-a-value-and-names-one-column.md); §5 carries the argument.
 
 ---
 
@@ -622,15 +623,31 @@ narrows `M_sel`, which is safe under **I12** — and it is a lag of one flush in
 coverage cliff, which is what makes it a design rather than a gap.
 
 **Every "degrades safely" argument in this document rests on one property, named here so it cannot
-be lost silently: every shipped operand is positive.** An entity whose value is unreachable — not
-yet flushed, in a layer that failed to compose, blanked at the fold — matches *no* positive
-predicate, so any failure that loses values under-reports, under-reporting narrows `M_sel`, and
-**I12** absorbs it. A negative operand inverts that arithmetic: under `none_of`, an entity with no
-reachable value *matches*, so the same failures — a lost layer, a lagging flush, a blanked slot —
-**widen** the result instead of narrowing it. `none_of` is fenced today for a different reason
-(decision 0060's existence oracle over gated vocabularies), so nothing enforces this one; the
-review that ever lifts that fence must therefore revisit layer composition and every start-up
-failure mode in §6.2 under the inverted sign, and this paragraph is the tripwire that forces it.
+be lost silently: every operand is positive, `none_of` included.** An entity whose value is
+unreachable — not yet flushed, in a layer that failed to compose, blanked at the fold — matches *no*
+positive predicate, so any failure that loses values under-reports, under-reporting narrows `M_sel`,
+and **I12** absorbs it.
+
+**`none_of` is positive because it requires a value, and that is why it is expressible at all**
+([decision 0064](../decisions/0064-none-of-requires-a-value-and-names-one-column.md)). It means
+*carries a value in this column, and none of these predicates matches it* — evaluated as
+`present ∩ candidate ∖ matched`, never as `candidate ∖ matched`. Under the complement reading an
+entity with no reachable value would *match*, so a lost layer, a lagging flush or a blanked slot
+would **widen** the result and every argument above would invert. Under the built reading those same
+failures remove the entity from `present` and it matches nothing, exactly as it matches no `eq`. The
+sign is preserved rather than argued around, and `tests/filtering.rs` asserts it against a buffered
+entity — in the candidate, in no layer — which is the reachable-value failure the design actually
+has.
+
+The same requirement closes decision 0060's C11 existence oracle without a second mechanism: an
+entity in the candidate carrying value *v* is itself the witness that makes *v* visible under C11's
+derivation, so a result can only ever reach values the principal was offered, and
+`none_of: [every value I was offered]` is empty by construction. The "one extra intersection" 0060
+anticipated is not needed — the presence requirement it prescribed *is* the intersection.
+
+**A negation names exactly one column**, refused otherwise. It has to require presence in the column
+it negates, and two columns give two answers to which; `all_of: [{none_of: [A]}, {none_of: [B]}]` is
+the same set and says which presence each clause requires, so nothing is lost but the ambiguity.
 
 > **⊘ Built, and the accelerator's tail is answered by scanning it.** A flush writes one extent per
 > column that **owes a value column** — `used_for = "filter"`, *or* a category whose vocabulary is

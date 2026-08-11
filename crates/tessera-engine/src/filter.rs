@@ -73,7 +73,7 @@
 //! and is safe under **I12**. It is a bounded lag measured in one flush interval, not a coverage
 //! cliff that never closes, which is what the refusal this composition replaced was answering.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -204,6 +204,29 @@ pub enum FilterExpr {
     /// At least one sub-expression must match. **Empty matches nothing**, which is the identity for
     /// union and not an oversight: `any_of: []` asks for items matching one of no alternatives.
     AnyOf(Vec<FilterExpr>),
+    /// The entity **carries a value in this column** and no sub-expression matches it.
+    ///
+    /// **Not the complement, and the difference is the whole of why a negation is expressible at
+    /// all.** `candidate ∖ any_of(kids)` would put every entity carrying *no* value into the result,
+    /// and two separate arguments break at once if it did:
+    ///
+    /// - **Positivity** (filter-index §5). Every "this failure degrades safely under **I12**"
+    ///   argument in the design holds because each operand is positive: an entity whose value is
+    ///   unreachable — not yet flushed, in a layer that failed to compose, blanked at the fold —
+    ///   matches nothing, so a lost value under-reports and under-reporting narrows. Under a
+    ///   complement those same failures *widen*. Requiring presence keeps the sign: a value that
+    ///   cannot be read is not a value that fails the predicate.
+    /// - **C11**, decision 0060's existence oracle. `none_of: [every value I was offered]` returning
+    ///   a non-empty set would prove there exist values the principal was not shown. It cannot here:
+    ///   evaluation is inside the candidate, and an entity in the candidate carrying value *v* is
+    ///   itself the witness that makes *v* visible under C11's derivation, so *v* was offered. The
+    ///   set is empty by construction rather than by an extra intersection.
+    ///
+    /// **Every sub-expression must name one and the same column**, refused otherwise
+    /// ([`FilterError::NegationSpansColumns`]) — which costs no expressiveness, because
+    /// `all_of: [none_of: [A], none_of: [B]]` is exactly the multi-column reading and says which
+    /// presence it requires.
+    NoneOf(Vec<FilterExpr>),
 }
 
 /// How deep a filter expression may nest.
@@ -218,8 +241,54 @@ impl FilterExpr {
     pub fn depth(&self) -> usize {
         match self {
             FilterExpr::Leaf { .. } => 1,
-            FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
+            FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
                 1 + kids.iter().map(FilterExpr::depth).max().unwrap_or(0)
+            }
+        }
+    }
+
+    /// Every column named anywhere in this expression, in name order.
+    pub fn columns(&self) -> BTreeSet<&str> {
+        let mut out = BTreeSet::new();
+        self.collect_columns(&mut out);
+        out
+    }
+
+    fn collect_columns<'a>(&'a self, out: &mut BTreeSet<&'a str>) {
+        match self {
+            FilterExpr::Leaf { column, .. } => {
+                out.insert(column.as_str());
+            }
+            FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
+                for kid in kids {
+                    kid.collect_columns(out);
+                }
+            }
+        }
+    }
+
+    /// Refuse a [`FilterExpr::NoneOf`] whose sub-expressions do not name exactly one column.
+    ///
+    /// **A whole-tree check run once, before evaluation** — not per node during it. A negation that
+    /// spanned two columns would have to pick a presence set, and either choice is a silent answer
+    /// to a question the caller did not ask: requiring both makes `none_of: [A, B]` narrower than
+    /// the caller's reading, requiring either makes it fail-open under a lost layer. So the shape
+    /// is refused rather than resolved, and `all_of: [none_of: [A], none_of: [B]]` says which was
+    /// meant.
+    fn check_negations(&self) -> Result<(), FilterError> {
+        match self {
+            FilterExpr::Leaf { .. } => Ok(()),
+            FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
+                kids.iter().try_for_each(FilterExpr::check_negations)
+            }
+            FilterExpr::NoneOf(kids) => {
+                let columns = self.columns();
+                if columns.len() != 1 {
+                    return Err(FilterError::NegationSpansColumns {
+                        columns: columns.into_iter().map(str::to_string).collect(),
+                    });
+                }
+                kids.iter().try_for_each(FilterExpr::check_negations)
             }
         }
     }
@@ -330,6 +399,8 @@ pub enum FilterError {
     /// cannot be evaluated for it. Fail-closed for the reason `categories.rs` gives: an empty value
     /// set is what a principal who may see none of them is told.
     MembershipUnavailable(String),
+    /// A `none_of` names more or fewer than one column — see [`FilterExpr::NoneOf`].
+    NegationSpansColumns { columns: Vec<String> },
 }
 
 impl std::fmt::Display for FilterError {
@@ -353,6 +424,23 @@ impl std::fmt::Display for FilterError {
                 "column '{column}' carries no derived membership postings, so its per-viewer value \
                  visibility cannot be derived"
             ),
+            FilterError::NegationSpansColumns { columns } => match columns.len() {
+                0 => write!(
+                    f,
+                    "a 'none_of' names no column, so there is no value for an item to be required \
+                     to carry. 'none_of' means *carries a value in this column, and none of these \
+                     matches it*, which needs a column to be about"
+                ),
+                _ => write!(
+                    f,
+                    "a 'none_of' names {} columns ({}), and it may name only one: it requires the \
+                     item to carry a value in the column it negates, and two columns give two \
+                     answers to which. Write all_of: [{{none_of: [...]}}, {{none_of: [...]}}], \
+                     which is the same set and says which presence each clause requires",
+                    columns.len(),
+                    columns.join(", ")
+                ),
+            },
         }
     }
 }
@@ -774,7 +862,29 @@ impl FilterColumns {
                 max: MAX_FILTER_DEPTH,
             });
         }
+        expr.check_negations()?;
         self.eval(expr, candidate)
+    }
+
+    /// The entities of `candidate` that carry a value in `column` — the presence half of a
+    /// negation, unioned across the layers exactly as a scan is.
+    ///
+    /// **A scan of every layer, never the postings**, even for a column whose `eq` is routed
+    /// (decision 0061). Presence derived from postings would be a union over every code in the
+    /// vocabulary — O(values) file reads to answer a question the value column answers in one
+    /// intersection per layer — and it would answer it only for the base, since no flush writes
+    /// postings.
+    fn present_in(&self, column: &str, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
+        let layers = self
+            .columns
+            .get(column)
+            .filter(|layers| layers.filterable)
+            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        let mut out = Bitmap::new();
+        for layer in &layers.layers {
+            out |= layer.values.present_in(candidate);
+        }
+        Ok(out)
     }
 
     fn eval(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
@@ -794,6 +904,29 @@ impl FilterColumns {
                 let mut out = Bitmap::new();
                 for kid in kids {
                     out |= self.eval(kid, candidate)?;
+                }
+                Ok(out)
+            }
+            // `present ∖ matched`, and `present` is what makes this a positive predicate — see
+            // `FilterExpr::NoneOf` for the two arguments that rest on it.
+            //
+            // `check_negations` has already established that the sub-expressions name exactly one
+            // column, so this cannot pick the wrong one.
+            FilterExpr::NoneOf(kids) => {
+                let column = kids
+                    .iter()
+                    .flat_map(|kid| kid.columns())
+                    .next()
+                    .expect("check_negations admits exactly one column");
+                let mut out = self.present_in(column, candidate)?;
+                for kid in kids {
+                    // Under `out`, not `candidate`: each clause need only be evaluated over what is
+                    // still standing, so a selective first clause makes the rest cheaper — the same
+                    // narrowing `AllOf` does, for the same reason.
+                    out.andnot_inplace(&self.eval(kid, &out)?);
+                    if out.is_empty() {
+                        break;
+                    }
                 }
                 Ok(out)
             }

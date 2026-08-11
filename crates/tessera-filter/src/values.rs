@@ -1250,6 +1250,29 @@ impl ValueColumn {
         &self.codes
     }
 
+    /// Entities of `candidate` this column holds a value for.
+    ///
+    /// **The predicate `none_of` is built on**, and the reason a negation is expressible without
+    /// inverting the failure arithmetic every safety argument here rests on (filter-index §5): an
+    /// entity whose value is unreachable — not yet flushed, in a layer that failed to compose,
+    /// blanked at the fold — is absent from this set, so it matches no `none_of` either. Losing
+    /// values still under-reports, and under-reporting still narrows `M_sel`.
+    ///
+    /// [`Self::present`]'s intersected form, and cheaper for the universal case: a column every
+    /// entity carries a value in owns no presence bitmap, so this clips the candidate to the
+    /// column's own extent instead of materialising a run of every slot and intersecting.
+    pub fn present_in(&self, candidate: &Bitmap) -> Bitmap {
+        match &self.presence {
+            None => {
+                if self.codes.len() == 0 {
+                    return Bitmap::new();
+                }
+                candidate.and(&Bitmap::from_range(0u32..self.codes.len() as u32))
+            }
+            Some(p) => p.and(candidate),
+        }
+    }
+
     /// Entities this column holds a value for. `None` presence means the dense range.
     pub fn present(&self) -> Bitmap {
         match &self.presence {

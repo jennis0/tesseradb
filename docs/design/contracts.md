@@ -416,18 +416,21 @@ The first two are contract because they are unconditional and the shipped client
 
 If `idset` is supplied and differs from `identity.idset` (§2.2), the response is `409 conflict` — *"stale idset; re-resolve by external_id"* — decided before inversion and identically for every identifier.
 
-`filters`: a **boolean expression over declared columns** *(r26, decision 0060)*. A node is a leaf — one column name mapped to one operator — or a combinator, `all_of` or `any_of`, over sub-expressions:
+`filters`: a **boolean expression over declared columns** *(r26, decision 0060; r27, decision 0064)*. A node is a leaf — one column name mapped to one operator — or a combinator, `all_of`, `any_of` or `none_of`, over sub-expressions:
 
 ```json
 {"all_of": [{"department": {"in": ["eng", "sales"]}},
-            {"any_of": [{"region": {"eq": "emea"}}, {"department": {"eq": "legal"}}]}]}
+            {"any_of": [{"region": {"eq": "emea"}}, {"department": {"eq": "legal"}}]},
+            {"none_of": [{"status": {"eq": "archived"}}]}]}
 ```
 
 Operators by column family: a **category** takes `eq` and `in`, whose values are the vocabulary's **key (a JSON string) or its code (a JSON integer)**, freely mixed — the two are unambiguous because a key is never an integer. A **`utf8`** column takes `eq`, `in`, `prefix` and `contains` against the stored bytes — `in` being `eq` over a list, which is not a category-only generalisation. A **numeric** column — every integer width, both floats, `timestamp_us` and `bool` — takes `eq`, `in` and `range`, the last carrying a bounds object of `gte`/`gt`/`lte`/`lt`, any subset, at least one. Either side may be open; both bounds on one side is a `422` rather than a precedence rule, and an empty `range` is a `422` rather than "no constraint", since a leaf with no constraint is an omitted leaf. **A NaN value satisfies no bound and no equality**, inherited from IEEE rather than implemented, which is also why no order-preserving key is needed. A **`text`** column takes `match` against analysed tokens (⊘ unbuilt, [#44]). `/v1/meta`'s `filter_operands` publishes the per-column operator list, so a client need not infer it.
 
 **An unknown column name is `422`; an operator outside the column's family is `422`; an unknown *value* is an empty operand.** The split is which side of the trust boundary the fact lives on: a column and its family are **deployment schema**, identical for every principal and published in `/v1/meta`, so refusing discloses nothing. A **value**'s existence is viewer data. Refusing an unknown *value* would make the filter an existence oracle over exactly the vocabulary `listing = "per_viewer"` hides. The two must not be conflated, and a client must render "no matches" identically for a value it may not see and one that does not exist.
 
-**Empty combinators are their operators' identities and differ**: `all_of: []` matches the whole candidate, `any_of: []` matches nothing. **Nesting is bounded** by the deployment's limit and an over-deep expression is **refused, never flattened** — a flattened expression answers a different question. `none_of` is **not accepted**: it is specified and unbuilt (decision 0060), so naming it is `422` rather than an ignored clause.
+**Empty combinators are their operators' identities and differ**: `all_of: []` matches the whole candidate, `any_of: []` matches nothing. **Nesting is bounded** by the deployment's limit and an over-deep expression is **refused, never flattened** — a flattened expression answers a different question.
+
+**`none_of` means *carries a value in this column, and none of these matches it*** *(r27, decision 0064)* — **not** the complement of the candidate. An item carrying **no** value for the column is *not* in the result, exactly as it is in no `eq`; a client must not read `none_of` as "everything except". Two consequences a client sees: `none_of: []` is a **`422`**, not an identity, because it names no column to require a value in; and **every sub-expression of one `none_of` must name the same column**, also a `422`, with `all_of: [{"none_of": [A]}, {"none_of": [B]}]` as the form that says which presence each clause requires. The surface has no operand for "carries no value" — that would be a new positive operand, not a spelling of this one.
 
 ### 3.3 Session plane
 
@@ -513,6 +516,11 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 - **The reader must refuse a non-canonical `SEGMENTS-<n>.json` name** (§2.1). The grammar is ruled — unpadded — and the writer already conforms; the reader still parses a padded name leniently and then fails to open it, which is the silent path the ruling exists to close.
 
 ## Appendix R — Review record
+
+**r27** accepts `none_of` (2026-08-11, decision 0064, design r40). §3.2's combinator list gains it,
+with the two refusals a client can provoke — an empty negation and one spanning columns — and the
+warning that it is not "everything except": an item carrying no value is outside it. No field
+changes; the `422` that named `none_of` as unbuilt is gone.
 
 **r26** adds `row-entity.u32` (2026-08-11, decision 0063, design r39). A third headerless `u32`
 array joins §0.2's list and §2.6 specifies it: the inverse of `permutation.bin` over the base

@@ -67,24 +67,16 @@ fn parse_node(
         .ok_or_else(|| bad("a filter node must be an object"))?;
     if obj.len() != 1 {
         return Err(bad(format!(
-            "a filter node must carry exactly one key — a column name, or `all_of`/`any_of` — and \
-             this one carries {}. Two keys would need an implicit operator between them, and the \
-             expression says which it wants",
+            "a filter node must carry exactly one key — a column name, or \
+             `all_of`/`any_of`/`none_of` — and this one carries {}. Two keys would need an \
+             implicit operator between them, and the expression says which it wants",
             obj.len()
         )));
     }
     let (name, body) = obj.iter().next().expect("length checked");
 
     match name.as_str() {
-        // `none_of` is named here only so it refuses with its reason rather than as an unknown
-        // column: it is specified and not built (decision 0060), and it carries a rule that must
-        // ship with it.
-        "none_of" => Err(bad(
-            "`none_of` is specified and not built (decision 0060). Negation over a `per_viewer` \
-             category must be evaluated within the visible vocabulary, or it proves the existence \
-             of values the listing hides",
-        )),
-        combinator @ ("all_of" | "any_of") => {
+        combinator @ ("all_of" | "any_of" | "none_of") => {
             let arr = body.as_array().ok_or_else(|| {
                 bad(format!("`{combinator}` takes an array of filter expressions"))
             })?;
@@ -92,10 +84,15 @@ fn parse_node(
                 .iter()
                 .map(|k| parse_node(k, family_of, resolve))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(if combinator == "all_of" {
-                FilterExpr::AllOf(kids)
-            } else {
-                FilterExpr::AnyOf(kids)
+            Ok(match combinator {
+                "all_of" => FilterExpr::AllOf(kids),
+                "any_of" => FilterExpr::AnyOf(kids),
+                // **The one-column rule is not checked here**, and deliberately: the engine checks
+                // it once over the whole tree (`FilterExpr::check_negations`), where the same rule
+                // also covers an expression this parser never saw — one an embedder built directly.
+                // A copy here would be a second statement of a safety rule, which is the shape
+                // `verdict`'s doc argues against.
+                _ => FilterExpr::NoneOf(kids),
             })
         }
         column => {
@@ -404,13 +401,27 @@ mod tests {
         assert!(format!("{err:?}").contains("exactly one key"), "{err:?}");
     }
 
-    /// `none_of` refuses with its own reason rather than as an unknown column, so a caller learns
-    /// it is unbuilt rather than misspelt.
+    /// `none_of` parses like the other two combinators and carries its clauses through.
+    ///
+    /// **The one-column rule is not this parser's** — see the comment at the `none_of` arm — so a
+    /// multi-column `none_of` parses here and is refused by the engine. The test for *that* lives
+    /// with the rule, in `tests/filtering.rs`.
     #[test]
-    fn none_of_names_what_is_absent() {
-        let err = parse_str(r#"{"none_of": [{"department": {"eq": "eng"}}]}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("specified and not built"), "{err:?}");
-        assert!(format!("{err:?}").contains("per_viewer"), "{err:?}");
+    fn none_of_parses_as_a_combinator() {
+        let expr = parse_str(r#"{"none_of": [{"department": {"eq": "eng"}}]}"#).unwrap();
+        let FilterExpr::NoneOf(kids) = expr else {
+            panic!("expected a negation")
+        };
+        assert_eq!(kids.len(), 1);
+        assert!(matches!(kids[0], FilterExpr::Leaf { .. }));
+    }
+
+    /// A misspelt combinator is still an unknown *column*, which is the right error: the node's key
+    /// is a column name unless it is one of the three reserved words.
+    #[test]
+    fn a_misspelt_combinator_is_an_unknown_column() {
+        let err = parse_str(r#"{"non_of": [{"department": {"eq": "eng"}}]}"#).unwrap_err();
+        assert!(format!("{err:?}").contains("not a filterable column"), "{err:?}");
     }
 
     /// `in` over a string column is `eq` over a list — the same generalisation a category gets,

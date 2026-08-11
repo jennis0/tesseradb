@@ -1517,6 +1517,229 @@ fn any_of_unions_across_columns() {
     assert!(got.andnot(&cand).is_empty());
 }
 
+/// **`none_of` means *carries a value in this column, and none of these matches it*** — not the
+/// complement of the candidate.
+///
+/// The distinction is the whole of why a negation is expressible at all, and it is asserted here
+/// against a column that genuinely has absences: an item with no department must be missing from
+/// `none_of: [eng]`, where a complement would return it.
+#[test]
+fn none_of_requires_a_value_rather_than_taking_the_complement() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::NoneOf(vec![leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+    )]);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e).is_some()
+            && department_of(e) != Some("eng")),
+        "none_of returned items carrying no department, which is the complement rather than the \
+         negation"
+    );
+    // Non-degenerate in both directions: the corpus has items with no department at all, and the
+    // negation really did exclude something.
+    assert!((0..N).any(|e| department_of(e).is_none()));
+    assert!((0..N).any(|e| department_of(e) == Some("eng")));
+    // I12 by shape: a negation is still a subset of the candidate.
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// **The positivity property, asserted rather than argued** (filter-index §5).
+///
+/// Every "this failure degrades safely under I12" argument in the design holds because each operand
+/// is positive: an entity whose value is unreachable matches nothing, so a lost value under-reports
+/// and under-reporting narrows. A complement-style negation inverts that — the same failures would
+/// *widen*.
+///
+/// The unreachable entity here is a **buffered** one: accepted and acked, in the candidate, and in
+/// no layer until its flush (filter-index §5 rules on exactly this lag). Under a complement it
+/// would match every `none_of`; under the built semantics it matches none.
+#[test]
+fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-positivity");
+    let wal = fx._dir.path().join("wal-positivity");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
+    let row = UnallocatedRow {
+        external_id: Some(b"buffered".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::Utf8("paper-77".to_string()),
+            WalScalar::I32(3),
+            WalScalar::Null,
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    };
+    let buffered = engine
+        .accept_ingest(vec![row], "batch-buffered".to_string(), [9u8; 32])
+        .expect("ingest is accepted")[0]
+        .raw() as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    assert!(
+        cand.contains(buffered),
+        "the buffered entity must be in the candidate, or this proves nothing"
+    );
+
+    for expr in [
+        FilterExpr::NoneOf(vec![leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+        )]),
+        FilterExpr::NoneOf(vec![leaf("title", FilterOperand::TextPrefix("zzz".into()))]),
+    ] {
+        let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
+        assert!(
+            !got.contains(buffered),
+            "an entity with no reachable value matched a negation — the failure arithmetic has \
+             inverted and every 'degrades safely under I12' argument with it"
+        );
+    }
+}
+
+/// **Decision 0060's C11 existence oracle, closed by construction.**
+///
+/// The attack: `none_of: [every value I was offered]` returning a non-empty set would prove there
+/// exist values of a `per_viewer` category the principal was not shown. It cannot, and not because
+/// of an extra intersection — because evaluation happens inside the candidate, so an entity in the
+/// candidate carrying value *v* is itself the witness that makes *v* visible under C11's
+/// derivation. Every value reachable in the result was therefore offered.
+///
+/// Asserted with a **narrow** principal, since a full-coverage one is offered everything and the
+/// oracle has nothing to reveal to it.
+#[test]
+fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
+    let fx = fixture();
+    let (engine, cand) = candidate_for(&fx, &subset_credential());
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let generation = engine.generation();
+
+    // The vocabulary this principal is actually offered, derived the way `/v1/categories` derives
+    // it — membership against its own composed candidate.
+    let membership = generation
+        .filter_columns
+        .category_membership("department", &cand)
+        .expect("a per_viewer category carries membership postings");
+    let offered: Vec<AttrLocalId> = fx
+        .codes
+        .values()
+        .filter(|c| membership.carries(**c).unwrap())
+        .map(|c| AttrLocalId::new(*c))
+        .collect();
+    // **The fixture must withhold a value the corpus actually carries**, or the oracle has nothing
+    // to reveal and an empty result proves nothing. `legal` is that value: the subset principal
+    // sees `e % 3 == 0`, and every item carrying `legal` falls outside it.
+    assert!(!offered.is_empty(), "this principal is offered nothing");
+    let withheld: Vec<&str> = ["eng", "sales", "legal"]
+        .into_iter()
+        .filter(|k| !membership.carries(fx.codes[*k]).unwrap())
+        .collect();
+    assert_eq!(
+        withheld,
+        vec!["legal"],
+        "the fixture must withhold a value some item genuinely carries"
+    );
+    assert!(
+        (0..N).any(|e| department_of(e) == Some("legal")),
+        "'legal' must be carried by something, or withholding it discloses nothing"
+    );
+
+    let expr = FilterExpr::NoneOf(vec![leaf(
+        "department",
+        FilterOperand::In(offered.clone()),
+    )]);
+    let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
+
+    assert!(
+        got.is_empty(),
+        "none_of over every offered value returned {} entities, which proves to this principal \
+         that values it was not shown exist (C11)",
+        got.cardinality()
+    );
+    let _ = session;
+}
+
+/// A `none_of` naming two columns is refused, because it would have to pick which column's presence
+/// to require and either choice answers a question the caller did not ask. `all_of` of two
+/// single-column negations is the same set and says which.
+#[test]
+fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let spanning = FilterExpr::NoneOf(vec![
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        leaf("title", FilterOperand::TextPrefix("paper-1".into())),
+    ]);
+    let err = fx
+        .columns
+        .evaluate(&spanning, &cand)
+        .expect_err("a negation over two columns is refused");
+    let text = format!("{err}");
+    assert!(text.contains("department") && text.contains("title"), "{text}");
+    assert!(text.contains("all_of"), "the refusal names the way to say it: {text}");
+
+    // And the composition it points at is accepted, and is the intersection of the two negations.
+    let composed = FilterExpr::AllOf(vec![
+        FilterExpr::NoneOf(vec![leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        )]),
+        FilterExpr::NoneOf(vec![leaf("title", FilterOperand::TextPrefix("paper-1".into()))]),
+    ]);
+    let got = fx.columns.evaluate(&composed, &cand).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e).is_some()
+            && department_of(e) != Some("eng")
+            && !title_of(e).starts_with("paper-1"))
+    );
+
+    // An empty negation names no column at all, and is refused for the same reason.
+    assert!(fx
+        .columns
+        .evaluate(&FilterExpr::NoneOf(vec![]), &cand)
+        .is_err());
+}
+
+/// A negation nests inside the other combinators and counts against the same depth budget.
+#[test]
+fn a_negation_nests_and_counts_towards_the_depth_limit() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::AnyOf(vec![
+        FilterExpr::NoneOf(vec![leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        )]),
+        leaf("title", FilterOperand::TextEquals("paper-00".into())),
+    ]);
+    assert_eq!(expr.depth(), 3);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| (department_of(e).is_some()
+            && department_of(e) != Some("eng"))
+            || title_of(e) == "paper-00")
+    );
+}
+
 /// Nesting: a conjunction one of whose clauses is a disjunction.
 #[test]
 fn a_conjunction_may_contain_a_disjunction() {

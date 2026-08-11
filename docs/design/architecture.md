@@ -496,7 +496,9 @@ There is no leak in preserving labels under filtering: the principal could alrea
 
 ### 8.2 The filter contract
 
-**Every filter returns a set of entity IDs as a bitmap.** Composition is intersection. This is also the extension discipline for the retrieval surface: new filter forms add operands rather than changing the shape of the call (§2.2). Four rules.
+**Every filter returns a set of entity IDs as a bitmap.** Composition is any boolean combination of leaf predicates, evaluated inside the candidate *(r38, decision 0060)* — `all_of`, `any_of` and `none_of`. Every node returns a subset of the candidate because every leaf does, so **I12** holds structurally rather than by check. This is also the extension discipline for the retrieval surface: new filter forms add operands rather than changing the shape of the call (§2.2). Five rules.
+
+**Negation requires a value, and names one column** *(r40, [decision 0064](../decisions/0064-none-of-requires-a-value-and-names-one-column.md))*. `none_of` means *carries a value in this column, and none of these matches it* — not `candidate ∖ matched`. The presence requirement is what keeps a negation **positive**, which every "this failure degrades safely" argument in `filter-index.md` depends on: an entity whose value is unreachable matches nothing, so losing values under-reports and under-reporting narrows. It also closes C11's existence oracle without a second mechanism — an entity in the candidate carrying a value *is* the witness that makes that value visible, so a negation can only reach values the principal was offered. One column, because a negation must require presence in the column it negates and two columns give two answers to which; `all_of` of single-column negations is the same set and says which.
 
 **Threshold, never top-k.** A filter whose result depends on what else is in the query cannot be composed independently. A top-*k* nearest-neighbour query evaluated alone is computed over the whole corpus, so intersecting afterwards *is* post-filtering — the principal's nearest neighbours would vary observably with items they cannot see. Express ranked filters as thresholds and apply top-*k* **after** intersection.
 
@@ -1169,6 +1171,17 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r40** — **`none_of` is built, and the fence decision 0060 raised comes down on a stronger
+  footing than it went up** (2026-08-11, decision 0064). §8.2 gains negation's rule: it requires the
+  item to *carry a value* in the column, which makes it a positive operand and therefore leaves
+  `filter-index.md` §5's failure arithmetic — and every "degrades safely under I12" argument resting
+  on it — untouched. 0060 anticipated a separate mitigation for C11's existence oracle ("evaluated
+  within the visible vocabulary, one extra intersection"); the presence requirement *is* that
+  intersection, reached from the other side, because evaluation inside the candidate makes a
+  carrying entity the witness for its own value's visibility. A negation names exactly one column,
+  refused otherwise, which costs no expressiveness — `all_of` of single-column negations is the same
+  set — and narrows the query surface the leak register enumerates.
 
 - **r39** — **the inverse permutation is stored** (2026-08-11, decision 0063). §5.1 said row→entity
   "is not stored at all" and is derivable from the row's `tessera_id`. It is derivable, and for a
