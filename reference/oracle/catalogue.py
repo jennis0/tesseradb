@@ -92,7 +92,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import morton
 from .bundle import Bundle
 from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, read_recipe, write_recipe
 
@@ -638,20 +637,36 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
 
 
 def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
-    """The receipt matches, and there is a readable post-r6 bundle under it.
+    """The receipt matches, there is a readable post-r6 bundle under it, and nothing has been
+    published into it since the build.
 
-    The receipt is the test; the structural check below is a cheap second gate against a bundle
-    that was damaged *after* its receipt was written (a truncated `/tmp`, a half-deleted tree) —
-    a case the receipt cannot see. Both are tolerant of anything unreadable: what cannot be
-    confirmed is rebuilt, because being wrong in that direction costs a build and being wrong in
-    the other hands every test a fixture nobody asked for.
+    The receipt is the test; the two structural checks below are a cheap second gate against a
+    bundle that was damaged or *written to* after its receipt was written — cases the receipt
+    cannot see, because neither is an input. All three are tolerant of anything unreadable: what
+    cannot be confirmed is rebuilt, because being wrong in that direction costs a build and being
+    wrong in the other hands every test a fixture nobody asked for.
+
+    **The published-state check is not hypothetical.** An accepted deny is written into the bundle
+    prefix as a further `SEGMENTS-<n>.json` (contracts §2.3), so any driver that points a server at
+    this shared fixture and then suppresses or deletes an item leaves the fixture denied for every
+    later reader, on this run and the next. Drivers isolate themselves by serving a copy
+    (`conformance/conftest.py`'s `private_catalogue_bundle`); this is the backstop for the one that
+    forgets, and it turns a wrong answer into a rebuild.
     """
     if read_recipe(bundle_root) != wanted:
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
-        manifest = json.loads((bundle_root / current["prefix"] / "MANIFEST.json").read_text())
-        return "identity" in manifest
+        prefix = bundle_root / current["prefix"]
+        manifest = json.loads((prefix / "MANIFEST.json").read_text())
+        if "identity" not in manifest:
+            return False
+        published = [
+            p.name
+            for p in prefix.glob("partitions/*/SEGMENTS-*.json")
+            if p.name != "SEGMENTS-0.json"
+        ]
+        return not published
     except (OSError, KeyError, ValueError):
         return False
 

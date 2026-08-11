@@ -6,10 +6,18 @@
 // estimated, and nothing is derived from a drawn sample.
 //
 //   TESSERA_SESSION_CRED=… node clients/ts/scripts/measure-principals.mjs \
-//     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0..200
+//     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0..200 \
+//     [--ranks <pairs>.term-ranks.json]
 //
 // Re-run it per fixture: the term dictionary differs between bundles, so presets measured against
 // 2m4 are meaningless against 1e8.
+//
+// With `--ranks` (scripts/rank_terms.py's output) it also composes COVERAGE principals — sparse
+// ~1%, medium ~10%, heavy ~50% of the corpus — because at a 4.8 x 10^4-term dictionary any single
+// term is a sliver and "switch principal" demonstrates nothing. Each is the shortest prefix of the
+// ranked terms whose visible set reaches the target, found by binary search on the prefix length
+// with the REAL visible measured per probe — the ranking orders candidates, the service decides
+// sizes, and nothing here is estimated from pair counts.
 //
 // Note it decodes only the TILE stream, which is the one carrying an explicit length prefix at
 // byte 0 — so this script needs none of core's message-walking, and stays plain JS.
@@ -94,21 +102,83 @@ const broad = measured[measured.length - 1];
 // Distinct terms only: at a small dictionary the quantiles can collide, and three identical
 // presets would make "switch principal and watch the map change" untestable while looking fine.
 const chosen = [];
-for (const [label, m] of [
-  ['narrow', narrow],
-  ['medium', medium],
-  ['broad', broad]
-]) {
+const singles = args.ranks ? [['narrow', narrow]] : [['narrow', narrow], ['medium', medium], ['broad', broad]];
+for (const [label, m] of singles) {
   if (chosen.some((c) => c.terms[0] === m.term)) continue;
   chosen.push({label: `${label} — term ${m.term}`, terms: [m.term], visible: m.visible});
 }
 
-const allTerms = measured.map((m) => m.term);
-chosen.push({
-  label: `everything (${allTerms.length} terms)`,
-  terms: allTerms,
-  visible: await visibleFor(allTerms)
-});
+if (args.ranks) {
+  const {readFile} = await import('node:fs/promises');
+  const rankedRows = JSON.parse(await readFile(args.ranks, 'utf8'));
+  const ranked = rankedRows.map((r) => String(r.term));
+  const pairShare = rankedRows.map((r) => r.pairs);
+  const totalPairs = pairShare.reduce((a, b) => a + b, 0);
+  // The denominator is the corpus a maximal principal can see, not the item count — measured the
+  // same way as everything else. The whole dictionary in one authorise call would be a megabyte of
+  // auth_data; the top slice of a Zipf-shaped ranking is within a hair of the same union.
+  const CORPUS_PROBE_TERMS = Math.min(ranked.length, 4096);
+  const corpus = await visibleFor(ranked.slice(0, CORPUS_PROBE_TERMS));
+  console.log(`corpus visible (top ${CORPUS_PROBE_TERMS} ranked terms): ${corpus.toLocaleString()}`);
+
+  // **A small target cannot start at the head of a Zipf ranking** — the head term alone was 5.5%
+  // of this corpus, so no prefix is 1%. Each target instead starts at the first term whose own
+  // pair share is at or below the target, and takes the shortest run of consecutive ranked terms
+  // from there whose MEASURED union reaches it: pair shares choose where to start, the service
+  // decides when the run is long enough. ~log2 service calls per target.
+  // In PAIR space, scaled by the measured items-per-pair ratio: a term's pair share overstates
+  // its visible share by the corpus's term multiplicity (~2.2x here), and without the scaling the
+  // sparse preset started on a term twice its target.
+  const startFor = (fraction) => {
+    const pairFraction = fraction * (corpus / totalPairs);
+    let i = 0;
+    while (i < ranked.length - 1 && pairShare[i] / totalPairs > pairFraction) i++;
+    return i;
+  };
+  const runReaching = async (start, target) => {
+    const unions = new Map();
+    const unionOf = async (n) => {
+      if (!unions.has(n)) unions.set(n, await visibleFor(ranked.slice(start, start + n)));
+      return unions.get(n);
+    };
+    let lo = 1;
+    let hi = Math.min(4096, ranked.length - start);
+    if ((await unionOf(hi)) < target) return {n: hi, visible: await unionOf(hi)};
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if ((await unionOf(mid)) >= target) hi = mid;
+      else lo = mid + 1;
+    }
+    return {n: lo, visible: await unionOf(lo)};
+  };
+
+  for (const [label, fraction] of [
+    ['sparse', 0.01],
+    ['medium', 0.1],
+    ['heavy', 0.5]
+  ]) {
+    const start = startFor(fraction);
+    const {n, visible} = await runReaching(start, corpus * fraction);
+    const pct = (100 * visible) / corpus;
+    chosen.push({
+      label: `${label} — ${pct < 10 ? pct.toFixed(1) : Math.round(pct)}% (${n} terms)`,
+      terms: ranked.slice(start, start + n),
+      visible
+    });
+  }
+  chosen.push({
+    label: `full — top ${CORPUS_PROBE_TERMS} terms`,
+    terms: ranked.slice(0, CORPUS_PROBE_TERMS),
+    visible: corpus
+  });
+} else {
+  const allTerms = measured.map((m) => m.term);
+  chosen.push({
+    label: `everything (${allTerms.length} terms)`,
+    terms: allTerms,
+    visible: await visibleFor(allTerms)
+  });
+}
 
 const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
 await writeFile(out, `${JSON.stringify(chosen, null, 2)}\n`);

@@ -2,7 +2,11 @@
 //! plus `/healthz`/`/readyz`. Bearer auth is a session token (`Session::token`), minted by the
 //! session plane's `/session/authorise`.
 
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
@@ -11,17 +15,19 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 
 use tessera_types::{GenerationStamp, TesseraId};
-use tessera_wire::{viewport_ipc, ScalarColumn, ViewportColumns};
+use tessera_wire::{points_frame, sub_cells_frame, tiles_frame, trailer_frame, ScalarColumn};
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::CancelToken;
+use tessera_engine::{CancelToken, SinkClosed, SinkResult, ViewportHead, ViewportSink};
 
 use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::AppState;
+use crate::state::{AppState, GatePermits};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // The dev-only browser seam: absent `serve.dev_cors_origins` mounts nothing, so the seam is
@@ -82,18 +88,18 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-/// Flips a [`CancelToken`] on drop. Created before the admission-gate acquire so it lives
-/// for the whole `viewport` handler body, and held as a local there — axum dropping the handler's
-/// future (the only signal this transport gives for "the client went away": there is no explicit
-/// disconnect callback) drops this guard too, which is what flips the flag the `spawn_blocking`
-/// closure's engine call is polling. Only a *clone* of the token moves into that closure; this
-/// guard keeps the original.
+/// Flips a [`CancelToken`] on drop. Created before the admission-gate acquire, held by the
+/// `viewport` handler while it awaits the first flush, then moved into the [`StreamBody`] for
+/// the life of the response — so the one transport signal for "the client went away" (the
+/// future, and later the body, being dropped) flips the flag the `spawn_blocking` producer's
+/// engine call is polling, at whichever phase the disconnect lands. Only a *clone* of the token
+/// moves into that closure; this guard keeps the original.
 ///
-/// **Disarmed on the normal path**, just before the handler constructs its response, so a
-/// completed request's own guard drop (at function return) does not flip a token nobody is
-/// reading any more. Flipping it late would in fact be harmless — the engine call has already
-/// returned by the time this guard would drop on that path — but disarming keeps "cancelled"
-/// meaning what it says: this request was cut short, not merely finished.
+/// **Disarmed on clean completion only** — [`StreamBody`] disarms when the channel ends with
+/// the trailer sent, so a completed stream's guard drop does not flip a token nobody is reading
+/// any more. Flipping it late would in fact be harmless — the producer has already returned on
+/// that path — but disarming keeps "cancelled" meaning what it says: this request was cut
+/// short, not merely finished.
 struct CancelGuard {
     token: CancelToken,
     armed: bool,
@@ -316,7 +322,20 @@ async fn categories(
 struct ViewportReq {
     slice: String,
     zoom: u8,
-    bbox: [f64; 4],
+    /// Absent exactly when `tiles` is present — the two are alternatives, not a pair.
+    #[serde(default)]
+    bbox: Option<[f64; 4]>,
+    /// The exact depth-`zoom` Morton prefixes to answer for, in place of a bbox.
+    ///
+    /// A client holding a replica omits every tile it can prove it already has, and an omitted tile
+    /// costs the engine nothing at all — no range derivation, counting, selection or gather. That
+    /// is what makes server work scale with novelty rather than with viewport area.
+    ///
+    /// Refused, never silently preferred, when a bbox is sent too: two ways of naming a tile set in
+    /// one request is a contradiction the server must not resolve on the caller's behalf, and
+    /// `/v1/region` already sets that precedent with its "exactly one of polygon/bbox".
+    #[serde(default)]
+    tiles: Option<Vec<u64>>,
     #[serde(default)]
     k: Option<usize>,
     #[serde(default)]
@@ -331,31 +350,177 @@ struct ViewportReq {
     underlay_offset: Option<u8>,
 }
 
-/// Everything a `spawn_blocking` viewport closure hands back to the async side: the wire bytes
-/// already framed by `viewport_ipc`, the stamp to echo in `x-tessera-pin`, whether the client's own
-/// stamp is stale, and the timing figures
-/// `x-tessera-stage-ns` needs — computed inside the closure since they describe work done there
-/// (`arrow_serialise_ns`) or by the engine call it wraps (`timings`). Response/header
-/// construction is deliberately NOT here: that stays on the reactor, since it neither blocks nor
-/// costs measurable CPU.
-struct ViewportOutcome {
-    bytes: Vec<u8>,
+/// The streamed viewport's channel capacity, in frames. Two: one in flight to hyper, one built
+/// ahead — the backpressure bound `streamed-serving.md` §5 states, and all a stalled client can
+/// hold beyond hyper's own write buffer once the producer has been shed.
+const STREAM_CHANNEL_FRAMES: usize = 2;
+
+/// [`StreamBody`]'s three completion states, published by the producer *before* it drops the
+/// channel sender, so the body's end-of-channel read is never ambiguous.
+const STREAM_RUNNING: u8 = 0;
+const STREAM_COMPLETE: u8 = 1;
+const STREAM_ABORTED: u8 = 2;
+
+/// One streamed `/v1/viewport` producer→handler handoff: everything the handler needs to
+/// construct the `Response` — the header coordinates and the serialised first flush — sent once,
+/// when the engine's sweep completes. Errors up to that point travel the same oneshot as `Err`,
+/// so every pre-first-flush failure keeps its typed status exactly as before streaming
+/// (`streamed-serving.md` §5).
+struct FirstFlush {
+    coordinates: tessera_engine::ViewCoordinates,
     stamp: GenerationStamp,
     stale: bool,
-    timings: tessera_engine::StageTimings,
-    arrow_serialise_ns: u64,
+    /// The serialised tiles frame plus, when the §3.3 underlay was requested, the sub-cells
+    /// frame — the body's first bytes, prepended ahead of the channel.
+    first_frames: Vec<u8>,
+    /// Post-admission time to first-flush-ready, µs — the `x-tessera-server-us` header, which is
+    /// the latency gate's figure; the whole-stream total is the trailer's `stream_us`.
+    server_us: u64,
 }
 
-/// The engine call through Arrow IPC framing: everything CPU-bound or file-IO-bearing in this
-/// handler, run inside `spawn_blocking`. Takes `&AppState`/`&Session` by reference —
-/// the caller owns both as `'static` values moved into the closure, so a reference borrowed for
-/// the closure's own body lifetime is all this needs.
-fn run_viewport(
+/// The engine's [`ViewportSink`], wired to the transport: serialises each delivery to frames
+/// (`tessera-wire`), hands the first flush to the waiting handler, and blocking-sends the rest
+/// into the bounded body channel under the two deadlines. Owns the request's [`GatePermits`] so
+/// the compute permit can be released at exactly the sweep/emit boundary and the slot permit
+/// exactly when the producer returns.
+///
+/// I10 is upheld structurally on this path exactly as before streaming: no entity id is
+/// available to leak here, because the engine never gathers one (`tessera_engine::PointColumns`'
+/// doc) — the wire identity is `tessera_id` carried through unchanged, and scalar names come
+/// from the head, minted from the SAME generation the points are gathered from (never a second
+/// `Engine::meta` call — lifecycle §1.1).
+struct WireSink {
+    head: Option<ViewportHead>,
+    first_tx: Option<oneshot::Sender<Result<FirstFlush, ApiError>>>,
+    tx: mpsc::Sender<Bytes>,
+    permits: GatePermits,
+    /// Taken post-admission, before the producer was spawned, so blocking-pool scheduling wait
+    /// lands inside `server_us` — the same accounting as before streaming.
+    start: Instant,
+    stall: Duration,
+    deadline: Duration,
+    /// Set at the first flush; the whole-stream deadline is measured from it.
+    first_flush_at: Option<Instant>,
+    arrow_serialise_ns: u64,
+    points_total: u64,
+    flushes: u64,
+}
+
+impl WireSink {
+    /// Blocking-send one frame under the two deadlines `streamed-serving.md` §5 requires: a
+    /// per-send stall budget (a reader that stopped) and a whole-stream budget from first flush
+    /// (a reader that drips — the shape a per-send deadline alone admits). Refusal is
+    /// [`SinkClosed`], which the engine treats as cancellation.
+    fn send(&mut self, frame: Vec<u8>) -> SinkResult {
+        let send_started = Instant::now();
+        let mut item = Bytes::from(frame);
+        loop {
+            if self
+                .first_flush_at
+                .is_some_and(|t| t.elapsed() >= self.deadline)
+            {
+                return Err(SinkClosed);
+            }
+            match self.tx.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(back)) => {
+                    if send_started.elapsed() >= self.stall {
+                        return Err(SinkClosed);
+                    }
+                    item = back;
+                    // A sleep poll, 5 ms against a 10 s default stall budget: tokio's mpsc has
+                    // no blocking-send-with-timeout, and waking a sync thread from the async
+                    // receiver would need a second channel to save a wait this coarse. The
+                    // parked thread is the one this request already holds.
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(SinkClosed),
+            }
+        }
+    }
+}
+
+impl ViewportSink for WireSink {
+    fn head(&mut self, head: ViewportHead) -> SinkResult {
+        self.head = Some(head);
+        Ok(())
+    }
+
+    fn counts(
+        &mut self,
+        tiles: &[tessera_engine::TileCount],
+        sub_cells: Option<&[tessera_engine::SubCellCount]>,
+    ) -> SinkResult {
+        let serialise_start = Instant::now();
+        let tile: Vec<u64> = tiles.iter().map(|t| t.tile).collect();
+        let visible: Vec<u64> = tiles.iter().map(|t| t.visible).collect();
+        let matched: Vec<u64> = tiles.iter().map(|t| t.matched).collect();
+        let served: Vec<u64> = tiles.iter().map(|t| t.served).collect();
+        let mut frames = tiles_frame(&tile, &visible, &matched, &served);
+        // `Some` of an empty slice is a present, zero-row frame; `None` is no frame at all —
+        // presence is decided by the request, not the result (contracts §3.2's r12 rule).
+        if let Some(cells) = sub_cells {
+            let cell: Vec<u64> = cells.iter().map(|c| c.cell).collect();
+            let count: Vec<u64> = cells.iter().map(|c| c.count).collect();
+            frames.extend_from_slice(&sub_cells_frame(&cell, &count));
+        }
+        self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
+
+        // The sweep is done: the compute permit goes back to the gate here, at exactly the
+        // boundary where this request stops computing at its own pace and starts emitting at
+        // the client's (`streamed-serving.md` §5). The slot permit stays until the producer
+        // returns.
+        self.permits.release_compute();
+        self.first_flush_at = Some(Instant::now());
+
+        let head = self.head.as_ref().expect("head precedes counts");
+        let first = FirstFlush {
+            coordinates: head.coordinates,
+            stamp: head.stamp.clone(),
+            stale: head.stale,
+            first_frames: frames,
+            server_us: self.start.elapsed().as_micros() as u64,
+        };
+        // A dropped receiver is the handler future gone — the client disconnected during the
+        // sweep — which is the same signal as a closed body channel: stop.
+        self.first_tx
+            .take()
+            .expect("counts is delivered exactly once")
+            .send(Ok(first))
+            .map_err(|_| SinkClosed)
+    }
+
+    fn points(&mut self, chunk: tessera_engine::PointColumns) -> SinkResult {
+        let head = self.head.as_ref().expect("head precedes points");
+        let serialise_start = Instant::now();
+        // The wire's buffers are the engine's buffers borrowed — no transpose, no reshaping;
+        // names zip positionally with the chunk's columns, both in manifest order.
+        let scalar_refs: Vec<(&str, ScalarColumn)> = head
+            .declared_scalars
+            .iter()
+            .zip(&chunk.scalars)
+            .map(|(d, col)| (d.name.as_str(), column_ref(col)))
+            .collect();
+        let frame = points_frame(&chunk.tessera_ids, &chunk.codes, &scalar_refs);
+        self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
+        self.points_total += chunk.tessera_ids.len() as u64;
+        self.flushes += 1;
+        self.send(frame)
+    }
+}
+
+/// The producer: the engine call through frame serialisation, run inside `spawn_blocking` for
+/// the whole life of the stream. Returns nothing — every outcome is communicated through the
+/// oneshot (pre-first-flush errors), the channel (frames), or the shared state (completion
+/// versus abort), and the permits release when `sink` drops at this function's end.
+fn run_viewport_stream(
     state: &AppState,
     session: &tessera_engine::Session,
     req: ViewportReq,
     cancel: CancelToken,
-) -> Result<ViewportOutcome, ApiError> {
+    mut sink: WireSink,
+    shared: Arc<AtomicU8>,
+) {
     let stamp = req.pin.map(GenerationStamp::from);
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
@@ -367,82 +532,134 @@ fn run_viewport(
         .unwrap_or_else(|| state.engine.config().k_max_marks)
         .min(state.max_k);
 
-    let out = state
-        .engine
-        .viewport(
-            session,
-            ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
-                .stamp(stamp)
-                .underlay_offset(req.underlay_offset)
-                .cancel(Some(cancel)),
-        )
-        .map_err(map_engine_error)?;
-
-    // **Nothing is reshaped here any more.** The engine gathers column-major, so the wire's
-    // buffers are the engine's buffers borrowed — no transpose, and no second row-major pass to
-    // pull out the identities and positions.
-    //
-    // I10 (entity ids never cross the trust boundary) is upheld structurally: no entity id is
-    // available to leak here, because the engine never gathers one on this path (see
-    // `tessera_engine::PointColumns`' doc). The wire identity is `tessera_id` directly, carried
-    // through unchanged; there is no per-session translation left to do (`tessera-wire`'s
-    // `HandleTable` is retained for node handles, which are not on this path —
-    // docs/decisions/0032-delete-the-dead-handle-table.md).
-    //
-    // Names come from `out.scalar_names`, populated by `Engine::viewport` from the SAME
-    // generation it already loaded for this request — not a second `state.engine.meta()` call.
-    // That second call would `load_full()` the generation pointer again, against lifecycle
-    // §1.1's "exactly once, at request start"; the names are identical either way (same
-    // manifest, same order), so this changes no response byte.
-    let point_ids = &out.points.tessera_ids;
-    let codes = &out.points.codes;
-    let scalar_refs: Vec<(&str, ScalarColumn)> = out
-        .scalar_names
-        .iter()
-        .zip(&out.points.scalars)
-        .map(|(name, col)| (name.as_str(), column_ref(col)))
-        .collect();
-
-    let tiles: Vec<u64> = out.tiles.iter().map(|t| t.tile).collect();
-    let visible: Vec<u64> = out.tiles.iter().map(|t| t.visible).collect();
-    let matched: Vec<u64> = out.tiles.iter().map(|t| t.matched).collect();
-    let served: Vec<u64> = out.tiles.iter().map(|t| t.served).collect();
-
-    // Absent, not empty, when the underlay was not requested: `viewport_ipc` emits zero trailing
-    // bytes for `None`, which is what keeps the default payload byte-identical to the pre-underlay
-    // format (see `tessera_wire::payload`'s module doc).
-    let sub_cells: Option<(Vec<u64>, Vec<u64>)> =
-        req.underlay_offset.filter(|&o| o > 0).map(|_| {
-            (
-                out.sub_cells.iter().map(|c| c.cell).collect(),
-                out.sub_cells.iter().map(|c| c.count).collect(),
-            )
-        });
-
-    // Everything from the engine's return to here is response assembly, not serialisation; the
-    // engine's own breakdown stops at its last gather. Start the serialise clock at the call.
-    let serialise_start = std::time::Instant::now();
-    let bytes = viewport_ipc(&ViewportColumns {
-        tile: &tiles,
-        visible: &visible,
-        matched: &matched,
-        served: &served,
-        points_tessera_ids: point_ids,
-        codes,
-        scalars: &scalar_refs,
-        sub_cells: sub_cells
-            .as_ref()
-            .map(|(cells, counts)| (cells.as_slice(), counts.as_slice())),
+    // **Deduplicated here, not trusted from the caller — first occurrence kept, order
+    // preserved.** A repeated tile would be served — and drawn — twice, inflating every count a
+    // client derives from the response. The order is NOT normalised: the request's own order is
+    // the response's order (contracts §3.2), which is how a streaming client gets its tiles
+    // centre-out by ordering its own list. The engine's range derivation sorts internally, so
+    // arbitrary order costs nothing there.
+    let tiles = req.tiles.map(|list| {
+        let mut seen = std::collections::HashSet::with_capacity(list.len());
+        list.into_iter()
+            .filter(|t| seen.insert(*t))
+            .collect::<Vec<_>>()
     });
-    let arrow_serialise_ns = serialise_start.elapsed().as_nanos() as u64;
+    // Validated as present-and-alone by the handler before admission; the default here is inert.
+    let bbox = req.bbox.unwrap_or([0.0, 0.0, 0.0, 0.0]);
 
-    Ok(ViewportOutcome {
-        bytes,
-        stamp: out.stamp,
-        stale: out.stale,
-        timings: out.timings,
-        arrow_serialise_ns,
-    })
+    let outcome = state.engine.viewport_stream(
+        session,
+        ViewportRequest::new(&req.slice, req.zoom, bbox, k)
+            .tiles(tiles.as_deref())
+            .stamp(stamp)
+            .underlay_offset(req.underlay_offset)
+            .cancel(Some(cancel)),
+        state.stream_flush_bytes,
+        &mut sink,
+    );
+
+    match outcome {
+        Ok(timings) => {
+            // The trailer: exactly this key set, and the conformance comparator asserts it —
+            // the one server-authored JSON region of the body must not quietly acquire a field
+            // the comparator never sees (`streamed-serving.md` §7). `stream_us` includes
+            // client-paced channel waits and is deliberately NOT named `server_us`: the
+            // server-cost figure is the first-flush header.
+            let mut trailer = serde_json::json!({
+                "stream_us": sink.start.elapsed().as_micros() as u64,
+                "arrow_serialise_ns": sink.arrow_serialise_ns,
+                "points": sink.points_total,
+                "flushes": sink.flushes,
+            });
+            if state.stage_timing {
+                if let Some(csv) = stage_header(&timings, sink.arrow_serialise_ns) {
+                    trailer["stage_ns"] = serde_json::Value::String(csv);
+                }
+            }
+            let frame = trailer_frame(trailer.to_string().as_bytes());
+            let end_state = if sink.send(frame).is_ok() {
+                STREAM_COMPLETE
+            } else {
+                STREAM_ABORTED
+            };
+            shared.store(end_state, Ordering::SeqCst);
+        }
+        Err(e) => match sink.first_tx.take() {
+            // Pre-first-flush: nothing is committed, and the handler is waiting on this
+            // channel — the typed status reaches the client exactly as before streaming,
+            // including `Cancelled → 500 fail-closed` (a pre-status cancellation means the
+            // requester is gone and nobody reads the status).
+            Some(tx) => {
+                let _ = tx.send(Err(map_engine_error(e)));
+            }
+            // Mid-body: the 200 is committed. No trailer is ever sent — the missing kind-4
+            // frame marks the response incomplete — and the body wrapper turns the channel's
+            // end into a transport abort, so the truncation is loud twice over
+            // (`streamed-serving.md` §6). Cancellation here is the client's own disconnect or
+            // shed and logs nothing; anything else is a server fault worth a line.
+            None => {
+                if !matches!(e, tessera_engine::EngineError::Cancelled) {
+                    tracing::warn!(error = %e, "viewport stream aborted mid-body");
+                }
+                shared.store(STREAM_ABORTED, Ordering::SeqCst);
+            }
+        },
+    }
+    // `sink` drops here — after the state stores above, which is what makes the body wrapper's
+    // end-of-channel read unambiguous — releasing the channel sender and, through
+    // `GatePermits`' drop, the slot permit (and the `streaming` gauge entry, if the sweep
+    // completed).
+}
+
+/// The streamed response body: the first flush, then the producer's frames, then — only when
+/// the shared state says the trailer went out — a clean end. Owns the request's [`CancelGuard`]
+/// for the response's lifetime: a client that disconnects mid-stream drops this body, which
+/// flips the token (the producer observes it at its next checkpoint) and closes the channel
+/// (the producer's next send fails immediately).
+struct StreamBody {
+    first: Option<Bytes>,
+    rx: mpsc::Receiver<Bytes>,
+    shared: Arc<AtomicU8>,
+    cancel_guard: CancelGuard,
+    /// Fused: once the end (clean or aborted) has been yielded, every later poll is
+    /// `Ready(None)` rather than a second abort error — hyper stops at the first, but a
+    /// combinator that polls past it must not observe a stream that un-ends.
+    done: bool,
+}
+
+impl futures_core::Stream for StreamBody {
+    type Item = std::result::Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
+        }
+        if let Some(first) = this.first.take() {
+            return Poll::Ready(Some(Ok(first)));
+        }
+        match this.rx.poll_recv(cx) {
+            Poll::Ready(Some(frame)) => Poll::Ready(Some(Ok(frame))),
+            Poll::Ready(None) => {
+                this.done = true;
+                if this.shared.load(Ordering::SeqCst) == STREAM_COMPLETE {
+                    // Clean end: the trailer was the last frame, the producer has returned,
+                    // and disarming keeps "cancelled" meaning "cut short" — see `CancelGuard`.
+                    this.cancel_guard.disarm();
+                    Poll::Ready(None)
+                } else {
+                    // Aborted — an emit-phase engine error, a stall shed, or the stream
+                    // deadline. Surfacing an error makes hyper cut the connection rather than
+                    // end the chunked body cleanly: the missing trailer already marks the
+                    // response incomplete, and this makes it loud (`streamed-serving.md` §6).
+                    Poll::Ready(Some(Err(std::io::Error::other(
+                        "viewport stream aborted before its trailer",
+                    ))))
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 async fn viewport(
@@ -453,25 +670,58 @@ async fn viewport(
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
-    if req.bbox.iter().any(|v| !v.is_finite())
-        || req.bbox[0] > req.bbox[2]
-        || req.bbox[1] > req.bbox[3]
-    {
-        return Err(ApiError::Contract(
-            "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
-        ));
-    }
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
+    }
+
+    // **Exactly one of `bbox` and `tiles`.** Both is a contradiction the server must not resolve on
+    // the caller's behalf — silently preferring one would leave a client believing it had asked for
+    // a region it never received — and neither leaves nothing to answer for. `/v1/region`'s
+    // "exactly one of polygon/bbox" is the same shape.
+    match (&req.bbox, &req.tiles) {
+        (Some(bbox), None) => {
+            if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
+                return Err(ApiError::Contract(
+                    "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
+                ));
+            }
+        }
+        (None, Some(tiles)) => {
+            // A prefix carries no depth of its own, so one with bits above `zoom` names a tile at a
+            // depth this request is not asking about. Refused rather than masked off, for the same
+            // reason `underlay_offset` is: a silently reduced request hands back tiles the client
+            // cannot interpret.
+            let shift = 2 * u32::from(req.zoom);
+            if let Some(bad) = tiles
+                .iter()
+                .find(|&&prefix| shift < 64 && prefix >> shift != 0)
+            {
+                return Err(ApiError::Contract(format!(
+                    "tile prefix {bad} has bits above depth {}",
+                    req.zoom
+                )));
+            }
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError::Contract(
+                "send exactly one of bbox and tiles, not both".to_string(),
+            ));
+        }
+        (None, None) => {
+            return Err(ApiError::Contract(
+                "send exactly one of bbox and tiles".to_string(),
+            ));
+        }
     }
 
     // The cancellation token and its drop-guard, created before the admission-gate acquire below
     // so the guard's lifetime spans the whole handler — a disconnect during the queue
     // wait is already free (dropping the `admit().await` future releases nothing that was ever
     // acquired), but creating the guard here rather than after admission keeps one token identity
-    // for the entire request and costs nothing extra.
+    // for the entire request and costs nothing extra. It moves into the `StreamBody` below, so
+    // its reach extends to the whole response, not just this handler's await.
     let cancel = CancelToken::new();
-    let mut cancel_guard = CancelGuard::new(cancel.clone());
+    let cancel_guard = CancelGuard::new(cancel.clone());
 
     // The two-stage admission gate. `admit()` sheds with `ApiError::Backpressure` (429) if the
     // outer slots semaphore has no permit to `try_acquire`, or if the inner compute semaphore does
@@ -481,79 +731,135 @@ async fn viewport(
 
     // Server-side timing, for the latency gate `scripts/bench_p99.py` checks. Not a wire-format
     // field — an observability-only response header, reported to microseconds so the gate can be
-    // checked without relying on end-to-end (client-observed) latency, which also includes
-    // HTTP/TCP/loopback overhead outside the engine's control.
+    // checked without relying on end-to-end (client-observed) latency.
     //
-    // **The clock starts AFTER admission**, so `x-tessera-server-us` means "server compute,
-    // excluding queueing"; bench baselines read it that way. `start` is nonetheless taken before
-    // `spawn_blocking`, so a blocking-pool scheduling wait lands inside `server_us` rather than in
-    // `x-tessera-admission-us`. The gate bounds that wait rather than removing it: at most
-    // `compute_admission` closures are admitted at a time, far under the blocking pool's
-    // 512-thread size, so in practice it is ~0 and this header is effectively compute-only.
-    // `admission_us` carries only the gate wait itself (`admit()`'s own two-stage acquire).
-    let start = std::time::Instant::now();
+    // **The clock starts AFTER admission and stops at first-flush-ready**, so
+    // `x-tessera-server-us` means "server compute to the first drawable flush, excluding
+    // queueing" — the server-cost part of a streamed response, and the latency gate's figure;
+    // the whole-stream wall total (which includes client-paced sends) is the trailer's
+    // `stream_us`, deliberately under a different name. `start` is taken before
+    // `spawn_blocking`, so a blocking-pool scheduling wait lands inside `server_us` rather than
+    // in `x-tessera-admission-us`, exactly as before streaming.
+    let start = Instant::now();
 
-    // The engine call through Arrow IPC framing is CPU-bound (and, on a cold row-projection
-    // or fragment build, file-IO-bearing) with no `.await` of its own — run synchronously here it
-    // would monopolise this reactor thread for the whole viewport, starving every other request
-    // sharing this process's tokio worker threads, `/healthz` included. `spawn_blocking` moves it
-    // to tokio's blocking-thread pool instead.
+    // The producer: engine call through frame serialisation, CPU-bound then client-paced, with
+    // no `.await` of its own — `spawn_blocking` moves it to tokio's blocking-thread pool, where
+    // it lives for the whole stream (parked in channel sends while the client reads;
+    // `streamed-serving.md` §5 states the pool arithmetic).
     //
-    // Closure capture: `state` is a cloned `Arc<AppState>` (cheap; `Engine: Send + Sync` is what
-    // makes this sound), `entry` is the already-cloned `Arc<SessionEntry>`
-    // `authenticated_session` returned, `req` is moved in whole (its fields were only ever
-    // borrowed above), and `gate_permits` moves in so both permits release
-    // only when this closure returns — correct accounting even if the client has disconnected.
-    // Only a *clone* of `cancel` moves in — `cancel_guard` keeps the original outside the
-    // closure, on the reactor, where a client disconnect can flip it. If the client disconnects
-    // (axum drops this whole handler future), `cancel_guard` drops and flips the flag; the engine
-    // call inside the closure observes it at its next checkpoint and returns
-    // `Err(EngineError::Cancelled)`, so the closure itself returns `Err` and `_gate_permits` drops
-    // — releasing both `OwnedSemaphorePermit`s well before the closure would otherwise have run to
-    // completion.
+    // **Detached, deliberately.** The handler awaits the first flush on the oneshot below, not
+    // the closure itself: the closure outlives this handler by the length of the stream. Its
+    // panic is observable as the oneshot closing (mapped to the same fail-closed 500 the old
+    // `map_join_error` produced), or — after the first flush — as a body abort.
+    //
+    // Closure capture: `state` is a cloned `Arc<AppState>`, `entry` the `Arc<SessionEntry>`,
+    // `req` moved whole, `sink` carries the `GatePermits` (released at the sweep/emit boundary
+    // and at producer exit — see `WireSink`), and only a *clone* of `cancel` moves in:
+    // `cancel_guard` keeps the original, first here, then inside the response body.
+    let (first_tx, first_rx) = oneshot::channel();
+    let (tx, rx) = mpsc::channel::<Bytes>(STREAM_CHANNEL_FRAMES);
+    let shared = Arc::new(AtomicU8::new(STREAM_RUNNING));
+    let sink = WireSink {
+        head: None,
+        first_tx: Some(first_tx),
+        tx,
+        permits: gate_permits,
+        start,
+        stall: Duration::from_millis(state.stream_write_stall_ms),
+        deadline: Duration::from_millis(state.stream_deadline_ms),
+        first_flush_at: None,
+        arrow_serialise_ns: 0,
+        points_total: 0,
+        flushes: 0,
+    };
     let closure_state = Arc::clone(&state);
     let closure_cancel = cancel.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let _gate_permits = gate_permits;
-        run_viewport(&closure_state, &entry.session, req, closure_cancel)
-    })
-    .await
-    .map_err(map_join_error)??;
+    let closure_shared = Arc::clone(&shared);
+    drop(tokio::task::spawn_blocking(move || {
+        run_viewport_stream(
+            &closure_state,
+            &entry.session,
+            req,
+            closure_cancel,
+            sink,
+            closure_shared,
+        );
+    }));
 
-    // Normal path reached — disarm the guard so its own drop (at this function's return,
-    // whichever branch below) does not pointlessly flip a token nobody downstream is reading any
-    // more. See `CancelGuard`'s doc for why leaving it armed here would be harmless, not merely
-    // wrong-looking.
-    cancel_guard.disarm();
+    let first = match first_rx.await {
+        Ok(Ok(first)) => first,
+        // Every pre-first-flush failure, with its typed status — auth ran earlier, so these are
+        // the engine's own refusals (422/404/429/500), exactly the set the awaited-closure
+        // shape produced.
+        Ok(Err(e)) => return Err(e),
+        // The producer died without delivering anything — a panic in the closure. The same
+        // fail-closed 500 `map_join_error` produced when this handler awaited the JoinHandle;
+        // see that function for why the detail is fixed rather than forwarded.
+        Err(_) => {
+            return Err(ApiError::FailClosed(
+                "the viewport producer terminated before its first flush".to_string(),
+            ))
+        }
+    };
 
-    let pin_header = serde_json::to_string(&PinDto::from(&outcome.stamp))
+    let pin_header = serde_json::to_string(&PinDto::from(&first.stamp))
         .expect("PinDto serialisation cannot fail");
-    let server_us = start.elapsed().as_micros().to_string();
 
-    let mut response = Response::builder()
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
+        // **The content coordinate travels as an entity tag** (`delta-serving.md` §2). The
+        // semantics are exactly HTTP's — process my declarations only if this still holds — and
+        // contracts §0.2 adopts published formats rather than inventing. One documented deviation:
+        // a mismatched `If-Match` does not produce `412`, it produces the full response, because
+        // the request remains perfectly answerable and refusing it would turn the fail-closed path
+        // into a failure rather than a fallback. Weak-tag syntax is not used; this is an exact
+        // comparison of an opaque value.
+        .header("etag", format!("\"{}\"", hex16(&first.coordinates.content_key)))
+        // The authorisation coordinate, which governs whether a held band may be RENDERED at all
+        // and is therefore the client's cache PARTITION key. Separate from the entity tag because
+        // it answers a different question and moves on a different schedule: HTTP has one
+        // validator slot and this is not a validator.
+        .header(
+            "x-tessera-identity-key",
+            hex16(&first.coordinates.identity_key),
+        )
         .header("x-tessera-pin", pin_header)
         // The staleness signal (`geometry-pinning.md` §7). A header rather than a body field
-        // because the body is Arrow IPC and this is one bit that every client — including one that
-        // only reads counts — should be able to see without decoding a batch. Always present, so a
-        // client never has to distinguish "fresh" from "the server did not say".
-        .header("x-tessera-stale", if outcome.stale { "1" } else { "0" })
-        .header("x-tessera-server-us", server_us)
+        // because the body is framed Arrow IPC and this is one bit that every client — including
+        // one that only reads counts — should be able to see without decoding a batch. Always
+        // present, so a client never has to distinguish "fresh" from "the server did not say".
+        .header("x-tessera-stale", if first.stale { "1" } else { "0" })
+        .header("x-tessera-server-us", first.server_us.to_string())
         .header("x-tessera-admission-us", admission_us.to_string());
 
-    if state.stage_timing {
-        if let Some(value) = stage_header(&outcome.timings, outcome.arrow_serialise_ns) {
-            response = response.header("x-tessera-stage-ns", value);
-        }
-    }
-
+    // No `x-tessera-stage-ns` header any more: whole-request timings cannot precede the body
+    // they describe, so the stage breakdown rides the trailer frame (same double gate).
     Ok(response
-        .body(Body::from(outcome.bytes))
+        .body(Body::from_stream(StreamBody {
+            first: Some(Bytes::from(first.first_frames)),
+            rx,
+            shared,
+            cancel_guard,
+            done: false,
+        }))
         .expect("response construction cannot fail"))
 }
 
-/// The `x-tessera-stage-ns` value: a fixed-order CSV of unsigned integers, no names.
+/// Lower-case hex of an opaque 16-byte coordinate. Not a checksum and not reversible by a client:
+/// the only operation defined on it is equality against one the server minted earlier.
+fn hex16(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// The trailer's `stage_ns` value (formerly the `x-tessera-stage-ns` header, which a streamed
+/// body cannot carry — whole-request timings cannot precede the body they describe): a
+/// fixed-order CSV of unsigned integers, no names.
 ///
 /// **Returns `None` in a build without `bench-timing`**, so a config that turns `stage_timing` on
 /// against a release binary emits nothing rather than a row of zeros that reads like a free

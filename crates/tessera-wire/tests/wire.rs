@@ -1,12 +1,15 @@
-//! `tessera-wire`'s handle tables and Arrow IPC payloads (I10 — the trust boundary between
-//! entity space and the wire).
+//! `tessera-wire`'s handle tables and framed Arrow IPC payloads (I10 — the trust boundary
+//! between entity space and the wire; contracts §3.2 r26 — the streamed frame sequence).
 
 use arrow::array::{Array, UInt64Array};
 use arrow::datatypes::DataType;
 use arrow::ipc::reader::StreamReader;
 use tessera_types::{EntityId, Handle};
 use tessera_wire::handles::HandleTable;
-use tessera_wire::payload::{viewport_ipc, ScalarColumn, ViewportColumns};
+use tessera_wire::{
+    points_frame, split_frames, sub_cells_frame, tiles_frame, trailer_frame, ScalarColumn,
+    FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
+};
 
 /// (a) Handle stability + per-session isolation: the same entity, minted in two independent
 /// tables, gets a handle stable within each table but not necessarily equal across tables.
@@ -42,38 +45,42 @@ fn entity_of_an_unminted_handle_is_none() {
     assert_eq!(table.entity_of(Handle::new(99)), None);
 }
 
-/// (c) Encode a viewport payload, decode both batches with `StreamReader`, assert schemas and
-/// values round-trip.
+/// One well-formed body from the frame builders, in contract order. The chunked points are two
+/// frames on purpose: chunk boundaries are not contract, and a reader that only handles one
+/// frame is wrong.
+fn build_body() -> Vec<u8> {
+    let counts_a = [70u64, 80];
+    let counts_b = [90u64];
+    let mut body = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1]);
+    body.extend_from_slice(&points_frame(
+        &[0, 1],
+        &[1, 2],
+        &[("count", ScalarColumn::U64(&counts_a))],
+    ));
+    body.extend_from_slice(&points_frame(
+        &[2],
+        &[3],
+        &[("count", ScalarColumn::U64(&counts_b))],
+    ));
+    body.extend_from_slice(&trailer_frame(
+        br#"{"stream_us":1,"arrow_serialise_ns":2,"points":3,"flushes":2}"#,
+    ));
+    body
+}
+
+/// (c) Encode a framed viewport body, walk it with `split_frames`, decode every Arrow payload
+/// with `StreamReader`, and assert schemas, values and the cross-frame concatenation round-trip.
 #[test]
-fn viewport_payload_round_trips_through_arrow_ipc() {
-    let tile = [30u64, 31];
-    let visible = [10u64, 5];
-    let matched = [10u64, 5];
-    let tessera_ids = [0u64, 1, 2];
-    let codes = [1u64, 2, 3];
-    let counts = [70u64, 80, 90];
-    let scalars = [("count", ScalarColumn::U64(&counts))];
+fn viewport_frames_round_trip_through_arrow_ipc() {
+    let body = build_body();
+    let frames = split_frames(&body).unwrap();
+    let kinds: Vec<u8> = frames.iter().map(|(k, _)| *k).collect();
+    assert_eq!(
+        kinds,
+        vec![FRAME_TILES, FRAME_POINTS, FRAME_POINTS, FRAME_TRAILER]
+    );
 
-    // Two tiles serving 2 and 1 of the three points: `served` must sum to the points length, and
-    // `viewport_ipc` asserts that, because the points batch is a flat concatenation whose only
-    // grouping key is `served`.
-    let served = [2u64, 1];
-    let bytes = viewport_ipc(&ViewportColumns {
-        tile: &tile,
-        visible: &visible,
-        matched: &matched,
-        served: &served,
-        points_tessera_ids: &tessera_ids,
-        codes: &codes,
-        scalars: &scalars,
-        sub_cells: None,
-    });
-
-    let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let tile_bytes = &bytes[4..4 + tile_len];
-    let points_bytes = &bytes[4 + tile_len..];
-
-    let mut tile_reader = StreamReader::try_new(tile_bytes, None).unwrap();
+    let mut tile_reader = StreamReader::try_new(frames[0].1, None).unwrap();
     {
         let schema = tile_reader.schema();
         assert_eq!(schema.field(0).name(), "tile");
@@ -93,66 +100,51 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
             .downcast_ref::<UInt64Array>()
             .unwrap()
             .values(),
-        &tile
-    );
-    assert_eq!(
-        tile_batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &visible
+        &[30u64, 31]
     );
     assert!(tile_reader.next().is_none(), "exactly one tile batch");
 
-    let mut points_reader = StreamReader::try_new(points_bytes, None).unwrap();
-    {
-        let schema = points_reader.schema();
+    // The two points frames decode independently — each is a complete stream — and their rows
+    // concatenate to the full points set, in order.
+    let mut ids = Vec::new();
+    let mut counts = Vec::new();
+    for (kind, payload) in &frames {
+        if *kind != FRAME_POINTS {
+            continue;
+        }
+        let mut reader = StreamReader::try_new(*payload, None).unwrap();
+        let schema = reader.schema();
         assert_eq!(schema.field(0).name(), "tessera_id");
         assert_eq!(schema.field(1).name(), "code");
         assert_eq!(schema.field(2).name(), "count");
+        for batch in reader.by_ref() {
+            let batch = batch.unwrap();
+            let id = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let count = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            ids.extend(id.values().iter().copied());
+            counts.extend(count.values().iter().copied());
+        }
     }
-    let points_batch = points_reader.next().unwrap().unwrap();
-    assert_eq!(points_batch.num_rows(), 3);
-    assert_eq!(
-        points_batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &tessera_ids
-    );
-    assert_eq!(
-        points_batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &codes
-    );
-    assert_eq!(
-        points_batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &counts
-    );
-    assert!(points_reader.next().is_none(), "exactly one points batch");
+    assert_eq!(ids, vec![0, 1, 2]);
+    assert_eq!(counts, vec![70, 80, 90]);
 }
 
 /// (d) Byte-scan (I10): the 8-byte little-endian encoding of a set of entity ids must not appear
-/// anywhere in the encoded payload bytes — only the handles minted for them (and plain
-/// coordinate/scalar columns) may cross into `payload::viewport_ipc`. `viewport_ipc`'s identity
-/// column is `u64` now (it carries `tessera_id`, not a `Handle`), so the handles minted here are
-/// widened to `u64` before being passed in; the property under test — that the sensitive raw
-/// entity ids never appear as bytes anywhere in the payload — is unchanged.
+/// anywhere in the encoded body bytes — only the identities the caller passed (and plain
+/// coordinate/scalar columns) may cross into the frame builders. The identity column is `u64`
+/// (it carries `tessera_id`, not a `Handle`), so the handles minted here are widened to `u64`
+/// before being passed in; the property under test — that the sensitive raw entity ids never
+/// appear as bytes anywhere in the body — is unchanged from the pre-streaming format.
 #[test]
-fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
+fn frame_bytes_never_contain_a_raw_entity_id_encoding() {
     let sensitive_ids = [0xDEAD_BEEFu64, 7, 1_000_000];
 
     let mut table = HandleTable::new();
@@ -162,52 +154,30 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
         .collect();
     let codes = vec![1u64; handles.len()];
 
-    let one_tile = [0u64];
-    let n = [handles.len() as u64];
-    let bytes = viewport_ipc(&ViewportColumns {
-        tile: &one_tile,
-        visible: &n,
-        matched: &n,
-        served: &n,
-        points_tessera_ids: &handles,
-        codes: &codes,
-        scalars: &[],
-        sub_cells: None,
-    });
+    let n = handles.len() as u64;
+    let mut body = tiles_frame(&[0], &[n], &[n], &[n]);
+    body.extend_from_slice(&points_frame(&handles, &codes, &[]));
+    body.extend_from_slice(&trailer_frame(b"{}"));
 
     for &raw in &sensitive_ids {
         let needle = raw.to_le_bytes();
         assert!(
-            !bytes.windows(needle.len()).any(|window| window == needle),
-            "payload bytes contain the 8-byte LE encoding of entity id {raw:#x}"
+            !body.windows(needle.len()).any(|window| window == needle),
+            "body bytes contain the 8-byte LE encoding of entity id {raw:#x}"
         );
     }
 }
 
-/// The points batch's identity column is `tessera_id: uint64` — the wire identity after the
+/// The points frame's identity column is `tessera_id: uint64` — the wire identity after the
 /// boundary changed (decision 0006), replacing the per-session `handle: uint32` this crate
 /// used to emit.
 #[test]
-fn the_points_batch_identity_column_is_tessera_id() {
-    let tessera_ids = [10u64, 20, 30];
-    let codes = [1u64, 2, 3];
+fn the_points_frame_identity_column_is_tessera_id() {
+    let frame = points_frame(&[10, 20, 30], &[1, 2, 3], &[]);
+    let (kind, payload) = split_frames(&frame).unwrap()[0];
+    assert_eq!(kind, FRAME_POINTS);
 
-    let one_tile = [0u64];
-    let n = [tessera_ids.len() as u64];
-    let bytes = viewport_ipc(&ViewportColumns {
-        tile: &one_tile,
-        visible: &n,
-        matched: &n,
-        served: &n,
-        points_tessera_ids: &tessera_ids,
-        codes: &codes,
-        scalars: &[],
-        sub_cells: None,
-    });
-    let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let points_bytes = &bytes[4 + tile_len..];
-
-    let mut points_reader = StreamReader::try_new(points_bytes, None).unwrap();
+    let mut points_reader = StreamReader::try_new(payload, None).unwrap();
     let schema = points_reader.schema();
     assert_eq!(schema.field(0).name(), "tessera_id");
     assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
@@ -220,7 +190,7 @@ fn the_points_batch_identity_column_is_tessera_id() {
             .downcast_ref::<UInt64Array>()
             .unwrap()
             .values(),
-        &tessera_ids
+        &[10u64, 20, 30]
     );
 }
 
@@ -236,136 +206,36 @@ fn the_points_batch_identity_column_is_tessera_id() {
 #[test]
 fn payload_bytes_never_contain_the_identity_key() {}
 
-/// **The appended sub-cell stream must be invisible to a reader that does not know about it.**
-///
-/// This is the falsifiable form of the backward-compatibility claim in `payload`'s module doc.
-/// Rather than asserting that Arrow's `StreamReader` stops at the end-of-stream marker, it decodes
-/// a *three*-stream payload using exactly the two-stream procedure a pre-underlay reader used —
-/// take the `u32` prefix, slice the tile stream, treat **all** the rest as the points stream — and
-/// asserts the points batch still decodes with the right rows. If Arrow ever began rejecting
-/// trailing bytes, this fails rather than the claim quietly becoming false.
+/// The requested-but-empty underlay (contracts §3.2's r12 rule, carried into the framing): a
+/// present kind-2 frame whose payload is a schema-only, zero-row stream — decodable, zero rows,
+/// and visibly distinct from the unrequested case, which is no frame at all.
 #[test]
-fn a_pre_underlay_reader_still_decodes_a_payload_carrying_sub_cells() {
-    let tile = [7u64];
-    let visible = [9u64];
-    let matched = [9u64];
-    let served = [2u64];
-    let tessera_ids = [11u64, 22];
-    let codes = [1u64, 2];
-    let cells = [100u64, 101, 102];
-    let counts = [5u64, 3, 1];
+fn an_empty_sub_cells_frame_is_schema_only_and_decodes_to_zero_rows() {
+    let frame = sub_cells_frame(&[], &[]);
+    let (kind, payload) = split_frames(&frame).unwrap()[0];
+    assert_eq!(kind, FRAME_SUB_CELLS);
+    assert!(!payload.is_empty(), "schema-only is bytes, not absence");
 
-    let with_underlay = viewport_ipc(&ViewportColumns {
-        tile: &tile,
-        visible: &visible,
-        matched: &matched,
-        served: &served,
-        points_tessera_ids: &tessera_ids,
-        codes: &codes,
-        scalars: &[],
-        sub_cells: Some((&cells, &counts)),
-    });
-
-    // The pre-underlay decode procedure, verbatim: everything after the tile stream is "the points
-    // stream", trailing bytes included.
-    let tile_len = u32::from_le_bytes(with_underlay[0..4].try_into().unwrap()) as usize;
-    let points_and_beyond = &with_underlay[4 + tile_len..];
-    let mut reader = StreamReader::try_new(points_and_beyond, None).unwrap();
-    let batch = reader.next().unwrap().unwrap();
-    assert_eq!(batch.num_rows(), 2);
-    assert_eq!(
-        batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &tessera_ids,
-        "an old reader must still see the points, with the sub-cell stream trailing it"
-    );
+    let mut reader = StreamReader::try_new(payload, None).unwrap();
+    let schema = reader.schema();
+    assert_eq!(schema.field(0).name(), "cell");
+    assert_eq!(schema.field(1).name(), "count");
+    let rows: usize = reader.by_ref().map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, 0);
 }
 
-/// Not requested means **zero trailing bytes**, not an empty schema-only stream — which is what
-/// makes a default payload byte-identical to the pre-underlay format, and therefore what makes the
-/// absence of an `API_VERSION` bump correct rather than convenient.
+/// The populated sub-cells frame decodes as `(cell, count)` — no cursor arithmetic, no walking
+/// another stream to its end: the frame boundary is the length prefix, which is the whole point
+/// of §8.6(2)'s prefix-everything rule.
 #[test]
-fn an_unrequested_underlay_adds_no_bytes_at_all() {
-    let tile = [7u64];
-    let visible = [9u64];
-    let matched = [9u64];
-    let served = [2u64];
-    let tessera_ids = [11u64, 22];
-    let codes = [1u64, 2];
-
-    let cols = |sub_cells| ViewportColumns {
-        tile: &tile,
-        visible: &visible,
-        matched: &matched,
-        served: &served,
-        points_tessera_ids: &tessera_ids,
-        codes: &codes,
-        scalars: &[],
-        sub_cells,
-    };
-
-    let without = viewport_ipc(&cols(None));
-    let empty_cells: [u64; 0] = [];
-    let empty_counts: [u64; 0] = [];
-    let with_empty = viewport_ipc(&cols(Some((&empty_cells, &empty_counts))));
-
-    assert!(
-        with_empty.len() > without.len(),
-        "an empty sub-cell stream still costs schema bytes — which is exactly why `None` must mean \
-         zero bytes rather than an empty stream"
-    );
-}
-
-/// The sub-cell stream decodes as `(cell, count)` when a reader does look for it, found by parsing
-/// the points stream to its end and taking the cursor — there is no length prefix for points, which
-/// `payload`'s module doc records as the deliberate cost of appending rather than reframing.
-#[test]
-fn the_sub_cell_stream_decodes_as_cell_and_count() {
-    let tile = [7u64];
-    let visible = [9u64];
-    let matched = [9u64];
-    let served = [1u64];
-    let tessera_ids = [11u64];
-    let codes = [1u64];
+fn the_sub_cells_frame_decodes_as_cell_and_count() {
     let cells = [100u64, 101];
     let counts = [5u64, 3];
+    let frame = sub_cells_frame(&cells, &counts);
+    let (_, payload) = split_frames(&frame).unwrap()[0];
 
-    let bytes = viewport_ipc(&ViewportColumns {
-        tile: &tile,
-        visible: &visible,
-        matched: &matched,
-        served: &served,
-        points_tessera_ids: &tessera_ids,
-        codes: &codes,
-        scalars: &[],
-        sub_cells: Some((&cells, &counts)),
-    });
-
-    let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let rest = &bytes[4 + tile_len..];
-
-    // Parse the points stream, then resume from wherever it stopped. `StreamReader` borrows the
-    // cursor (`impl Read for &mut R`), so the position is readable once the reader is dropped —
-    // which is exactly the "parse to end-of-stream and take the cursor" procedure the module doc
-    // says an underlay-aware reader must perform, since only the tile boundary is length-prefixed.
-    let mut cursor = std::io::Cursor::new(rest);
-    {
-        let mut points_reader = StreamReader::try_new(&mut cursor, None).unwrap();
-        while points_reader.next().is_some() {}
-    }
-    let consumed = cursor.position() as usize;
-
-    let mut sub_reader = StreamReader::try_new(&rest[consumed..], None).unwrap();
-    {
-        let schema = sub_reader.schema();
-        assert_eq!(schema.field(0).name(), "cell");
-        assert_eq!(schema.field(1).name(), "count");
-    }
-    let batch = sub_reader.next().unwrap().unwrap();
+    let mut reader = StreamReader::try_new(payload, None).unwrap();
+    let batch = reader.next().unwrap().unwrap();
     assert_eq!(batch.num_rows(), 2);
     assert_eq!(
         batch
@@ -385,4 +255,28 @@ fn the_sub_cell_stream_decodes_as_cell_and_count() {
             .values(),
         &counts
     );
+}
+
+/// A truncated body must never decode to a plausible shorter response — cut anywhere, the walk
+/// refuses. This is the wire half of the truncation contract; the response half (a missing
+/// trailer marks the body incomplete) is the consumers' to enforce and the server tests'.
+#[test]
+fn a_body_cut_at_any_byte_boundary_never_splits_cleanly_short() {
+    let body = build_body();
+    for cut in 1..body.len() {
+        let frames = split_frames(&body[..cut]);
+        match frames {
+            Err(_) => {}
+            Ok(frames) => {
+                // A cut that lands exactly on a frame boundary walks cleanly — and is then
+                // caught one level up by the missing trailer. Assert that is the only clean
+                // case.
+                assert_ne!(
+                    frames.last().map(|(k, _)| *k),
+                    Some(FRAME_TRAILER),
+                    "a strict prefix of the body must never end in a trailer (cut at {cut})"
+                );
+            }
+        }
+    }
 }

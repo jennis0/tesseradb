@@ -74,6 +74,7 @@ import pytest
 
 from oracle.canary_fixture import build_canary_states, verify_allocation_rules
 from oracle.harness import spawn_server, stop_server
+from oracle import wire
 from oracle.wire import decode_viewport, split_frames
 
 GRID_MAX = 65536.0
@@ -173,7 +174,7 @@ def _canonical_response(server, token, zoom, bbox) -> dict[str, bytes]:
     states serve the same points" to "the two states serve the same prefix" and still pass.
     """
     raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
-    tile_bytes, points_and_after = split_frames(raw)
+    frames = split_frames(raw)
 
     tiles, _points = decode_viewport(raw)
     for tile, visible, _matched, served in tiles:
@@ -183,9 +184,17 @@ def _canonical_response(server, token, zoom, bbox) -> dict[str, bytes]:
             f"spawn_server overrides"
         )
 
-    # The sub-cell stream is appended after the points stream with no length prefix (contracts §5),
-    # so the points stream is parsed to its end-of-stream marker and what follows is the underlay.
-    points_len = _points_stream_length(points_and_after)
+    # The framed body (contracts §3.2 r26) hands each surface back by kind: the points surface is
+    # the kind-3 payloads concatenated in frame order — served order, chunk boundaries and all.
+    # The chunking is not contract, but at one pinned configuration it is deterministic, which is
+    # all decision 0030's argument requires of these bytes. The trailer (kind 4) carries this
+    # run's timings and is EXCLUDED from the comparison — it is the one deliberately
+    # nondeterministic region — with its key set already validated by the shared decoder
+    # (`oracle.wire.decode_frames` via `decode_viewport` above), so exclusion here does not
+    # unguard it.
+    tile_bytes = next(payload for kind, payload in frames if kind == wire.FRAME_TILES)
+    points_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_POINTS)
+    subcell_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_SUB_CELLS)
 
     with ipc.open_stream(io.BytesIO(tile_bytes)) as reader:
         table = pa.Table.from_batches(list(reader), reader.schema)
@@ -197,18 +206,9 @@ def _canonical_response(server, token, zoom, bbox) -> dict[str, bytes]:
 
     return {
         "tiles": sink.getvalue(),
-        "points": points_and_after[:points_len],
-        "subcells": points_and_after[points_len:],
+        "points": points_bytes,
+        "subcells": subcell_bytes,
     }
-
-
-def _points_stream_length(points_and_after: bytes) -> int:
-    """Byte length of the points stream inside `points-and-everything-after`."""
-    buf = io.BytesIO(points_and_after)
-    with ipc.open_stream(buf) as reader:
-        for _ in reader:
-            pass
-    return buf.tell()
 
 
 SURFACES = ("tiles", "points", "subcells")

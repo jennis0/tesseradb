@@ -36,9 +36,11 @@ pub enum ApiError {
     /// slots semaphore had no permit to `try_acquire` at all, or the inner compute semaphore did
     /// not free one within `admission_timeout_ms`. Whole-request shed, never a partial result or
     /// a narrowed `k` (spec constraint: shedding must not change WHAT a principal sees). Carries
-    /// `Retry-After: 1` and body `retry_after_s: 1`, both fixed, never a knob. Also reached from
-    /// `EngineError::ProjectionBuilding`/`FragmentBuilding`: a concurrent single-flight build is
-    /// already in progress, and by the client's retry the slot is warm.
+    /// `Retry-After: 1` and body `retry_after_s: 1`, both fixed, never a knob.
+    ///
+    /// **This variant means saturation and nothing else.** A shed from the engine's single-flight
+    /// builders is [`ApiError::SingleFlightBackpressure`], which is a different mechanism reached
+    /// after this gate has already admitted the request.
     Backpressure,
     /// 429 `backpressure` for the **write** path: the bounded ingest work queue was full
     /// (`SubmitError::QueueFull`; contracts §3.1's 429 row names ingest first).
@@ -76,7 +78,7 @@ pub enum ApiError {
     /// WAL byte.
     ///
     /// **A third variant for one wire code, and it is the third for the same reason as the
-    /// second**: contracts §3.1 lists `backpressure` once and all three emit it, but §0.3 deviation
+    /// second**: contracts §3.1 lists `backpressure` once and every variant emits it, but §0.3 deviation
     /// 11 makes the *value* per-subject, and this subject's value is neither of the other two's.
     /// [`ApiError::Backpressure`]'s fixed `1` rests on a compute-admission saturation clearing on
     /// one request's timescale; [`ApiError::WriteBackpressure`]'s comes from a queue's depth. This
@@ -92,6 +94,38 @@ pub enum ApiError {
     /// strings name different mechanisms, and every 429 assertion matches on the body rather than
     /// on the status alone.
     IngestAdmissionBackpressure { retry_after_s: u64 },
+    /// 429 `backpressure` for the engine's **single-flight builders**, and — for the row
+    /// projection — the answer at the **end of a wait rather than instead of one** (decision
+    /// 0058). A racer parks on the in-flight build and is served its result; this is what it gets
+    /// if `serve.single_flight_wait_ms` runs out first. `EngineError::FragmentBuilding` still
+    /// reaches here immediately: the fragment cache is `tessera-authz`'s own single-flight, which
+    /// 0058 did not rule on, and its builds are on the session plane rather than the viewer's.
+    ///
+    /// **What changed for a reader of this 429.** It used to mean "someone else got here first,
+    /// come back in a moment"; a retry then usually found the slot warm. It now means the build is
+    /// outlasting a budget already argued to exceed a cold build at 10⁹, so a client seeing it
+    /// repeatedly is seeing something slower than the design's worst measured case, not a race.
+    ///
+    /// **A fourth variant for one wire code, on [`ApiError::WriteBackpressure`]'s argument** —
+    /// contracts §3.1 lists `backpressure` once and all four emit it; what is closed is the code,
+    /// not the `detail`. The split is here because one variant cannot carry both docs truthfully:
+    /// [`ApiError::Backpressure`] says the server is at its compute-admission bound, and here it is
+    /// not — the gate admitted this request and has free permits. Borrowing that variant sent a
+    /// caller, and an operator reading the body, to a gate that had shed nothing.
+    ///
+    /// **The number is the gate's `1`, and here it is argued rather than inherited** (contracts
+    /// §0.3 deviation 11 forbids the inheritance, not the value): a single-flight build holds the
+    /// slot for one build of one session's projection, which is the timescale `1` was chosen for.
+    /// It is deliberately **not** re-derived from `single_flight_wait_ms`: a caller that has
+    /// already waited the budget is not helped by being told to wait it again, and the retry it
+    /// makes at 1 s is what finds the value if the build lands just after the budget expired.
+    ///
+    /// **`ComputeGateStatus::shed_total` deliberately does not count this path**, as
+    /// [`crate::state::ComputeGate::shed_total`]'s own doc records: that counter is the gate's two
+    /// shed paths, and this shed happens downstream of them. So the two 429s are distinguishable in
+    /// a log or a response body — the `detail` strings name different mechanisms — but not in that
+    /// counter, and a client-observed 429 rate above `shed_total` is this gap, not a lost count.
+    SingleFlightBackpressure,
     /// 503 `not-ready`: contracts §3.1's row — "unverified bundle, unready worker, unloaded
     /// plugin". Reached when the write executor was never started, or is gone **without having
     /// been handed the command** (`SubmitError::ExecutorDead`).
@@ -172,6 +206,14 @@ impl ApiError {
                      load and are unaffected"
                 ),
             ),
+            ApiError::SingleFlightBackpressure => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "backpressure",
+                "a concurrent request is already building this session's row projection or mask \
+                 fragment; retry shortly. This is not compute admission — that gate admitted this \
+                 request, and its shed counters do not move for this refusal"
+                    .to_string(),
+            ),
             ApiError::NotReady => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "not-ready",
@@ -197,6 +239,9 @@ impl ApiError {
             // Deviation 11's third subject — see the variant's doc for why its number is neither
             // of the other two's.
             ApiError::IngestAdmissionBackpressure { retry_after_s } => Some(*retry_after_s),
+            // Also one second, on this subject's own argument rather than inherited from the
+            // gate's — see the variant's doc.
+            ApiError::SingleFlightBackpressure => Some(RETRY_AFTER_SECS),
             ApiError::BadCredential
             | ApiError::ExpiredToken
             | ApiError::Unknown(_)
@@ -295,11 +340,13 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // A concurrent request is already building this session's row projection. The single-flight
         // cache never blocks a second caller, so the honest response is 429 `backpressure` with
         // `Retry-After: 1` — by the client's retry the slot is warm. Named explicitly rather than
-        // left to the catch-all so this mapping stays visible at the call site.
-        EngineError::ProjectionBuilding => ApiError::Backpressure,
+        // left to the catch-all so this mapping stays visible at the call site. Not
+        // `ApiError::Backpressure`: the compute gate admitted this request and may be entirely
+        // idle, so that variant's detail would send the reader to the wrong mechanism.
+        EngineError::ProjectionBuilding => ApiError::SingleFlightBackpressure,
         // Lifecycle §3.3, the fragment-cache twin of the arm above: a concurrent
         // `authorise` call is already building this credential's mask fragment. Same mapping.
-        EngineError::FragmentBuilding => ApiError::Backpressure,
+        EngineError::FragmentBuilding => ApiError::SingleFlightBackpressure,
         // Cooperative cancellation (the rapid-pan case). Named explicitly, rather than left
         // to the catch-all below, so the response body can NEVER carry this variant's own
         // `Display` — a fixed string only, the same rule `map_store_error`/`map_join_error` apply
@@ -1049,20 +1096,35 @@ mod tests {
     /// `ProjectionBuilding` is explicitly named in `map_engine_error`'s match (not caught only by
     /// the wildcard arm) and maps to 429 `backpressure` — a concurrent
     /// single-flight build never blocks, so the honest response is retryable, not fail-closed.
+    ///
+    /// **The detail must not claim compute-admission saturation**, which is a different mechanism
+    /// with a different counter: the gate has already admitted this request and may be idle.
     #[test]
     fn map_engine_error_takes_projection_building_to_backpressure() {
-        let (status, code, _) = map_engine_error(EngineError::ProjectionBuilding).parts();
+        let (status, code, detail) = map_engine_error(EngineError::ProjectionBuilding).parts();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(code, "backpressure");
+        assert!(
+            detail.contains("row projection"),
+            "the detail must name the mechanism that shed, got: {detail}"
+        );
+        assert!(
+            !detail.contains("at its compute-admission bound"),
+            "the detail must not claim compute-admission saturation, got: {detail}"
+        );
     }
 
     /// `FragmentBuilding` is explicitly named in `map_engine_error`'s match and
     /// maps to the same 429 `backpressure` arm as `ProjectionBuilding`.
     #[test]
     fn map_engine_error_takes_fragment_building_to_backpressure() {
-        let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
+        let (status, code, detail) = map_engine_error(EngineError::FragmentBuilding).parts();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(code, "backpressure");
+        assert!(
+            !detail.contains("at its compute-admission bound"),
+            "the detail must not claim compute-admission saturation, got: {detail}"
+        );
     }
 
     /// `StaleIdSet` — raised by `Engine::item` itself, against the one generation it loads — maps
@@ -1100,6 +1162,23 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("1")
         );
+    }
+
+    /// The single-flight 429 carries the same `Retry-After: 1` — argued for this subject rather
+    /// than inherited (see the variant's doc), but the same number, so a client's retry timing is
+    /// unchanged by the split. Only the `detail` distinguishes the two.
+    #[test]
+    fn single_flight_backpressure_carries_the_same_retry_after_as_the_gate() {
+        let response = ApiError::SingleFlightBackpressure.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(ApiError::SingleFlightBackpressure.retry_after_s(), Some(1));
     }
 
     /// Every other error body omits the field entirely — `retry_after_s` is

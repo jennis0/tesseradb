@@ -267,6 +267,117 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
     );
 }
 
+/// **The content key tracks the geometry served, not the generation** (`delta-serving.md` §2).
+///
+/// The content key is what licenses the server to elide points a client says it already holds, and
+/// eliding is exact only while the tile's visible set is unchanged. Two requests can straddle a
+/// flush and still be answered over one visible set — rung 2 re-serves the very geometry the
+/// earlier request built — so the key must *not* move between them, or every flush would void
+/// declarations that are still perfectly sound. But once the refresh publishes, the live answer
+/// covers rows neither earlier answer did, and there the key must move: otherwise a bound the
+/// client declared from the stale answer would be honoured against the larger set, and the rows in
+/// between are ones it never received and cannot know are missing. A hole, caused by the server,
+/// which the client-side trust posture does not excuse.
+///
+/// **Mutation:** mint from `generation.watermark` rather than from the served fragment's, and the
+/// first assertion fails — a flush would rotate the key while the answer had not changed at all.
+#[test]
+fn the_content_key_tracks_the_geometry_served_not_the_generation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = engine_at(tmp.path(), &root, "wal", 1);
+    engine.set_background_refresh_for_test(false);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let live = engine.viewport(&session, whole_extent()).unwrap();
+
+    ingest(&engine, "ext-1", 5.0, 5.0);
+    wait_until("the flush to publish", || {
+        engine.write_executor_stats().flushes >= 1
+    });
+
+    let stale = engine.viewport(&session, whole_extent()).unwrap();
+    assert_eq!(engine.stale_serves(), 1, "this request must take rung 2");
+
+    // Once the refresh publishes, the answer covers rows neither earlier one did. THAT is the
+    // boundary an elision must not cross: a bound declared against the smaller set, honoured
+    // against the larger, drops rows the client never received and cannot know are missing.
+    // Two publications, because that is the retention depth: the stale entry is rung-2-servable
+    // until a second one ages it out, which is the very property the test above pins.
+    engine.set_background_refresh_for_test(true);
+    ingest(&engine, "ext-2", 500.0, 500.0);
+    wait_until("the second flush", || {
+        engine.write_executor_stats().flushes >= 2
+    });
+    let fresh = wait_for_viewport(&engine, &session);
+    assert!(
+        fresh.tiles.iter().map(|t| t.visible).sum::<u64>()
+            > stale.tiles.iter().map(|t| t.visible).sum::<u64>(),
+        "the refreshed answer must actually see more, or this proves nothing"
+    );
+    assert_ne!(
+        fresh.coordinates.content_key, stale.coordinates.content_key,
+        "the visible set grew, so a bound declared against the smaller one must not be honoured"
+    );
+
+    // The render partition is untouched throughout: the principal never changed, and a client that
+    // dropped its held bands on a flush would be throwing away marks it may still legitimately draw.
+    for out in [&live, &stale, &fresh] {
+        assert_eq!(
+            out.coordinates.identity_key, live.coordinates.identity_key,
+            "content moved, authorisation did not"
+        );
+    }
+
+    // **Idempotent while nothing writes.** Two answers over one visible set must agree, or the key
+    // is rotating on something that is not content — a clock, a counter, the request itself — and
+    // every declaration would lapse before it could ever be used.
+    let again = wait_for_viewport(&engine, &session);
+    assert_eq!(
+        again.coordinates, fresh.coordinates,
+        "nothing wrote between these two requests, so neither coordinate may move"
+    );
+}
+
+/// **An accepted write rotates the content key, and the rotation is deliberately conservative.**
+///
+/// An ingest swaps the buffer and so bumps `overlay_version` before any flush lands, even though
+/// buffered items have no rows and the row-space visible set is momentarily unchanged. Over-rotating
+/// costs a client bytes it need not have spent; under-rotating costs it rows. The direction is the
+/// point, and it is why `overlay_version` is in the key at all — not because a removal could open a
+/// hole (it cannot, `delta-serving.md` §4) but because it moves the counts a client shows.
+#[test]
+fn an_accepted_write_rotates_the_content_key() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = engine_at(tmp.path(), &root, "wal", 1);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let before = engine.viewport(&session, whole_extent()).unwrap();
+
+    ingest(&engine, "ext-1", 5.0, 5.0);
+
+    let after = wait_for_viewport(&engine, &session);
+    assert_ne!(
+        before.coordinates.content_key, after.coordinates.content_key,
+        "an accepted write must void every outstanding declaration"
+    );
+    assert_eq!(
+        before.coordinates.identity_key, after.coordinates.identity_key,
+        "but not the render partition"
+    );
+}
+
 /// A viewport, retried past the bounded `ProjectionBuilding` a refresh window can answer with.
 /// Decision 0044 permits exactly this residual, and a test that did not retry would be asserting
 /// that the residual does not exist.

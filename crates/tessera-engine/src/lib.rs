@@ -49,7 +49,7 @@ pub use session::{
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
 // `/control/status` publishes have to cross the crate boundary.
-pub use single_flight::CacheStats;
+pub use single_flight::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLIGHT_WAIT_MS};
 // The fragment tier's gauges, under a distinguishing name because the two are the same shape and a
 // bare second `CacheStats` in one namespace would be a coin toss at every call site.
 //
@@ -61,8 +61,9 @@ pub use single_flight::CacheStats;
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SubCellCount, TileCount, ViewportOut,
-    ViewportRequest,
+    ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SinkClosed, SinkResult,
+    SubCellCount, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportRequest,
+    ViewportSink,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge

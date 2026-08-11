@@ -1,93 +1,92 @@
-import {Message} from 'apache-arrow';
-
 /**
- * Split a `/v1/viewport` response into its concatenated Arrow IPC streams.
+ * Split a `/v1/viewport` response into its frames.
  *
- * The wire frame (see `tessera-wire`'s `payload` module doc) is:
+ * The wire frame (contracts §3.2 r26; `tessera-wire`'s `payload` module doc) is a sequence of
+ * tagged, length-prefixed frames — every frame prefixed, which is client-interaction §8.6(2)'s
+ * owner-annotated item and what retired this file's previous Arrow-message boundary walk and the
+ * padding-arithmetic desynchronisation bug it documented:
  *
- *     u32 LE  byte length of the tile stream
- *     <tile stream>       Arrow IPC stream: tile, visible, matched, served (all uint64)
- *     <points stream>     Arrow IPC stream: tessera_id uint64, x float32, y float32, ...scalars
- *     <sub-cell stream>   Arrow IPC stream: cell uint64, count uint64 — ABSENT ENTIRELY
- *                         (zero bytes) unless the underlay was requested
+ *     u8 kind, u32 LE payload length, <payload>     -- repeated
+ *       kind 1  tiles      Arrow IPC stream: tile, visible, matched, served (all uint64)
+ *       kind 2  sub-cells  Arrow IPC stream: cell uint64, count uint64 — present iff the
+ *                          underlay was requested (schema-only when requested-but-empty)
+ *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars —
+ *                          zero or more frames, concatenating to the full points stream
+ *       kind 4  trailer    JSON; exactly one, last — its presence marks the response complete
  *
- * Only the tile boundary carries a length prefix; the server documents that relaxation
- * deliberately, so the points stream's end must be found by walking its IPC messages. That walk is
- * what {@link streamLength} does, and it is why this file parses framing rather than calling
- * `tableFromIPC` and hoping.
- *
- * Every failure here throws. A short read would decode to fewer points than the tile batch's
- * `served` promised — a sample silently standing in for the set, which is the one failure mode
- * this client exists to make impossible.
+ * Every failure here throws, and strictly: a truncated body, an unknown kind, a missing trailer
+ * or a misplaced tiles frame must never decode to a plausible shorter response — a sample
+ * silently standing in for the set is the one failure mode this client exists to make
+ * impossible. A response missing its trailer is incomplete BY CONTRACT, whatever the transport
+ * said (the server aborts mid-body streams without one).
  */
 export type FramedStreams = {
   tiles: Uint8Array;
-  points: Uint8Array;
+  /** One entry per kind-3 frame, in arrival order — decode each alone, concatenate the rows. */
+  points: Uint8Array[];
   subCells: Uint8Array | null;
+  /** The kind-4 trailer's raw JSON bytes. */
+  trailer: Uint8Array;
 };
 
-const CONTINUATION = 0xffffffff;
+export const FRAME_TILES = 1;
+export const FRAME_SUB_CELLS = 2;
+export const FRAME_POINTS = 3;
+export const FRAME_TRAILER = 4;
 
-/**
- * Byte length of the single Arrow IPC stream beginning at `offset`, including its end-of-stream
- * marker.
- *
- * Walks encapsulated messages: continuation (u32 `0xffffffff`), metadata length (u32), the
- * metadata flatbuffer, then a body whose length only that flatbuffer knows — which is why this
- * decodes the message header rather than scanning for a byte pattern. Scanning would be shorter
- * and wrong: `ff ff ff ff 00 00 00 00` is a legal run of bytes inside a uint64 column.
- *
- * **No alignment arithmetic, and that is measured rather than assumed.** Arrow pads both metadata
- * and bodies to 8 bytes, but the writer folds that padding into the values it reports: against the
- * captured golden the schema message is `metadataLength = 248` at offset 1164 and the next message
- * begins at 1420, which is `8 + 248` later and is *not* itself 8-aligned. Rounding either figure
- * up here over-advances by 4 bytes and the walk desynchronises on the second message.
- */
-export function streamLength(buf: Uint8Array, offset: number): number {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  let at = offset;
-  for (;;) {
-    if (at + 8 > buf.byteLength) {
-      throw new Error(`truncated Arrow stream: no end-of-stream marker before byte ${at}`);
-    }
-    const continuation = view.getUint32(at, true);
-    if (continuation !== CONTINUATION) {
-      throw new Error(`bad Arrow continuation 0x${continuation.toString(16)} at byte ${at}`);
-    }
-    const metadataLength = view.getUint32(at + 4, true);
-    if (metadataLength === 0) return at + 8 - offset; // end-of-stream marker
-    const metadataEnd = at + 8 + metadataLength;
-    if (metadataEnd > buf.byteLength) {
-      throw new Error(`truncated Arrow message metadata at byte ${at}`);
-    }
-    const bodyLength = Message.decode(buf.subarray(at + 8, metadataEnd)).bodyLength;
-    at = metadataEnd + bodyLength;
-    if (at > buf.byteLength) {
-      throw new Error(`truncated Arrow message body: needs ${at} bytes, have ${buf.byteLength}`);
-    }
-  }
-}
+const FRAME_HEADER_BYTES = 5;
 
 export function splitFramedStreams(buf: Uint8Array): FramedStreams {
-  if (buf.byteLength < 4) {
-    throw new Error(`viewport payload is ${buf.byteLength} bytes: too short for its length prefix`);
-  }
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const tileLength = view.getUint32(0, true);
-  if (4 + tileLength > buf.byteLength) {
-    throw new Error(
-      `viewport payload claims a ${tileLength}-byte tile stream but is ${buf.byteLength} bytes`
-    );
+  let tiles: Uint8Array | null = null;
+  const points: Uint8Array[] = [];
+  let subCells: Uint8Array | null = null;
+  let trailer: Uint8Array | null = null;
+
+  let at = 0;
+  while (at < buf.byteLength) {
+    if (at + FRAME_HEADER_BYTES > buf.byteLength) {
+      throw new Error(`truncated frame header at byte ${at}`);
+    }
+    const kind = view.getUint8(at);
+    const length = view.getUint32(at + 1, true);
+    const start = at + FRAME_HEADER_BYTES;
+    const end = start + length;
+    if (end > buf.byteLength) {
+      throw new Error(`frame at byte ${at} claims a payload past the end of the body`);
+    }
+    const payload = buf.subarray(start, end);
+    switch (kind) {
+      case FRAME_TILES:
+        if (tiles) throw new Error('more than one tiles frame');
+        if (at !== 0) throw new Error('the tiles frame must be first');
+        tiles = payload;
+        break;
+      case FRAME_SUB_CELLS:
+        if (subCells) throw new Error('more than one sub-cells frame');
+        if (points.length > 0 || trailer) {
+          throw new Error('the sub-cells frame must immediately follow tiles');
+        }
+        subCells = payload;
+        break;
+      case FRAME_POINTS:
+        points.push(payload);
+        break;
+      case FRAME_TRAILER:
+        if (trailer) throw new Error('more than one trailer frame');
+        trailer = payload;
+        break;
+      default:
+        // Refused, never skipped: skipping would let a future frame kind carry data an old
+        // reader silently drops.
+        throw new Error(`unknown frame kind ${kind} at byte ${at}`);
+    }
+    at = end;
   }
-  const tiles = buf.subarray(4, 4 + tileLength);
 
-  const pointsStart = 4 + tileLength;
-  const pointsLength = streamLength(buf, pointsStart);
-  const points = buf.subarray(pointsStart, pointsStart + pointsLength);
-
-  // Absent, not empty: a request that did not ask for the underlay produces zero trailing bytes,
-  // so this payload is byte-identical to a pre-underlay one.
-  const subStart = pointsStart + pointsLength;
-  const subCells = subStart >= buf.byteLength ? null : buf.subarray(subStart);
-  return {tiles, points, subCells};
+  if (!tiles) throw new Error('viewport payload has no tiles frame');
+  if (!trailer) {
+    throw new Error('viewport payload has no trailer: the response is incomplete');
+  }
+  return {tiles, points, subCells, trailer};
 }

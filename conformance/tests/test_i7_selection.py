@@ -214,7 +214,13 @@ def test_i7_selection_differential(
         )
 
 
-@pytest.mark.parametrize("case", cat.catalogue(), ids=lambda c: c.name)
+# The catalogue minus `empty`, which has no marks in any parent tile and therefore nothing to
+# nest. Excluded here rather than skipped inside the test: a skip is a line the report prints on
+# every run, and a reader has to go and re-derive an answer that cannot change.
+NESTING_CASES = [c for c in cat.catalogue() if c.entities]
+
+
+@pytest.mark.parametrize("case", NESTING_CASES, ids=lambda c: c.name)
 def test_i7_selection_nests_across_zoom(catalogue_bundle: Bundle, catalogue_density_server, case):
     """An item drawn in a parent tile is still drawn in whichever child contains it (§7.2).
 
@@ -234,9 +240,6 @@ def test_i7_selection_nests_across_zoom(catalogue_bundle: Bundle, catalogue_dens
     *prefix* of the point's own position code: take the cell half, shift to the child depth. One
     line, and the assertion becomes the property the docstring claims.
     """
-    if not case.entities:
-        pytest.skip("the empty case has nothing to nest")
-
     server = catalogue_density_server
     token = server.authorise(list(case.grants))["token"]
     k = 30

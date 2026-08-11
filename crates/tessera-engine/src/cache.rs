@@ -26,8 +26,9 @@ use croaring::Portable;
 use tessera_authz::FrozenFragment;
 use tessera_types::TermId;
 
+use crate::cancel::CancelToken;
 use crate::compose::RowProjection;
-use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache};
+use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
 /// `(token_id, slice, segments_version)` — the row-projection cache's key (shared-context
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
@@ -88,6 +89,15 @@ pub(crate) struct RowProjectionKey {
 /// contract rather than on the generic cache's internals.
 #[derive(Debug)]
 pub(crate) struct CacheBusy;
+
+/// Why a waiting caller ([`RowProjectionCache::get_or_derive_waiting`]) gave up: the wait budget
+/// expired, or the client disconnected. Distinct from `single_flight::WaitEnded` for the reason
+/// [`CacheBusy`] is distinct from `single_flight::Building`.
+#[derive(Debug)]
+pub(crate) enum CacheWaitEnded {
+    Budget,
+    Cancelled,
+}
 
 /// What [`RowProjectionCache::peek`] found. **Three states, not two**: a request under decision
 /// 0044 answers `Building` and `Absent` differently — the first means a refresh or a racer is
@@ -209,12 +219,12 @@ impl RowProjectionCache {
 
     /// Claim `key`'s slot and produce its value, or refuse if someone already has it.
     ///
-    /// **Two callers, and neither is the ordinary request.** The background refresh
-    /// (`crate::refresh`) calls this at every geometry publication, once per resident key; a
-    /// request calls it only at rung 3 of `Engine::session_geometry`'s ladder — session
-    /// establishment, or a rebuild after eviction, neither of which is update-induced work
-    /// (decision 0044). The steady-state request path reads through [`Self::peek`] and claims
-    /// nothing.
+    /// **One caller, and it is not the request path.** The background refresh (`crate::refresh`)
+    /// calls this at every geometry publication, once per resident key, and must not wait — its
+    /// call site carries the argument. The request path takes
+    /// [`Self::get_or_derive_waiting`] (decision 0058) at the last rung of
+    /// `Engine::session_geometry`'s ladder; in steady state it reads through [`Self::peek`] and
+    /// claims nothing.
     ///
     /// **Fallible on purpose, and `Err` does not mean failure.** `Err(CacheBusy)` means some other
     /// caller is building this key right now and this call declined to wait. `make` runs with no
@@ -252,6 +262,31 @@ impl RowProjectionCache {
         self.inner
             .get_or_derive(key, derive_from, make)
             .map_err(|_busy| CacheBusy)
+    }
+
+    /// [`Self::get_or_derive`], except that finding a build in flight parks on it and takes its
+    /// result rather than refusing — decision 0058, and the route the request path takes. The
+    /// value-equality argument below is unchanged: a waiter is served exactly what the winner
+    /// built, which is what this method's own contract already required of any two callers of the
+    /// same key.
+    pub(crate) fn get_or_derive_waiting(
+        &self,
+        key: RowProjectionKey,
+        derive_from: Option<&RowProjectionKey>,
+        cancel: &CancelToken,
+        make: impl FnOnce(Option<&SessionGeometry>) -> SessionGeometry,
+    ) -> Result<Arc<SessionGeometry>, CacheWaitEnded> {
+        self.inner
+            .get_or_derive_waiting(key, derive_from, cancel, make)
+            .map_err(|ended| match ended {
+                WaitEnded::Budget => CacheWaitEnded::Budget,
+                WaitEnded::Cancelled => CacheWaitEnded::Cancelled,
+            })
+    }
+
+    /// See [`SingleFlightCache::set_wait_budget_ms`].
+    pub(crate) fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
+        self.inner.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// Look `key` up **without claiming its slot** — the stale-serve path's read.

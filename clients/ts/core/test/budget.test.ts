@@ -85,11 +85,15 @@ describe('calibrate', () => {
     expect(calibrate(observation(65_536), 16, 16)).toBe(16);
   });
 
-  it('NEVER raises mTarget, because a shallower request is a strict subset', () => {
-    // Marks popping OUT while the user does nothing is the failure §7.2 and §7.3 strike as
-    // unsound. Overshoot is a payload question; undershoot-correction is a correctness one.
+  it('raises mTarget on overshoot — damped and bounded, banked to apply across motion', () => {
+    // The one-directional rule's premise — overshoot is a payload question — died at 10^9, where
+    // density-scaled m(T) reached 4-8x the budget and 3.8e6 resident marks rasterised at 11 fps.
+    // The pop-out objection (§7.2/§7.3) is honoured by WHERE the correction lands: the driver
+    // holds the presented depth at rest, so a raised mTarget changes only the next gesture's
+    // depth choice. Here: 2x overshoot at 0.5 damping corrects halfway, inside the 4x bound.
     const next = calibrate(observation(200_000), 16, 16);
-    expect(next).toBe(16);
+    expect(next).toBeGreaterThan(16);
+    expect(next).toBeLessThanOrEqual(16 * 4);
   });
 
   it('does nothing once every visible item is already drawn', () => {

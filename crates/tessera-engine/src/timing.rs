@@ -34,7 +34,7 @@
 /// (`tiles_nonempty`, `sigma_visible`, `select_rows_visited`, `points_gathered`,
 /// `underlay_cells_evaluated`) are now **cross-worker sums**: each tile's own contribution
 /// ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that tile's own
-/// `tile_result` call, on whatever rayon worker ran it, and summed into these fields by
+/// `tile_sweep` call, on whatever rayon worker ran it, and summed into these fields by
 /// [`TileStats::fold_into`] in `Engine::viewport`'s serial in-order fold. At `compute_threads = 1`
 /// this sum coincides with the old wall-clock partition (one worker, one tile at a time — nothing
 /// changes). At `compute_threads > 1` these fields report *aggregate CPU time spent*, not *wall
@@ -329,7 +329,7 @@ impl Probe {
 }
 
 /// One tile's contribution to the summed-over-tiles stage numbers (D-E) — the parallel-sweep
-/// counterpart to [`StageTimings`]. `Engine::viewport`'s per-tile function (`tile_result`) builds
+/// counterpart to [`StageTimings`]. `Engine::viewport`'s per-tile function (`tile_sweep`) builds
 /// one of these locally, on whatever rayon worker runs that tile; the request's serial in-order
 /// fold sums each field into the request's own [`StageTimings`] via [`Self::fold_into`].
 ///
@@ -344,7 +344,7 @@ impl Probe {
 /// build's zeros for a genuinely free tile.
 ///
 /// **Deliberately does NOT carry `rows_in_ranges`.** Counted here it would be per-tile, taken
-/// before that tile's own `visible == 0` check — and `tile_result` returns `Ok(None)`
+/// before that tile's own `visible == 0` check — and `tile_sweep` returns `Ok(None)`
 /// on that exact branch, which `Engine::viewport`'s fold discards without ever calling
 /// [`Self::fold_into`]. That would silently make a field documented as mask-independent
 /// (`StageTimings::rows_in_ranges`'s doc) track which tiles a grant left empty instead. It is
@@ -387,14 +387,14 @@ impl TileStats {
     }
 }
 
-/// A [`Probe`]-shaped clock for one tile, owned locally inside `tile_result` — **never shared
+/// A [`Probe`]-shaped clock for one tile, owned locally inside `tile_sweep` — **never shared
 /// across threads**: each rayon worker constructs and discards its own, which is what makes this
 /// safe to call from `par_iter`'s closure with no synchronisation at all. Same lap/count API as
 /// [`Probe`], over [`TileStats`] instead of [`StageTimings`], for the same reason `Probe` has it:
-/// the gate is on the clock, not on the call site, so `tile_result` carries no `#[cfg]` at any of
+/// the gate is on the clock, not on the call site, so `tile_sweep` carries no `#[cfg]` at any of
 /// its own measurement points either.
 pub struct TileProbe {
-    /// The accumulated per-tile breakdown. Public so `tile_result` can move it into
+    /// The accumulated per-tile breakdown. Public so `tile_sweep` can move it into
     /// `TileResult::stats` at the end of the call.
     pub t: TileStats,
     #[cfg(feature = "bench-timing")]

@@ -10,8 +10,71 @@
 #   ./run_demo.sh                 # build the demo fixture if needed, serve it, open the viewer
 #   ./run_demo.sh --wide          # the 19-column tail instead: every declared type, 5x the bytes
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have
+#   ./run_demo.sh --bundle PATH --ranks RANKS.json
+#                                 # ...with coverage principals (sparse ~1% / medium ~10% /
+#                                 # heavy ~50%) composed from a term ranking; generate the
+#                                 # ranking once per pairs file with scripts/rank_terms.py
 #   ./run_demo.sh --no-viewer     # server only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundle
+#
+# ## Watching the replica work
+#
+# The viewer holds what it has fetched, and buys a margin beyond the screen while the view is
+# still. Four rows in the **Last request** panel report it: `tiles from cache` (of the region the
+# view wanted, how much needed no request), `replica held`, `prefetched ahead`, and
+# `— of which provisional` (marks borrowed from another zoom level while this one loads — drawn
+# like any other mark, and deliberately carrying no counts: the count channel is what stops a
+# superset being read as density).
+#
+# `http://localhost:5173/?prefetch=0` turns look-ahead off and leaves the cache on. That is the A/B
+# the measurements use: the cache decides what a request is *answered from*, look-ahead decides
+# what is *asked for*, and they are worth judging separately.
+#
+# ## Recording a session — `?trace=1`
+#
+# `http://localhost:5173/?trace=1` records what you did, what the client did about it, and how long
+# each frame took, into a file you can hand to someone else. It exists because the browser-free
+# harness (`probes/2026-08-09-client-pipeline/`) cannot see the three costs a user actually feels:
+# GPU upload, frame scheduling, and the delay between an input and the paint answering it.
+#
+# A bar appears bottom-left. **Press `m`, or click `mark`, the moment something feels wrong** — the
+# trace then carries your judgement rather than leaving it to be inferred from the numbers, and that
+# marker is the first thing a reader looks for. Then `download trace`.
+#
+# What it records: frame gaps past 20 ms (smooth runs cost one counter, not one record per frame),
+# long tasks, pointer and wheel input, every request and its arrival, splitting a response into
+# bands, deriving a frame, the slab sync, and the gap from handing deck.gl its layers to the next
+# frame — which is the upload. Plus a header naming the GPU: a trace whose renderer says SwiftShader
+# was software-rasterised and its timings mean nothing.
+#
+# Off unless the parameter is present, down to not installing the observers — an instrument that
+# runs inside the frame loop it is timing has to cost nothing when it is not wanted.
+#
+# Two debug knobs answer the one question the platform will not. `painted` — handing deck.gl its
+# layers to the next frame — is the largest remaining cost, and deck's own `gpuTime` reads zero
+# here because the GPU timer query extension is absent under ANGLE, so the GPU half cannot be
+# measured directly. Measure it by difference, same gesture each time:
+#
+#   ?trace=1&radius=0.6     marks a third the area. If `painted` falls, the cost is fill rate.
+#   ?trace=1&pickable=0     no per-instance picking colours. If `painted` falls, it is that buffer.
+#
+# Both change what is drawn or what can be clicked. They are instruments, not settings.
+#
+# Three things that will otherwise waste your time:
+#
+#   - **Zoom in before panning.** At zoom 0 the whole world is on screen and the view box clamps,
+#     so panning changes nothing and every gesture is answered without a request. Nothing is wrong;
+#     there is just nothing to fetch.
+#   - **The defaults are now the hard case** — every term, the largest mark budget, coloured by
+#     `archive` — because the narrow principal saturates at almost any depth and exercises none of
+#     the machinery worth watching. Drop to a single term to see the *opposite* extreme; do not
+#     expect the cache or the budget to do anything there.
+#   - **Let the depth budget settle.** Marks-per-tile calibrates over the first few interactions
+#     and only ever goes deeper; while it is moving, each view lands at a depth nothing is held at,
+#     so the cache reads cold for reasons that have nothing to do with the cache.
+#
+# `clients/ts/viewer/smoke-cache.mjs` and `smoke-lookahead.mjs` do all of the above headlessly and
+# print the numbers, against a server this script has already started.
 #
 # **Colour needs a bundle with a schema**, so this cannot default to `data/bench-fixtures/2m4`:
 # that carries no attribute tail and would leave the colour-by control with nothing to offer. It
@@ -54,12 +117,14 @@ export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-dev-session-credential}"
 export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 
 bundle_override=""
+ranks_file=""
 run_viewer=1
 rebuild=0
 wide=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --bundle)     bundle_override="$2"; shift 2 ;;
+    --ranks)      ranks_file="$2"; shift 2 ;;
     --no-viewer)  run_viewer=0; shift ;;
     --rebuild)    rebuild=1; shift ;;
     --wide)       wide=1; shift ;;
@@ -194,10 +259,17 @@ cd "$REPO/clients/ts"
 # committed one back.
 say "measuring principals (rewrites the tracked clients/ts/viewer/presets.json)"
 node scripts/measure-principals.mjs \
-  --viewer "http://$VIEWER_ADDR" --session "http://$SESSION_ADDR" --terms 0..200
+  --viewer "http://$VIEWER_ADDR" --session "http://$SESSION_ADDR" --terms 0..200 \
+  ${ranks_file:+--ranks "$ranks_file"}
 
 say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop both"
-echo "Pick a column in the Colour panel: primary_category for the palette, submitted_at for the"
-echo "ramp. --wide adds every other declared type, including a per_viewer category (refused:"
-echo "its gate is specified and not built)."
+echo "Opens on every term, the largest mark budget, coloured by archive. Other columns in the"
+echo "Colour panel: primary_category for a wider palette, submitted_at for the ramp. --wide adds"
+echo "every other declared type, including a per_viewer category (refused: its gate is specified"
+echo "and not built)."
+echo
+echo "To watch the replica: zoom in a few notches, then pan away and back."
+echo "To record a session for someone else: add ?trace=1, press m when it feels wrong, download."
+echo "The return trip should need no request — see 'tiles from cache' under Last request."
+echo "http://localhost:$VITE_PORT/?prefetch=0 turns look-ahead off, cache still on, for comparison."
 npm run dev -w @tessera/viewer

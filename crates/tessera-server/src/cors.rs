@@ -21,14 +21,18 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 ///
 /// Without these, `fetch` hides them from the page and the viewer's stats panel silently shows
 /// nothing — a failure that reads as "the server emits no timings" rather than as a CORS
-/// configuration hiding them. `x-tessera-stage-ns` is listed even though it is absent from a
-/// release build: exposing a header the response does not carry is a no-op, and listing it here
-/// means a `bench-timing` build needs no configuration change to become readable.
-const EXPOSED: [&str; 4] = [
+/// configuration hiding them. `x-tessera-stage-ns` is retired (contracts §3.2 r26 — the stage
+/// breakdown rides the trailer frame, in-body and outside CORS's reach). `etag`,
+/// `x-tessera-identity-key` and `x-tessera-stale` are the delta-serving coordinates
+/// (`delta-serving.md` §2): a browser client that cannot read them cannot key a replica at all,
+/// and `etag` is not on the CORS safelist despite being a standard header.
+const EXPOSED: [&str; 6] = [
+    "etag",
+    "x-tessera-identity-key",
+    "x-tessera-stale",
     "x-tessera-pin",
     "x-tessera-server-us",
     "x-tessera-admission-us",
-    "x-tessera-stage-ns",
 ];
 
 /// The layer for a configured origin list, or `None` when there is nothing to configure.

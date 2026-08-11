@@ -12,9 +12,9 @@ Five things are proven, kept deliberately separate (task brief):
     oracle's own `served` (design §7.2's definition, implemented independently — see
     `oracle/viewport.py`'s doc).
 (d) suppress over the control plane -> oracle told to drop it -> counts re-agree.
-(e) a mixed-change composition stress (delete, suppress, predicate-widen onto an entity the grant
-    set previously missed, predicate-narrow) -> all counts re-agree; the oracle composes in
-    entity space per I1's formula, the server composes as row-space diffs.
+(e) a mixed-change composition stress (delete, suppress — the whole of what an overlay can hold
+    since decision 0047 withdrew the `predicate` op) -> all counts re-agree; the oracle composes
+    in entity space per I1's formula, the server composes as row-space diffs.
 
 20 random grant sets (mixed sizes, one empty, one huge) x 10 random viewports at zooms 3-8, per
 the brief; the RNG is seeded for reproducibility.
@@ -290,16 +290,20 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
 
 def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
-    """(e) delete, suppress, predicate-widen onto an entity the grant set previously missed, and
-    predicate-narrow, composed together — the oracle in entity space per I1, the server as
-    row-space diffs. Agreement here is the equivalence proof for Task 10's retirement rules."""
+    """(e) delete and suppress composed together — the oracle in entity space per I1, the server as
+    row-space diffs. Agreement here is the equivalence proof for Task 10's retirement rules.
+
+    It used to compose four operations. The other two were a predicate-widen onto an entity the
+    grant set previously missed and a predicate-narrow; decision 0047 withdrew the `predicate` op
+    (an access edit is a delete plus a re-ingest) and `/control/changes` refuses it with a typed
+    422, so the two subtracting ops are the whole of what an overlay can now hold. The refusal
+    itself is pinned in `conformance/tests/test_overlay_journal.py`, where the journal rules live."""
     dictionary = oracle_bundle.dictionary
     term_a = 0
-    term_b = 1 if len(dictionary) > 1 else 0
     session_terms = {term_a}
 
     base_mask = mask_mod.mask_of(session_terms, oracle_bundle.pairs_path())
-    assert len(base_mask) >= 4, "fixture must have enough term-0 members for this stress test"
+    assert len(base_mask) >= 2, "fixture must have enough term-0 members for this stress test"
 
     auth = server.authorise([_descriptor_str(dictionary[term_a])])
     token = auth["token"]
@@ -312,19 +316,10 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     ordered_mask = sorted(base_mask)
     delete_entity = ordered_mask[0]
     suppress_entity = ordered_mask[1]
-    narrow_entity = ordered_mask[2]  # currently has term_a; predicate-change removes it
-
-    # An entity NOT already in base_mask (does not carry term_a) — predicate-widen grants it
-    # term_a directly, independent of pairs.parquet's original labelling.
-    not_granted = mask_mod.mask_of({term_b}, oracle_bundle.pairs_path()) - base_mask
-    assert not_granted, "fixture must have an entity with term_b but not term_a"
-    widen_entity = min(not_granted)
 
     batch = [
         (delete_entity, "delete", None),
         (suppress_entity, "suppress", None),
-        (widen_entity, "predicate", {term_a}),
-        (narrow_entity, "predicate", set()),
     ]
 
     payload = []
@@ -352,8 +347,6 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     resolved_mask = changes.resolve(base_mask, session_terms)
     assert delete_entity not in resolved_mask
     assert suppress_entity not in resolved_mask
-    assert widen_entity in resolved_mask
-    assert narrow_entity not in resolved_mask
 
     raw = server.viewport(token, SLICE, zoom, bbox, k=200)
     tiles, _ = decode_viewport(raw)
