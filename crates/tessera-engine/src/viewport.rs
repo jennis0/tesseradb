@@ -43,9 +43,9 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use tessera_authz::FrozenFragment;
+use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
-use tessera_spatial::tiler::ScalarType;
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
@@ -243,7 +243,10 @@ impl ColumnBuf {
     /// would otherwise append values under a name that does not describe them. Refused rather
     /// than dropped: a short column is caught downstream by the wire layer's length assertion,
     /// but a *wrong* one is not caught anywhere.
-    fn append(&mut self, other: ColumnBuf) -> std::result::Result<(), (&'static str, &'static str)> {
+    fn append(
+        &mut self,
+        other: ColumnBuf,
+    ) -> std::result::Result<(), (&'static str, &'static str)> {
         macro_rules! arms {
             ($(($v:ident, $t:ty)),* $(,)?) => {
                 match (self, other) {
@@ -899,13 +902,17 @@ impl Engine {
         // deleted-but-unfolded entities — and then projected into this slice's row space to meet
         // the mask.
         //
-        // ⊘ **Projected, not tested per tile.** `probes/2026-08-08-filter-layout/` arm 3 measures
-        // the crossover: a projection costs ~27 ns per set bit and scales with the *result*, while
-        // a per-tile membership test costs ~6–22 ns per viewport row and scales with the
-        // *viewport* — so a broad filter should test per tile (2,779 ms against 6.49 ms at 10⁹,
-        // 10⁸ matches). Only the projecting route is built. It is exact at every size; what is
-        // missing is the cheap route for the broad case, which is a latency gap and not a
-        // correctness one.
+        // ⊘ **Projected, not tested per tile.** A projection costs ~20–30 ns per set bit and scales
+        // with the *result*; a per-tile membership test costs ~20–29 ns per viewport row on a
+        // clumped result and ~57–106 ns on a scattered one, and scales with the *viewport*
+        // (`probes/2026-08-11-viewport-crossing/`, which supersedes arm 3's 6–22 ns — that figure
+        // was measured against a materialised row→entity array the system did not then have).
+        // The crossover is therefore around a result of ~10⁶ against a 300,000-row viewport, not
+        // the ~75,000 an earlier quarter-rule gave. Only the projecting route is built. It is exact
+        // at every size; what is missing is the cheap route for the broad case, where the gap is
+        // large — 216 ms against 32 ms at a 10⁷ result — and is a latency gap, not a correctness
+        // one. `row-entity.u32` (`tessera_store::row_entity`) is the half of that route that now
+        // exists: `RowSpace::entity_of` answers the per-row question without a Feistel.
         let mask = if let Some(expr) = &req.filter {
             // **The fragment is brought forward, not read off the session.** A session's own
             // fragment is fixed at authorise, and composition treats entities below the live
@@ -1541,8 +1548,7 @@ fn tile_result(
             //
             // `TileCount::visible` is computed separately and stays unfiltered; the two figures
             // answer different questions (§7.1).
-            let visible =
-                mask.count_matched_range(row_base + range.start..row_base + range.end);
+            let visible = mask.count_matched_range(row_base + range.start..row_base + range.end);
             SelectionPart {
                 segment,
                 range: range.clone(),
@@ -1782,7 +1788,9 @@ fn gather_tile_columns(
         let segment = parts.as_slice()[part as usize].segment;
         let idx = local as usize;
         tessera_ids.push(segment.columns.tessera_id()[idx]);
-        codes.push(((segment.morton.u32()[idx] as u64) << 32) | segment.columns.residual()[idx] as u64);
+        codes.push(
+            ((segment.morton.u32()[idx] as u64) << 32) | segment.columns.residual()[idx] as u64,
+        );
     }
 
     let resolved: Vec<ResolvedScalars<'_>> = parts
