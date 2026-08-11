@@ -377,15 +377,21 @@ pub enum EngineError {
     /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
     /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
     UnderlayRefused(String),
-    /// This session's row projection for `(token_id, slice, segments_version)` is being
-    /// built by a concurrent request right now. **Waiters do not park** (`tessera-bench`'s load
-    /// arm measures the alternative): a parked waiter would hold the server's admission budget
-    /// while burning zero CPU, so this call returns immediately and the caller is expected to
-    /// retry.
+    /// This session's row projection for `(token_id, slice, segments_version)` was being built by
+    /// a concurrent request, and **this request waited for it and the wait budget ran out**
+    /// (decision 0058). It is no longer the immediate answer to finding a build in flight: a racer
+    /// parks on that build and is served its result, because refusing sheds no load — the work is
+    /// already happening — while the client's retry budget is shorter than the build.
+    ///
+    /// So this now means one of two things, and both are real: the build is taking longer than
+    /// `serve.single_flight_wait_ms`, or builders are dying without publishing often enough to
+    /// exhaust the budget. Decision 0044's merge-window shed also produces it, from a different
+    /// rung of `Engine::session_geometry`'s ladder and for a different reason.
+    ///
     /// Maps to **429 `backpressure` with `Retry-After`** at the server boundary
     /// (`tessera-server::error::map_engine_error`'s explicit arm, pinned by
-    /// `map_engine_error_takes_projection_building_to_backpressure`): a build that never blocks
-    /// makes the honest answer retryable rather than fail-closed.
+    /// `map_engine_error_takes_projection_building_to_backpressure`): retryable rather than
+    /// fail-closed, because a retry after this genuinely may find the value.
     ProjectionBuilding,
     /// This credential's mask fragment (lifecycle §3.3), keyed by the canonical `(bundle_identity, auth_plugin_hash, satisfied terms)` key, never
     /// `auth_data_hash` — see `tessera_authz::FragmentCache::get_or_build`'s doc — is being built
@@ -1308,6 +1314,18 @@ impl Engine {
             .load()
             .fragments
             .set_memory_bound(fragment_bytes);
+    }
+
+    /// How long a request parks on another request's in-flight row-projection build before it is
+    /// refused (`serve.single_flight_wait_ms`, decision 0058).
+    ///
+    /// A setter for [`Self::set_cache_bounds`]'s reason and by its route: `EngineConfig` is
+    /// exhaustively constructed at fifteen sites, three of them in frozen test files.
+    ///
+    /// An embedder that never calls this gets `single_flight::DEFAULT_WAIT_BUDGET_MS`, which is
+    /// argued from the measured build cost it has to outlast rather than being a placeholder.
+    pub fn set_single_flight_wait_ms(&self, wait_budget_ms: u64) {
+        self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`,
@@ -2247,7 +2265,7 @@ mod tests {
     /// that chain: the pool itself does not eat the panic before it ever reaches `spawn_blocking`).
     ///
     /// Deliberately **not** a full `Engine::open` + fixture-bundle test with an injection hook
-    /// into `tile_result`: a `#[cfg(test)]`-visible injection point in the real per-tile path would
+    /// into `tile_sweep`: a `#[cfg(test)]`-visible injection point in the real per-tile path would
     /// let a test-only branch diverge from the code every real request runs. This is rayon's
     /// own propagation guarantee, pinned against the identical construction `Engine::open` uses,
     /// which is what `self.pool.install(...)` in `Engine::viewport` actually relies on.

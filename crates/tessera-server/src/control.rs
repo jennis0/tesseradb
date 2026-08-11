@@ -1711,6 +1711,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "queue": gate.queue,
             "in_flight": gate.in_flight,
             "waiting": gate.waiting,
+            // Emit-phase streams: slot held, compute released (`streamed-serving.md` §5).
+            "streaming": gate.streaming,
             "shed_total": gate.shed_total,
         },
         "write_executor": {
@@ -1908,7 +1910,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "bound_bytes": projection_cache.bound_bytes,
             "hits": projection_cache.hits,
             "misses": projection_cache.misses,
+            // **`building_refusals` and `waits_satisfied` are one figure split in two** (decision
+            // 0058): same-key racers used to be refused and counted here, and are now served and
+            // counted there. Sum them for the race rate an older dashboard read off this field
+            // alone. `waiters_now` is a gauge, not a total, and is process-wide — it says whether
+            // parked requests are holding compute permits, never whose (decision 0059).
             "building_refusals": projection_cache.building_refusals,
+            "waits_satisfied": projection_cache.waits_satisfied,
+            "waiters_now": projection_cache.waiters_now,
             "evictions": projection_cache.evictions,
             "young_evictions": projection_cache.young_evictions,
             "thrashing": projection_cache.young_evictions > 0,

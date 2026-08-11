@@ -1,130 +1,204 @@
-"""Decode the framed Arrow payload `tessera_wire::viewport_ipc` builds (Reference Sheet R5):
-a 4-byte LE length, the tile stream, the points stream, and — only when the request asked for the
-§3.3 underlay — a trailing sub-cell stream.
+"""Decode the framed `/v1/viewport` body `tessera_wire::payload` builds (contracts §3.2 r26,
+`streamed-serving.md`): a sequence of frames, each `u8 kind` + `u32 LE payload length` + payload,
+every payload a complete Arrow IPC stream (JSON for the trailer):
 
-Mirrors `crates/tessera-server/tests/http.rs`'s `decode_viewport` byte-for-byte, independently
-implemented in Python (this is the client-side decode any real SDK would need, not shared Rust
-logic). Moved here from `reference/tests/wire.py` (Task 15's refactor) so `conformance/tests` can
-reuse it without copy-paste; `reference/tests/wire.py` re-exports this module's `decode_viewport`
-unchanged.
+    kind 1  tiles      (tile, visible, matched, served)      exactly one, first
+    kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
+    kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
+    kind 4  trailer    JSON                                   exactly one, last
 
-**Only the tile boundary is length-prefixed.** The sub-cell stream is appended, so recovering it
-means parsing the points stream to its end-of-stream marker and taking the cursor position — which
-is what `decode_viewport_with_subcells` does. `pyarrow.ipc.open_stream` stops at that marker without
-inspecting what follows, which is exactly why appending is backward-compatible: a reader that treats
-"everything after the tile stream" as the points stream still decodes it correctly.
+Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
+independently implemented in Python (this is the client-side decode any real SDK would need, not
+shared Rust logic), so `conformance/tests` can reuse it without copy-paste;
+`reference/tests/wire.py` re-exports this module's `decode_viewport` unchanged.
+
+Strictness is deliberate: a truncated body, an unknown kind, a misplaced tiles frame or a missing
+trailer raises — a truncated stream must never decode as a plausible shorter response. The
+trailer's presence is the completeness signal, and its key set is closed (asserted here), so the
+one server-authored JSON region of the body cannot quietly acquire a field the conformance
+comparator never sees.
 """
 
 from __future__ import annotations
 
 import io
+import json
 import struct
 
 import pyarrow.ipc as ipc
 
+FRAME_TILES = 1
+FRAME_SUB_CELLS = 2
+FRAME_POINTS = 3
+FRAME_TRAILER = 4
 
-def split_frames(data: bytes) -> tuple[bytes, bytes]:
-    """Split the framed payload into `(tile_bytes, rest)` without decoding either.
+_KNOWN_KINDS = {FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER}
 
-    `rest` is the points stream *and anything appended after it* — the sub-cell stream, when the
-    request asked for the underlay. This is deliberately the pre-underlay behaviour: passing `rest`
-    straight to `open_stream` yields the points batch regardless, because the reader stops at the
-    end-of-stream marker.
+#: The trailer's closed key set (contracts §3.2 r26). ``stage_ns`` is the one optional key,
+#: double-gated behind the server's timing feature and configuration.
+TRAILER_REQUIRED_KEYS = frozenset({"stream_us", "arrow_serialise_ns", "points", "flushes"})
+TRAILER_OPTIONAL_KEYS = frozenset({"stage_ns"})
+
+
+def split_frames(data: bytes) -> list[tuple[int, bytes]]:
+    """The raw `(kind, payload)` sequence, refusing truncation and unknown kinds.
+
+    Framing only — no Arrow decode and no grammar check beyond the kinds; `decode_frames` is the
+    layer that enforces tiles-first / trailer-last.
     """
-    (tile_len,) = struct.unpack_from("<I", data, 0)
-    tile_bytes = data[4 : 4 + tile_len]
-    rest = data[4 + tile_len :]
-    return tile_bytes, rest
+    frames: list[tuple[int, bytes]] = []
+    at = 0
+    while at < len(data):
+        if len(data) - at < 5:
+            raise ValueError(f"truncated frame header at byte {at}")
+        kind = data[at]
+        if kind not in _KNOWN_KINDS:
+            raise ValueError(f"unknown frame kind {kind} at byte {at} — refused, never skipped")
+        (length,) = struct.unpack_from("<I", data, at + 1)
+        start = at + 5
+        end = start + length
+        if end > len(data):
+            raise ValueError(f"frame at byte {at} claims a payload past the end of the body")
+        frames.append((kind, data[start:end]))
+        at = end
+    return frames
 
 
-def _decode_tiles(tile_bytes: bytes) -> list[tuple[int, int, int, int]]:
-    """`(tile, visible, matched, served)` per row.
+def _batches(payload: bytes):
+    with ipc.open_stream(io.BytesIO(payload)) as reader:
+        yield from reader
 
-    `served` is contracts r7's addition, appended after `matched`: how many of this tile's points
-    are in the flat points batch. It is the only way to split that batch under §7.2's density rule,
-    where the per-tile count is no longer `min(k, visible)`.
+
+def decode_frames(data: bytes):
+    """`(tiles, points, sub_cells, trailer)` — the full grammar-checked decode.
+
+    - `tiles`: `(tile, visible, matched, served)` per row.
+    - `points`: `(tessera_id, code)` per point, concatenated across every points frame in order.
+    - `sub_cells`: `(cell, count)` rows, or `None` when no kind-2 frame was present (underlay
+      unrequested — distinct from `[]`, a present-but-empty frame; contracts §3.2's r12 rule).
+    - `trailer`: the parsed JSON object, key set validated.
     """
-    tiles = []
-    with ipc.open_stream(io.BytesIO(tile_bytes)) as reader:
-        for batch in reader:
-            tile_col = batch.column("tile").to_pylist()
-            visible_col = batch.column("visible").to_pylist()
-            matched_col = batch.column("matched").to_pylist()
-            served_col = batch.column("served").to_pylist()
-            for t, v, m, s in zip(tile_col, visible_col, matched_col, served_col):
-                tiles.append((t, v, m, s))
-    return tiles
+    frames = split_frames(data)
+    if not frames:
+        raise ValueError("empty body: a response carries at least tiles + trailer")
+    if frames[0][0] != FRAME_TILES:
+        raise ValueError("the tiles frame must be first")
+    if frames[-1][0] != FRAME_TRAILER:
+        raise ValueError("missing trailer: the response is incomplete")
+
+    tiles: list[tuple[int, int, int, int]] = []
+    points: list[tuple[int, int]] = []
+    sub_cells: list[tuple[int, int]] | None = None
+    trailer: dict | None = None
+
+    for index, (kind, payload) in enumerate(frames):
+        if kind == FRAME_TILES:
+            # Exactly one, first — a second tiles frame anywhere would silently concatenate
+            # into the count surface, which is precisely the laxity a second reader must not
+            # have (this decoder mirrors the shipped TS client's strictness deliberately).
+            if index != 0:
+                raise ValueError("more than one tiles frame")
+            for batch in _batches(payload):
+                tiles.extend(
+                    zip(
+                        batch.column("tile").to_pylist(),
+                        batch.column("visible").to_pylist(),
+                        batch.column("matched").to_pylist(),
+                        batch.column("served").to_pylist(),
+                    )
+                )
+        elif kind == FRAME_SUB_CELLS:
+            if sub_cells is not None:
+                raise ValueError("more than one sub-cells frame")
+            if index != 1:
+                raise ValueError("the sub-cells frame must immediately follow tiles")
+            sub_cells = []
+            for batch in _batches(payload):
+                sub_cells.extend(
+                    zip(
+                        batch.column("cell").to_pylist(),
+                        batch.column("count").to_pylist(),
+                    )
+                )
+        elif kind == FRAME_POINTS:
+            for batch in _batches(payload):
+                # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
+                # handle from the viewer plane and puts the stable wire identity at the row. The
+                # oracle must not translate it — it is opaque here, and the differential compares
+                # point sets by position code precisely so that agreement never depends on either
+                # side interpreting an identifier.
+                points.extend(
+                    zip(
+                        batch.column("tessera_id").to_pylist(),
+                        batch.column("code").to_pylist(),
+                    )
+                )
+        elif kind == FRAME_TRAILER:
+            if trailer is not None:
+                raise ValueError("more than one trailer frame")
+            trailer = json.loads(payload)
+            keys = set(trailer)
+            if not TRAILER_REQUIRED_KEYS <= keys:
+                raise ValueError(f"trailer missing required keys: {sorted(TRAILER_REQUIRED_KEYS - keys)}")
+            extra = keys - TRAILER_REQUIRED_KEYS - TRAILER_OPTIONAL_KEYS
+            if extra:
+                raise ValueError(f"trailer carries keys outside the closed set: {sorted(extra)}")
+
+    assert trailer is not None  # frames[-1] checked above
+    if trailer["points"] != len(points):
+        raise ValueError(
+            f"trailer claims {trailer['points']} points but the body carries {len(points)}"
+        )
+    served_total = sum(t[3] for t in tiles)
+    if served_total != len(points):
+        raise ValueError(
+            f"sum of served ({served_total}) != number of points ({len(points)})"
+        )
+    return tiles, points, sub_cells, trailer
 
 
 def decode_viewport(data: bytes):
     """`(tiles, points)`; tile rows are 4-tuples `(tile, visible, matched, served)`."""
-    tile_bytes, points_bytes = split_frames(data)
-
-    tiles = _decode_tiles(tile_bytes)
-
-    points = []
-    with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
-        for batch in reader:
-            # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
-            # handle from the viewer plane and puts the stable wire identity at the row. The
-            # oracle must not translate it — it is opaque here, and the differential compares
-            # point sets by position code precisely so that agreement never depends on either
-            # side interpreting an identifier.
-            id_col = batch.column("tessera_id").to_pylist()
-            code_col = batch.column("code").to_pylist()
-            for ident, code in zip(id_col, code_col):
-                points.append((ident, code))
-
+    tiles, points, _sub_cells, _trailer = decode_frames(data)
     return tiles, points
 
 
 def decode_viewport_points(data: bytes):
-    """The points stream as a `pyarrow.Table` — **every** column, not the three [`decode_viewport`]
-    names.
+    """The points stream as a `pyarrow.Table` — **every** column, not the two
+    [`decode_viewport`] names.
 
-    [`decode_viewport`] projects `(tessera_id, code)` because that is all the differential compares.
-    A declared scalar (contracts §2.6 — the fixture's `fx_key`, the handle→item join) arrives as an
-    additional column, and a test that means to assert on it has to see the schema rather than a
-    fixed projection. Returning the table rather than widening the tuple keeps every existing
-    caller's arity.
+    [`decode_viewport`] projects `(tessera_id, code)` because that is all the differential
+    compares. A declared scalar (contracts §2.6 — the fixture's `fx_key`, the handle→item join)
+    arrives as an additional column, and a test that means to assert on it has to see the schema
+    rather than a fixed projection. Returning the table rather than widening the tuple keeps
+    every existing caller's arity. Batches concatenate across points frames in frame order, which
+    is served order.
     """
     import pyarrow as pa  # noqa: PLC0415 — only this function needs the table type
 
-    _tile_bytes, points_bytes = split_frames(data)
-    with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
-        return pa.Table.from_batches(list(reader), reader.schema)
+    frames = split_frames(data)
+    batches = []
+    schema = None
+    for kind, payload in frames:
+        if kind != FRAME_POINTS:
+            continue
+        with ipc.open_stream(io.BytesIO(payload)) as reader:
+            schema = reader.schema
+            batches.extend(reader)
+    if schema is None:
+        raise ValueError(
+            "no points frame in this body: a zero-point response carries no points schema at all"
+        )
+    return pa.Table.from_batches(batches, schema)
 
 
 def decode_viewport_with_subcells(data: bytes):
     """`(tiles, points, sub_cells)` — `sub_cells` is `[]` when the underlay was not requested.
 
-    A separate function rather than a wider return from `decode_viewport`, so existing callers keep
-    their arity. Recovering the third stream needs the points stream parsed to its end, because only
-    the tile boundary carries a length prefix (see this module's doc).
+    A separate function rather than a wider return from `decode_viewport`, so existing callers
+    keep their arity. The `[]`-for-unrequested flattening is this function's compatibility
+    contract with its existing callers; `decode_frames` is the layer that distinguishes
+    unrequested (`None`) from present-but-empty (`[]`).
     """
-    tile_bytes, rest = split_frames(data)
-    tiles = _decode_tiles(tile_bytes)
-
-    points = []
-    buf = io.BytesIO(rest)
-    with ipc.open_stream(buf) as reader:
-        for batch in reader:
-            id_col = batch.column("tessera_id").to_pylist()
-            code_col = batch.column("code").to_pylist()
-            for ident, code in zip(id_col, code_col):
-                points.append((ident, code))
-
-    # Whatever the points reader did not consume. Zero bytes means the underlay was not requested —
-    # `viewport_ipc` emits nothing at all rather than an empty stream, precisely so that this is
-    # unambiguous.
-    trailing = rest[buf.tell() :]
-    sub_cells: list[tuple[int, int]] = []
-    if trailing:
-        with ipc.open_stream(io.BytesIO(trailing)) as reader:
-            for batch in reader:
-                cell_col = batch.column("cell").to_pylist()
-                count_col = batch.column("count").to_pylist()
-                for cell, count in zip(cell_col, count_col):
-                    sub_cells.append((cell, count))
-
-    return tiles, points, sub_cells
+    tiles, points, sub_cells, _trailer = decode_frames(data)
+    return tiles, points, sub_cells if sub_cells is not None else []

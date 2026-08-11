@@ -11,6 +11,14 @@ the mask but a *state* of the overlay, so it is a base case plus a history of ac
 operations. `oracle/journal.py` is that history, and its one rule — **only a 200 is journalled** —
 is what `test_a_refused_operation_...` exercises directly.
 
+**Only the subtracting arm is reachable, and that is a property of the phase, not of this module.**
+Decision 0047 withdrew the `predicate` op — an access edit is a delete plus a re-ingest — so the
+composed mask can only shrink: `∪ direct_eval(L)` has no way in until a re-ingested item can reach
+a viewport, which needs a flush Phase 1 does not have. What is asserted instead is the refusal
+itself (`test_the_withdrawn_predicate_op_is_refused_...`), because an engine that started accepting
+the op again would restore the novel-descriptor silent hide the withdrawal dissolved, and no other
+test here would notice.
+
 ## Why the served *points* are compared here, and not only the counts
 
 Counts are not the disclosure. Until this module gained
@@ -82,22 +90,27 @@ BATCH = 400
 
 
 @pytest.fixture(scope="module")
-def overlay_server(tmp_path_factory, catalogue_bundle_root):
-    """A server of its own, not the session-scoped catalogue ones.
+def overlay_server(tmp_path_factory, private_catalogue_bundle):
+    """A server of its own, on a **private copy of the bundle**, not the session-scoped ones.
 
-    Overlay changes are **irreversible in Phase 1** — a deletion deny retires only via the stamp
-    ledger, which does not exist until compaction lands (lifecycle §3.1) — so a module that deletes
-    items must not share a server with modules that assume the corpus intact. `reference/tests`
-    learned this the expensive way and left the comment to prove it.
+    Overlay changes are **irreversible in Phase 1** — a deletion deny retires only at the
+    compaction fold, which does not run here — so a module that deletes items must not share a
+    server with modules that assume the corpus intact. `reference/tests` learned this the expensive
+    way and left the comment to prove it.
+
+    A private *server* is not enough, which is what the copy is for: an accepted deny is published
+    into the bundle prefix (contracts §2.3), so a server on the shared cached fixture denies items
+    for every later reader of that fixture, this run and the next. See
+    `conftest.private_catalogue_bundle`.
     """
     tmp_dir = tmp_path_factory.mktemp("catalogue-overlay")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir)
+    srv, proc = spawn_server(private_catalogue_bundle("overlay"), tmp_dir)
     yield srv
     stop_server(proc)
 
 
 @pytest.fixture(scope="module")
-def overlay_density_server(tmp_path_factory, catalogue_bundle_root):
+def overlay_density_server(tmp_path_factory, private_catalogue_bundle):
     """θ **live** *and* an overlay — the combination nothing in this suite previously made.
 
     A third server rather than a reuse of either existing one, for two independent reasons. The
@@ -108,7 +121,8 @@ def overlay_density_server(tmp_path_factory, catalogue_bundle_root):
     """
     tmp_dir = tmp_path_factory.mktemp("catalogue-overlay-density")
     srv, proc = spawn_server(
-        catalogue_bundle_root, tmp_dir, theta_target_marks=THETA_TARGET_MARKS
+        private_catalogue_bundle("overlay-density"), tmp_dir,
+        theta_target_marks=THETA_TARGET_MARKS,
     )
     yield srv
     stop_server(proc)
@@ -241,6 +255,13 @@ def denied_overlay(catalogue_bundle: Bundle, overlay_density_server):
     The pre-change agreement is asserted here, as a precondition. Nothing below means anything if
     the engine and the definition already disagree on the intact corpus, and a failure at that
     point is a setup failure rather than a result.
+
+    **Deletes and suppressions only.** The state used to carry a predicate-widen as well, for the
+    `∪ direct_eval(L)` arm; the `predicate` op is withdrawn (decision 0047 — edit is delete +
+    re-ingest) and `/control/changes` refuses it with a typed 422, so in Phase 1 no control
+    operation can make a composed mask larger. The arm is not untested here by choice; it is not
+    reachable. What replaces it as coverage is `test_the_withdrawn_predicate_op_is_refused_...`,
+    which pins the refusal and that a refusal composes nothing.
     """
     case = next(c for c in cat.catalogue() if c.name == DENSITY_CASE)
     base_mask = set(case.entities)
@@ -259,21 +280,14 @@ def denied_overlay(catalogue_bundle: Bundle, overlay_density_server):
     ordered = sorted(base_mask)
     deletes = ordered[:N_DELETES]
     suppressions = ordered[N_DELETES : N_DELETES + N_SUPPRESSIONS]
-    # A predicate-widen onto a block the token never granted: the `∪ direct_eval(L)` arm, the only
-    # one that can make the composed mask *larger*. Its rows are confined to one depth-6 tile, so
-    # it also lands as a concentrated addition rather than a diffuse one.
-    widen_block = cat.BLOCKS["one_tile"]
-    widens = list(range(widen_block.start, widen_block.stop))
-    assert not (set(widens) & base_mask), "the widen arm must start outside the token's mask"
 
     _apply(journal, deletes, "delete")
     _apply(journal, suppressions, "suppress")
-    _apply(journal, widens, "predicate", term_ids=session_terms)
     assert not journal.refused, journal.describe()
-    assert journal.acked_count == len(deletes) + len(suppressions) + len(widens)
+    assert journal.acked_count == len(deletes) + len(suppressions)
 
     composed = journal.resolve(base_mask, session_terms)
-    assert len(composed) == len(base_mask) - N_DELETES - N_SUPPRESSIONS + len(widens)
+    assert len(composed) == len(base_mask) - N_DELETES - N_SUPPRESSIONS
 
     return {
         "server": server,
@@ -294,8 +308,8 @@ def test_served_points_follow_the_overlay_under_live_theta(
     """§7.2's served **points**, against a journal of accepted denies, with θ live.
 
     The three preconditions are all present here and were previously never present together (see
-    the module doc): a live θ, an overlay carrying accepted deletes, suppressions and predicate
-    changes, and a comparison of the served set rather than the count. What that buys, stated as
+    the module doc): a live θ, an overlay carrying accepted deletes and suppressions, and a
+    comparison of the served set rather than the count. What that buys, stated as
     the two engines it rejects:
 
     * an engine that samples from the **pre-overlay** mask serves items it has just been told to
@@ -474,13 +488,17 @@ def test_overlay_heavy_state_composes_the_same_mask_both_ways(
 ):
     """Several hundred acked changes on top of a catalogue case, composed both ways.
 
-    The four operations are chosen to cover each arm of I1's formula rather than to be numerous:
-    `delete` and `suppress` remove an entity outright by different retirement rules; a
-    **predicate-widen** onto an entity the grant set previously missed adds one from *outside*
-    `token_mask`, which is the `∪ direct_eval(L)` arm and the only one that can make the composed
-    mask larger; a **predicate-narrow** removes one via `L` rather than via a deny, which is the
-    `\\ L` arm. An engine that composed by subtraction alone would pass every test that used only
-    deletes and suppressions.
+    `delete` and `suppress` remove an entity outright by different retirement rules — Rule F at the
+    compaction fold and Rule S on unsuppress — and they are the whole of what a Phase 1 overlay can
+    hold. The two `predicate` arms this test used to carry, a **widen** onto an entity outside
+    `token_mask` (I1's `∪ direct_eval(L)`, the only arm that can make a composed mask larger) and a
+    **narrow** via `L`, are gone because the op is: decision 0047 withdrew it — an edit is a delete
+    plus a re-ingest — and `/control/changes` answers it with a typed 422.
+
+    So the caveat that used to justify those arms now stands unanswered by construction: **an
+    engine that composed by subtraction alone would pass this test**, because subtraction is all
+    Phase 1's control plane can ask for. The arm returns when a re-ingested item can reach a
+    viewport, which needs the flush this phase does not have.
     """
     case = cat.overlay_heavy_base()
     base_mask = set(case.entities)
@@ -496,33 +514,22 @@ def test_overlay_heavy_state_composes_the_same_mask_both_ways(
     ordered = sorted(base_mask)
     deletes = ordered[:100]
     suppressions = ordered[100:300]
-    narrows = ordered[300:400]
-    # Entities carrying `cross_hi` and not `cross_lo` — outside the token's mask entirely, so a
-    # predicate-widen onto them is the `∪ direct_eval(L)` arm and nothing else.
-    widen_block = cat.BLOCKS["cross_hi"]
-    widens = list(range(widen_block.start, widen_block.start + 100))
 
     for entity in deletes:
         assert journal.change(entity, "delete").status_code == 200
     for entity in suppressions:
         assert journal.change(entity, "suppress").status_code == 200
-    for entity in narrows:
-        assert journal.change(entity, "predicate", term_ids=set()).status_code == 200
-    for entity in widens:
-        assert journal.change(entity, "predicate", term_ids=session_terms).status_code == 200
 
-    assert journal.acked_count == 500
+    assert journal.acked_count == 300
     assert not journal.refused
 
     composed = journal.resolve(base_mask, session_terms)
-    assert len(composed) == len(base_mask) - 400 + 100, (
+    assert len(composed) == len(base_mask) - 300, (
         "the oracle's own composition is not what this test set up; check I1's arms before "
         "blaming the engine"
     )
-    for entity in deletes + suppressions + narrows:
+    for entity in deletes + suppressions:
         assert entity not in composed
-    for entity in widens:
-        assert entity in composed
 
     assert _engine_counts(overlay_server, token) == _oracle_counts(catalogue_bundle, composed), (
         "the engine's row-space diff composition and the oracle's entity-space composition "
@@ -531,11 +538,11 @@ def test_overlay_heavy_state_composes_the_same_mask_both_ways(
 
 
 @pytest.fixture(scope="module")
-def ingest_server(tmp_path_factory, catalogue_bundle_root):
+def ingest_server(tmp_path_factory, private_catalogue_bundle):
     """Its own server: an ingest allocates entity ids and moves the watermark, which every other
     module here asserts is where the bundle left it."""
     tmp_dir = tmp_path_factory.mktemp("catalogue-ingest")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir)
+    srv, proc = spawn_server(private_catalogue_bundle("ingest"), tmp_dir)
     yield srv
     stop_server(proc)
 
@@ -663,4 +670,54 @@ def test_a_refused_operation_is_not_journalled_and_changes_nothing(
     assert journal.resolve(base_mask, session_terms) == before_mask
     assert _engine_counts(overlay_server, token) == before_counts, (
         "a refused control operation moved the engine's view — the refusal was not a refusal"
+    )
+
+
+def test_the_withdrawn_predicate_op_is_refused_and_composes_nothing(
+    catalogue_bundle: Bundle, overlay_server
+):
+    """`op: "predicate"` is refused with a typed 422, and refusing it changes nothing.
+
+    Decision 0047 withdrew the op: an access edit is a delete plus a re-ingest under the same
+    `external_id`. This is the conformance-side pin on that, and it is a **fail-closed** check
+    rather than a tidiness one. The withdrawal is what dissolves the novel-descriptor silent hide
+    (the invariants review's F4): a predicate change naming a descriptor the dictionary never held
+    minted an unsatisfiable extension id that nothing ever promoted, leaving the item invisible to
+    everyone behind a 200. An engine that quietly began accepting the op again would restore that
+    hole while every other test here stayed green, because a widen the oracle also applies is
+    indistinguishable from a widen that worked.
+
+    Both directions are submitted — a narrow (empty term set) and a widen onto an entity outside
+    the token's mask — because they travel the same handler but only the widen could enlarge a
+    mask, and a refusal that covered one and not the other is the interesting half-fix.
+    """
+    case = cat.overlay_heavy_base()
+    base_mask = set(case.entities)
+    session_terms = {catalogue_bundle.term_id_of(g.encode("ascii")) for g in case.grants}
+    token = overlay_server.authorise(list(case.grants))["token"]
+
+    journal = AckedJournal(overlay_server, catalogue_bundle)
+    before_counts = _engine_counts(overlay_server, token)
+    before_mask = journal.resolve(base_mask, session_terms)
+
+    narrow = sorted(base_mask)[-1]
+    widen = cat.BLOCKS["cross_hi"].start
+    assert widen not in base_mask, "the widen arm must start outside the token's mask"
+
+    for entity, term_ids in ((narrow, set()), (widen, session_terms)):
+        response = journal.change(entity, "predicate", term_ids=term_ids)
+        assert response.status_code == 422, (
+            f"the withdrawn predicate op was answered {response.status_code}, not 422: "
+            f"{response.text}"
+        )
+        assert "predicate" in response.text and "delete" in response.text, (
+            "the 422 must name the op and the flow that replaces it, or a caller cannot act on "
+            f"it: {response.text}"
+        )
+
+    assert journal.ops == [], "a refused operation must not enter the journal"
+    assert len(journal.refused) == 2
+    assert journal.resolve(base_mask, session_terms) == before_mask
+    assert _engine_counts(overlay_server, token) == before_counts, (
+        "the refused predicate changes moved the engine's view — they were not refused"
     )

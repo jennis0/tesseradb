@@ -689,12 +689,14 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     );
 }
 
-/// The `x-tessera-stage-ns` header obeys **both** of its gates, and carries no identifier.
+/// The trailer's `stage_ns` key (formerly the `x-tessera-stage-ns` header — contracts §3.2 r26)
+/// obeys **both** of its gates, and carries no identifier.
 ///
 /// `spawn_server` sets `stage_timing: true`, so the runtime gate is open throughout this test.
 /// The compile-time gate therefore decides on its own, and this asserts each direction rather
 /// than only the one the current build happens to take — a release binary that started emitting
-/// the header would otherwise pass a test written for the instrumented build.
+/// the breakdown would otherwise pass a test written for the instrumented build. The retired
+/// header is asserted absent in BOTH directions: nothing may quietly resurrect it.
 ///
 /// The field-count assertion pins the CSV contract `tessera-bench` and `scripts/bench_*.py`
 /// parse. Append-only: adding a stage means bumping the expected count here deliberately.
@@ -729,12 +731,18 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let header = resp.headers().get("x-tessera-stage-ns").cloned();
+    assert!(
+        resp.headers().get("x-tessera-stage-ns").is_none(),
+        "the stage header is retired (contracts §3.2 r26): the breakdown rides the trailer"
+    );
+    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
+    let stage_ns = decoded.trailer.get("stage_ns").cloned();
 
     if cfg!(feature = "bench-timing") {
-        let value = header
-            .expect("bench-timing is on and stage_timing is true, so the header must be present");
-        let text = value.to_str().expect("header is ASCII digits and commas");
+        let value =
+            stage_ns.expect("bench-timing is on and stage_timing is true, so stage_ns is present");
+        let text = value.as_str().expect("stage_ns is a CSV string").to_string();
+        let text = text.as_str();
 
         let fields: Vec<&str> = text.split(',').collect();
         assert_eq!(
@@ -784,8 +792,8 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         );
     } else {
         assert!(
-            header.is_none(),
-            "without the bench-timing feature the header must be absent even when \
+            stage_ns.is_none(),
+            "without the bench-timing feature the trailer must carry no stage_ns even when \
              `stage_timing = true` — a release build must not emit it"
         );
     }
@@ -1408,11 +1416,12 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 ///
 /// Two servers, same bundle, differing only in `EngineConfig::compute_threads`; the same
 /// authorisation terms (so both sessions see the identical mask) and the identical request body.
-/// Only the response **body** is compared -- `x-tessera-server-us`, `x-tessera-admission-us` and
-/// (when enabled) `x-tessera-stage-ns` are wall-clock/CPU-time measurements of this specific run
-/// and are expected to differ between the two servers, and between runs of the same server; none
-/// of them are part of this byte-equality claim. `x-tessera-pin` IS compared -- it is derived from
-/// the bundle's own `(prefix, segments_version)`, not from timing, so it must agree too.
+/// The compared region is the body **minus its trailer frame** (`streamed-serving.md` §7): the
+/// trailer carries wall-clock figures of this specific run and is canonicalised by key set in
+/// `decode_viewport_frames` rather than compared by bytes; `x-tessera-server-us` and
+/// `x-tessera-admission-us` are likewise timing headers outside the claim. `x-tessera-pin` IS
+/// compared -- it is derived from the bundle's own `(prefix, segments_version)`, not from
+/// timing, so it must agree too.
 ///
 /// Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's default
 /// `N_ITEMS` (1,000), for a genuinely multi-tile, multi-thousand-row request. But item count alone
@@ -1528,17 +1537,21 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         "the pin must agree -- same bundle, same generation"
     );
 
-    let (tiles, points) = decode_viewport(&bytes_1);
+    let decoded_1 = decode_viewport_frames(&bytes_1);
+    let decoded_8 = decode_viewport_frames(&bytes_8);
     assert!(
-        tiles.len() > 1,
+        decoded_1.tiles.len() > 1,
         "need more than one non-empty tile to exercise cross-tile ordering, got {}",
-        tiles.len()
+        decoded_1.tiles.len()
     );
-    assert!(!points.is_empty(), "the fixture must return some points");
+    assert!(
+        !decoded_1.points.is_empty(),
+        "the fixture must return some points"
+    );
 
     assert_eq!(
-        bytes_1, bytes_8,
-        "the full Arrow response body must be byte-for-byte identical regardless of \
+        decoded_1.deterministic_bytes, decoded_8.deterministic_bytes,
+        "every frame before the trailer must be byte-for-byte identical regardless of \
          compute_threads -- this is also the statement that the Python differential oracle and \
          the conformance byte-scanner's vectors are unaffected: they consume exactly these bytes \
          and know nothing about compute_threads"
@@ -1640,7 +1653,9 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
     assert_eq!(resp_8.status(), 200);
     let bytes_8 = resp_8.bytes().await.unwrap();
 
-    let (tiles, _points) = decode_viewport(&bytes_1);
+    let decoded_1 = decode_viewport_frames(&bytes_1);
+    let decoded_8 = decode_viewport_frames(&bytes_8);
+    let tiles = &decoded_1.tiles;
     assert!(
         !tiles.is_empty(),
         "need at least one non-empty tile for this to be a real mixed case, got none"
@@ -1653,27 +1668,30 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
     );
 
     assert_eq!(
-        bytes_1, bytes_8,
-        "the full Arrow response body must be byte-for-byte identical regardless of \
+        decoded_1.deterministic_bytes, decoded_8.deterministic_bytes,
+        "every frame before the trailer must be byte-for-byte identical regardless of \
          compute_threads, including on the mostly-empty-tile Ok(None) skip path"
     );
 }
 
-/// **A single-flight shed must not claim the compute gate is saturated.** Concurrent viewports on
-/// a *cold* session — one whose row projection has not been built — race the engine's single-flight
-/// builder, and the losers are shed with 429 `backpressure`. That is a different mechanism from the
-/// compute-admission gate: the gate admitted every one of these requests and sheds nothing, which
-/// this test pins by reading its `shed_total` from `/control/status`. A body claiming a
-/// compute-admission bound therefore sends whoever reads it — client author or operator — to a
-/// gate with 48 free permits and a zero counter.
+/// **Concurrent viewports on a cold session are all served, off one build** — decision 0058's
+/// whole point, at the boundary a client sees.
 ///
-/// **Not a timing bet in the direction that matters.** If the projection happens to be built before
-/// any sibling arrives, no 429 is produced and there is nothing to assert; the test then passes
-/// vacuously rather than failing, because a 429 is the *loser's* answer and losing is not
-/// guaranteed. What it can never do is pass while a single-flight shed carries the gate's wording.
-/// The fixture is deliberately larger than [`N_ITEMS`] so the build is wide enough to lose to.
+/// A cold session is one whose row projection has not been built. Eight simultaneous viewports on
+/// one therefore all miss, one becomes the builder, and the other seven find a `Building` slot.
+/// They used to be shed with 429 `backpressure`; they now wait for that build and are served its
+/// result.
+///
+/// **The assertions are unconditional now, and that is the change.** This test previously allowed
+/// that no racer might lose, in which case there was no 429 and nothing to check — it could pass
+/// vacuously. Waiting removes the branch: every racer is served whatever the interleaving, and
+/// `misses == 1` says the eight of them cost one projection build rather than eight. The
+/// `shed_total` check stays, because it is what distinguishes this mechanism from the
+/// compute-admission gate, and the gate still sheds nothing here.
+///
+/// The fixture is deliberately larger than [`N_ITEMS`] so the build is wide enough to race.
 #[tokio::test]
-async fn a_single_flight_shed_does_not_blame_the_compute_gate() {
+async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture_n(
@@ -1690,7 +1708,7 @@ async fn a_single_flight_shed_does_not_blame_the_compute_gate() {
     .await;
 
     // The generous default gate: 48 admission permits against the handful of requests below, so
-    // any 429 here is necessarily the single-flight builder's and not the gate's.
+    // any 429 here would be the single-flight builder's and not the gate's.
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
 
@@ -1719,30 +1737,302 @@ async fn a_single_flight_shed_does_not_blame_the_compute_gate() {
         }));
     }
 
-    let mut shed = 0;
     for racer in racers {
         let (status, body) = racer.await.unwrap();
-        if status != 429 {
-            assert_eq!(status, 200, "a racer must be served or shed, nothing else");
-            continue;
-        }
-        shed += 1;
-        assert_eq!(body["error"], "backpressure", "the wire code is closed");
-        assert_eq!(body["retry_after_s"], 1);
-        let detail = body["detail"].as_str().unwrap();
-        assert!(
-            !detail.contains("compute-admission bound"),
-            "a single-flight shed must not claim compute-admission saturation, got: {detail}"
-        );
-        assert!(
-            detail.contains("row projection") || detail.contains("mask fragment"),
-            "the detail must name the mechanism that actually shed, got: {detail}"
+        assert_eq!(
+            status, 200,
+            "every racer on a cold session must be served, not shed: {body}"
         );
     }
 
     let status = control_status(&server).await;
     assert_eq!(
         status["compute"]["shed_total"], 0,
-        "the compute gate shed nothing, whatever the {shed} single-flight refusals said"
+        "the compute gate admitted every request and sheds nothing on this path"
     );
+    let cache = &status["row_projection_cache"];
+    assert_eq!(
+        cache["misses"], 1,
+        "eight concurrent racers must cost one projection build, not eight"
+    );
+    assert_eq!(
+        cache["building_refusals"], 0,
+        "nothing was refused — the racers waited and were served"
+    );
+    // Not asserted as exactly seven: a racer that arrives after the publish is an ordinary hit and
+    // never waits at all, which is a legitimate interleaving rather than a failure. What is
+    // asserted is that hits and waits together account for the other seven, which `misses == 1`
+    // above already says.
+    assert!(
+        cache["waits_satisfied"].as_u64().unwrap() <= 7,
+        "a wait cannot be satisfied for a racer that never waited"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The streamed response (`streamed-serving.md`; contracts §3.2 r26): multi-frame chunking,
+// request-order emission, and the frame grammar over real HTTP.
+// ---------------------------------------------------------------------------------------------
+
+/// A flush threshold far below one response's bytes produces many point frames, whose payloads
+/// concatenate to exactly the single-frame body a generous threshold serves — the server-level
+/// face of the engine's collector-equivalence test, over a real socket. The frame grammar
+/// (tiles first, trailer last, closed trailer key set, `sum(served) == points`) is enforced by
+/// `decode_viewport_frames` on both responses.
+#[tokio::test]
+async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let chunked = spawn_server_with_stream_flush(
+        &bundle_root,
+        &tmp.path().join("cache-chunked"),
+        &tmp.path().join("wal-chunked.log"),
+        // 1 KiB: dozens of flushes for this fixture's zoom-3 response.
+        1 << 10,
+        10_000,
+    )
+    .await;
+    let whole = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache-whole"),
+        &tmp.path().join("wal-whole.log"),
+    )
+    .await;
+
+    let body = serde_json::json!({
+        "slice": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 64
+    });
+    let mut decoded = Vec::new();
+    for server in [&chunked, &whole] {
+        let auth = authorise(server, &["0"]).await;
+        let token = auth["token"].as_str().unwrap();
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        decoded.push(decode_viewport_frames(&resp.bytes().await.unwrap()));
+    }
+    let (chunked, whole) = (&decoded[0], &decoded[1]);
+
+    assert!(
+        chunked.point_frames > 1,
+        "a 1 KiB threshold must chunk this response, got {} frame(s)",
+        chunked.point_frames
+    );
+    assert_eq!(
+        whole.point_frames, 1,
+        "the 1 MiB default must leave this fixture-sized response in one frame"
+    );
+    // Chunk boundaries are not contract; content is.
+    assert_eq!(chunked.tiles, whole.tiles);
+    assert_eq!(chunked.served, whole.served);
+    assert_eq!(chunked.points, whole.points);
+    assert_eq!(chunked.sub_cells, whole.sub_cells);
+}
+
+/// The `tiles` request form's response order is the request's own order (contracts §3.2 r26):
+/// reversed request, reversed response — with a duplicate in the list dropped at its first
+/// occurrence rather than served twice.
+#[tokio::test]
+async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    // Which depth-2 tiles are non-empty, from a bbox request.
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 4
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let all = decode_viewport_frames(&resp.bytes().await.unwrap());
+    let mut wanted: Vec<u64> = all.tiles.iter().map(|t| t.0).collect();
+    assert!(wanted.len() >= 2, "need at least two non-empty tiles");
+    wanted.reverse();
+
+    // The same tiles, explicitly, reversed, with the first tile repeated at the end — the
+    // duplicate must be dropped (first occurrence kept), never served twice.
+    let mut with_duplicate = wanted.clone();
+    with_duplicate.push(wanted[0]);
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 2, "tiles": with_duplicate, "k": 4
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let out = decode_viewport_frames(&resp.bytes().await.unwrap());
+    let got: Vec<u64> = out.tiles.iter().map(|t| t.0).collect();
+    assert_eq!(
+        got, wanted,
+        "the tiles batch must report in the request's order, deduplicated, unsorted"
+    );
+
+    // The points follow the tiles: split the bbox response's flat concatenation by its per-tile
+    // `served` counts, reverse the groups, and the explicit-order response must match exactly —
+    // same points, same within-tile ascending order, opposite tile order.
+    let mut groups: Vec<&[(u64, u64)]> = Vec::new();
+    let mut at = 0usize;
+    for &served in &all.served {
+        groups.push(&all.points[at..at + served as usize]);
+        at += served as usize;
+    }
+    let expected: Vec<(u64, u64)> = groups.iter().rev().flat_map(|g| g.iter().copied()).collect();
+    assert_eq!(
+        out.points, expected,
+        "points must concatenate in the request's tile order"
+    );
+}
+
+/// The emit phase's shed machinery, end to end over a real socket — the three behaviours the
+/// implementation review named as dark: a reader that STOPS reading is shed by the write-stall
+/// deadline; a reader that DISCONNECTS is shed by the closed channel; and in both cases the
+/// `streaming` gauge (slot held, compute released — `streamed-serving.md` §5) returns to zero
+/// and the gate goes on serving.
+///
+/// Uses a 2M-item fixture so the response (~32 MB at these parameters) genuinely overruns the
+/// loopback socket buffers, which autotune to ~10 MB combined — a response that fits in kernel
+/// buffers "streams" to a stopped reader without the producer ever parking, and the test would
+/// pass without touching the shed path at all (measured: the 300k fixture's ~5 MB response did
+/// exactly that on first run).
+#[tokio::test]
+async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero() {
+    const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        SHED_FIXTURE_ITEMS,
+    );
+    let server = spawn_server_with_stream_flush(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        // Small flushes, so the producer parks on the channel as soon as the client stops.
+        1 << 12,
+        // A short stall budget, so the shed happens inside the test's patience.
+        1_500,
+    )
+    .await;
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let big_request = serde_json::json!({
+        "slice": "s0", "zoom": 6, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+    });
+
+    // Observed through `TestServer::state` after driving the requests over HTTP — the
+    // observe-not-drive licence that field's doc grants. `/control/status` publishes the same
+    // gauge; the direct read spares the operator credential and a JSON parse per poll.
+    let wait_for_streaming = |state: std::sync::Arc<tessera_server::state::AppState>,
+                              want: usize,
+                              patience_ms: u64| async move {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(patience_ms);
+        loop {
+            let now = state.compute_gate.status().streaming;
+            if now == want {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "streaming gauge stuck at {now}, wanted {want}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+
+    // 1. The stalled reader: take the headers, then stop reading, holding the connection open.
+    //    The producer fills the channel and the socket buffers, parks, and the stall deadline
+    //    sheds it — observable as the gauge rising and then returning to zero while we still
+    //    hold the response.
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&big_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    wait_for_streaming(std::sync::Arc::clone(&server.state), 1, 5_000).await;
+    wait_for_streaming(std::sync::Arc::clone(&server.state), 0, 10_000).await;
+    // The shed is loud at this end too: reading the held body now must NOT produce a complete
+    // response — either the transport aborts, or the bytes end without a trailer.
+    match resp.bytes().await {
+        Err(_) => {}
+        Ok(bytes) => {
+            let frames = tessera_wire::split_frames(&bytes);
+            let complete = matches!(
+                &frames,
+                Ok(frames) if frames.last().map(|(k, _)| *k) == Some(tessera_wire::FRAME_TRAILER)
+            );
+            assert!(
+                !complete,
+                "a shed stream must never read as a complete response"
+            );
+        }
+    }
+
+    // 2. The disconnecting reader: drop the response as soon as the headers arrive. The body —
+    //    and with it the channel receiver and the cancel guard — drops, and the producer's next
+    //    send observes the closure immediately.
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&big_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    drop(resp);
+    wait_for_streaming(std::sync::Arc::clone(&server.state), 0, 10_000).await;
+
+    // 3. The gate is undamaged: a full request is served and decodes complete.
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&big_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
+    assert!(!decoded.points.is_empty());
 }

@@ -496,27 +496,29 @@ struct RawOutcome {
     points_served: u64,
 }
 
-/// Decode just the tile stream's `served` column and sum it — new bench metric (points served per
-/// second/user/request). Per the wire framing (`tessera-wire::payload`'s module doc): `u32 LE`
-/// byte length of the tile stream, then the tile stream itself (an Arrow IPC stream, schema
-/// `tile/visible/matched/served`, all `uint64`). The points stream and any subcell stream follow
-/// but are never touched — the length prefix is exactly what makes that possible without parsing
-/// Arrow metadata first, and `served` alone is sufficient (equal by contract to the points-stream
-/// row count, so there is nothing the points stream itself would add).
+/// Decode just the tiles frame's `served` column and sum it — new bench metric (points served
+/// per second/user/request). Per the wire framing (contracts §3.2 r26; `tessera-wire::payload`'s
+/// module doc): the body is tagged length-prefixed frames, the kind-1 tiles frame first, its
+/// payload an Arrow IPC stream (schema `tile/visible/matched/served`, all `uint64`). The point
+/// frames and any sub-cell frame follow but are never touched — every frame is length-prefixed,
+/// and `served` alone is sufficient (equal by contract to the points-stream row count, so there
+/// is nothing the points frames themselves would add).
 ///
-/// Returns `0` on any malformed input (too short for the length prefix, length prefix past the
-/// body's end, or an Arrow decode failure) rather than panicking — a load generator must never
-/// crash the whole run over one malformed response; the caller's accounting simply undercounts
-/// that one response's points, which a near-zero rate elsewhere in the cell would already flag.
+/// Returns `0` on any malformed input (a frame walk failure or an Arrow decode failure) rather
+/// than panicking — a load generator must never crash the whole run over one malformed response;
+/// the caller's accounting simply undercounts that one response's points, which a near-zero rate
+/// elsewhere in the cell would already flag.
 fn sum_served(body: &[u8]) -> u64 {
-    if body.len() < 4 {
-        return 0;
-    }
-    let tile_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
-    let Some(tile_bytes) = body.get(4..4 + tile_len) else {
+    let Ok(frames) = tessera_wire::split_frames(body) else {
         return 0;
     };
-    let Ok(reader) = arrow::ipc::reader::StreamReader::try_new(tile_bytes, None) else {
+    let Some((_, tile_bytes)) = frames
+        .iter()
+        .find(|(kind, _)| *kind == tessera_wire::FRAME_TILES)
+    else {
+        return 0;
+    };
+    let Ok(reader) = arrow::ipc::reader::StreamReader::try_new(*tile_bytes, None) else {
         return 0;
     };
     let mut total = 0u64;

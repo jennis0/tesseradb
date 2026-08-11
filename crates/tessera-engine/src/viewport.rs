@@ -11,26 +11,35 @@
 //! parameters (notably θ's anchor, which **must** be the composed visible cardinality — see
 //! [`crate::select::Threshold::anchor`] for the I2 argument) and to gather what selection returns.
 //!
-//! **D-D/D-F: the per-tile body of the count-and-select loop runs on the engine's shared rayon
-//! pool.** [`tile_result`] is the pure per-tile function — no `&self`, no engine method, nothing
-//! but `&`-borrowed inputs and an owned result — that [`Engine::viewport`] fans out over every
-//! tile via `self.pool.install(|| tiles.par_iter().zip(..).map(tile_result).collect::<Vec<_>>())`.
-//! The collect target is deliberately `Vec<Result<Option<TileResult>, EngineError>>`, never
-//! `Result<Vec<TileResult>, EngineError>`: a `Result` collect drops rayon onto its unindexed
+//! **The request is two phases, split at the seam streaming needs** (`streamed-serving.md`):
+//! the **sweep** — count, select and underlay per tile, no gather — and the **emit** — a serial
+//! pass over the swept tiles in response order that gathers and hands off flush-sized
+//! [`PointColumns`] chunks. [`Engine::viewport_stream`] is the producer; [`Engine::viewport`] is
+//! the same producer run into a collecting sink, returning the batch [`ViewportOut`].
+//!
+//! **D-D/D-F: the sweep's per-tile body runs on the engine's shared rayon pool.**
+//! [`tile_sweep`] is the pure per-tile function — no `&self`, no engine method, nothing
+//! but `&`-borrowed inputs and an owned result — that the sweep fans out over every
+//! tile via `self.pool.install(|| tiles.par_iter().zip(..).map(tile_sweep).collect::<Vec<_>>())`.
+//! The collect target is deliberately `Vec<Result<Option<TileSweepOut>, EngineError>>`, never
+//! `Result<Vec<TileSweepOut>, EngineError>`: a `Result` collect drops rayon onto its unindexed
 //! reduce path, and this response's byte-equality claim (same request, same bytes, at
 //! `compute_threads = 1` or `8`) would then rest on an implementation detail of that reduce
 //! strategy rather than on anything stated here. Collecting `Vec<Result<..>>` stays on rayon's
 //! *indexed* collect path, so the output vector's order equals the input tiles' order **by
 //! construction** — not by convention, not by observation of the current rayon version. A serial,
-//! in-order fold over that vector (still in `Engine::viewport`) then short-circuits on the first
-//! `Err` (D-C's per-tile cancellation check, moved inside `tile_result` — see its doc) and
-//! concatenates `tile_counts`/`points`/`sub_cells` exactly as the serial fold does.
+//! in-order fold over that vector then short-circuits on the first
+//! `Err` (D-C's per-tile cancellation check, moved inside `tile_sweep` — see its doc) and
+//! collects `tile_counts`/`sub_cells` plus each tile's selected rows for the emit pass.
+//! **The emit pass is deliberately serial** — obviously correct first, and its wall cost
+//! overlaps transmission under streaming; if a measurement shows it binding, parallel
+//! gather-ahead inside the emit loop is a contained change.
 //!
 //! **Calibration task: below [`SERIAL_FALLBACK_MAX_ROWS`], the fan-out above does not run at
 //! all.** Measured (2.42M-fixture, w=10 grant, zoom 8) at 2.97x-13x slower at
 //! `compute_threads = default` than at `compute_threads = 1` for a typical small viewport — the
 //! `pool.install` fan-out's own entry/scheduling cost dominates the ~µs of real per-tile work a
-//! sparse, ~256-tile request produces. `Engine::viewport` instead folds `tile_result` serially,
+//! sparse, ~256-tile request produces. `Engine::viewport` instead folds `tile_sweep` serially,
 //! in tile order, producing the identical `Vec<Result<Option<TileResult>>>` shape the fold below
 //! already consumes — so the fold, and therefore the response, is unaffected by which branch ran.
 //! See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for the predictor argument and the sweep data, and the
@@ -40,19 +49,19 @@ use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 
 use tessera_authz::FrozenFragment;
+use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
-use tessera_spatial::tiler::ScalarType;
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, GenerationStamp, TesseraId, API_VERSION};
 
-use crate::cache::{Peek, RowProjectionKey, SessionGeometry};
+use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
@@ -158,6 +167,40 @@ impl PointColumns {
     pub fn is_empty(&self) -> bool {
         self.tessera_ids.is_empty()
     }
+
+    /// Concatenate `other` onto this buffer, column by column — the response's in-order
+    /// accumulation, shared by the emit pass's flush buffer and any collecting
+    /// [`ViewportSink`].
+    ///
+    /// A type disagreement means two tiles read the same declared column at different types,
+    /// which no well-formed bundle produces — see [`ColumnBuf::append`], which this defers to.
+    pub fn append(
+        &mut self,
+        other: PointColumns,
+    ) -> std::result::Result<(), (&'static str, &'static str)> {
+        self.tessera_ids.extend(other.tessera_ids);
+        self.codes.extend(other.codes);
+        // Positional: both sides were built from the same declared-scalar list, so index i is
+        // the same column on both. A length disagreement between the two `scalars` vectors is a
+        // producer bug caught by the zip running short — the appended columns then fail the
+        // wire layer's length assertion rather than silently dropping a column.
+        for (dst, src) in self.scalars.iter_mut().zip(other.scalars) {
+            dst.append(src)?;
+        }
+        Ok(())
+    }
+
+    /// Estimated wire bytes of these columns as a points frame payload — the emit pass's flush
+    /// threshold. Deterministic (a pure function of the data), and a hint rather than a
+    /// contract: it decides where chunks split, never what they contain.
+    pub fn wire_bytes_estimate(&self) -> usize {
+        // `tessera_id` and `code`, both u64.
+        let mut bytes = self.tessera_ids.len() * 16;
+        for col in &self.scalars {
+            bytes += col.wire_bytes_estimate();
+        }
+        bytes
+    }
 }
 
 /// A same-typed column of gathered scalar values.
@@ -238,7 +281,10 @@ impl ColumnBuf {
     /// would otherwise append values under a name that does not describe them. Refused rather
     /// than dropped: a short column is caught downstream by the wire layer's length assertion,
     /// but a *wrong* one is not caught anywhere.
-    fn append(&mut self, other: ColumnBuf) -> std::result::Result<(), (&'static str, &'static str)> {
+    fn append(
+        &mut self,
+        other: ColumnBuf,
+    ) -> std::result::Result<(), (&'static str, &'static str)> {
         macro_rules! arms {
             ($(($v:ident, $t:ty)),* $(,)?) => {
                 match (self, other) {
@@ -259,6 +305,24 @@ impl ColumnBuf {
                     $(ColumnBuf::$v(_) => stringify!($v),)*
                     ColumnBuf::Bool(_) => "Bool",
                     ColumnBuf::Utf8(_) => "Utf8",
+                }
+            };
+        }
+        flat_families!(arms)
+    }
+
+    /// This column's approximate wire size — element widths for the fixed families, a bitmap
+    /// for `Bool`, offsets-plus-data for `Utf8`. Mirrors `tessera-wire`'s buffer-sizing
+    /// arithmetic without depending on that crate (the dependency edge runs the other way).
+    fn wire_bytes_estimate(&self) -> usize {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnBuf::$v(x) => x.len() * std::mem::size_of::<$t>(),)*
+                    ColumnBuf::Bool(x) => x.len().div_ceil(8),
+                    ColumnBuf::Utf8(x) => {
+                        4 * (x.len() + 1) + x.iter().map(|v| v.len()).sum::<usize>()
+                    }
                 }
             };
         }
@@ -312,8 +376,13 @@ pub struct ViewportRequest<'a> {
     /// as before, self-contained, with no declaration logic anywhere in the client
     /// (`client-interaction.md` §5's REPLACE default).
     ///
-    /// Sorted and deduplicated by the caller boundary before it reaches here: the points stream is
-    /// a flat concatenation in tile order, so a repeated tile would be served — and drawn — twice.
+    /// Deduplicated by the caller boundary before it reaches here (first occurrence kept, order
+    /// preserved): a repeated tile would be served — and drawn — twice. **The list's order is the
+    /// response's order** — the tiles batch reports in it and the points stream concatenates in
+    /// it — which is how a streaming client orders its own arrival sequence (centre-out, say)
+    /// with no server-side ordering policy at all (`streamed-serving.md` §3). The range
+    /// derivation is order-independent (`tile_ranges_all` sweeps in Morton order internally and
+    /// writes back positionally), so an arbitrary order costs nothing.
     pub tiles: Option<&'a [u64]>,
     /// The client's per-tile mark budget. Clamped to `max_k` (the machine ceiling) and then to
     /// `k_max_marks` (§7.2's cap clause).
@@ -464,6 +533,86 @@ impl PartialEq for ViewportOut {
             && self.points == other.points
             && self.sub_cells == other.sub_cells
             && self.scalar_names == other.scalar_names
+    }
+}
+
+/// Everything about a viewport response that is known **before the sweep runs** — the HTTP
+/// headers derive from it, which is why it is delivered first (`streamed-serving.md` §4).
+#[derive(Debug, Clone)]
+pub struct ViewportHead {
+    pub coordinates: ViewCoordinates,
+    /// The geometry this response is answered from — what a client echoes back next time.
+    pub stamp: GenerationStamp,
+    /// See [`ViewportOut::stale`].
+    pub stale: bool,
+    /// The declared-scalar schema, in manifest order, from the SAME generation the response is
+    /// served from — names for the wire's column headers, types so a collecting sink can seed
+    /// empty columns for a response that emits no points chunk at all.
+    pub declared_scalars: Vec<DeclaredScalar>,
+}
+
+/// The sink told the producer to stop: the consumer is gone (a closed channel, an expired
+/// stream deadline). The producer treats it exactly as a cancellation — abandoned work, not a
+/// fault.
+#[derive(Debug)]
+pub struct SinkClosed;
+
+pub type SinkResult = std::result::Result<(), SinkClosed>;
+
+/// Where [`Engine::viewport_stream`] delivers a response, in strict order: `head`, then
+/// `counts`, then zero or more `points` chunks. The producer returning `Ok` is the completeness
+/// signal — there is no `done` callback, so a sink that needs one (the server's trailer) writes
+/// it after the call returns.
+///
+/// Every callback may refuse with [`SinkClosed`], which aborts the request as a cancellation
+/// (D-C posture): the remaining work is abandoned, nothing partial is recorded anywhere, and
+/// the caller gets [`EngineError::Cancelled`].
+pub trait ViewportSink {
+    /// Everything the response headers need. Exactly once, before any other callback.
+    fn head(&mut self, head: ViewportHead) -> SinkResult;
+    /// Sweep complete: every tile's counts, and the §3.3 underlay. Exactly once, before any
+    /// points. `sub_cells` is `None` when the request did not ask for the underlay and `Some`
+    /// (possibly of an empty slice) when it did — the wire's frame-presence rule needs the
+    /// distinction, and an empty slice cannot carry it.
+    fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult;
+    /// One flush chunk: whole tiles' worth of points, in response order, ascending by
+    /// `tessera_id` within each tile. Never called with an empty chunk.
+    fn points(&mut self, chunk: PointColumns) -> SinkResult;
+}
+
+/// [`Engine::viewport`]'s sink: collect everything, so the batch caller sees exactly what a
+/// streaming consumer would have seen, concatenated.
+#[derive(Default)]
+struct CollectSink {
+    head: Option<ViewportHead>,
+    tiles: Vec<TileCount>,
+    sub_cells: Vec<SubCellCount>,
+    points: Option<PointColumns>,
+}
+
+impl ViewportSink for CollectSink {
+    fn head(&mut self, head: ViewportHead) -> SinkResult {
+        self.head = Some(head);
+        Ok(())
+    }
+
+    fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult {
+        self.tiles = tiles.to_vec();
+        self.sub_cells = sub_cells.unwrap_or_default().to_vec();
+        Ok(())
+    }
+
+    fn points(&mut self, chunk: PointColumns) -> SinkResult {
+        match &mut self.points {
+            None => self.points = Some(chunk),
+            Some(points) => points
+                .append(chunk)
+                // Unreachable: every chunk of one response is gathered against the same
+                // declared-scalar list, and a per-chunk type disagreement is refused inside the
+                // gather (`gather_tile_columns`) before it could reach here.
+                .expect("chunks of one response cannot disagree on a column's type"),
+        }
+        Ok(())
     }
 }
 
@@ -769,6 +918,7 @@ impl Engine {
         generation: &Generation,
         slice: &str,
         slice_data: &tessera_store::read::SliceData,
+        cancel: &Option<CancelToken>,
         probe: &mut Probe,
     ) -> Result<Arc<SessionGeometry>> {
         let key = RowProjectionKey {
@@ -808,16 +958,33 @@ impl Engine {
 
         // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map lock
         // is held only for the O(1) `Building`/`Ready` transition — never across the build — so
-        // distinct sessions' first viewports do not serialise behind one global lock. A concurrent
-        // request racing the *same* key does not wait; it gets `ProjectionBuilding` and retries.
+        // distinct sessions' first viewports do not serialise behind one global lock.
+        //
+        // **A concurrent request racing the *same* key waits for that build and is served its
+        // result** (decision 0058). It used to be refused, which reached the client as a 429 whose
+        // `Retry-After` was shorter than the build it was waiting for — so at 10⁹ a client racing
+        // itself exhausted its retries before work that was always going to succeed finished, and
+        // showed a blank map. The wait is bounded by `serve.single_flight_wait_ms` and observes
+        // this request's cancellation token, so a disconnected client releases its
+        // `ComputeGate` permit rather than holding it to the budget.
+        //
+        // Blocking here is safe because of the guardrail below: this resolves on the **calling**
+        // thread, never a rayon worker. `crate::refresh` is the caller for which that is not true,
+        // and it does not wait.
         //
         // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
         // cache.** The value is resolved once, here, on the calling thread, strictly before the
-        // parallel tile sweep begins, and is then only *borrowed* by every `tile_result` call.
+        // parallel tile sweep begins, and is then only *borrowed* by every `tile_sweep` call.
         let fragment = self.fragment_for(session, generation)?;
         probe.lap(|t| &mut t.fragment_forward_ns);
+        // Constructed here rather than at the top of this function so the allocation lands only on
+        // the path that can actually park — every warm request returns at rung 1 above. An
+        // embedder that supplies no token (every non-server caller of this API) waits on one that
+        // is never flipped, which is the same posture `check_cancelled` takes for `None`.
+        let never_cancelled = CancelToken::new();
+        let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
         self.row_projection_cache
-            .get_or_derive(key, None, |_source| {
+            .get_or_derive_waiting(key, None, cancel, |_source| {
                 // Crosses entity space into row space over the *whole* fragment
                 // (`Permutation::project`'s cost note: seconds at 10⁹ rows). `Permutation::project`
                 // parallelises internally but owns no pool of its own — this is the one call site
@@ -833,19 +1000,83 @@ impl Engine {
                     auth_data_hash: session.auth_data_hash,
                 }
             })
-            .map_err(|_busy| EngineError::ProjectionBuilding)
+            .map_err(|ended| match ended {
+                // The budget expiry is what `SingleFlightBackpressure` now means: the request
+                // waited for a build and it did not arrive. A cancellation is the client's own
+                // disconnect and must not be dressed up as backpressure — reporting it as a 429
+                // would tell an operator the server is shedding when a browser closed a tab.
+                CacheWaitEnded::Budget => EngineError::ProjectionBuilding,
+                CacheWaitEnded::Cancelled => EngineError::Cancelled,
+            })
     }
 
-    /// The masked viewport query — see [`ViewportRequest`] for the parameters and for the
-    /// non-decreasing-`k` obligation that §7.2's nesting property rests on.
+    /// The masked viewport query, batch form: [`Self::viewport_stream`] run into a collecting
+    /// sink. Same producer, same order, same bytes-at-completion — this is the surface the
+    /// bench harness, the tests and any embedder consume, and the reason the streamed and
+    /// batch answers cannot disagree: there is only one answer.
+    pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
+        let mut sink = CollectSink::default();
+        // `usize::MAX`: never flush mid-emit, so the collector receives at most one chunk and
+        // the memory profile matches the pre-streaming fold (one concatenation, no doubling).
+        let timings = self.viewport_stream(session, req, usize::MAX, &mut sink)?;
+        let head = sink
+            .head
+            .expect("viewport_stream delivers a head before returning Ok");
+        // An empty response emits no points chunk at all (the sink contract), but the batch
+        // shape still carries one buffer per declared column — seeded from the declaration, as
+        // the fold always did.
+        let points = sink.points.unwrap_or_else(|| PointColumns {
+            tessera_ids: Vec::new(),
+            codes: Vec::new(),
+            scalars: head
+                .declared_scalars
+                .iter()
+                .map(|d| ColumnBuf::empty(d.arrow_type))
+                .collect(),
+        });
+        Ok(ViewportOut {
+            coordinates: head.coordinates,
+            stamp: head.stamp,
+            stale: head.stale,
+            tiles: sink.tiles,
+            points,
+            sub_cells: sink.sub_cells,
+            scalar_names: head
+                .declared_scalars
+                .iter()
+                .map(|d| d.name.clone())
+                .collect(),
+            timings,
+        })
+    }
+
+    /// The masked viewport query, streamed (`streamed-serving.md`) — see [`ViewportRequest`]
+    /// for the parameters and for the non-decreasing-`k` obligation that §7.2's nesting
+    /// property rests on, and [`ViewportSink`] for the delivery order. `flush_bytes` is the
+    /// emit pass's chunk threshold: a points chunk is handed off once its estimated wire size
+    /// reaches it, always at a whole-tile boundary.
     ///
-    /// **D-C cancellation checkpoints** (cooperative, the rapid-pan case): once per tile, at the
-    /// top of the tile loop below; once before [`compose`] runs; once before θ's anchor
-    /// (`mask.visible_total()`). A hit at any of these aborts the WHOLE request with
-    /// [`EngineError::Cancelled`] — no partial `ViewportOut` is ever returned (I13a). The
+    /// **D-C cancellation checkpoints** (cooperative, the rapid-pan case): once per tile in the
+    /// sweep, at the top of [`tile_sweep`]; once before [`compose`] runs; once before θ's
+    /// anchor (`mask.visible_total()`); once per tile in the emit pass. The
     /// row-projection single-flight build (D-G, above the compose checkpoint) is deliberately
     /// NOT gated — see [`check_cancelled`]'s doc.
-    pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
+    ///
+    /// **I13a, annotated at the claim** (architecture §4 carries the ruling): a hit at any
+    /// checkpoint — including the sink refusing a delivery — aborts the request with
+    /// [`EngineError::Cancelled`], and nothing partial is observable by any *other* request.
+    /// The requesting consumer itself may by then have received a prefix of the response; that
+    /// prefix is exact (whole tiles, each an id-order prefix of its served set), the consumer
+    /// can detect the truncation (the producer never signalled completion), and delta-serving
+    /// §7 licenses drawing it — a partial *presented as complete* is what the invariant
+    /// forbids, and no path here produces one.
+    pub fn viewport_stream(
+        &self,
+        session: &Session,
+        req: ViewportRequest<'_>,
+        flush_bytes: usize,
+        sink: &mut dyn ViewportSink,
+    ) -> Result<StageTimings> {
         let ViewportRequest {
             slice,
             zoom,
@@ -932,13 +1163,27 @@ impl Engine {
         // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
         // cache.** The value is resolved once, here, on the calling thread, strictly before the
         // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
-        // `EffectiveMask`) by every `tile_result` call — never re-fetched or re-built per tile.
+        // `EffectiveMask`) by every `tile_sweep` call — never re-fetched or re-built per tile.
         let geometry =
-            self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
+            self.session_geometry(session, &generation, slice, slice_data, &cancel, &mut probe)?;
         // Minted here, from the geometry that actually resolved — see `view_coordinates`.
         let coordinates = self.view_coordinates(&generation, &geometry, slice);
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
+
+        // The head, delivered before the sweep: everything the response headers derive from is
+        // known here, and a server that waits for the first flush before committing a status
+        // needs it in hand by then. A refusal is the consumer gone — cancellation, not a fault.
+        sink.head(ViewportHead {
+            coordinates,
+            stamp: answered_from.clone(),
+            stale,
+            declared_scalars: generation.bundle.manifest.declared_scalars.clone(),
+        })
+        .map_err(|SinkClosed| EngineError::Cancelled)?;
+        // Reset the clock so the head's construction and delivery are unattributed rather than
+        // silently charged to compose.
+        probe.skip();
 
         // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
         // guards. Placed after the (non-cancellable, D-G) row-projection build so a cancellation
@@ -1001,10 +1246,17 @@ impl Engine {
         let tiles = match requested_tiles {
             // **An explicit list replaces the derivation, and that is where the saving is.** Every
             // tile a client can prove it already holds is absent, and absence costs nothing at all:
-            // no row range, no `count_range`, no selection scan, no gather. Ordering is the caller's
-            // (already sorted and deduplicated at the request boundary), and it is the order the
-            // tile stream reports and the points stream concatenates in.
-            Some(list) => list.iter().map(|&prefix| Tile { prefix, depth: zoom }).collect(),
+            // no row range, no `count_range`, no selection scan, no gather. Ordering is the
+            // caller's — deduplicated at the request boundary, first occurrence kept, NOT sorted
+            // (contracts §3.2 r26) — and it is the order the tile stream reports and the points
+            // stream concatenates in.
+            Some(list) => list
+                .iter()
+                .map(|&prefix| Tile {
+                    prefix,
+                    depth: zoom,
+                })
+                .collect(),
             None => tiles_for_bbox(bbox, zoom, &extent),
         };
         probe.lap(|t| &mut t.tiles_for_bbox_ns);
@@ -1077,17 +1329,6 @@ impl Engine {
         };
 
         let mut tile_counts = Vec::new();
-        // Seeded from the declaration rather than from whichever tile arrives first: an empty
-        // request must still carry one buffer per declared column, and a request whose first tile
-        // is narrower than a later one must not fix the column set from it.
-        let mut points = PointColumns {
-            tessera_ids: Vec::new(),
-            codes: Vec::new(),
-            scalars: declared_scalars
-                .iter()
-                .map(|d| ColumnBuf::empty(d.arrow_type))
-                .collect(),
-        };
         let mut sub_cells = Vec::new();
 
         // Resolve every tile's row range in ONE monotone sweep rather than two full-column binary
@@ -1142,7 +1383,7 @@ impl Engine {
         // sub-cell fan-out actually was.
         //
         // §14.2 fix: this is also `StageTimings::rows_in_ranges`'s whole value, computed here
-        // rather than accumulated per-tile inside `tile_result`. It used to be counted into each
+        // rather than accumulated per-tile inside `tile_sweep`. It used to be counted into each
         // tile's `TileStats` before that tile's own `visible == 0` check, but a tile that fails
         // that check returns `Ok(None)`, and `Engine::viewport`'s fold below discards `Ok(None)`
         // entirely (`let Some(tr) = outcome? else { continue };`) — so a grant that left a tile
@@ -1161,15 +1402,15 @@ impl Engine {
         probe.count(|t| &mut t.rows_in_ranges, rows_in_ranges);
         let total_rows_in_ranges: u64 = rows_in_ranges + underlay_cells_demanded;
 
-        // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_result` in place —
+        // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
         // own entry/scheduling cost exceeds the per-tile work it would parallelise (measured; see
         // the constant's doc). At or above it, the existing `pool.install` fan-out runs, on the
         // ONE shared pool this engine built at `Engine::open` — no second, per-request pool, no
-        // nested throttling (D-D). Every input to `tile_result` is borrowed or `Copy`:
+        // nested throttling (D-D). Every input to `tile_sweep` is borrowed or `Copy`:
         // `mask`/`segment`/`declared_scalars`/`params` are the generation- and request-derived
         // values already resolved above (lifecycle §1.1 — nothing is re-loaded per tile), and
-        // `cancel` is the D-C token, checked inside `tile_result` at the very top (moved there
+        // `cancel` is the D-C token, checked inside `tile_sweep` at the very top (moved there
         // at the very top of that function rather than here).
         //
         // Both branches produce `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias
@@ -1178,31 +1419,30 @@ impl Engine {
         // module's doc; `with_min_len(TILE_PAR_MIN_LEN)` and the parallel branch's own collect
         // shape are load-bearing for THAT claim within the parallel branch itself).
         //
-        // D-C cancellation bound, both branches: a `Cancelled` observed inside `tile_result`
+        // D-C cancellation bound, both branches: a `Cancelled` observed inside `tile_sweep`
         // propagates to the fold below regardless of path, which discards every result after the
         // first `Err` it walks (see the fold's own comment). What differs is how much wasted work
         // can be IN FLIGHT past the checkpoint at the instant of cancellation. Serial fold: at
-        // most ONE tile — the one `tile_result` call currently running, since nothing else is
+        // most ONE tile — the one `tile_sweep` call currently running, since nothing else is
         // concurrently past the checkpoint by construction. Parallel fan-out: at most
         // `compute_threads` tiles (one per worker) — every tile that had already passed the
         // checkpoint keeps running to completion; every tile whose worker had not yet reached it
         // observes the flip there instead and returns immediately. The serial path's bound is
         // therefore strictly tighter, not merely no-worse.
-        // One closure, not two independently-maintained copies of the same 9-argument
-        // call — the duplication was a divergence risk (a future change to `tile_result`'s
+        // One closure, not two independently-maintained copies of the same 8-argument
+        // call — the duplication was a divergence risk (a future change to `tile_sweep`'s
         // argument list would need to be made twice, silently, with no compiler help if one copy
         // were missed). `run` captures only shared references and `Copy` values (`&mask`,
-        // `segment`, `declared_scalars`, `&params`, `zoom`, `underlay_offset`, `&cancel`), so it is
+        // `&segments`, `&params`, `zoom`, `underlay_offset`, `&cancel`), so it is
         // `Sync` for free and usable from both the serial `Iterator::map` below and rayon's
         // parallel `map` inside `pool.install` — no new bound this file did not already require of
         // these captures for the parallel branch to compile before this change.
         let run = |tile: &Tile, tile_parts: &[(usize, Range<u32>)]| {
-            tile_result(
+            tile_sweep(
                 tile,
                 tile_parts,
                 &mask,
                 &segments,
-                declared_scalars,
                 &params,
                 zoom,
                 underlay_offset,
@@ -1221,13 +1461,13 @@ impl Engine {
         // own atomic operations elsewhere. Deliberately not `#[cfg]`-gated to a second code path
         // here too: that would cost more to audit than the load itself costs to run.
         let serial_fallback_max_rows = self.serial_fallback_max_rows.load(Ordering::Relaxed);
-        let tile_outcomes: Vec<Result<Option<TileResult>>> =
+        let tile_outcomes: Vec<Result<Option<TileSweepOut>>> =
             if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows, tiles.len()) {
                 tiles
                     .iter()
                     .zip(&ranges)
                     .map(|(tile, tile_parts)| run(tile, tile_parts))
-                    .collect::<Vec<Result<Option<TileResult>>>>()
+                    .collect::<Vec<Result<Option<TileSweepOut>>>>()
             } else {
                 self.pool.install(|| {
                     tiles
@@ -1235,7 +1475,7 @@ impl Engine {
                         .zip(ranges.par_iter())
                         .with_min_len(TILE_PAR_MIN_LEN)
                         .map(|(tile, tile_parts)| run(tile, tile_parts))
-                        .collect::<Vec<Result<Option<TileResult>>>>()
+                        .collect::<Vec<Result<Option<TileSweepOut>>>>()
                 })
             };
         // D-E: neither branch's own wall time is a named stage — it is already fully accounted
@@ -1246,53 +1486,100 @@ impl Engine {
         probe.skip();
 
         // D-F: the serial, IN-ORDER fold. `tile_outcomes`' order equals `tiles`' order by
-        // construction (the indexed collect path above — this module's doc), so this reconstructs
-        // exactly the concatenation the serial fold produces. Short-circuits on the
+        // construction (the indexed collect path above — this module's doc), so the response
+        // order is the request order. Short-circuits on the
         // first `Err` (D-C's `Cancelled`, or any other per-tile error): every tile's own work is
         // already done by this point (the parallel sweep does not itself short-circuit — that is
         // the point of collecting `Vec<Result<..>>` rather than `Result<Vec<..>>`), so bailing out
         // here costs only the remaining `Result`s' worth of `?`, never any recomputation.
+        let mut swept: Vec<TileSweepOut> = Vec::new();
         for outcome in tile_outcomes {
-            let Some(tr) = outcome? else {
+            let Some(mut ts) = outcome? else {
                 continue;
             };
-            tr.stats.fold_into(&mut probe.t);
-            tile_counts.push(tr.count);
-            points.tessera_ids.extend(tr.points.tessera_ids);
-            points.codes.extend(tr.points.codes);
-            // Positional against `declared_scalars`, which both sides were built from, so the
-            // zip cannot pair two different columns. A type disagreement is refused rather than
-            // appended — see `ColumnBuf::append`.
-            for (dst, src) in points.scalars.iter_mut().zip(tr.points.scalars) {
-                if let Err((want, got)) = dst.append(src) {
-                    return Err(EngineError::Malformed(format!(
-                        "two tiles of one response hold the same declared column at different \
-                         types ({want} and {got}); the bundle's segments disagree about it"
-                    )));
-                }
-            }
-            sub_cells.extend(tr.sub_cells);
+            ts.stats.fold_into(&mut probe.t);
+            tile_counts.push(ts.count.clone());
+            sub_cells.append(&mut ts.sub_cells);
+            swept.push(ts);
         }
 
-        Ok(ViewportOut {
-            coordinates,
-            stamp: answered_from,
-            stale,
-            tiles: tile_counts,
-            points,
-            sub_cells,
-            // From the SAME `declared_scalars` slice `row_to_point` read for every point
-            // above (`generation.bundle.manifest.declared_scalars`), not a fresh `meta()` call —
-            // that would `load_full()` the generation pointer a second time.
-            scalar_names: declared_scalars.iter().map(|d| d.name.clone()).collect(),
-            timings: probe.finish(),
-        })
+        // The first flush: every count, before any point (`streamed-serving.md` §2 — the number
+        // channel is exact from the first paint). `None`, not an empty slice, when the underlay
+        // was not requested: the wire's frame-presence rule needs the distinction.
+        sink.counts(
+            &tile_counts,
+            underlay_offset.map(|_| sub_cells.as_slice()),
+        )
+        .map_err(|SinkClosed| EngineError::Cancelled)?;
+        probe.skip();
+
+        // The emit pass: gather and hand off, serial, in response order (this module's doc says
+        // why serial). The buffer is seeded from the declaration rather than from whichever tile
+        // arrives first — a request whose first tile is narrower than a later one must not fix
+        // the column set from it — and re-seeded identically at each flush.
+        let seed = || PointColumns {
+            tessera_ids: Vec::new(),
+            codes: Vec::new(),
+            scalars: declared_scalars
+                .iter()
+                .map(|d| ColumnBuf::empty(d.arrow_type))
+                .collect(),
+        };
+        let mut buf = seed();
+        let mut buf_bytes = 0usize;
+        for ts in &swept {
+            // D-C: the emit pass's per-tile checkpoint — one atomic read, so an abandoned
+            // stream stops gathering within one tile even when the sink is not refusing yet.
+            check_cancelled(&cancel)?;
+            let mut stats = TileProbe::new();
+            let parts = SelectionParts::new(&ts.parts);
+            let tile_points = gather_tile_columns(&parts, &ts.rows, declared_scalars)?;
+            stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
+            buf_bytes += tile_points.wire_bytes_estimate();
+            if let Err((want, got)) = buf.append(tile_points) {
+                return Err(EngineError::Malformed(format!(
+                    "two tiles of one response hold the same declared column at different \
+                     types ({want} and {got}); the bundle's segments disagree about it"
+                )));
+            }
+            // Brackets gather-and-append only — the flush below (a channel send, under
+            // streaming) must not inflate a figure documented as CPU cost.
+            stats.lap(|t| &mut t.gather_ns);
+            stats.t.fold_into(&mut probe.t);
+            // Two guards on the threshold (both from the implementation review):
+            // `!buf.is_empty()`, because a zero-row buffer can still carry estimate bytes — a
+            // Utf8 column's offset table is 4 bytes at zero rows — so `k = 0` (a legal
+            // counts-only request) over enough tiles would otherwise emit empty points frames
+            // against the sink contract; and `MAX_POINTS_FRAME_BYTES`, so a deliberately huge
+            // `flush_bytes` ("one flush per response") cannot accumulate a frame past the
+            // wire's u32 length field, which is a panic there and a bounded split here.
+            if buf_bytes >= flush_bytes.min(MAX_POINTS_FRAME_BYTES) && !buf.is_empty() {
+                let chunk = std::mem::replace(&mut buf, seed());
+                buf_bytes = 0;
+                sink.points(chunk).map_err(|SinkClosed| EngineError::Cancelled)?;
+            }
+        }
+        if !buf.is_empty() {
+            sink.points(buf).map_err(|SinkClosed| EngineError::Cancelled)?;
+        }
+
+        // `total_ns` (stamped by `finish`) is this call's wall clock, which under streaming
+        // includes the sink's sends — consumer-paced time, not compute. Per-stage figures are
+        // unaffected: gather laps bracket gather-and-append only, and no lap spans a send.
+        Ok(probe.finish())
     }
 }
 
+/// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
+/// the deliberately huge value that means "one flush per response". The wire's frame length is a
+/// `u32`, so an unbounded accumulation would panic at serialisation; 1 GiB keeps a frame two
+/// factors below that bound while being far above any threshold an operator would set on
+/// purpose. Not a knob: nothing legitimate sits on the other side of it.
+const MAX_POINTS_FRAME_BYTES: usize = 1 << 30;
+
 /// Calibration task threshold: below this many total rows spanned by a request's resolved tiles
 /// PLUS its §3.3 underlay cell demand if any (`Σ range.len() + underlay_cells_demanded`, pre-mask
-/// — see the call site's `total_rows_in_ranges`), `Engine::viewport` folds `tile_result` serially
+/// — see the call site's `total_rows_in_ranges`), `Engine::viewport` folds `tile_sweep` serially
 /// instead of calling `self.pool.install`.
 ///
 /// `pub` (unlike [`TILE_PAR_MIN_LEN`]) so the byte-equality tests in `tests/viewport.rs` can
@@ -1490,7 +1777,7 @@ const _: () = {
 /// 8), with no shape favouring 4. `8` replaces the original argued-not-measured `4`.
 ///
 /// **The original reasoning, still the shape of the argument, only the number moves.** Measured
-/// per-tile cost is highly non-uniform — an empty-tile skip (`tile_result` returning `Ok(None)`
+/// per-tile cost is highly non-uniform — an empty-tile skip (`tile_sweep` returning `Ok(None)`
 /// after one `count_range`) is a handful of comparisons, while a dense tile at a high cap is a
 /// bitmap-range read plus a bounded heap sort — so work-stealing needs to be able to move
 /// *individual* tiles between workers rather than being locked into a few large, coarse chunks; a
@@ -1523,32 +1810,32 @@ const _: () = {
 /// now, not because it won everywhere it was tried. Full table: calibration report §14.5.
 const TILE_PAR_MIN_LEN: usize = 8;
 
-/// One tile's contribution to a `/v1/viewport` response (D-F) — the pure per-tile body pulled out
-/// of what was, before this task, a serial `for` loop over `Engine::viewport`'s tiles. Safe to
-/// call concurrently from any rayon worker: every parameter is `&`-borrowed or `Copy`, nothing
-/// here reaches back into `Engine` or any state shared across tiles (see the guardrail comment at
-/// the row-projection cache call site in `Engine::viewport`, above), and the return value is
-/// owned outright by the caller — no shared mutable state, no interior mutability, nothing to
-/// synchronise.
+/// One tile's sweep contribution (D-F): count, select and underlay — **no gather**, which the
+/// emit pass does later from the `rows`/`parts` returned here (`streamed-serving.md` §4). The
+/// pure per-tile body pulled out of what was, before streaming, a fused count-select-gather
+/// loop. Safe to call concurrently from any rayon worker: every parameter is `&`-borrowed or
+/// `Copy`, nothing here reaches back into `Engine` or any state shared across tiles (see the
+/// guardrail comment at the row-projection cache call site in `Engine::viewport_stream`,
+/// above), and the return value is owned outright by the caller — no shared mutable state, no
+/// interior mutability, nothing to synchronise.
 ///
 /// `Ok(None)` — an empty tile: no segment for this slice, or nothing visible in `range`. Exactly
 /// the "skip empty" rule the old inline loop applied (no count row, no selection work). `Err`
 /// carries [`EngineError::Cancelled`] from the per-tile cancellation checkpoint below — checked
 /// first, so a flip
 /// observed here costs only the one atomic read, never any of this tile's own
-/// count/select/gather/underlay work.
+/// count/select/underlay work.
 #[allow(clippy::too_many_arguments)]
-fn tile_result(
+fn tile_sweep<'a>(
     tile: &Tile,
     tile_parts: &[(usize, Range<u32>)],
     mask: &EffectiveMask,
-    segments: &[(&SegmentData, u32)],
-    declared_scalars: &[DeclaredScalar],
+    segments: &[(&'a SegmentData, u32)],
     params: &SelectParams,
     zoom: u8,
     underlay_offset: Option<u8>,
     cancel: &Option<CancelToken>,
-) -> Result<Option<TileResult>> {
+) -> Result<Option<TileSweepOut<'a>>> {
     check_cancelled(cancel)?;
 
     if tile_parts.is_empty() {
@@ -1591,7 +1878,10 @@ fn tile_result(
     stats.count(|t| &mut t.tiles_nonempty, 1);
     stats.count(|t| &mut t.sigma_visible, visible);
 
-    let parts = SelectionParts::new(&parts);
+    // The owned list survives the call: the emit pass rebuilds a `SelectionParts` over it to
+    // resolve each selected row at gather time.
+    let part_list = parts;
+    let parts = SelectionParts::new(&part_list);
     let selected = Selection::of(mask, &parts, params, visible);
     stats.lap(|t| &mut t.select_ns);
     // Counted by `Selection::of` itself, inside the loops that do the reading — not from
@@ -1605,12 +1895,6 @@ fn tile_result(
         matched: visible,
         served: selected.rows.len() as u64,
     };
-
-    // Each selected row is a **slice-space** row; `resolve` gives back the segment holding it and
-    // its index within that segment, which is what indexes `morton.u32` and `columns.arrow`.
-    let points = gather_tile_columns(&parts, &selected.rows, declared_scalars)?;
-    stats.lap(|t| &mut t.gather_ns);
-    stats.count(|t| &mut t.points_gathered, points.len() as u64);
 
     // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton range. Only
     // non-empty cells are emitted, exactly as empty tiles are skipped above.
@@ -1653,21 +1937,27 @@ fn tile_result(
         );
     }
 
-    Ok(Some(TileResult {
+    Ok(Some(TileSweepOut {
         count,
-        points,
+        rows: selected.rows,
+        parts: part_list,
         sub_cells,
         stats: stats.t,
     }))
 }
 
-/// One tile's parallel-sweep output — [`tile_result`]'s return payload, folded serially and
-/// in-order into the request's `tile_counts`/`points`/`sub_cells`/[`StageTimings`] by
-/// `Engine::viewport` (D-F). An implementation detail of the parallel sweep, not part of this
-/// crate's public API — `ViewportOut` is what callers see.
-struct TileResult {
+/// One tile's parallel-sweep output — [`tile_sweep`]'s return payload, folded serially and
+/// in-order into the request's `tile_counts`/`sub_cells`/[`StageTimings`] and then consumed by
+/// the emit pass, which gathers `rows` through a `SelectionParts` rebuilt over `parts`. An
+/// implementation detail of the sweep, not part of this crate's public API — [`ViewportOut`]
+/// and the [`ViewportSink`] callbacks are what callers see.
+///
+/// `rows` are slice-space rows **ascending by `tessera_id`** ([`Selection::rows`]) — the order
+/// the wire requires within a tile, and the property every mid-stream cut's validity rests on.
+struct TileSweepOut<'a> {
     count: TileCount,
-    points: PointColumns,
+    rows: Vec<u32>,
+    parts: Vec<SelectionPart<'a>>,
     sub_cells: Vec<SubCellCount>,
     stats: TileStats,
 }
@@ -1796,7 +2086,9 @@ fn gather_tile_columns(
         let segment = parts.as_slice()[part as usize].segment;
         let idx = local as usize;
         tessera_ids.push(segment.columns.tessera_id()[idx]);
-        codes.push(((segment.morton.u32()[idx] as u64) << 32) | segment.columns.residual()[idx] as u64);
+        codes.push(
+            ((segment.morton.u32()[idx] as u64) << 32) | segment.columns.residual()[idx] as u64,
+        );
     }
 
     let resolved: Vec<ResolvedScalars<'_>> = parts
@@ -2018,9 +2310,9 @@ mod tests {
     /// isolates, cheaply, at every pool/grain combination this file's constants and sweeps used.
     #[test]
     fn indexed_collect_of_tile_shaped_results_preserves_order_at_any_pool_size() {
-        // The exact collect target shape as `tile_result`'s call sites use, without needing a
+        // The exact collect target shape as `tile_sweep`'s call sites use, without needing a
         // real `Engine`, `mask` or bundle to produce one: `Result<Option<T>>` per item, `Ok(None)`
-        // standing in for `tile_result`'s empty-tile skip.
+        // standing in for `tile_sweep`'s empty-tile skip.
         let items: Vec<u32> = (0..2000).collect();
         let make = |i: &u32| -> Result<Option<u32>> {
             if i.is_multiple_of(7) {

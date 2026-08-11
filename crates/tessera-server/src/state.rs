@@ -2,7 +2,7 @@
 //! server's responsibility rather than the engine's — the engine mints a [`Session`] and never
 //! checks its deadline again, so retention, expiry refusal and revocation all live here.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -260,12 +260,43 @@ impl SessionRegistry {
 /// Both `OwnedSemaphorePermit`s a successful [`ComputeGate::admit`] call returns, held together
 /// so a caller can move one value into a `spawn_blocking` closure. Dropping this — which
 /// happens when the closure returns, panics, or is otherwise finished — is what releases both
-/// permits, so accounting stays correct even if the client has disconnected: a permit tracks
-/// compute completion, never caller interest. Fields are private; a caller has no reason to touch
-/// either permit once held, only to keep this alive across the closure's body.
+/// permits (or the slot alone, after [`Self::release_compute`]), so accounting stays correct
+/// even if the client has disconnected: a permit tracks compute completion, never caller
+/// interest. Fields are private; beyond `release_compute` a caller has no reason to touch either
+/// permit once held, only to keep this alive across the closure's body.
 pub struct GatePermits {
     _slot: OwnedSemaphorePermit,
-    _compute: OwnedSemaphorePermit,
+    /// `Some` from admission until [`Self::release_compute`]; `None` marks this request as
+    /// having entered its streaming emit phase, which is what the `Drop` impl reads to keep the
+    /// gauge exact.
+    compute: Option<OwnedSemaphorePermit>,
+    /// The gate's [`ComputeGate::streaming`] gauge, incremented at `release_compute` and
+    /// decremented at drop — see that field's doc for why the gauge exists.
+    streaming: Arc<AtomicUsize>,
+}
+
+impl GatePermits {
+    /// The streamed viewport's permit split (`streamed-serving.md` §5): release the compute
+    /// permit at sweep completion, keep the slot permit for the emit phase. The emit phase runs
+    /// at the client's pace, and holding compute for it would let slow-but-healthy readers
+    /// starve the gate; the slot keeps the request counted against total admission until the
+    /// closure returns. Idempotent, so an error path that runs it again costs nothing.
+    pub fn release_compute(&mut self) {
+        if let Some(permit) = self.compute.take() {
+            drop(permit);
+            self.streaming.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for GatePermits {
+    fn drop(&mut self) {
+        // `compute` is `None` exactly when `release_compute` ran (admission always sets it),
+        // so this cannot under- or over-count.
+        if self.compute.is_none() {
+            self.streaming.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The two-stage admission gate in front of the viewer/session planes' CPU-bound closures
@@ -301,7 +332,21 @@ pub struct ComputeGate {
     /// no visibility into, and one whose `detail` says so. A caller correlating
     /// `shed_total` against the client-observed 429 rate should expect the latter to be equal or
     /// higher; the gap is the single-flight sheds, not a bug to chase.
+    ///
+    /// **Decision 0058 moves traffic between the two, and can move it into this one.** A racer on
+    /// a cold row projection used to be shed downstream immediately, releasing its permits at
+    /// once; it now parks on the build, holding them for up to `serve.single_flight_wait_ms`. Under
+    /// cold-start load that is permit occupancy this gate did not previously see, so `shed_total`
+    /// can rise on a workload whose *client-observed* 429 rate has fallen. Decision 0059 records
+    /// why that occupancy is bounded by the wait budget rather than by a per-principal share of
+    /// this gate, and `row_projection_cache.waiters_now` is what makes it visible.
     shed_total: AtomicU64,
+    /// Requests in their streaming emit phase: slot held, compute released
+    /// ([`GatePermits::release_compute`]). Without it, `status()`'s `waiting` derivation —
+    /// admitted minus running — counts every emit-phase stream as phantom queue depth, and
+    /// `/control/status` misreports exactly under streaming load. Incremented/decremented by
+    /// [`GatePermits`] itself so it can never drift from the permit state it mirrors.
+    streaming: Arc<AtomicUsize>,
 }
 
 /// `/control/status`'s `compute` block. `in_flight`/`waiting` are derived from the
@@ -312,6 +357,8 @@ pub struct ComputeGateStatus {
     pub queue: usize,
     pub in_flight: usize,
     pub waiting: usize,
+    /// Emit-phase streams: slot held, compute released. See [`ComputeGate::streaming`].
+    pub streaming: usize,
     /// See [`ComputeGate::shed_total`]'s doc: this gate's own two shed paths only, not the
     /// engine's single-flight builders' 429s.
     pub shed_total: u64,
@@ -326,6 +373,7 @@ impl ComputeGate {
             slots: Arc::new(Semaphore::new(compute_admission + compute_queue)),
             compute: Arc::new(Semaphore::new(compute_admission)),
             shed_total: AtomicU64::new(0),
+            streaming: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -371,7 +419,8 @@ impl ComputeGate {
         Ok((
             GatePermits {
                 _slot: slot,
-                _compute: compute,
+                compute: Some(compute),
+                streaming: Arc::clone(&self.streaming),
             },
             admission_us,
         ))
@@ -383,12 +432,17 @@ impl ComputeGate {
         let in_flight = self.compute_admission - self.compute.available_permits();
         let admitted =
             (self.compute_admission + self.compute_queue) - self.slots.available_permits();
+        let streaming = self.streaming.load(Ordering::Relaxed);
         ComputeGateStatus {
             admission: self.compute_admission,
             queue: self.compute_queue,
             in_flight,
-            // Everything admitted but not yet running compute is waiting in the queue.
-            waiting: admitted.saturating_sub(in_flight),
+            // Everything admitted but neither running compute nor streaming its emit phase is
+            // waiting in the queue. The three gauges are read from two semaphores and an atomic
+            // at three instants, so a request moving between states mid-read can skew `waiting`
+            // by one transiently — an accepted property of a lock-free status read.
+            waiting: admitted.saturating_sub(in_flight).saturating_sub(streaming),
+            streaming,
             shed_total: self.shed_total.load(Ordering::Relaxed),
         }
     }
@@ -494,9 +548,15 @@ pub struct AppState {
     /// handler** — see `control::router`. Carried here so the layer and the 422's detail string
     /// read the same number.
     pub ingest_max_batch_bytes: usize,
-    /// Runtime half of the `x-tessera-stage-ns` gate (see `Config::stage_timing`). The other half
+    /// Runtime half of the trailer's `stage_ns` gate (see `Config::stage_timing`). The other half
     /// is the `bench-timing` compile feature; both must hold.
     pub stage_timing: bool,
+    /// The streamed viewport's flush threshold. See `Config::stream_flush_bytes`.
+    pub stream_flush_bytes: usize,
+    /// One frame send's stall budget. See `Config::stream_write_stall_ms`.
+    pub stream_write_stall_ms: u64,
+    /// The whole emit phase's wall budget. See `Config::stream_deadline_ms`.
+    pub stream_deadline_ms: u64,
     /// The disclosure floor: the smallest group whose existence may be reflected in a response.
     /// Parsed and stored because design §7.5/§2.3 makes a missing `[disclosure]` section a
     /// refusal to start.

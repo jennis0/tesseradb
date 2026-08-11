@@ -1677,27 +1677,35 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // F4 (`tessera-bench/src/arms/load.rs:34-76`): the previous cache ran `RowProjection::new` —
 // seconds at 10⁹ rows — *inside* the map lock on a miss, so distinct sessions' first viewports
 // serialised behind one global mutex. D-G replaces the cache value with a slot-state map
-// (`Building` | `Ready`); the map lock is now held only for the O(1) state transition, and a
-// concurrent arrival on the *same* key observed mid-build does not wait — it gets
-// `EngineError::ProjectionBuilding` immediately, never a parked thread.
+// (`Building` | `Ready`), and the map lock is now held only for the O(1) state transition. A
+// concurrent arrival on the *same* key parks on that build and is served its result (decision
+// 0058); the two are not in tension, because what F4 requires is that *distinct* keys do not
+// serialise, and same-key callers serialising is what single-flight is.
 //
-// The state machine itself (single-flight, non-blocking waiters, panic safety) is proven
+// The state machine itself (waiting, the four wake paths, panic safety) is proven
 // deterministically — no sleeps, no timing slack — by `tessera-engine`'s own `single_flight`
 // unit tests, which control a build's start and finish with channels because the map is directly
 // reachable there. The tests below instead exercise the real, public `Engine::viewport` path
 // end to end, which cannot inject a pause into `RowProjection::new`; they use a large enough
 // synthetic fixture that a cold build takes tens of milliseconds even unoptimised, well above OS
-// thread-wake jitter, and — for the single-flight case — retry across fresh sessions until the
-// race is actually observed rather than asserting it lands on a specific attempt.
+// thread-wake jitter.
 
-/// D-G / F4: a concurrent arrival on the same `(token_id, slice, segments_version)` key while
-/// another request is still building that key's `RowProjection` gets
-/// `EngineError::ProjectionBuilding` immediately rather than blocking; once the build publishes
-/// `Ready`, a retried loser succeeds, and the cache never ends up with more than one slot per
-/// key.
+/// D-G / decision 0058: every concurrent arrival on the same
+/// `(token_id, slice, segments_version)` key is served, off **one** build.
+///
+/// **This test asserted the opposite until 0058**, and the shape of the change is the point. It
+/// used to require that losers received `EngineError::ProjectionBuilding`, and it could not assert
+/// even that unconditionally — a round where no thread happened to lose produced nothing to check,
+/// so it looped over fresh sessions until contention landed and panicked if it never did. With
+/// waiting there is no loser: sixteen threads through one barrier all return `Ok`, and
+/// `full_projection_builds` says they cost one crossing of entity space into row space rather than
+/// sixteen. Both assertions hold on any schedule, so no retry loop is needed.
+///
+/// What it cannot see: whether a thread waited or arrived after the publish. That distinction is
+/// unit-tested where a build can be held open on a channel; here it is deliberately not asserted,
+/// because pinning it would put a timing bet back into a test that no longer needs one.
 #[test]
-fn concurrent_same_key_viewports_single_flight_others_get_projection_building() {
-    const ROUNDS: usize = 25;
+fn concurrent_same_key_viewports_are_all_served_off_one_build() {
     const THREADS: usize = 16;
     const ITEMS: u64 = 150_000;
 
@@ -1716,78 +1724,43 @@ fn concurrent_same_key_viewports_single_flight_others_get_projection_building() 
         &tmp.path().join("wal.log"),
     ));
 
-    for round in 0..ROUNDS {
-        // A fresh session -> a fresh `token_id` -> a cache key this engine has never built,
-        // regardless of what earlier rounds warmed (`Session::token_id` is a process-lifetime
-        // monotone counter — see `Engine::authorise`).
-        let session = Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
-        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+    // A fresh session -> a fresh `token_id` -> a cache key this engine has never built
+    // (`Session::token_id` is a process-lifetime monotone counter — see `Engine::authorise`).
+    let session = Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
+    let barrier = Arc::new(std::sync::Barrier::new(THREADS));
 
-        let handles: Vec<_> = (0..THREADS)
-            .map(|_| {
-                let engine = Arc::clone(&engine);
-                let session = Arc::clone(&session);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    engine.viewport(
-                        &session,
-                        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                    )
-                })
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let engine = Arc::clone(&engine);
+            let session = Arc::clone(&session);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine.viewport(
+                    &session,
+                    ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+                )
             })
-            .collect();
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        let successes = results.iter().filter(|r| r.is_ok()).count();
-        let building = results
-            .iter()
-            .filter(|r| matches!(r, Err(EngineError::ProjectionBuilding)))
-            .count();
-        assert_eq!(
-            successes + building,
-            THREADS,
-            "round {round}: every racing viewport must either succeed or fail with \
-             ProjectionBuilding — no other outcome is possible from a single-flight cache"
-        );
+    for (thread, result) in results.iter().enumerate() {
         assert!(
-            successes >= 1,
-            "round {round}: the winning builder must always succeed"
+            result.is_ok(),
+            "thread {thread} was refused a build that was always going to succeed: {:?}",
+            result.as_ref().err()
         );
-
-        if building == 0 {
-            // No contention landed this round (every thread happened to queue behind the map
-            // lock only after the builder had already published `Ready`) -- not a failure of
-            // the property, just an unlucky schedule. Try another fresh key.
-            continue;
-        }
-
-        // Contention observed: retry every loser and confirm it now succeeds -- the build must
-        // have published `Ready` (never left the key wedged at `Building`, never cached a
-        // failure).
-        for result in &results {
-            if matches!(result, Err(EngineError::ProjectionBuilding)) {
-                engine
-                    .viewport(
-                        &session,
-                        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                    )
-                    .expect("a retried loser must succeed once the build has published Ready");
-            }
-        }
-
-        assert_eq!(
-            engine.row_projection_cache_len(),
-            round + 1,
-            "exactly one Ready slot per round's fresh key, never more than one build's worth"
-        );
-        return;
     }
-
-    panic!(
-        "never observed same-key contention in {ROUNDS} rounds of {THREADS} threads -- either \
-         the race window is too narrow on this machine (widen ITEMS) or single-flight regressed \
-         to blocking waiters"
+    assert_eq!(
+        engine.full_projection_builds(),
+        1,
+        "{THREADS} racers on one key must cost one projection build"
+    );
+    assert_eq!(
+        engine.row_projection_cache_len(),
+        1,
+        "exactly one Ready slot for the one key, never more than one build's worth"
     );
 }
 
@@ -2617,5 +2590,312 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial
         out_1, out_8,
         "ViewportOut must be byte-for-byte identical regardless of compute_threads, including \
          below the serial-fallback threshold where neither run touches the pool"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The streamed producer (`streamed-serving.md`): collector equivalence, chunking, ordering,
+// and sink-refusal-as-cancellation.
+// ---------------------------------------------------------------------------------------------
+
+/// A recording sink: every delivery kept, so a test can compare the streamed shape against the
+/// batch `ViewportOut` and against the sink contract (head, then counts, then points).
+#[derive(Default)]
+struct RecordingSink {
+    head: Option<tessera_engine::ViewportHead>,
+    counts: Option<(Vec<tessera_engine::TileCount>, Option<Vec<tessera_engine::SubCellCount>>)>,
+    chunks: Vec<tessera_engine::PointColumns>,
+    /// When `Some(n)`, the nth callback overall refuses with `SinkClosed`.
+    refuse_at: Option<usize>,
+    calls: usize,
+}
+
+impl RecordingSink {
+    fn step(&mut self) -> tessera_engine::SinkResult {
+        self.calls += 1;
+        if self.refuse_at == Some(self.calls) {
+            return Err(tessera_engine::SinkClosed);
+        }
+        Ok(())
+    }
+}
+
+impl tessera_engine::ViewportSink for RecordingSink {
+    fn head(&mut self, head: tessera_engine::ViewportHead) -> tessera_engine::SinkResult {
+        assert!(self.head.is_none(), "head is delivered exactly once, first");
+        assert!(self.counts.is_none() && self.chunks.is_empty());
+        self.head = Some(head);
+        self.step()
+    }
+
+    fn counts(
+        &mut self,
+        tiles: &[tessera_engine::TileCount],
+        sub_cells: Option<&[tessera_engine::SubCellCount]>,
+    ) -> tessera_engine::SinkResult {
+        assert!(self.head.is_some(), "head precedes counts");
+        assert!(self.counts.is_none(), "counts is delivered exactly once");
+        assert!(self.chunks.is_empty(), "every count precedes every point");
+        self.counts = Some((tiles.to_vec(), sub_cells.map(<[_]>::to_vec)));
+        self.step()
+    }
+
+    fn points(&mut self, chunk: tessera_engine::PointColumns) -> tessera_engine::SinkResult {
+        assert!(self.counts.is_some(), "counts precede points");
+        assert!(!chunk.is_empty(), "never called with an empty chunk");
+        self.chunks.push(chunk);
+        self.step()
+    }
+}
+
+/// THE COLLECTOR-EQUIVALENCE TEST: `viewport_stream` at a tiny flush threshold — many chunks —
+/// concatenates to exactly what `Engine::viewport` returns for the same request. This is the
+/// "one producer, two sinks" claim (`streamed-serving.md` §8): the streamed and batch answers
+/// cannot disagree because there is only one answer.
+#[test]
+fn viewport_stream_chunks_concatenate_to_the_batch_response() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Multi-tile request, k high enough that many tiles serve points.
+    let request =
+        |cancel| ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 64).cancel(cancel);
+
+    let batch = engine.viewport(&session, request(None)).unwrap();
+
+    let mut sink = RecordingSink::default();
+    // 1 KiB: far below any tile's worth of points at this k, so the emit pass flushes many
+    // times and the multi-chunk path is what is exercised.
+    engine
+        .viewport_stream(&session, request(None), 1 << 10, &mut sink)
+        .unwrap();
+
+    let head = sink.head.expect("head delivered");
+    assert_eq!(head.coordinates, batch.coordinates);
+    assert_eq!(head.stamp, batch.stamp);
+    assert_eq!(head.stale, batch.stale);
+    assert_eq!(
+        head.declared_scalars
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>(),
+        batch.scalar_names
+    );
+
+    let (tiles, sub_cells) = sink.counts.expect("counts delivered");
+    assert_eq!(tiles, batch.tiles);
+    assert!(
+        sub_cells.is_none(),
+        "no underlay requested: counts carries None, not an empty slice"
+    );
+
+    assert!(
+        sink.chunks.len() > 1,
+        "a 1 KiB threshold must produce multiple chunks, got {}",
+        sink.chunks.len()
+    );
+
+    // Chunks concatenate to the batch points, and every chunk boundary is a whole-tile
+    // boundary: each chunk's length is a sum of a consecutive run of per-tile served counts.
+    let mut concatenated = sink.chunks[0].clone();
+    for chunk in &sink.chunks[1..] {
+        concatenated.append(chunk.clone()).unwrap();
+    }
+    assert_eq!(concatenated, batch.points);
+
+    let served: Vec<u64> = batch.tiles.iter().map(|t| t.served).collect();
+    let mut tile_cursor = 0usize;
+    for (i, chunk) in sink.chunks.iter().enumerate() {
+        let mut remaining = chunk.len() as u64;
+        while remaining > 0 {
+            assert!(
+                tile_cursor < served.len(),
+                "chunk {i} runs past the served tiles"
+            );
+            assert!(
+                remaining >= served[tile_cursor],
+                "chunk {i} splits tile {tile_cursor} mid-tile — boundaries must be whole tiles"
+            );
+            remaining -= served[tile_cursor];
+            tile_cursor += 1;
+        }
+    }
+    // Tiles serving zero points may trail; every served tile must have been consumed.
+    assert!(served[tile_cursor..].iter().all(|&s| s == 0));
+}
+
+/// The batch collector's underlay face: requested-but-empty arrives as `Some` even when no cell
+/// is occupied at the offset... which this fixture cannot produce (full coverage occupies
+/// cells), so the positive direction is asserted instead: an underlay request yields `Some`
+/// with content, and the batch `ViewportOut.sub_cells` agrees.
+#[test]
+fn viewport_stream_underlay_presence_follows_the_request() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let request = |offset| {
+        ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 8).underlay_offset(offset)
+    };
+    let batch = engine.viewport(&session, request(Some(2))).unwrap();
+    assert!(!batch.sub_cells.is_empty());
+
+    let mut sink = RecordingSink::default();
+    engine
+        .viewport_stream(&session, request(Some(2)), usize::MAX, &mut sink)
+        .unwrap();
+    let (_, sub_cells) = sink.counts.expect("counts delivered");
+    assert_eq!(sub_cells.as_deref(), Some(batch.sub_cells.as_slice()));
+
+    let mut sink = RecordingSink::default();
+    engine
+        .viewport_stream(&session, request(None), usize::MAX, &mut sink)
+        .unwrap();
+    let (_, sub_cells) = sink.counts.expect("counts delivered");
+    assert!(sub_cells.is_none(), "unrequested underlay is None");
+}
+
+/// A sink refusal is a cancellation (D-C posture): the producer stops at the refusal and
+/// returns `EngineError::Cancelled` — never a partial success, never a different error dressed
+/// as the consumer's fault.
+#[test]
+fn viewport_stream_sink_refusal_aborts_as_cancellation() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let request = || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 64);
+
+    // Refuse at each of the first three callbacks in turn: head, counts, first points chunk.
+    for refuse_at in 1..=3 {
+        let mut sink = RecordingSink {
+            refuse_at: Some(refuse_at),
+            ..Default::default()
+        };
+        let err = engine
+            .viewport_stream(&session, request(), 1 << 10, &mut sink)
+            .unwrap_err();
+        assert!(
+            matches!(err, EngineError::Cancelled),
+            "refusal at callback {refuse_at} must abort as Cancelled, got {err:?}"
+        );
+    }
+}
+
+/// The response order is the request's own tiles order (contracts §3.2 r26): non-empty tiles
+/// report — and their points concatenate — in exactly the relative order the caller listed
+/// them, not in sorted order.
+#[test]
+fn viewport_stream_tile_order_follows_the_request_list() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Which depth-2 tiles are non-empty, from a bbox request.
+    let all = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 4),
+        )
+        .unwrap();
+    let mut nonempty: Vec<u64> = all.tiles.iter().map(|t| t.tile).collect();
+    assert!(nonempty.len() >= 2, "need at least two non-empty tiles");
+
+    // Ask for them explicitly, in reversed order — a stand-in for any client-chosen order
+    // (centre-out, say).
+    nonempty.reverse();
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 2, [0.0; 4], 4).tiles(Some(&nonempty)),
+        )
+        .unwrap();
+    let got: Vec<u64> = out.tiles.iter().map(|t| t.tile).collect();
+    assert_eq!(
+        got, nonempty,
+        "the tiles batch must report in the request's order, unsorted"
+    );
+}
+
+/// `k = 0` is a legal counts-only request (delta-serving: a zero cap serves nothing, and the
+/// response is the tile stream and its validator) — the stream delivers every count and NO
+/// points chunk, empty or otherwise. The empty-chunk half is the review's finding 1: a zero-row
+/// buffer can still carry estimate bytes (a Utf8 offset table is 4 bytes at zero rows), so
+/// without the emit loop's `!buf.is_empty()` guard a small flush threshold would emit empty
+/// frames against the sink contract — which `RecordingSink::points` asserts against.
+#[test]
+fn a_zero_k_request_streams_counts_and_no_points_chunks() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let mut sink = RecordingSink::default();
+    // A 1-byte threshold: any accumulated estimate at all would flush — which is exactly the
+    // configuration under which an estimate-without-rows defect emits an empty frame.
+    engine
+        .viewport_stream(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 0),
+            1,
+            &mut sink,
+        )
+        .unwrap();
+
+    let (tiles, _) = sink.counts.expect("counts delivered");
+    assert!(!tiles.is_empty(), "counts are served at k = 0");
+    assert!(tiles.iter().all(|t| t.served == 0), "nothing is served");
+    assert!(
+        sink.chunks.is_empty(),
+        "no points chunks at all — never an empty one"
     );
 }

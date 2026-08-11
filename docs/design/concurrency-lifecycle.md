@@ -1,6 +1,6 @@
 # Tessera — Concurrency and Lifecycle Design
 
-**Status:** Draft r8 — r7 plus decision 0048's deletion sweep: the overlay is two stores, not three, and §3.4's evaluate-entry fold is deleted rather than pending. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
+**Status:** Draft r9 — r8 plus decisions 0058 and 0059: §7.2's single-flight waiters block, bounded and cancellable, and the 429 it used to produce on every race is now the answer at the end of a wait. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
 
 **Owns:** the mechanism level of the lifecycle **on the read side and in the infrastructure** — thread and state ownership, the generation lifecycle and its retention, geometry-versus-authorisation, WAL *recovery*, caching and single-flight, the router/worker protocol, and the crash matrix. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
 
@@ -304,9 +304,17 @@ tokio for HTTP and sockets; one lifecycle thread per partition (the single write
 
 Caches are concurrent maps of immutable entries, keyed by design §8.5's keys verbatim; **invalidation is key rotation, never mutation**, and nothing here ever modifies a cached value. What the cache adds beyond that is capacity management and single-flight build, and both have consequences a one-clause description hides.
 
-**Waiters do not block, and this is visible to clients.** A miss makes the arriving caller the builder: it publishes a `Building` slot, releases the map lock, runs the build with no lock held, then re-acquires to publish. A *concurrent* arrival on a key already building **does not wait** — it is handed `Building` back immediately, which the engine turns into a projection-building error and the server into a **429**. A parked waiter would hold the server's global admission budget while consuming zero CPU, so a queue of waiters would starve runnable work exactly under the load that makes it worst. The refusal rate is bounded by *same-key* concurrency; a working set that does not fit produces rebuilds, never refusals.
+**A waiter blocks, bounded and cancellable, and this is visible to clients** *(decision [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md), superseding r7's "waiters do not block")*. A miss makes the arriving caller the builder: it publishes a `Building` slot, releases the map lock, runs the build with no lock held, then re-acquires to publish. A *concurrent* arrival on a key already building **parks on that build and is served its result**. The 429 survives as the answer at the end of a wait that did not finish — a wait budget expiring, or the request's cancellation token being flipped, which returns a cancellation rather than backpressure.
 
 The motivation is measured, not aesthetic. The original row-projection cache ran the entity-space-to-row-space crossing — seconds at 10⁹ rows — **inside** the map lock on a miss, so every distinct session's first viewport serialised behind one global mutex. The signature at c=1000: throughput halves, server CPU *drops*, p99 reaches 1.04 s. Threads blocked on a lock, not doing work.
+
+The refusal it replaced was not backpressure and calling it that hid the defect: the server is idle and the work is already succeeding on another thread, so refusing sheds no load. What broke was the arithmetic — a full row-projection rebuild is a measured 4,550 ms at 10⁹ against a client retry budget of 1 s then 2 s, so a client racing *itself* exhausted its retries before work that was always going to succeed finished, and rendered a blank map. The budget is therefore argued from the build it must outlast (`serve.single_flight_wait_ms`, defaulting to 6,000 ms) rather than inherited from the admission gate's 250 ms or the client's `Retry-After: 1`.
+
+**The cost the old rule named is real and is now bounded rather than avoided.** A parked caller holds a compute-admission permit while consuming no CPU. That occupancy is bounded by the budget, and by nothing per-principal: decision [0059](../decisions/0059-per-principal-admission-is-not-capped.md) declines a per-principal cap on the grounds that the ceiling on admitted requests does not move, that a principal can already occupy every permit with *distinct* cold keys at real CPU cost, and that a fixed cap binds hardest when the server is idle. It is instrumented instead — parked callers are a gauge, and waits satisfied a counter beside the refusals they used to be. The refusal rate that remains is bounded by *same-key* concurrency; a working set that does not fit produces rebuilds, never refusals.
+
+**One caller must not wait, and it is not a policy choice.** The background refresh runs on a rayon worker, and the build it would park behind installs work on that same pool; parking workers on work that needs workers is a starvation deadlock. It keeps the non-waiting entry point and skips a key it finds building. The request path resolves on its own calling thread and is free to block.
+
+**Waking is where this is hard, and the argument is structural rather than a list of sites.** A waiter that is never woken is a hang, which is strictly worse than the refusal it replaces. A `Building` slot is left by four routes — a publish, a publish whose value exceeds the whole bound, a build that unwinds, and a prune landing mid-build — but they are only **two writes**: three are removals and every removal funnels through the one removal function rule 4 already names, and the fourth is the single insertion site. A waiter re-reads the map on every wake rather than trusting it, so a wake that means "removed" is answered by building rather than by stalling, and a spurious wake costs a re-read.
 
 **Eviction is not invalidation.** It removes a still-correct entry to stay under a byte bound; the miss path rebuilds from the same inputs the key names, so a removal can never widen a mask. Four rules make it safe:
 
@@ -357,11 +365,26 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 5. **Two removal rules, never conflated** *(amended by the 2026-08-03 ruling — was "three rules", with deletions on a stamp ledger)*: suppressions retire only on unsuppress (Rule S); deletions at the compaction fold that executes them (Rule F). Giving a suppression any other retirement route is fail-open. *The fold is unbuilt, so today nothing retires — §3.2.*
 6. **Fragments build from current postings only.** *Built. The retirement-floor backstop is superseded with the stamp ledger — Rule F's safety is the fold's prefix rotating the fragment identity — §3.2.*
 7. **Protocol postcard over socketpairs; worker WAL wins lease arbitration.** *Unbuilt — §6.*
-8. **Single-flight waiters do not block**; a concurrent arrival on a building key is refused with a 429 rather than parked. A caching decision with a client-visible outcome — §7.2.
+8. **Single-flight waiters block, bounded and cancellable** *(amended by decision 0058 — was "waiters do not block", a concurrent arrival refused with a 429 rather than parked)*: a concurrent arrival on a building key is served that build's result, and the 429 remains only for a wait that outran its budget. Still a caching decision with a client-visible outcome, and the permit occupancy it admits is bounded by the budget rather than by a per-principal cap (decision 0059) — §7.2.
 9. **The ack contract is carried by a type**, not by call ordering: a success receipt requires proof that the generation carrying its effect is live — §4.
 10. **Injected failures are indistinguishable from real ones in variant and order**, and the conformance harness extends this mechanism rather than adding a second — §7.3.
 
 ## Appendix R — Review record
+
+**r9** (2026-08-09) applies decisions
+[0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and
+[0059](../decisions/0059-per-principal-admission-is-not-capped.md) to §7.2 and to decision 8.
+**The claim that changed sides is "waiters do not block"** — stated here since r7 with its
+motivation (a parked waiter holds admission budget while burning no CPU) and now false of the
+built system. The motivation was not wrong; it was the wrong answer to the case it was applied to,
+which the arithmetic settles: a 4,550 ms cold build against a client retry budget of 1 s then 2 s
+means the refusal loses the client an answer that was always coming. §7.2 records the wait, its
+budget, the one caller that still must not wait and why that one is a deadlock rather than a
+preference, and the two-write argument that no wake can be missed. Nothing else in the section
+changed: the four eviction rules, the byte bound's reach and the deliberate cross-crate
+duplication all stand as written, and the F4 measurement that motivated the slot-state map is
+untouched — same-key callers serialising is what single-flight *is*, and F4 is about distinct
+keys.
 
 **r8** (2026-08-06) applies decision
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md): the evaluate

@@ -9,6 +9,7 @@ root.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -56,6 +57,33 @@ def catalogue_bundle(catalogue_bundle_root: Path):
     from oracle.harness import open_bundle_with_source  # noqa: PLC0415
 
     return open_bundle_with_source(catalogue_bundle_root, catalogue_points_path())
+
+
+@pytest.fixture(scope="session")
+def private_catalogue_bundle(tmp_path_factory, catalogue_bundle_root: Path):
+    """A factory for **private copies** of the catalogue bundle, one per server that will accept a
+    control operation.
+
+    An accepted deny is not server-local state. The overlay is published *into the bundle prefix*
+    as a new `SEGMENTS-<n>.json` carrying `deny` and `tombstones` (contracts §2.3; the loader
+    applies it to the initial overlay and WAL replay unions on top), so a private cache directory
+    and a private WAL isolate nothing — the deny lane does not go there. A server pointed at the
+    shared cached fixture therefore rewrites the fixture that every later module, and every later
+    run on this machine, reads. That is `(checkout, /tmp state)` deciding whether the suite is
+    green, arriving by a second route; the receipt closed the first.
+
+    **One copy per server, not per module.** Two servers sharing a copy would compose each other's
+    denies, which is the same failure at a shorter range.
+
+    The *oracle* side keeps reading the pristine root: the copy is byte-identical at the moment it
+    is made, and comparing against a bundle the engine is free to mutate is the thing being fixed.
+    """
+    def make(label: str) -> Path:
+        dest = tmp_path_factory.mktemp(f"bundle-{label}") / "bundle-catalogue"
+        shutil.copytree(catalogue_bundle_root, dest)
+        return dest
+
+    return make
 
 
 @pytest.fixture(scope="session")

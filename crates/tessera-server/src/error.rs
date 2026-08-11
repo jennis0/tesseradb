@@ -94,10 +94,17 @@ pub enum ApiError {
     /// strings name different mechanisms, and every 429 assertion matches on the body rather than
     /// on the status alone.
     IngestAdmissionBackpressure { retry_after_s: u64 },
-    /// 429 `backpressure` for the engine's **single-flight builders**: a concurrent request is
-    /// already building this session's row projection (`EngineError::ProjectionBuilding`) or this
-    /// credential's mask fragment (`EngineError::FragmentBuilding`), and neither cache blocks a
-    /// second caller. By the client's retry the slot is warm.
+    /// 429 `backpressure` for the engine's **single-flight builders**, and — for the row
+    /// projection — the answer at the **end of a wait rather than instead of one** (decision
+    /// 0058). A racer parks on the in-flight build and is served its result; this is what it gets
+    /// if `serve.single_flight_wait_ms` runs out first. `EngineError::FragmentBuilding` still
+    /// reaches here immediately: the fragment cache is `tessera-authz`'s own single-flight, which
+    /// 0058 did not rule on, and its builds are on the session plane rather than the viewer's.
+    ///
+    /// **What changed for a reader of this 429.** It used to mean "someone else got here first,
+    /// come back in a moment"; a retry then usually found the slot warm. It now means the build is
+    /// outlasting a budget already argued to exceed a cold build at 10⁹, so a client seeing it
+    /// repeatedly is seeing something slower than the design's worst measured case, not a race.
     ///
     /// **A fourth variant for one wire code, on [`ApiError::WriteBackpressure`]'s argument** —
     /// contracts §3.1 lists `backpressure` once and all four emit it; what is closed is the code,
@@ -109,6 +116,9 @@ pub enum ApiError {
     /// **The number is the gate's `1`, and here it is argued rather than inherited** (contracts
     /// §0.3 deviation 11 forbids the inheritance, not the value): a single-flight build holds the
     /// slot for one build of one session's projection, which is the timescale `1` was chosen for.
+    /// It is deliberately **not** re-derived from `single_flight_wait_ms`: a caller that has
+    /// already waited the budget is not helped by being told to wait it again, and the retry it
+    /// makes at 1 s is what finds the value if the build lands just after the budget expired.
     ///
     /// **`ComputeGateStatus::shed_total` deliberately does not count this path**, as
     /// [`crate::state::ComputeGate::shed_total`]'s own doc records: that counter is the gate's two

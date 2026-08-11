@@ -2300,6 +2300,7 @@ dependencies = [
  "tessera-spatial",
  "tessera-store",
  "tessera-types",
+ "tessera-wire",
  "tokio",
  "toml 0.8.23",
 ]
@@ -2407,6 +2408,8 @@ dependencies = [
  "arrow",
  "axum",
  "base64",
+ "bytes",
+ "futures-core",
  "parking_lot",
  "parquet",
  "reqwest",
