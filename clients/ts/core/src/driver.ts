@@ -81,6 +81,8 @@ export type DriverOptions = {
   /** Anticipation pacing — D5: shipped at design budgets, judged by measurement. */
   maxPrefetchPerPause?: number;
   maxPrefetchBytesPerPause?: number;
+  /** Zoom layers kept resident-but-undrawn (0 = none, 2+ for strong machines). */
+  prefetchLayers?: number;
   /** Marks-on-screen budget, forwarded to the planner. */
   budget?: number;
 };
@@ -97,6 +99,7 @@ const DEFAULTS = {
   maxRetries: 2,
   maxPrefetchPerPause: 3,
   maxPrefetchBytesPerPause: 8_000_000,
+  prefetchLayers: 1,
   budget: 50_000
 };
 
@@ -193,6 +196,7 @@ export class Driver {
       velocity,
       heldBytes: this.replica.bytes,
       budgetBytes: this.replica.budgetBytes,
+      depthLayers: this.o.prefetchLayers,
       holdDepth: this.holdSuspended ? undefined : this.presented?.depth
     };
     return plan(inputs);

@@ -36,6 +36,20 @@ describe('worldBbox', () => {
 });
 
 describe('plan', () => {
+  it('leads the background with the zoom shadow: depth+L over the visible box', () => {
+    // The one region anticipation can be certain about — a zoom lands on ground already on
+    // screen — and the one the pan ring cannot help. The layer count is a knob (D5 posture:
+    // design budgets, then measurement); 0 disables the shadow without touching the ring.
+    const p = plan({...BASE, depthLayers: 2});
+    const deeper = p.background.filter((b) => b.kind === 'deeper');
+    expect(deeper.length).toBeGreaterThan(0);
+    expect(deeper.length).toBeLessThanOrEqual(2);
+    expect(deeper[0]!.depth).toBe(p.choice.depth + 1);
+    expect(p.background[0]!.kind).toBe('deeper');
+    const none = plan({...BASE, depthLayers: 0});
+    expect(none.background.filter((b) => b.kind === 'deeper')).toHaveLength(0);
+  });
+
   it('chooses depth for the visible box, not the margined one', () => {
     // Depth must not drop just because the request covers more than the screen: that would spend
     // the budget on off-screen marks and lower the resolution of what is actually being looked at.

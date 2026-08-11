@@ -1,4 +1,4 @@
-import {WORLD_SIZE} from './coords.js';
+import {MAX_DEPTH, WORLD_SIZE} from './coords.js';
 import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type DepthChoice} from './budget.js';
 import {rectArea, type TileRect} from './rects.js';
 
@@ -65,6 +65,12 @@ export type PlannerInputs = {
   /** What the replica holds and what it may hold — sizes the ring. See {@link ringMargin}. */
   heldBytes?: number;
   budgetBytes?: number;
+  /**
+   * Zoom layers to keep resident-but-undrawn beneath the current depth (`?layers=`, default 1;
+   * 0 for a resource-starved client, 2+ where GPU and wire afford it). See the shadow band in
+   * {@link plan}.
+   */
+  depthLayers?: number;
 };
 
 /** One region to ask about, in tile-index space at `depth`. */
@@ -255,6 +261,22 @@ export function plan(inputs: PlannerInputs): Plan {
   // ring asked for 2.3 x 10^6 points in one response.
   const reach = ringMargin(inputs.heldBytes ?? 0, inputs.budgetBytes ?? 0);
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
+  // **The zoom shadow comes first.** Depth+L over the visible box is the one region anticipation
+  // can be certain about — a zoom-in lands under the cursor, and its ground is already on screen
+  // — and it is the interaction the pan ring cannot help: ancestors stay sparse by design, so an
+  // unanticipated zoom notch reads as loading. Resident-but-undrawn is free to arrange: bands
+  // land in the replica by depth, the slab retains a partition per depth, and the flip on arrival
+  // is the swap that is already instant. Each layer costs up to ~4x the viewport's bytes over
+  // novel ground and nothing over held ground (owner-ruled: ship at design budgets, measure —
+  // D5); the count is a knob because that cost is a machine's to afford: 0 for a starved client,
+  // 2+ where GPU and wire allow.
+  for (let layer = 1; layer <= (inputs.depthLayers ?? 1); layer++) {
+    const depth = choice.depth + layer;
+    if (depth > MAX_DEPTH) break;
+    const rect = tileRectOfBbox(visible, depth);
+    if (rectArea(rect) > maxTiles) break;
+    background.push({kind: 'deeper', depth, rect});
+  }
   for (let step = 0; ; step++) {
     const depth = choice.depth - step;
     const margin = RING_MARGIN * 2 ** step;

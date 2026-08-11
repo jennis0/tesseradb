@@ -36,6 +36,15 @@ export type ViewerConfig = {
    * misrender, `?gpu=0` restores the typed-array path in one reload and names the culprit.
    */
   gpuBuffers: boolean;
+  /**
+   * Zoom layers kept resident-but-undrawn beneath the current depth (`?layers=`, default 1).
+   *
+   * 0 for a resource-starved machine; 2+ where GPU memory and bandwidth afford it. Each layer
+   * costs up to ~4x the viewport's bytes over novel ground and nothing over held ground; what it
+   * buys is the one interaction the pan ring cannot help — a zoom notch landing on ground that
+   * is already decoded, resident, and one partition swap from drawn.
+   */
+  prefetchLayers: number;
 };
 
 /**
@@ -54,6 +63,7 @@ export function readConfig(): ViewerConfig {
     pickable: query?.get('pickable') !== '0',
     ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
     gpuBuffers: query?.get('gpu') !== '0',
+    prefetchLayers: query?.has('layers') ? Math.max(0, Number(query.get('layers')) || 0) : 1,
     viewerUrl: env.VITE_TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
     sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
     sessionCredential: env.VITE_TESSERA_SESSION_CREDENTIAL ?? ''

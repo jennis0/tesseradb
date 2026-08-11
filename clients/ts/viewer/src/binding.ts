@@ -17,6 +17,7 @@ import {
   type Assembled
 } from './assemble.js';
 import {widenDomain} from './colour.js';
+import {readConfig} from './config.js';
 import {trace} from './trace.js';
 import type {Store} from './state.js';
 
@@ -62,7 +63,7 @@ export class DriverBinding {
         onStatus: (status, detail) => this.status(status, detail),
         onTrace: (kind, fields) => trace.event(kind, fields)
       },
-      {budget: store.state.budget},
+      {budget: store.state.budget, prefetchLayers: readConfig().prefetchLayers},
       prefetch
     );
   }
