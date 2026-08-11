@@ -163,6 +163,13 @@ pub(crate) fn refresh_resident(
         };
         let space = &slice_data.row_space;
         let previous_projection = Arc::clone(&previous.projection);
+        // **Does not wait, and this is the one caller for which that is not a policy choice**
+        // (decision 0058 gives the request path the waiting entry point). This pass runs on a
+        // rayon worker — `RefreshHandle::spawn` submits it to the same pool — and the build it
+        // would park behind calls `pool.install`. Parking workers on work that needs workers is a
+        // starvation deadlock, not merely a wasted refresh slot. It also delays the publication
+        // every other session is waiting on, to duplicate a value a request thread is already
+        // producing. A key found `Building` is skipped: the request that owns it will publish it.
         let built = cache.get_or_derive(next_key, None, |_| {
             // **Three rungs, cheapest first, each exact rather than approximate.**
             //

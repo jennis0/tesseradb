@@ -79,9 +79,11 @@ async fn a_configured_origin_round_trips_with_the_exposed_headers() {
         "http://localhost:5173"
     );
 
-    // Without these, `fetch` hides the headers from the page and the viewer's stats panel shows
-    // nothing — a failure that reads as "the server emits no timings" rather than as a CORS
-    // configuration hiding them.
+    // Without these, `fetch` hides the headers from the page — the timing headers read as "the
+    // server emits no timings", and the delta-serving coordinates (`etag`,
+    // `x-tessera-identity-key`, `x-tessera-stale`) read as a server that cannot be replicated
+    // against at all. `x-tessera-stage-ns` is retired (contracts §3.2 r26 — the stage breakdown
+    // rides the trailer frame, in-body and outside CORS's reach) and must NOT reappear.
     let exposed = resp
         .headers()
         .get("access-control-expose-headers")
@@ -90,16 +92,22 @@ async fn a_configured_origin_round_trips_with_the_exposed_headers() {
         .unwrap()
         .to_ascii_lowercase();
     for header in [
+        "etag",
+        "x-tessera-identity-key",
+        "x-tessera-stale",
         "x-tessera-pin",
         "x-tessera-server-us",
         "x-tessera-admission-us",
-        "x-tessera-stage-ns",
     ] {
         assert!(
             exposed.contains(header),
             "{header} must be exposed, got: {exposed}"
         );
     }
+    assert!(
+        !exposed.contains("x-tessera-stage-ns"),
+        "the retired stage header must not be resurrected in the expose list: {exposed}"
+    );
 }
 
 #[tokio::test]

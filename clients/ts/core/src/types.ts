@@ -93,7 +93,19 @@ export type CategoryValue = {
 export type ViewportRequest = {
   slice: string;
   zoom: number;
-  bbox: [number, number, number, number];
+  /**
+   * The region to answer for. Send exactly one of this and {@link ViewportRequest.tiles} — the
+   * server refuses both, and refuses neither.
+   */
+  bbox?: [number, number, number, number];
+  /**
+   * The exact depth-`zoom` Morton prefixes to answer for.
+   *
+   * How a client with a replica elides: a tile it can prove it already holds is simply left out,
+   * and an omitted tile costs the server nothing — no range derivation, counting, selection or
+   * gather. A client with no replica sends a `bbox` and needs none of this.
+   */
+  tiles?: bigint[];
   /**
    * Omitted unless set. Contracts §3.2 defaults `k` to the deployment's own ceiling, so a caller
    * who never mentions it can never decrease it — which is what keeps P6's non-decreasing
@@ -126,8 +138,8 @@ export type ViewportResult = {
   ids: BigUint64Array;
   /**
    * Each point's 64-bit Morton position code, exactly as the server sent it. Its high 32 bits are
-   * the point's cell, so `code >> BigInt(32 - 2 * z)` is the depth-`z` tile containing it — hover
-   * bucketing and client-side clustering without a round trip.
+   * the point's Morton cell and its low 32 the sub-cell residual, so `tileOfCode(code, z)` is the
+   * depth-`z` tile containing it — hover bucketing and client-side clustering without a round trip.
    */
   codes: BigUint64Array;
   /**
@@ -140,6 +152,16 @@ export type ViewportResult = {
    * emulation would later recover it.
    */
   positions: Float64Array;
+  /**
+   * The same points in the renderer's world space, `f32`.
+   *
+   * Carried beside {@link positions} rather than instead of it because the two answer different
+   * questions: cell space is 32 bits per axis and round-trips to the server's `code`, which `f32`
+   * cannot (see `decode.ts`); world space is what a band holds and a buffer uploads. Computing it
+   * here means the per-point pass happens wherever decoding does — a worker, in a browser — rather
+   * than on the thread that draws.
+   */
+  world: Float32Array;
   /**
    * The declared-scalar tail, one entry per column, keyed by column name.
    *
@@ -191,6 +213,22 @@ export type Timings = {
 export type ViewportResponse = {
   result: ViewportResult;
   timings: Timings;
+  /**
+   * Whether a held band may be **rendered at all** — the replica's partition key.
+   *
+   * Over the idset, the credential, the mask fragment's identity and the slice. A cache keyed more
+   * loosely than this serves one principal's authorised data to another, which is a disclosure and
+   * not a staleness bug (decision 0029), so a client drops everything held when it changes.
+   */
+  identityKey: string;
+  /**
+   * Whether a held band may be **declared** in a request — the response's entity tag, unquoted.
+   *
+   * Moves when the visible set could have gained rows, and deliberately not when a merge or a
+   * compaction rearranges the ones already there. A band whose key has rotated is still renderable;
+   * what it has lost is the right to be declared (`delta-serving.md` §2).
+   */
+  contentKey: string;
   /**
    * The geometry this response was answered from (`x-tessera-pin`), to echo back on the next
    * request as {@link ViewportRequest.stamp}.

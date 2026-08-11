@@ -9,13 +9,23 @@
 //!
 //! This module is the replacement: a slot per key is either [`Slot::Building`] or
 //! [`Slot::Ready`], and the map's mutex is held only for the O(1) transition between those states
-//! — never for the build itself, which always runs with the lock released. A concurrent arrival
-//! on the *same* key while a build is in flight does not wait for it. The non-blocking-waiters
-//! rule: a parked waiter would hold the server's global admission budget while consuming
-//! zero CPU, so a queue of waiters would starve runnable work exactly when the server is under the
-//! load that makes it worst. [`SingleFlightCache::get_or_build`] therefore returns [`Building`]
-//! immediately to a losing arrival, and the caller decides what that means (`Engine::viewport`
-//! turns it into `EngineError::ProjectionBuilding`).
+//! — never for the build itself, which always runs with the lock released.
+//!
+//! **A concurrent arrival on the same key waits for the in-flight build and is served its result**
+//! (decision 0058), through [`SingleFlightCache::get_or_derive_waiting`]. The earlier rule was that
+//! nobody waited, on the ground that a parked waiter holds the server's admission budget while
+//! burning no CPU. That argument survives as a *cost* and is why the wait is bounded and
+//! cancellable, but it was the wrong answer to the case that motivated it: the losing caller is
+//! refused work that is already succeeding on another thread, and at 10⁹ the build outlasts the
+//! client's whole retry budget, so the user gets a blank map from a server doing nothing heavy.
+//! Decision 0059 records why the slot occupancy this buys is bounded by the wait budget rather than
+//! by a per-principal cap.
+//!
+//! [`SingleFlightCache::get_or_derive`] keeps the non-waiting behaviour and returns [`Building`]
+//! immediately, because one caller must not wait: the background refresh runs **on a rayon worker**
+//! and the build it would park behind calls `pool.install`, so parking workers on work that needs
+//! workers is a starvation deadlock, not merely a wasted refresh slot. The request path resolves on
+//! its own calling thread (`Engine::viewport`'s D-D guardrail) and is free to block.
 //!
 //! # The bound, and the four rules that make eviction safe
 //!
@@ -79,6 +89,38 @@
 //!    declined: it moves the same convention into a type whose `Drop` is still the thing that must
 //!    not run under the lock, buying a name rather than an enforcement.
 //!
+//! # Rule 5: waiting, and why a wake cannot be missed
+//!
+//! 5. **Every exit from `Building` notifies that slot's waiters, and a waiter decides by
+//!    re-reading the map rather than by trusting the wake.** A waiter that is never woken is a
+//!    hang, which is strictly worse than the refusal it replaces, so the argument has to be
+//!    structural rather than a list of call sites that happened to be found.
+//!
+//!    `Building` is left by four routes — a successful publish, the publish's oversized arm, a
+//!    build that unwinds ([`RemoveOnUnwind`]), and a prune ([`SingleFlightCache::retain_keys`])
+//!    landing mid-build — but they are only **two writes**. Three of them remove the slot, and
+//!    every removal funnels through [`Slots::remove`], which is rule 4's choke point already;
+//!    the fourth overwrites it, in the single insertion site inside [`SingleFlightCache::publish`].
+//!    Notifying at those two points covers all four by construction, and any fifth route would have
+//!    to go through one of them to exist at all. Both notify while holding the map lock: the woken
+//!    threads re-block on the mutex until it is released, which costs a scheduling round-trip and
+//!    buys the guarantee that no wake can be issued between a waiter's decision to sleep and its
+//!    sleeping.
+//!
+//!    **The condvar is per slot, not per cache.** Many condvars against one mutex is the legal
+//!    direction (one condvar against two mutexes is not), so this costs a word per `Building` slot
+//!    and avoids waking every waiter in the map on every publish — which would preserve F4's
+//!    property on paper while reintroducing its symptom.
+//!
+//!    **A waiter carries `seq` into the wait and re-checks it on wake** (rule 2, applied to a third
+//!    party): the slot it is woken for may already be a *later* builder's under the same key, and
+//!    being satisfied by that one is the same class of error as publishing into it. On any exit
+//!    that is not its own build's `Ready`, a waiter falls back to a plain **miss** — it takes the
+//!    slot and builds — rather than to an error, because a panicked, oversized or pruned build is
+//!    exactly the state a fresh arrival would find, and returning `Building` there would reinstate
+//!    the refusal this rule exists to remove. The wait budget, not the number of rounds, is what
+//!    bounds that loop.
+//!
 //! # What the bound bounds, and what it does not
 //!
 //! `bound_bytes` bounds the bytes **resident in this map**. It is not a bound on process memory,
@@ -115,6 +157,14 @@
 //! | LRU order, not insertion order | `eviction_takes_the_least_recently_used` | same name |
 //! | `young_evictions` is the thrash alarm | `young_evictions_counts_only_never_reused_entries` | same name |
 //! | single-flight, non-blocking waiters, panic safety | `a_ready_hit_never_calls_build_again`, `concurrent_miss_…`, `distinct_keys_…`, `a_panicking_build_…` | same four names |
+//! | 5 — a waiter is served the winner's value, built once | `a_waiter_is_served_the_winners_value_and_the_build_runs_once` | — (no waiting entry point there) |
+//! | 5 — the unwind wake, and the waiter does not inherit the panic | `a_waiter_whose_build_panics_falls_back_to_building_it` | — |
+//! | 5 — the oversized-publish wake | `a_waiter_whose_build_is_oversized_falls_back_to_building_it` | — |
+//! | 5 — the prune wake | `a_waiter_whose_build_is_pruned_falls_back_to_building_it` | — |
+//! | 5 — a later builder's value satisfies a waiter, and `seq` is deliberately absent from the wait | `a_waiter_takes_a_later_builders_value_for_the_same_key` | — |
+//! | 5 — the budget bounds the wait | `a_waiter_that_is_never_satisfied_times_out_as_building` | — |
+//! | 5 — cancellation releases before the budget | `a_cancelled_waiter_releases_before_the_budget` | — |
+//! | 5 — the non-waiting entry point still refuses | `concurrent_miss_during_a_build_does_not_block_and_does_not_rebuild` | same name |
 //!
 //! **Three deliberate asymmetries**, listed so they are not read as gaps: bulk pruning
 //! ([`SingleFlightCache::retain_keys`], `retain_keys_removes_only_rejected_keys_in_one_acquisition`)
@@ -131,9 +181,12 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
+
+use crate::cancel::CancelToken;
 
 /// What one cached value costs the byte bound.
 ///
@@ -186,7 +239,14 @@ enum Slot<K, V> {
     /// its own slot from a later builder's — this module's doc, rule 2.
     ///
     /// Carries no value, is charged no bytes, and is absent from the recency index (rule 1).
-    Building { seq: u64 },
+    ///
+    /// **`wake` is this slot's own condvar, and callers park on it** (rule 5): a caller through
+    /// [`SingleFlightCache::get_or_derive_waiting`] sleeps here until this build resolves, rather
+    /// than being refused. Per slot rather than per cache so a publish wakes the callers waiting
+    /// for *that* key and no others. It is notified by whichever write displaces this variant —
+    /// [`Slots::remove`] or the insert in [`SingleFlightCache::publish`] — and those are the only
+    /// two, which is the whole of rule 5's no-missed-wake argument.
+    Building { seq: u64, wake: Arc<Condvar> },
     Ready {
         value: Arc<V>,
         /// The map's own key, held here for two distinct reasons that an earlier draft of this
@@ -218,10 +278,52 @@ enum Slot<K, V> {
 }
 
 /// A losing arrival's outcome: some other caller is already building this key, and this call did
-/// not wait for it (D-G). Carries nothing — the caller only needs to know to retry, never a
-/// handle to the in-flight build.
+/// not wait for it. Carries nothing — the caller only needs to know to retry, never a handle to
+/// the in-flight build.
 #[derive(Debug)]
 pub(crate) struct Building;
+
+/// Why a waiting caller ([`SingleFlightCache::get_or_derive_waiting`]) gave up. Both are refusals,
+/// and they are kept apart because the server owes the client different answers: a budget
+/// expiry is the 429 that used to be immediate, a cancellation is the client's own disconnect and
+/// must not be reported as backpressure.
+///
+/// There is deliberately no "the build failed" variant. A build that panics, is oversized or is
+/// pruned leaves the waiter looking at a plain miss, which it then builds itself — rule 5. Giving
+/// that its own outcome would hand the caller an error for a state a fresh arrival handles without
+/// one.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WaitEnded {
+    /// The wait budget (`serve.single_flight_wait_ms`) expired with no value to serve.
+    Budget,
+    /// The request's [`CancelToken`] was flipped — the client is gone.
+    Cancelled,
+}
+
+/// A waiting caller's two bounds, carried together so neither can be supplied without the other.
+#[derive(Clone, Copy)]
+struct Wait<'a> {
+    cancel: &'a CancelToken,
+    deadline: Instant,
+}
+
+/// How long a parked waiter sleeps before re-reading its [`CancelToken`]. See
+/// [`SingleFlightCache::park`] for why cancellation polls rather than wakes.
+const WAIT_TICK: Duration = Duration::from_millis(50);
+
+/// The wait budget an embedder that never calls [`SingleFlightCache::set_wait_budget_ms`] gets.
+///
+/// **Argued from the build it has to outlast, not chosen for roundness.** A full row-projection
+/// rebuild at 10⁹ is a *measured* 4,550 ms (`crate::refresh`'s table), and a racer can arrive at
+/// any point during one, so any budget at or below that reproduces decision 0058's defect at the
+/// scale that motivated it. 6,000 ms is that figure with headroom for a loaded box. It is
+/// deliberately **not** inherited from the compute gate's `admission_timeout_ms` (250 ms), which
+/// bounds queueing for a permit rather than the work a permit is held for, nor from the client's
+/// `Retry-After: 1`.
+///
+/// The operator's knob is `serve.single_flight_wait_ms`; decision 0059 records why the slot
+/// occupancy this admits is bounded here rather than by a per-principal cap.
+pub const DEFAULT_WAIT_BUDGET_MS: u64 = 6_000;
 
 /// What [`SingleFlightCache::peek`] found — a read that claims nothing.
 ///
@@ -252,10 +354,36 @@ pub struct CacheStats {
     /// Builds started. A losing arrival that gets [`Building`] is neither a hit nor a miss: it
     /// neither read a value nor built one.
     pub misses: u64,
-    /// Losing arrivals turned away because a build was already in flight on their key. **This is
-    /// the 429 rate**, and it is bounded by *same-key* concurrency — a working set that does not
-    /// fit produces rebuilds, not refusals (rule 3).
+    /// Callers turned away because a build was already in flight on their key. **This is the 429
+    /// rate**, and it is bounded by *same-key* concurrency — a working set that does not fit
+    /// produces rebuilds, not refusals (rule 3).
+    ///
+    /// **Its population changed with decision 0058 and its name did not.** It used to count
+    /// *races*: every arrival that found a `Building` slot. It now counts only the two arrivals
+    /// that still refuse — one through the non-waiting entry point (`crate::refresh`), and one
+    /// whose wait budget expired. A racer that waits and is served is counted by
+    /// [`Self::waits_satisfied`] instead, so the two together are the old figure, and reading this
+    /// one alone as a race rate now understates it.
     pub building_refusals: u64,
+    /// Waits that ended with the winner's value — the 429s decision 0058 converted into answers.
+    ///
+    /// Against [`Self::building_refusals`] this is the whole picture of same-key contention: sum
+    /// for the race rate, ratio for whether the budget is set sensibly. A waiter that fell through
+    /// to building its own value (its build panicked, was oversized, or was pruned) is in neither
+    /// figure — it is a [`Self::misses`], because that is what it became.
+    pub waits_satisfied: u64,
+    /// Callers parked in a wait **at this instant** — a gauge, not a total.
+    ///
+    /// What it is for: a parked caller holds a `ComputeGate` permit while burning no CPU, and that
+    /// occupancy is the price decision 0058 pays and decision 0059 declines to bound with a
+    /// per-principal cap. Sustained non-zero here against a low `waits_satisfied` is a budget set
+    /// too high.
+    ///
+    /// **It does not attribute, and must not be read as though it did.** It is process-wide: it
+    /// says whether waiting occupies the gate, never whose waiting does. Deciding that one
+    /// principal is the cause needs per-auth-hash instrumentation, which SA §9 keeps off this
+    /// surface.
+    pub waiters_now: u64,
     pub evictions: u64,
     pub evicted_bytes: u64,
     /// Evictions of entries that were never reused (`uses == 0`).
@@ -346,7 +474,18 @@ impl<K: Eq + Hash, V> Slots<K, V> {
                   after the lock is released, never dropped in place"]
     fn remove(&mut self, key: &K) -> Option<Arc<V>> {
         match self.map.remove(key) {
-            None | Some(Slot::Building { .. }) => None,
+            None => None,
+            // **Rule 5's removal half.** Three of the four exits from `Building` are removals and
+            // all three arrive here, so waking once here covers the oversized-publish arm, the
+            // unwind guard and a prune landing mid-build without any of them knowing waiters
+            // exist. The wake is issued with the map lock held — this runs inside a locked block
+            // in every caller — so it cannot land in the window between a waiter deciding to sleep
+            // and sleeping. Each woken caller re-reads the map, finds its build's slot gone, and
+            // becomes a builder itself.
+            Some(Slot::Building { wake, .. }) => {
+                wake.notify_all();
+                None
+            }
             Some(Slot::Ready {
                 value,
                 charged,
@@ -401,11 +540,16 @@ pub(crate) struct SingleFlightCache<K, V> {
     /// it. The config-field route through `EngineConfig` is closed by this stage's frozen test
     /// files — the same constraint `Engine::start_write_executor` records for `ingest_queue_bound`.
     bound_bytes: AtomicU64,
+    /// The wait budget for [`SingleFlightCache::get_or_derive_waiting`], in milliseconds. Settable
+    /// after construction for the same reason `bound_bytes` is, and by the same route.
+    wait_budget_ms: AtomicU64,
     entries: AtomicUsize,
     bytes: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
     building_refusals: AtomicU64,
+    waits_satisfied: AtomicU64,
+    waiters_now: AtomicU64,
     evictions: AtomicU64,
     evicted_bytes: AtomicU64,
     young_evictions: AtomicU64,
@@ -437,11 +581,14 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                 bytes: 0,
             }),
             bound_bytes: AtomicU64::new(bound_bytes),
+            wait_budget_ms: AtomicU64::new(DEFAULT_WAIT_BUDGET_MS),
             entries: AtomicUsize::new(0),
             bytes: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             building_refusals: AtomicU64::new(0),
+            waits_satisfied: AtomicU64::new(0),
+            waiters_now: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             evicted_bytes: AtomicU64::new(0),
             young_evictions: AtomicU64::new(0),
@@ -455,6 +602,12 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// load is sound but takes effect only at the next publish.
     pub(crate) fn set_bound_bytes(&self, bound_bytes: u64) {
         self.bound_bytes.store(bound_bytes, Ordering::Relaxed);
+    }
+
+    /// Set the wait budget. Read once per waiting call, at entry, so a change under load takes
+    /// effect for calls that arrive after it and never shortens a wait already in progress.
+    pub(crate) fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
+        self.wait_budget_ms.store(wait_budget_ms, Ordering::Relaxed);
     }
 
     /// Slots currently held, `Building` and `Ready` both counted — a diagnostic, not a capacity
@@ -474,6 +627,8 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             building_refusals: self.building_refusals.load(Ordering::Relaxed),
+            waits_satisfied: self.waits_satisfied.load(Ordering::Relaxed),
+            waiters_now: self.waiters_now.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             evicted_bytes: self.evicted_bytes.load(Ordering::Relaxed),
             young_evictions: self.young_evictions.load(Ordering::Relaxed),
@@ -483,18 +638,18 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         }
     }
 
-    /// Look up `key`. A hit clones the `Arc`, moves the entry to the young end of the recency order
-    /// and returns without calling `build` at all. A miss makes this call the builder: publish
-    /// `Building`, drop the lock, run `build()` outside it, re-lock, evict to fit, publish `Ready`.
-    /// A *different* concurrent miss on the same key observed while this is in flight gets
-    /// `Err(Building)` immediately (see this module's doc for why that is correct rather than a
-    /// shortcut).
+    /// Look up `key` **without waiting** for a build already in flight.
     ///
     /// A hit clones the `Arc`, moves the entry to the young end of the recency order and returns
     /// without calling `make` at all. A miss makes this call the builder: publish `Building`, drop
     /// the lock, run `make` outside it, re-lock, evict to fit, publish `Ready`. A *different*
     /// concurrent miss on the same key observed while this is in flight gets `Err(Building)`
-    /// immediately (see this module's doc for why that is correct rather than a shortcut).
+    /// immediately.
+    ///
+    /// **This is now the exception rather than the rule** (decision 0058): the request path takes
+    /// [`Self::get_or_derive_waiting`], and this entry point exists for the caller that must not
+    /// block — `crate::refresh`, which runs on a rayon worker and would park it behind a build
+    /// that itself needs the pool. That call site carries the argument; see also this module's doc.
     ///
     /// **Exactly two lock acquisitions on a miss, exactly one on a hit**, asserted by this module's
     /// tests against [`CacheStats::slot_locks`]. The LRU touch and the eviction pass both happen
@@ -540,6 +695,56 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         derive_from: Option<&K>,
         make: impl FnOnce(Option<&V>) -> V,
     ) -> Result<Arc<V>, Building> {
+        self.claim_and_build(key, derive_from, None, make)
+            .map_err(|_ended| Building)
+    }
+
+    /// Look up `key`, **waiting** for a build already in flight rather than refusing (decision
+    /// 0058). Everything else — the state machine, the panic safety, rule 3, `derive_from`'s
+    /// treatment — is [`Self::get_or_derive`]'s, because both are one function.
+    ///
+    /// Three ways out for a caller that finds a build in flight:
+    ///
+    /// - the build publishes → this returns its value, and `make` never runs here;
+    /// - the build **fails to publish** — it panicked, it was oversized, or a prune removed its
+    ///   slot — → this caller takes the slot and builds, exactly as a fresh arrival would;
+    /// - the wait budget expires, or `cancel` is flipped → `Err`, which the request path turns
+    ///   into the 429 that used to be immediate, or into `EngineError::Cancelled`.
+    ///
+    /// **The budget is what bounds the wedge** that this module's `Slot` doc names: a build that
+    /// dies without going through either notify path would otherwise leave waiters asleep for
+    /// ever. Rule 5 argues no such path exists; the budget is what makes that argument's failure a
+    /// bounded stall rather than a hang, and it is a condition of 0058 rather than a tuning knob.
+    ///
+    /// **`cancel` is polled on a tick rather than waking the waiter** ([`WAIT_TICK`]). A
+    /// disconnected client therefore releases within a tick instead of instantly, which is the
+    /// price of not threading a second wakeup path through [`crate::cancel::CancelToken`] — a
+    /// cross-thread notify would need every token to know which condvars to hit, for a saving
+    /// measured in tens of milliseconds against a budget measured in seconds.
+    pub(crate) fn get_or_derive_waiting(
+        &self,
+        key: K,
+        derive_from: Option<&K>,
+        cancel: &CancelToken,
+        make: impl FnOnce(Option<&V>) -> V,
+    ) -> Result<Arc<V>, WaitEnded> {
+        // Taken once, here, rather than per park: the budget bounds the whole call, so a waiter
+        // that is woken, finds *another* builder and parks again cannot renew it. That is what
+        // makes a succession of short-lived builders bounded rather than a livelock.
+        let deadline =
+            Instant::now() + Duration::from_millis(self.wait_budget_ms.load(Ordering::Relaxed));
+        self.claim_and_build(key, derive_from, Some(Wait { cancel, deadline }), make)
+    }
+
+    /// The one body behind both entry points. `wait` present means "wait for an in-flight build";
+    /// absent means "refuse".
+    fn claim_and_build(
+        &self,
+        key: K,
+        derive_from: Option<&K>,
+        wait: Option<Wait<'_>>,
+        make: impl FnOnce(Option<&V>) -> V,
+    ) -> Result<Arc<V>, WaitEnded> {
         // Declared before any lock guard so that, whatever path is taken below, these drop AFTER
         // the guard goes out of scope (Rust drops locals in reverse declaration order) — rule 4.
         // Every locked block below writes evicted values here rather than dropping them in place.
@@ -547,55 +752,78 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
 
         let (owned_key, seq, source) = {
             let mut slots = self.lock_slots();
-            // Read before the `get_mut` borrow opens, so the whole touch — bumping `uses`, stamping
-            // the new tick — happens inside the one lookup. Consumed only on the hit branch; a
-            // tick read and not used costs nothing, because only uniqueness and monotonicity
-            // matter, never density.
-            let new_tick = slots.next_tick;
-            let hit = match slots.map.get_mut(&key) {
-                None => None,
-                Some(Slot::Building { .. }) => {
-                    self.building_refusals.fetch_add(1, Ordering::Relaxed);
-                    return Err(Building);
+            // Set by the first park, and read only to count a wait that ended in the winner's
+            // value — a waiter that falls through to building its own is not a satisfied wait.
+            let mut waited = false;
+            loop {
+                // Read before the `get_mut` borrow opens, so the whole touch — bumping `uses`,
+                // stamping the new tick — happens inside the one lookup. Consumed only on the hit
+                // branch; a tick read and not used costs nothing, because only uniqueness and
+                // monotonicity matter, never density.
+                let new_tick = slots.next_tick;
+                let hit = match slots.map.get_mut(&key) {
+                    None => None,
+                    Some(Slot::Building { wake, .. }) => {
+                        let Some(wait) = wait else {
+                            self.building_refusals.fetch_add(1, Ordering::Relaxed);
+                            return Err(WaitEnded::Budget);
+                        };
+                        let wake = Arc::clone(wake);
+                        // `?` returns the budget or cancellation answer; `Ok` means "woken, decide
+                        // again from what the map says now" — which is the loop, and which is also
+                        // how a spurious wakeup is absorbed without either returning early or
+                        // renewing the budget.
+                        slots = self.park(slots, &wake, wait)?;
+                        waited = true;
+                        continue;
+                    }
+                    Some(Slot::Ready {
+                        value,
+                        key: slot_key,
+                        tick,
+                        uses,
+                        ..
+                    }) => {
+                        *uses = uses.saturating_add(1);
+                        let old_tick = std::mem::replace(tick, new_tick);
+                        Some((Arc::clone(value), Arc::clone(slot_key), old_tick))
+                    }
+                };
+                // Read under the same lock that is about to claim this key's slot. Deliberately
+                // *before* the miss branch inserts `Building`, and deliberately not a recency
+                // touch — see this method's doc.
+                let source = derive_from.and_then(|from| match slots.map.get(from) {
+                    Some(Slot::Ready { value, .. }) => Some(Arc::clone(value)),
+                    _ => None,
+                });
+                if let Some((value, slot_key, old_tick)) = hit {
+                    // The rest of the touch, inside the same acquisition: the index moved to match
+                    // the tick already stamped above. Both halves of the bijection updated
+                    // together.
+                    slots.next_tick += 1;
+                    slots.recency.remove(&old_tick);
+                    slots.recency.insert(new_tick, slot_key);
+                    slots.check();
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    if waited {
+                        self.waits_satisfied.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Ok(value);
                 }
-                Some(Slot::Ready {
-                    value,
-                    key: slot_key,
-                    tick,
-                    uses,
-                    ..
-                }) => {
-                    *uses = uses.saturating_add(1);
-                    let old_tick = std::mem::replace(tick, new_tick);
-                    Some((Arc::clone(value), Arc::clone(slot_key), old_tick))
-                }
-            };
-            // Read under the same lock that is about to claim this key's slot. Deliberately
-            // *before* the miss branch inserts `Building`, and deliberately not a recency touch —
-            // see this method's doc.
-            let source = derive_from.and_then(|from| match slots.map.get(from) {
-                Some(Slot::Ready { value, .. }) => Some(Arc::clone(value)),
-                _ => None,
-            });
-            if let Some((value, slot_key, old_tick)) = hit {
-                // The rest of the touch, inside the same acquisition: the index moved to match the
-                // tick already stamped above. Both halves of the bijection updated together.
-                slots.next_tick += 1;
-                slots.recency.remove(&old_tick);
-                slots.recency.insert(new_tick, slot_key);
+                let owned_key = Arc::new(key.clone());
+                let seq = slots.next_seq;
+                slots.next_seq += 1;
+                slots.map.insert(
+                    Arc::clone(&owned_key),
+                    Slot::Building {
+                        seq,
+                        wake: Arc::new(Condvar::new()),
+                    },
+                );
+                self.entries.store(slots.map.len(), Ordering::Relaxed);
                 slots.check();
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(value);
+                break (owned_key, seq, source);
             }
-            let owned_key = Arc::new(key.clone());
-            let seq = slots.next_seq;
-            slots.next_seq += 1;
-            slots
-                .map
-                .insert(Arc::clone(&owned_key), Slot::Building { seq });
-            self.entries.store(slots.map.len(), Ordering::Relaxed);
-            slots.check();
-            (owned_key, seq, source)
         };
         self.misses.fetch_add(1, Ordering::Relaxed);
 
@@ -638,6 +866,61 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         Ok(value)
     }
 
+    /// Sleep on one `Building` slot's condvar until something displaces it, the budget runs out, or
+    /// the caller's request is cancelled. Returns the re-acquired guard, and the caller re-reads
+    /// the map — a wake is never treated as "ready".
+    ///
+    /// **Deliberately not `seq`-aware, and this is the one place that departs from rule 2's
+    /// habit.** A publish and an unwind must compare `seq` because writing into another build's
+    /// slot corrupts it. A waiter only *reads*, and the key wholly determines the value here (it
+    /// is what [`Self::peek`] rests on too), so a `Ready` left by a later builder under the same
+    /// key is exactly as correct an answer as this build's would have been — refusing it would
+    /// force a rebuild of a value already in the map. Carrying `seq` into the wait was specified
+    /// and is not built; nothing needs it, because the decision is taken from the map's present
+    /// state under the lock rather than from anything remembered across the sleep.
+    ///
+    /// **The tick, and why it is not the budget.** `wait_timeout` is capped at [`WAIT_TICK`] so
+    /// [`CancelToken`] — which has no wakeup path of its own — is re-read that often. Cost at the
+    /// gate's 48 admitted requests is ~960 re-acquisitions a second of a mutex held for O(1),
+    /// against a budget in seconds; F4's property is about hold time, which this does not touch.
+    fn park<'a>(
+        &self,
+        slots: MutexGuard<'a, Slots<K, V>>,
+        wake: &Condvar,
+        wait: Wait<'_>,
+    ) -> Result<MutexGuard<'a, Slots<K, V>>, WaitEnded> {
+        // Both checked before sleeping, so a caller arriving with an already-expired budget or an
+        // already-cancelled request never parks at all.
+        if wait.cancel.is_cancelled() {
+            return Err(WaitEnded::Cancelled);
+        }
+        let remaining = wait.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            self.building_refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(WaitEnded::Budget);
+        }
+
+        // The gauge decision 0059 ships: parked callers hold a `ComputeGate` permit while burning
+        // no CPU, and that occupancy is the cost of waiting. Process-wide and unattributed — it
+        // says whether waiting occupies the gate, never *whose* waiting does, which is exactly the
+        // per-principal state that decision declines to keep.
+        self.waiters_now.fetch_add(1, Ordering::Relaxed);
+        // **Not counted through `lock_slots`, so counted here.** `wait_timeout` re-acquires the
+        // mutex without passing the choke point, and leaving it uncounted would make
+        // `CacheStats::slot_locks` quietly understate acquisitions the moment anyone waits. The
+        // exact-count tests take the non-waiting path and are unaffected either way.
+        self.slot_locks.fetch_add(1, Ordering::Relaxed);
+        let (slots, _timed_out) = wake
+            .wait_timeout(slots, remaining.min(WAIT_TICK))
+            .unwrap_or_else(PoisonError::into_inner);
+        self.waiters_now.fetch_sub(1, Ordering::Relaxed);
+
+        // `_timed_out` is deliberately unread: the tick expiring means "re-check the token", not
+        // "give up", and the budget is re-tested at the top of the next park. Branching on it here
+        // would end the wait at the first tick.
+        Ok(slots)
+    }
+
     /// The publish half of a miss, factored out so the lock scope above stays readable. Runs with
     /// the lock held.
     ///
@@ -662,10 +945,14 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         bound: u64,
         dead: &mut Vec<Arc<V>>,
     ) -> EvictionTally {
-        match slots.map.get(&**key) {
-            Some(Slot::Building { seq: found }) if *found == seq => {}
+        // Cloned out before anything below can displace this slot. The insertion at the end of
+        // this function overwrites `Building` in place rather than going through `Slots::remove`,
+        // so it is the one exit from `Building` rule 5's removal choke point does not see, and the
+        // handle has to be taken while the variant is still there to take it from.
+        let wake = match slots.map.get(&**key) {
+            Some(Slot::Building { seq: found, wake }) if *found == seq => Arc::clone(wake),
             _ => return EvictionTally::default(),
-        }
+        };
 
         if charged > bound {
             // A `Building` slot: no value, so nothing to carry out of the critical section.
@@ -731,6 +1018,10 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
             },
         );
         slots.bytes += charged;
+        // Rule 5's insertion half, and the only exit from `Building` that hands waiters a value.
+        // After the insert, so a waiter re-reading the map on wake sees `Ready` rather than the
+        // slot it went to sleep on.
+        wake.notify_all();
         tally
     }
 
@@ -912,7 +1203,8 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> Drop for RemoveOnUnwind<'_, K, V> {
         // of completing the unwind. `lock_slots` recovers rather than propagating, and its doc
         // discharges why that is sound for this guarded value.
         let mut slots = self.cache.lock_slots();
-        if matches!(slots.map.get(&*self.key), Some(Slot::Building { seq }) if *seq == self.seq) {
+        if matches!(slots.map.get(&*self.key), Some(Slot::Building { seq, .. }) if *seq == self.seq)
+        {
             // A `Building` slot carries no value and no charged bytes, so this removal frees
             // nothing that could convoy — rule 4 is satisfied vacuously here rather than by
             // deferral. If this guard ever becomes able to remove a `Ready` slot, that stops being
@@ -942,11 +1234,29 @@ mod tests {
     /// is always `None`. Production has exactly one call site and it always offers a source.
     trait GetOrBuild<K, V> {
         fn get_or_build(&self, key: K, build: impl FnOnce() -> V) -> Result<Arc<V>, Building>;
+        fn get_or_build_waiting(
+            &self,
+            key: K,
+            cancel: &CancelToken,
+            build: impl FnOnce() -> V,
+        ) -> Result<Arc<V>, WaitEnded>;
     }
 
     impl<K: Eq + std::hash::Hash + Clone, V: CacheWeight> GetOrBuild<K, V> for SingleFlightCache<K, V> {
         fn get_or_build(&self, key: K, build: impl FnOnce() -> V) -> Result<Arc<V>, Building> {
             self.get_or_derive(key, None, |source| {
+                assert!(source.is_none(), "no source key was offered");
+                build()
+            })
+        }
+
+        fn get_or_build_waiting(
+            &self,
+            key: K,
+            cancel: &CancelToken,
+            build: impl FnOnce() -> V,
+        ) -> Result<Arc<V>, WaitEnded> {
+            self.get_or_derive_waiting(key, None, cancel, |source| {
                 assert!(source.is_none(), "no source key was offered");
                 build()
             })
@@ -1033,6 +1343,341 @@ mod tests {
             .get_or_build(1, || panic!("must not rebuild once Ready"))
             .unwrap();
         assert_eq!(retried.0, 99);
+    }
+
+    // ---- Rule 5: waiting (decision 0058) ----------------------------------------------------
+
+    /// Block until some caller is parked, or fail the test.
+    ///
+    /// **Polls the gauge rather than sleeping a guessed interval.** `waiters_now` is incremented
+    /// before the caller sleeps and decremented on every wake, so a test that observes `1` knows a
+    /// caller reached the wait — which is the interleaving these cases need and the thing a
+    /// `sleep(50ms)` would only assume. It dips to `0` between ticks, so this waits for the first
+    /// observation rather than for a steady state.
+    fn await_parked<V: CacheWeight>(cache: &SingleFlightCache<u32, V>) {
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        while cache.stats().waiters_now == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "no caller ever parked — the waiting path did not take the Building branch"
+            );
+            thread::yield_now();
+        }
+    }
+
+    /// **The property the whole change exists to create** (decision 0058): the racer is served the
+    /// winner's value, and the expensive build ran exactly once.
+    ///
+    /// The build count is the half that a wait implemented as "sleep, then rebuild" would fail
+    /// while still returning the right value.
+    #[test]
+    fn a_waiter_is_served_the_winners_value_and_the_build_runs_once() {
+        let cache = Arc::new(unbounded());
+        let builds = Arc::new(AtomicU64::new(0));
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder_builds = Arc::clone(&builds);
+        let builder = thread::spawn(move || {
+            builder_cache.get_or_build(1, move || {
+                builder_builds.fetch_add(1, Ordering::Relaxed);
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Weighed(99, BIG)
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        let waiter_cache = Arc::clone(&cache);
+        let waiter_builds = Arc::clone(&builds);
+        let waiter = thread::spawn(move || {
+            waiter_cache.get_or_build_waiting(1, &CancelToken::new(), move || {
+                waiter_builds.fetch_add(1, Ordering::Relaxed);
+                Weighed(0, BIG)
+            })
+        });
+        await_parked(&cache);
+
+        release_tx.send(()).unwrap();
+        assert_eq!(builder.join().unwrap().unwrap().0, 99);
+        assert_eq!(
+            waiter.join().unwrap().unwrap().0,
+            99,
+            "the waiter must be served the winner's value, not its own"
+        );
+        assert_eq!(
+            builds.load(Ordering::Relaxed),
+            1,
+            "the build must run once for both callers — that is single-flight"
+        );
+
+        let stats = cache.stats();
+        assert_eq!(stats.waits_satisfied, 1);
+        assert_eq!(stats.waiters_now, 0, "the gauge must return to zero");
+        assert_eq!(
+            stats.building_refusals, 0,
+            "a served wait is not a refusal — 0058's counter split"
+        );
+    }
+
+    /// Wake path 3: the builder unwinds, [`RemoveOnUnwind`] removes the slot, and the waiter is
+    /// woken. **It must not inherit the panic and must not hang** — it sees what a fresh arrival
+    /// would see, a miss, and builds. That the rebuild can panic again is correct and is I13a: no
+    /// failure is cached, so every caller finds out for itself.
+    #[test]
+    fn a_waiter_whose_build_panics_falls_back_to_building_it() {
+        let cache = Arc::new(unbounded());
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder = thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder_cache.get_or_build(1, move || -> Weighed {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                    panic!("boom");
+                })
+            }))
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        let waiter_cache = Arc::clone(&cache);
+        let waiter = thread::spawn(move || {
+            waiter_cache.get_or_build_waiting(1, &CancelToken::new(), || Weighed(42, BIG))
+        });
+        await_parked(&cache);
+
+        release_tx.send(()).unwrap();
+        assert!(builder.join().unwrap().is_err(), "the panic must propagate");
+        assert_eq!(
+            waiter.join().unwrap().unwrap().0,
+            42,
+            "the waiter must build its own value after the winner's build died"
+        );
+        assert_eq!(cache.stats().waits_satisfied, 0, "no wait was satisfied");
+    }
+
+    /// Wake path 2: the value exceeds the whole bound, so the publish removes the `Building` slot
+    /// and publishes nothing. The waiter must see a miss and build — the arm's own comment warns
+    /// that leaving the slot is "a permanent `ProjectionBuilding` wedge", and with waiters that
+    /// hazard becomes a permanent stall, so this is the test that says it did not reappear.
+    #[test]
+    fn a_waiter_whose_build_is_oversized_falls_back_to_building_it() {
+        // Bound below one entry: every build is oversized, served, never retained (rule 3).
+        let cache = Arc::new(SingleFlightCache::<u32, Weighed>::new(BIG / 2));
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder = thread::spawn(move || {
+            builder_cache.get_or_build(1, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Weighed(99, BIG)
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        let waiter_cache = Arc::clone(&cache);
+        let waiter = thread::spawn(move || {
+            waiter_cache.get_or_build_waiting(1, &CancelToken::new(), || Weighed(42, BIG))
+        });
+        await_parked(&cache);
+
+        release_tx.send(()).unwrap();
+        assert_eq!(builder.join().unwrap().unwrap().0, 99);
+        assert_eq!(
+            waiter.join().unwrap().unwrap().0,
+            42,
+            "nothing was published, so the waiter must build rather than stall"
+        );
+        assert_eq!(cache.len(), 0, "an oversized value is never retained");
+        assert_eq!(cache.stats().oversized_admissions, 2);
+    }
+
+    /// Wake path 4: a prune removes the `Building` slot mid-build. The waiter is woken, finds its
+    /// key absent, and builds — and the original builder's publish is then a no-op because rule
+    /// 2's `seq` check sees the waiter's slot, not its own. **Both halves matter**: without the
+    /// wake the waiter stalls to the budget, and without the `seq` check the prune is silently
+    /// undone on top of the waiter's entry.
+    #[test]
+    fn a_waiter_whose_build_is_pruned_falls_back_to_building_it() {
+        let cache = Arc::new(unbounded());
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder = thread::spawn(move || {
+            builder_cache.get_or_build(1, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Weighed(99, BIG)
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        let waiter_cache = Arc::clone(&cache);
+        let waiter = thread::spawn(move || {
+            waiter_cache.get_or_build_waiting(1, &CancelToken::new(), || Weighed(42, BIG))
+        });
+        await_parked(&cache);
+
+        assert_eq!(
+            cache.retain_keys(|key| *key != 1),
+            1,
+            "the prune must remove the Building slot"
+        );
+
+        // The waiter now owns the slot and has published; only then is the builder released, so
+        // its publish meets a slot carrying a different `seq`.
+        let waited = waiter.join().unwrap().unwrap();
+        assert_eq!(waited.0, 42);
+        release_tx.send(()).unwrap();
+        assert_eq!(builder.join().unwrap().unwrap().0, 99);
+        assert_eq!(
+            cache
+                .get_or_build(1, || panic!("must not rebuild"))
+                .unwrap()
+                .0,
+            42,
+            "the pruned build must not publish over the waiter's entry"
+        );
+    }
+
+    /// The budget is the bound, and it is what makes rule 5's argument's failure a stall rather
+    /// than a hang. A build that never finishes yields the same `Building` the immediate refusal
+    /// used to, and it is counted in the same place.
+    #[test]
+    fn a_waiter_that_is_never_satisfied_times_out_as_building() {
+        let cache = Arc::new(unbounded());
+        cache.set_wait_budget_ms(150);
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder = thread::spawn(move || {
+            builder_cache.get_or_build(1, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Weighed(99, BIG)
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        let started = Instant::now();
+        let waited = cache.get_or_build_waiting(1, &CancelToken::new(), || {
+            panic!("a timed-out waiter must not build")
+        });
+        assert!(matches!(waited, Err(WaitEnded::Budget)));
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "the waiter returned before its budget — the tick must not end the wait"
+        );
+        assert_eq!(cache.stats().building_refusals, 1);
+
+        release_tx.send(()).unwrap();
+        builder.join().unwrap().unwrap();
+    }
+
+    /// A disconnected client releases its compute permit within a tick instead of holding it to
+    /// the budget — the second of decision 0058's two conditions. The budget here is two orders of
+    /// magnitude longer than the assertion, so a waiter that ignored the token would fail the
+    /// elapsed check rather than merely being slow.
+    #[test]
+    fn a_cancelled_waiter_releases_before_the_budget() {
+        let cache = Arc::new(unbounded());
+        cache.set_wait_budget_ms(30_000);
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder = thread::spawn(move || {
+            builder_cache.get_or_build(1, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Weighed(99, BIG)
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        let cancel = CancelToken::new();
+        let waiter_cache = Arc::clone(&cache);
+        let waiter_cancel = cancel.clone();
+        let waiter = thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = waiter_cache.get_or_build_waiting(1, &waiter_cancel, || {
+                panic!("a cancelled waiter must not build")
+            });
+            (outcome, started.elapsed())
+        });
+        await_parked(&cache);
+
+        cancel.cancel();
+        let (outcome, elapsed) = waiter.join().unwrap();
+        assert!(matches!(outcome, Err(WaitEnded::Cancelled)));
+        assert!(
+            elapsed < HANDSHAKE_TIMEOUT,
+            "cancellation must release within a tick, not at the budget"
+        );
+        assert_eq!(
+            cache.stats().building_refusals,
+            0,
+            "a client's own disconnect is not backpressure and must not be counted as one"
+        );
+
+        release_tx.send(()).unwrap();
+        builder.join().unwrap().unwrap();
+    }
+
+    /// A waiter woken by a removal may find that *another* caller has since claimed the key, and
+    /// it then waits for that one instead of refusing — the budget, not the number of rounds, is
+    /// what bounds the loop.
+    ///
+    /// **This is where a `seq`-carrying waiter would differ, and why this module does not have
+    /// one.** The waiter is served the second builder's value. That is correct rather than
+    /// tolerated: the key wholly determines the value here, so the second build's answer is the
+    /// first's, and refusing it would rebuild a value already in the map.
+    #[test]
+    fn a_waiter_takes_a_later_builders_value_for_the_same_key() {
+        let cache = Arc::new(unbounded());
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let first_cache = Arc::clone(&cache);
+        let first = thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                first_cache.get_or_build(1, move || -> Weighed {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                    panic!("the first build dies without publishing");
+                })
+            }))
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        // Two waiters on the same in-flight build. When it dies, one of them claims the slot and
+        // the other necessarily meets a slot it never saw claimed — the interleaving under test.
+        let mut waiters = Vec::new();
+        for _ in 0..2 {
+            let waiter_cache = Arc::clone(&cache);
+            waiters.push(thread::spawn(move || {
+                waiter_cache.get_or_build_waiting(1, &CancelToken::new(), || Weighed(42, BIG))
+            }));
+        }
+        await_parked(&cache);
+
+        release_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_err());
+        for waiter in waiters {
+            assert_eq!(
+                waiter.join().unwrap().unwrap().0,
+                42,
+                "every waiter must end with the key's value, built once or twice but never refused"
+            );
+        }
+        assert_eq!(cache.len(), 1);
     }
 
     /// The map lock is held only for the O(1) transition, never for the build — proven by having

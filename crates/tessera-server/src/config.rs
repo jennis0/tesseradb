@@ -151,6 +151,27 @@ pub enum ConfigError {
     /// is what `serve.compute_queue = 0` (a legal value) already expresses explicitly. Refused so
     /// a zero here reads as a mistake rather than a second spelling of that same knob.
     AdmissionTimeoutZero,
+    /// `serve.single_flight_wait_ms = 0` would reinstate the immediate refusal decision 0058
+    /// removed: a racer would find a build in flight, park for no time at all, and be shed with
+    /// the 429 whose `Retry-After` is shorter than the build it is waiting for. Refused rather
+    /// than accepted as "disable waiting", because that is a behaviour the decision rules out
+    /// rather than a knob position.
+    SingleFlightWaitZero,
+    /// `serve.stream_flush_bytes = 0`: every gathered tile would flush alone, so the frame
+    /// overhead is paid per tile and the emit loop sends thousands of tiny frames — a knob
+    /// position with no use, refused so it reads as the mistake it is. There is no "disable
+    /// chunking" spelling because chunk boundaries are not contract; a huge value approximates
+    /// one flush per response honestly (the emit pass still splits at its own 1 GiB frame cap,
+    /// far below the wire's u32 length bound — `tessera_engine`'s `MAX_POINTS_FRAME_BYTES`).
+    StreamFlushBytesZero,
+    /// `serve.stream_write_stall_ms = 0`: the very first send of every streamed response would
+    /// exceed its stall budget before the client could read a byte — every viewport aborts,
+    /// silently, as if the corpus were empty. Refused rather than read as "no deadline".
+    StreamWriteStallZero,
+    /// `serve.stream_deadline_ms = 0`: same shape — every stream exceeds a zero whole-stream
+    /// budget immediately. An operator who wants effectively-unbounded streams sets it large and
+    /// owns the slot-occupancy arithmetic (`streamed-serving.md` §5); zero is never that intent.
+    StreamDeadlineZero,
     /// `serve.compute_admission + serve.compute_queue` overflows `usize`, or the sum exceeds
     /// `tokio::sync::Semaphore::MAX_PERMITS` (`usize::MAX >> 3`) — the two knobs together size
     /// the outer slots semaphore `AppState::new` builds
@@ -380,6 +401,27 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "serve.admission_timeout_ms = 0 would silently disable the bounded queue wait \
                  — use serve.compute_queue = 0 to disable queueing explicitly instead"
+            ),
+            ConfigError::SingleFlightWaitZero => write!(
+                f,
+                "serve.single_flight_wait_ms = 0 would refuse a request the instant it finds \
+                 another request already building its row projection — the behaviour decision \
+                 0058 removed. Set a budget that outlasts a cold build."
+            ),
+            ConfigError::StreamFlushBytesZero => write!(
+                f,
+                "serve.stream_flush_bytes = 0 would flush every gathered tile as its own frame; \
+                 set the flush threshold the client should decode per slice (default 1 MiB)"
+            ),
+            ConfigError::StreamWriteStallZero => write!(
+                f,
+                "serve.stream_write_stall_ms = 0 would abort every streamed response at its \
+                 first send; set how long one send may wait on a non-reading client"
+            ),
+            ConfigError::StreamDeadlineZero => write!(
+                f,
+                "serve.stream_deadline_ms = 0 would abort every streamed response immediately; \
+                 set the whole-stream budget that bounds a slot's occupancy"
             ),
             ConfigError::ComputeAdmissionQueueOverflow {
                 compute_admission,
@@ -672,6 +714,14 @@ struct RawServe {
     #[serde(default)]
     admission_timeout_ms: Option<u64>,
     #[serde(default)]
+    single_flight_wait_ms: Option<u64>,
+    #[serde(default)]
+    stream_flush_bytes: Option<usize>,
+    #[serde(default)]
+    stream_write_stall_ms: Option<u64>,
+    #[serde(default)]
+    stream_deadline_ms: Option<u64>,
+    #[serde(default)]
     row_projection_cache_bytes: Option<u64>,
     #[serde(default)]
     fragment_cache_bytes: Option<u64>,
@@ -762,6 +812,30 @@ pub struct Config {
     /// How long a request may wait for a compute permit before it is shed with 429
     /// `backpressure` and `Retry-After: 1`.
     pub admission_timeout_ms: u64,
+    /// How long a request parks on **another request's in-flight row-projection build** before it
+    /// is shed (decision 0058).
+    ///
+    /// **A different wait from [`Self::admission_timeout_ms`], and sized from a different
+    /// quantity.** That one bounds queueing for a compute permit and is 250 ms; this one bounds
+    /// waiting for work that is already running, so it is argued from the build's own measured
+    /// cost — see `tessera_engine`'s `DEFAULT_WAIT_BUDGET_MS`. A parked request holds its compute
+    /// permit throughout, which is the occupancy decision 0059 bounds with this key rather than
+    /// with a per-principal cap.
+    pub single_flight_wait_ms: u64,
+    /// The streamed viewport's flush threshold: a points frame is handed to the wire once its
+    /// estimated payload reaches this, always at a whole-tile boundary
+    /// (`streamed-serving.md` §2). Size-based only — there is deliberately no time-based flush,
+    /// which would make response bytes nondeterministic. See [`DEFAULT_STREAM_FLUSH_BYTES`].
+    pub stream_flush_bytes: usize,
+    /// How long one frame send may wait on a client that has stopped reading before the stream
+    /// is aborted. See [`DEFAULT_STREAM_WRITE_STALL_MS`], and `stream_deadline_ms` for the
+    /// whole-stream bound a per-send deadline alone cannot give.
+    pub stream_write_stall_ms: u64,
+    /// The whole emit phase's wall budget, from first flush. Bounds a slot's occupancy at
+    /// `slots x deadline` absolutely — the dripping-reader shape a per-send stall deadline
+    /// admits (`streamed-serving.md` §5; owner-ruled, decision 0060 — raising it is choosing a
+    /// larger parkable admission surface). See [`DEFAULT_STREAM_DEADLINE_MS`].
+    pub stream_deadline_ms: u64,
 
     // ---- The write-path and admission knobs. The argument for each default is on its
     // `DEFAULT_*` constant.
@@ -940,6 +1014,23 @@ fn default_compute_threads() -> usize {
 /// 25× the 10 ms p99 target — a request that cannot even *start* in 250 ms is better shed
 /// with `Retry-After: 1` than served at the measured 1.04 s worst case.
 const DEFAULT_ADMISSION_TIMEOUT_MS: u64 = 250;
+
+/// The client's asked-for flush cadence is ~1–2 MB (the streaming handover memo, criterion 3);
+/// 1 MiB is its low end, favouring time-to-next-paint over per-frame overhead, which at ~5 header
+/// bytes plus a few hundred bytes of repeated Arrow schema per frame is noise against the payload.
+const DEFAULT_STREAM_FLUSH_BYTES: usize = 1 << 20;
+
+/// Ten seconds of a full channel before one send gives up. Generous against any healthy reader —
+/// the channel holds ~2 flushes, so a reader consuming a megabyte every ten seconds stays under
+/// it — while bounding what a stopped reader can hold. Modelled, not measured; the whole-stream
+/// deadline below is the bound that actually caps occupancy.
+const DEFAULT_STREAM_WRITE_STALL_MS: u64 = 10_000;
+
+/// Sixty seconds for the whole emit phase, from first flush. At the measured op point (a 42 MB
+/// heaviest arrival) this admits a reader as slow as ~0.7 MB/s before cutting it — well below any
+/// deployment link this pre-release system has — and caps one slot's occupancy at a minute
+/// (`streamed-serving.md` §5; owner-ruled — decision 0060).
+const DEFAULT_STREAM_DEADLINE_MS: u64 = 60_000;
 
 /// `compute_admission`'s default multiplier over `compute_threads`.
 ///
@@ -1734,6 +1825,34 @@ fn parse(text: &str) -> Result<Config> {
     if admission_timeout_ms == 0 {
         return Err(ConfigError::AdmissionTimeoutZero);
     }
+    let single_flight_wait_ms = raw
+        .serve
+        .single_flight_wait_ms
+        .unwrap_or(tessera_engine::DEFAULT_SINGLE_FLIGHT_WAIT_MS);
+    if single_flight_wait_ms == 0 {
+        return Err(ConfigError::SingleFlightWaitZero);
+    }
+    let stream_flush_bytes = raw
+        .serve
+        .stream_flush_bytes
+        .unwrap_or(DEFAULT_STREAM_FLUSH_BYTES);
+    if stream_flush_bytes == 0 {
+        return Err(ConfigError::StreamFlushBytesZero);
+    }
+    let stream_write_stall_ms = raw
+        .serve
+        .stream_write_stall_ms
+        .unwrap_or(DEFAULT_STREAM_WRITE_STALL_MS);
+    if stream_write_stall_ms == 0 {
+        return Err(ConfigError::StreamWriteStallZero);
+    }
+    let stream_deadline_ms = raw
+        .serve
+        .stream_deadline_ms
+        .unwrap_or(DEFAULT_STREAM_DEADLINE_MS);
+    if stream_deadline_ms == 0 {
+        return Err(ConfigError::StreamDeadlineZero);
+    }
 
     // The write-path knobs. All of them default (SA §7: performance knobs default, disclosure
     // controls do not — none of these is a disclosure control); all of them refuse a zero, each with
@@ -2073,6 +2192,10 @@ fn parse(text: &str) -> Result<Config> {
         compute_admission,
         compute_queue,
         admission_timeout_ms,
+        single_flight_wait_ms,
+        stream_flush_bytes,
+        stream_write_stall_ms,
+        stream_deadline_ms,
         commit_window_max_items,
         ingest_queue_bound,
         ingest_admission,

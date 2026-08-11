@@ -1,20 +1,6 @@
-import type {
-  CategoryValue,
-  DepthChoice,
-  Meta,
-  Session,
-  TileCounts,
-  Timings,
-  ViewportResult
-} from '@tessera/client';
+import type {CategoryValue, DepthChoice, Meta, Session, Timings} from '@tessera/client';
+import type {Assembled} from './assemble.js';
 import type {Domain, Ranks} from './colour.js';
-
-/** What one loaded tile contributes. Counts come from the server; nothing here is derived. */
-export type LoadedTile = {
-  z: number;
-  counts: TileCounts[];
-  pointCount: number;
-};
 
 /**
  * The display states, kept distinct because collapsing them is how a fail-closed server becomes a
@@ -36,10 +22,24 @@ export type AppState = {
   /** Undefined means "do not send k", so the deployment's own ceiling applies (contracts §3.2). */
   k: number | undefined;
   underlayOffset: number;
-  /** The whole current view's response — one request, not one per tile. */
-  result: ViewportResult | null;
-  worldPositions: Float32Array | null;
+  /**
+   * The current view, assembled from held bands rather than from one response.
+   *
+   * Tiles reach it by three routes — their own band, an ancestor's restricted by Morton prefix, or
+   * the union of held descendants — and only the first is the served set. `Assembled.tiles` carries
+   * which, and every non-exact tile is stale-marked with no count shown against it.
+   */
+  assembled: Assembled | null;
   status: DisplayStatus;
+  /**
+   * Whether this session has received its first viewport response.
+   *
+   * The visible set materialises lazily inside that first request, and at 10^9 items a broad
+   * principal's union measured ~10 s — re-paid per session, since nothing is shared across them
+   * yet. Until it lands, "loading" means something different from every later loading state, and
+   * the panel says so instead of letting a session's establishment read as a hung fetch.
+   */
+  sessionWarm: boolean;
   lastError: {code: string; detail: string} | null;
   /** The depth the budget chose for the current view. */
   view: (DepthChoice & {requestedAt: number}) | null;
@@ -53,6 +53,15 @@ export type AppState = {
   /** Pan-to-paint breakdown, in ms. */
   latency: {waited: number; fetch: number; server: number; total: number} | null;
   lastBytes: number;
+  /** Bytes the replica holds, so the cache's cost is visible rather than implicit. */
+  replicaBytes: number;
+  /** Points held and bands holding them — the figure a cache budget should be argued from. */
+  replicaPoints: number;
+  replicaBands: number;
+  /** Tiles the anticipatory ring fetched on the last idle pause — look-ahead, made visible. */
+  prefetched: number;
+  /** How the last ask split between held tiles and asked-for ones — the cache's effectiveness. */
+  lastPlan: {omitted: number; fetched: number} | null;
   inFlight: number;
   failures: RequestFailure[];
   selected: {id: bigint; scalars: unknown[]; externalId: string | null} | null;

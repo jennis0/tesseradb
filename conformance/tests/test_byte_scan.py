@@ -249,6 +249,7 @@ from oracle import catalogue
 from oracle import mask as mask_mod
 from oracle.catalogue import catalogue_points_path
 from oracle.harness import open_bundle_with_source, spawn_server, stop_server
+from oracle import wire
 from oracle.wire import decode_viewport_with_subcells, split_frames
 
 SLICE = "s0"
@@ -362,27 +363,12 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
     return tessera_windows, code_windows
 
 
-def _points_stream_length(points_and_beyond: bytes) -> int:
-    """Byte length of the points stream inside `points-and-everything-after`.
-
-    Only the tile boundary carries a length prefix (contracts §5), so this is how a reader finds
-    where the appended sub-cell stream begins: parse the points stream to its end-of-stream marker
-    and take the cursor.
-    """
-    buf = io.BytesIO(points_and_beyond)
-    with ipc.open_stream(buf) as reader:
-        for _ in reader:
-            pass
-    return buf.tell()
-
-
 def _subcell_value_buffer_windows(subcell_bytes: bytes) -> set[int]:
     """8-byte-aligned LE windows over the sub-cell batch's `cell` and `count` value buffers.
 
-    The §3.3 underlay's third Arrow stream is **appended** after the points stream with no length
-    prefix, so `split_frames` hands it back glued to `points_bytes` and `ipc.open_stream` stops at
-    the points stream's end-of-stream marker without ever looking at it. Before this, every
-    underlay byte was outside the scan — and the columns are exactly the shape that matters: `cell`
+    The §3.3 underlay arrives as its own kind-2 frame (contracts §3.2 r26), handed back whole by
+    `split_frames`. Before the underlay was swept at all, every one of its bytes was outside the
+    scan — and the columns are exactly the shape that matters: `cell`
     is a Morton prefix up to 2^32-1 and `count` a small integer, both landing squarely in the dense
     entity-id neighbourhood the module doc's `SAFE_ID_FLOOR` reasoning was built for.
 
@@ -659,36 +645,30 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         # produced and swept. Without this the stream never existed during the scan at all.
         raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
         all_raw_responses.append(raw)
-        _tile_bytes, points_bytes = split_frames(raw)
+        # The framed body (contracts §3.2 r26): every frame is tagged and length-prefixed, and
+        # `split_frames` REFUSES an unknown kind — that refusal is what replaced the old "nothing
+        # may sit unscanned after the sub-cell stream" tail check: a new frame kind cannot arrive
+        # unswept, because the decoder every consumer shares will not decode the body at all
+        # until this scan learns about it.
+        frames = split_frames(raw)
+        subcell_frames = [p for kind, p in frames if kind == wire.FRAME_SUB_CELLS]
 
-        # `split_frames` returns points-and-everything-after, so recover the sub-cell stream by
-        # parsing the points stream to its end and taking what follows.
         _t2, _p2, sub_cells = decode_viewport_with_subcells(raw)
         subcell_rows_seen += len(sub_cells)
-        consumed = _points_stream_length(points_bytes)
-        subcell_windows |= _subcell_value_buffer_windows(points_bytes[consumed:])
-        # Nothing may sit unscanned after the sub-cell stream. The check that used to be here —
-        # `consumed <= len(points_bytes)` — could not fail: `BytesIO.tell()` after `open_stream`
-        # can never exceed the buffer, so a fourth appended stream would have arrived unswept while
-        # the assertion reported that it could not. Parse the sub-cell stream too, and require the
-        # payload to end there.
-        if subcell_bytes := points_bytes[consumed:]:
-            sub_buf = io.BytesIO(subcell_bytes)
-            with ipc.open_stream(sub_buf) as sub_reader:
-                for _ in sub_reader:
-                    pass
-            assert sub_buf.tell() == len(subcell_bytes), (
-                f"{len(subcell_bytes) - sub_buf.tell()} bytes follow the sub-cell stream and are "
-                f"swept by nothing — a fourth appended stream must be added to this scan before it "
-                f"can be served"
-            )
+        for payload in subcell_frames:
+            subcell_windows |= _subcell_value_buffer_windows(payload)
         # Scope decision (module doc): the tile batch (visible/matched counts) is deliberately
-        # excluded from the scan — those are I2-legitimate aggregates, not a surface I10 governs.
-        # Only the points batch's decoded column *value buffers* are scanned.
-        tid_w, code_w = _points_value_buffer_windows(points_bytes)
-        tessera_id_windows |= tid_w
-        code_windows |= code_w
-        sampled_ids.update(_decode_tessera_ids(points_bytes))
+        # excluded from the scan — those are I2-legitimate aggregates, not a surface I10 governs
+        # — and so is the trailer, whose closed key set of timing figures the shared decoder
+        # validates (`oracle.wire.decode_frames`). Only the points batches' decoded column
+        # *value buffers* are scanned, per points frame.
+        for kind, payload in frames:
+            if kind != wire.FRAME_POINTS:
+                continue
+            tid_w, code_w = _points_value_buffer_windows(payload)
+            tessera_id_windows |= tid_w
+            code_windows |= code_w
+            sampled_ids.update(_decode_tessera_ids(payload))
     # Used for checks (identity key, external ids) that need to look at the whole points batch,
     # not just the entity-id sweep's column-specific split above.
     all_points_windows = tessera_id_windows | code_windows

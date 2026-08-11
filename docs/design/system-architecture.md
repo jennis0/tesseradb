@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r14 — r13 plus decision 0048's deletion applied to §6.6's *evaluate* disposition. **r13's correction is preserved and must stay**: the evaluate deletion arrived on a branch cut before r13, so taking its §6.6 paragraph verbatim would have reinstated both the immediate-postings-subtraction reading and the invented "row tombstone" that r13 removed. r13 was r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
+**Status:** Draft r15 — r14 plus decisions 0058 and 0059 in §6.3 and §9: single-flight waiters park on the build they used to be refused by, and the counters an operator reads on that path are named. r14 was r13 plus decision 0048's deletion applied to §6.6's *evaluate* disposition. **r13's correction is preserved and must stay**: the evaluate deletion arrived on a branch cut before r13, so taking its §6.6 paragraph verbatim would have reinstated both the immediate-postings-subtraction reading and the invented "row tombstone" that r13 removed. r13 was r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and the capability epics in this repository's issues (which own sequencing — the phase model they replaced is archived). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -410,7 +410,7 @@ Two independent bounds sit in front of the engine, and neither is on the control
 
 **Ingest admission** is one semaphore, `try_acquire` only: no queue, no timeout. It bounds concurrent `/control/ingest` handlers, which is the bound on how many blocking-pool threads ingest can hold. Without it the viewer plane shared an unbounded FIFO with ingest and an already-admitted viewport would *hang* rather than shed. The control plane either takes the work now or refuses it, and the refusal costs no blocking thread, no queue slot and no WAL byte.
 
-Every 429 the gate produces is counted, and the count is deliberately not the whole 429 rate: the single-flight caches produce their own 429 (`ProjectionBuilding`, `FragmentBuilding`) *after* admission, so an operator correlating the two should expect the client-observed rate to be equal or higher. Single-flight waiters do not block — a concurrent arrival for a projection already being built is shed rather than queued, which is a client-visible outcome produced by a caching decision.
+Every 429 the gate produces is counted, and the count is deliberately not the whole 429 rate: the single-flight caches produce their own 429 (`ProjectionBuilding`, `FragmentBuilding`) *after* admission, so an operator correlating the two should expect the client-observed rate to be equal or higher. **A concurrent arrival for a row projection already being built parks on that build and is served its result** (decision [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md), superseding r11's "waiters do not block"); its 429 remains for a wait that outran its budget, and lifecycle §7.2 carries the mechanism. The consequence *here* is that a parked request holds its compute permit while burning no CPU, so cold-start load that used to shed downstream now shows as occupancy in this gate — `shed_total` can rise on a workload whose client-observed 429 rate has fallen. That occupancy is bounded by the wait budget and deliberately not by a per-principal share of the gate, which stays unpartitioned (decision [0059](../decisions/0059-per-principal-admission-is-not-capped.md), and §9's rule against per-auth-hash labels is part of why).
 
 **Cancellation** is the third lever and the only one that gives back work already started: a disconnected client flips a cooperative token, and the viewport path aborts wholly rather than returning a partial answer.
 
@@ -543,7 +543,8 @@ max_tiles_per_request = 262_144
 compute_threads = 8
 compute_admission = 32
 compute_queue = 64
-admission_timeout_ms = 250
+admission_timeout_ms = 250            # queueing for a permit; not the wait below
+single_flight_wait_ms = 6000          # waiting for a build already running (§6.3)
 # caches and pins
 row_projection_cache_bytes = 2_147_483_648
 fragment_cache_bytes = 1_073_741_824
@@ -585,7 +586,7 @@ The binary and its HTTP surfaces are the product. `tessera serve -c tessera.toml
 
 ## 9. Observability and failure
 
-**`GET /control/status` is the operational surface.** It is a single JSON document on the admin plane, and it is deliberately rich, because the quantities an operator needs are unmasked corpus quantities that must not leave that plane. It reports: the allocator high-water; the compute gate's admission, queue, in-flight, waiting and shed totals; the write executor's posture, submission and completion counts, WAL appends and fsyncs, apply-time totals and maxima, queue depth and an EWMA of service time; ingest admission and its shed total with the configured batch bounds; overlay depth and soft-limit alarms; pin drain depth and the age of the oldest retired generation; both caches' entries, bytes, bound, hits, misses, building-refusals, evictions, young evictions, a thrashing flag and oversized admissions; fragment rebuild counts; the posting-fragmentation figure — `postings_per_container` and `run_ratio` over the commit-window allocations this process has served, whose scope is narrower than the metric named below and is specified in contracts §3.4; and the session registry's retained count, sweeps run, sessions swept and the count at which the next sweep is due.
+**`GET /control/status` is the operational surface.** It is a single JSON document on the admin plane, and it is deliberately rich, because the quantities an operator needs are unmasked corpus quantities that must not leave that plane. It reports: the allocator high-water; the compute gate's admission, queue, in-flight, waiting and shed totals; the write executor's posture, submission and completion counts, WAL appends and fsyncs, apply-time totals and maxima, queue depth and an EWMA of service time; ingest admission and its shed total with the configured batch bounds; overlay depth and soft-limit alarms; pin drain depth and the age of the oldest retired generation; both caches' entries, bytes, bound, hits, misses, building-refusals, evictions, young evictions, a thrashing flag and oversized admissions, and for the row projection also waits satisfied and the waiters parked at this instant — the split decision 0058 makes necessary, because building-refusals used to count every same-key race and now counts only the two that still refuse; fragment rebuild counts; the posting-fragmentation figure — `postings_per_container` and `run_ratio` over the commit-window allocations this process has served, whose scope is narrower than the metric named below and is specified in contracts §3.4; and the session registry's retained count, sweeps run, sessions swept and the count at which the next sweep is due.
 
 The session figures are there because the registry sheds expired sessions on a growth-triggered sweep — a full pass under the mutex the viewer plane takes on every request — and this system's standard is that an O(n) pass on a request path is admissible only where its n is published. Retention is bounded at twice the live set: a session is *refused* the moment its deadline passes, and reclaiming its memory is a separate act, because each retained session holds a live mask fragment that the fragment cache's byte bound cannot release while the reference exists. `retained` rising while `swept_total` stays flat is the signature of a registry that is not shedding.
 
@@ -626,6 +627,21 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 **Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
+
+**r15** (2026-08-09) applies decisions
+[0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and
+[0059](../decisions/0059-per-principal-admission-is-not-capped.md). §6.3's *"single-flight waiters
+do not block"* stood since r11 and is now false of the built system; the mechanism belongs to
+lifecycle §7.2 and is recorded there, so what this document keeps is the part that is its own —
+that waiting is permit occupancy in the compute gate, that it therefore moves traffic *into*
+`shed_total` from a counter downstream of it, and that the gate stays unpartitioned. §9's status
+inventory gains the two row-projection counters, with the reason the existing one changed meaning
+rather than being renamed, and §7's sample configuration gains `single_flight_wait_ms` beside
+`admission_timeout_ms`, the two commented against each other because they are the pair an operator
+is most likely to conflate: one bounds queueing for a permit, the other bounds waiting for work a
+permit is already being held for. **§9's rule that per-auth-hash labels stay off shared dashboards is
+unchanged and load-bearing here**: it is why the waiter gauge is process-wide and cannot attribute
+occupancy to a principal, which decision 0059 states rather than leaving a reader to infer.
 
 **r13** (2026-08-05) — **one refuted sentence removed from §6.6, found by a reader's question
 rather than by a review.** It said deletion *"removes the entity from postings … and leaves a row

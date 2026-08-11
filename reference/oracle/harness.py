@@ -292,20 +292,38 @@ def fixture_recipe(argv: list[str]) -> dict:
 
 
 def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
-    """The receipt matches, and there is a readable bundle under it.
+    """The receipt matches, there is a readable bundle under it, and the bundle is still the
+    build's own output — not one a previous run's write-path tests have advanced.
 
     The structural half is a second gate against damage *after* the receipt was written (a wiped
     `/tmp`, a half-deleted tree) — something the receipt cannot see. Deliberately tolerant of an
     unreadable or malformed bundle: anything that cannot be confirmed is treated as needing a
     rebuild. Being wrong in that direction costs a rebuild; being wrong in the other hands every
     test a bundle that is not the one it asked for.
+
+    **The pristine check is the third gate, and it closes a poisoning the receipt structurally
+    cannot see.** The bundle root is the deployment root: a suite run's `/control/changes` tests
+    ack into a WAL in the run's own tmp dir, but the flushes those acks trigger publish
+    `SEGMENTS-N.json` sets — and the deny state they carry — INTO this shared bundle,
+    durably. The receipt still matches (same argv, same inputs), so the next run's differential
+    is handed a corpus whose visible counts disagree with the oracle's parquet-derived ones by
+    exactly the previous run's suppressions and deletes. Measured: a fresh fixture passes the
+    differential, the very next invocation fails it, deterministically. A fresh build writes
+    exactly one segment set per partition (`SEGMENTS-0.json`); any partition carrying more has
+    been served against with writes and is rebuilt.
     """
     if read_recipe(bundle_root) != wanted:
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
         prefix_dir = bundle_root / current["prefix"]
-        return json.loads((prefix_dir / "MANIFEST.json").read_text()) is not None
+        if json.loads((prefix_dir / "MANIFEST.json").read_text()) is None:
+            return False
+        for partition in (prefix_dir / "partitions").iterdir():
+            segment_sets = list(partition.glob("SEGMENTS-*.json"))
+            if len(segment_sets) > 1:
+                return False
+        return True
     except (OSError, KeyError, ValueError):
         return False
 

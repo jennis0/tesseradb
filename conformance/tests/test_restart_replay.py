@@ -9,11 +9,13 @@ that acked before it fsynced would pass it**. Conformance design §5 says so in 
 `test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded` is §5's truncating variant.
 After the kill it **truncates the WAL to its last-synced offset** before restarting, which is what a
 power loss would have done, and then asks the same survival questions. The offset comes from the
-WAL's own sidecar — `wal.log` → `wal.sync`, an 8-byte little-endian offset written
-write-tmp-then-rename and fsynced together with its directory entry after every WAL fsync, because
-replay already needs it (`tessera-lifecycle/src/wal.rs`, "the durable prefix"). §5 specifies an
-`fsync_offset()` introspection command behind a `conformance` cargo feature to supply this number;
-none of that is needed, because the number is already on disk.
+WAL's own sidecar — one per sequence member, `wal-000001.log` → `wal-000001.sync`, an 8-byte
+little-endian offset into that member written write-tmp-then-rename and fsynced together with its
+directory entry after every WAL fsync, because replay already needs it
+(`tessera-lifecycle/src/wal.rs`, "the durable prefix"; decision 0038). The configured `wal` path
+names the family, not a file, so the test derives the active member rather than opening it. §5
+specifies an `fsync_offset()` introspection command behind a `conformance` cargo feature to supply
+this number; none of that is needed, because the number is already on disk.
 
 # What this module does NOT establish, stated first because it was claimed and is false
 
@@ -206,30 +208,52 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
 
 
 @pytest.fixture
-def restart_paths(tmp_path):
-    """A private tmp dir for this test's cache/WAL, so an actual restart-on-same-state is
-    possible (the shared session-scoped `server` fixture's tmp dir is not reusable this way)."""
+def restart_paths(tmp_path, private_catalogue_bundle):
+    """A private tmp dir for this test's cache/WAL **and a private copy of the bundle**, so an
+    actual restart-on-same-state is possible and nothing this test denies escapes it.
+
+    The cache and WAL are private because a restart has to be pointed at the same durable state
+    twice. The *bundle* is private for a different reason: the three denies below are published
+    into the bundle prefix (contracts §2.3), so a test run against the shared cached fixture leaves
+    entities 0..2 suppressed and deleted for every module that reads it afterwards — including the
+    next run on this machine. See `conftest.private_catalogue_bundle`."""
     return {
         "root": tmp_path,
         "cache": tmp_path / "cache",
         "wal": tmp_path / "wal.log",
+        "bundle": private_catalogue_bundle(f"restart-{tmp_path.name}"),
     }
 
 
-def sync_sidecar_of(wal_path: Path) -> Path:
-    """`wal.log` → `wal.sync`, beside it — `wal.rs`'s `sync_sidecar_path`, transcribed.
+def active_member_of(wal_path: Path) -> Path:
+    """The sequence member currently being appended to — `wal.log` → `wal-000002.log` if two exist.
 
-    Transcribed rather than obtained from the server, which keeps the *path* derivation out of the
-    engine's hands. It does not keep the *offset* out of them: the sidecar's contents are the
-    engine's own bookkeeping, which is why this module cannot establish ack ordering. See the
-    module doc.
+    The configured path names a **family**, never a file (`wal.rs`, "the log is a sequence, not a
+    file"; decision 0038): members are `<stem>-<n:06><ext>`, positions are sequence-global and
+    offsets are per member. The active one is the highest-numbered, which is where an append lands
+    and which the sidecar this module reads belongs to.
+
+    Transcribed rather than obtained from the server, for the same reason the offset derivation was:
+    it keeps the *path* out of the engine's hands. It does not keep the *offset* out of them — see
+    the module doc.
     """
-    return wal_path.with_suffix(".sync")
+    members = sorted(wal_path.parent.glob(f"{wal_path.stem}-[0-9]*{wal_path.suffix}"))
+    assert members, f"no member of the WAL sequence {wal_path} exists"
+    return members[-1]
+
+
+def sync_sidecar_of(member_path: Path) -> Path:
+    """`wal-000001.log` → `wal-000001.sync`, beside it. Per member, never one for the sequence."""
+    return member_path.with_suffix(".sync")
 
 
 def read_sync_offset(wal_path: Path) -> int:
-    """The WAL's last-fsynced offset: 8 bytes, little-endian."""
-    raw = sync_sidecar_of(wal_path).read_bytes()
+    """The active member's last-fsynced offset: 8 bytes, little-endian.
+
+    An offset into that member's file, header included — so it is directly comparable with the
+    member's size, and the truncation below is a truncation of that file.
+    """
+    raw = sync_sidecar_of(active_member_of(wal_path)).read_bytes()
     assert len(raw) == 8, f"sync sidecar is {len(raw)} bytes, not 8 — cannot be an offset"
     return int.from_bytes(raw, "little")
 
@@ -267,13 +291,17 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]
+    # The engine serves the copy; the oracle keeps reading the pristine root it was opened from.
+    # The two are byte-identical until the first deny lands, which is the point.
+    served_root = restart_paths["bundle"]
 
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
+    srv, proc = spawn_server(served_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
 
     try:
         resp = srv.ingest(_build_ingest_batch(), BATCH_ID)
         assert resp.status_code == 200, resp.text
         high_water_after_ingest = srv.status()["entity_id_high_water"]
+        member_after_ingest = active_member_of(wal_path)
         sync_after_ingest = read_sync_offset(wal_path)
 
         term0 = 0
@@ -305,6 +333,14 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         expected_counts = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
 
         # --- the sync point advanced, so the sidecar is live ---------------------------------
+        # Both offsets must come from the same member for the comparison to mean anything: an
+        # offset is per file, so a rotation between the two reads would compare two files' lengths.
+        # Nothing here flushes, so nothing rotates; the assertion is what says so.
+        active = active_member_of(wal_path)
+        assert active == member_after_ingest, (
+            f"the WAL rotated between the ingest and the denies ({member_after_ingest.name} → "
+            f"{active.name}); offsets are per member, so the comparison below would be across files"
+        )
         sync_point = read_sync_offset(wal_path)
         assert sync_point > sync_after_ingest, (
             "the WAL's last-synced offset did not move across three acked deny operations — the "
@@ -313,7 +349,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         )
 
         # --- nothing acked lies beyond it --------------------------------------------------
-        wal_len = wal_path.stat().st_size
+        wal_len = active.stat().st_size
         discarded = wal_len - sync_point
         assert discarded == 0, (
             f"{discarded} bytes lie past the published durable prefix while every operation that "
@@ -332,11 +368,11 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         # is about to become false. (Deliberately no `st_size == sync_point` assertion after it:
         # `truncate(n)` sets the size to `n` whether it shrinks or grows the file, so it could
         # never fail.)
-        with wal_path.open("r+b") as fh:
+        with active.open("r+b") as fh:
             fh.truncate(sync_point)
 
         srv2, proc2 = spawn_server(
-            catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path
+            served_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path
         )
         try:
             assert srv2.status()["entity_id_high_water"] == high_water_after_ingest, (
@@ -363,8 +399,11 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]
+    # The engine serves the copy; the oracle keeps reading the pristine root it was opened from.
+    # The two are byte-identical until the first deny lands, which is the point.
+    served_root = restart_paths["bundle"]
 
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
+    srv, proc = spawn_server(served_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
 
     try:
         # --- ingest one batch -------------------------------------------------------------
@@ -423,7 +462,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         proc = None  # already reaped by kill_server
 
         # --- restart on the SAME wal/cache/bundle, nothing re-submitted ---------------------
-        srv2, proc2 = spawn_server(catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
+        srv2, proc2 = spawn_server(served_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
         try:
             status_after_restart = srv2.status()
             assert status_after_restart["entity_id_high_water"] == high_water_after_ingest, (

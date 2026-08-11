@@ -797,22 +797,21 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
 
 
 def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
-    """The receipt matches, and there is a readable post-r6 bundle under it.
+    """The receipt matches, there is a readable post-r6 bundle under it, and nothing has been
+    published into it since the build.
 
-    The receipt is the test; the structural checks below are a cheap second gate against a bundle
-    that was damaged *after* its receipt was written — a case the receipt cannot see. Both are
-    tolerant of anything unreadable: what cannot be confirmed is rebuilt, because being wrong in
-    that direction costs a build and being wrong in the other hands every test a fixture nobody
-    asked for.
+    The receipt is the test; the two structural checks below are a cheap second gate against a
+    bundle that was damaged or *written to* after its receipt was written — cases the receipt
+    cannot see, because neither is an input. All three are tolerant of anything unreadable: what
+    cannot be confirmed is rebuilt, because being wrong in that direction costs a build and being
+    wrong in the other hands every test a fixture nobody asked for.
 
-    **A bundle a server has published into is not the built fixture, and is rebuilt.** An
-    accepted deny is published into the bundle prefix as a `SEGMENTS-<n>.json` beyond the build's
-    own `SEGMENTS-0.json` (contracts §2.3), and Phase 1 denies never retire — so one run of a
-    module that deletes items against a server on this shared root permanently narrows every
-    later session's masks. That is not hypothetical: it presented as the mask differential
-    disagreeing by a contiguous *prefix* of each granted block (the denied batch), on a bundle
-    whose data files were byte-identical to a fresh build. The receipt cannot see it because the
-    build wrote everything the receipt stamps; only the overlay grew.
+    **The published-state check is not hypothetical.** An accepted deny is written into the bundle
+    prefix as a further `SEGMENTS-<n>.json` (contracts §2.3), so any driver that points a server at
+    this shared fixture and then suppresses or deletes an item leaves the fixture denied for every
+    later reader, on this run and the next. Drivers isolate themselves by serving a copy
+    (`conformance/conftest.py`'s `private_catalogue_bundle`); this is the backstop for the one that
+    forgets, and it turns a wrong answer into a rebuild.
     """
     if read_recipe(bundle_root) != wanted:
         return False
@@ -822,22 +821,12 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
         manifest = json.loads((prefix / "MANIFEST.json").read_text())
         if "identity" not in manifest:
             return False
-        # Glob rather than iterdir: an absent `partitions/` tree means nothing was published,
-        # which is the clean state, not damage — the CURRENT/MANIFEST reads above carry the
-        # damage gate.
         published = [
-            p.relative_to(prefix)
+            p.name
             for p in prefix.glob("partitions/*/SEGMENTS-*.json")
             if p.name != "SEGMENTS-0.json"
         ]
-        if published:
-            print(
-                f"fixture at {bundle_root} carries published server state "
-                f"({[str(p) for p in sorted(published)]}) on top of the build — a previous "
-                "run's denies live in it, so it is rebuilt rather than reused"
-            )
-            return False
-        return True
+        return not published
     except (OSError, KeyError, ValueError):
         return False
 

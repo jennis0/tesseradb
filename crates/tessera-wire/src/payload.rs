@@ -1,41 +1,38 @@
-//! Arrow IPC payload construction for the viewer plane (contracts §3.2).
+//! Frame construction for the viewer plane's streamed `POST /v1/viewport` response
+//! (`docs/design/streamed-serving.md`; contracts §3.2).
 //!
-//! `viewport_ipc` builds the two record batches a `POST /v1/viewport` response carries — tile
-//! counts, then sampled points — and never touches the underlying entity-ID type: it accepts a
-//! caller-supplied `tessera_id: u64` column and plain scalar slices exclusively (I10; enforced by
-//! `scripts/check-layers.sh`, which greps this file for the forbidden identity type by name). No
-//! engine or store type crosses into this module either — `tessera-server` reads `tessera_id`
-//! straight off the engine's `PointOut` (contracts §2.6) and passes the
-//! resulting plain slice here; there is no per-session translation left to do on this path (see
-//! `crate::handles` for why the module that used to do that translation is retained, not deleted).
-//!
-//! The batches have different schemas, so they cannot share one Arrow IPC stream. The returned
-//! bytes are therefore independent, complete Arrow IPC streams concatenated, framed by a leading
-//! 4-byte little-endian length so a reader can find the *first* boundary without parsing Arrow
-//! metadata first:
+//! A response body is a sequence of frames, each `u8 kind` + `u32 LE payload length` + payload.
+//! Every frame is a complete, independently decodable unit — an Arrow IPC stream for the three
+//! data kinds, JSON for the trailer — so no reader ever walks Arrow message framing to find a
+//! boundary (client-interaction §8.6(2)'s length-prefix-everything item):
 //!
 //! ```text
-//! u32 LE: byte length of the tile stream
-//! <tile stream bytes>      -- Arrow IPC stream, schema (tile: uint64, visible: uint64, matched: uint64, served: uint64)
-//! <points stream bytes>    -- Arrow IPC stream, schema (tessera_id: uint64, x: float32, y: float32, ...scalars)
-//! <subcell stream bytes>   -- Arrow IPC stream, schema (cell: uint64, count: uint64); ABSENT ENTIRELY
-//!                             (zero bytes) unless the request asked for the §3.3 underlay
+//! kind 1  tiles      Arrow IPC stream (tile, visible, matched, served — all uint64); exactly
+//!                    one, first
+//! kind 2  sub-cells  Arrow IPC stream (cell: uint64, count: uint64); exactly one, iff the
+//!                    request asked for the §3.3 underlay — schema-only when requested-but-empty,
+//!                    ABSENT ENTIRELY when unrequested
+//! kind 3  points     Arrow IPC stream (tessera_id: uint64, code: uint64, ...scalars); zero or
+//!                    more, whole tiles per frame, concatenating to the full points stream
+//! kind 4  trailer    JSON; exactly one, last — its presence is the completeness signal
 //! ```
 //!
-//! **`served` is appended after `matched`, and the position is contract.** Decoders that index the
-//! tile batch positionally exist, so inserting rather than appending would silently rebind
-//! `visible`/`matched` in them.
+//! This module never touches the underlying entity-ID type: it accepts a caller-supplied
+//! `tessera_id: u64` column and plain scalar slices exclusively (I10; enforced by
+//! `scripts/check-layers.sh`, which greps this file for the forbidden identity type by name — the
+//! module NAME is therefore load-bearing: moving the frame writer out of `payload.rs` would leave
+//! that rule permanently green). No engine or store type crosses into this module either —
+//! `tessera-server` reads `tessera_id` straight off the engine's `PointColumns` and passes plain
+//! slices here.
 //!
-//! **The sub-cell stream is appended without a length prefix, and that is a deliberate relaxation
-//! of the framing property above.** A reader that wants the sub-cells must parse the points stream
-//! to its end-of-stream marker and take the cursor position, because only the *tile* boundary is
-//! prefixed. Two reasons this is the right trade: the property survives untouched for every reader
-//! that does not ask for the underlay, and the alternative — inserting a second length prefix — is
-//! a breaking change to a frame that today's readers already parse. Because a request that does not
-//! ask for the underlay produces **zero** trailing bytes (not an empty schema-only stream), such a
-//! payload is byte-identical to what this module produced before the underlay existed, so no
-//! `API_VERSION` bump is warranted: Arrow's `StreamReader` and `pyarrow.ipc.open_stream` both stop
-//! at the end-of-stream marker without inspecting what follows.
+//! **`served` is appended after `matched` in the tiles batch, and the position is contract.**
+//! Decoders that index the tile batch positionally exist, so inserting rather than appending
+//! would silently rebind `visible`/`matched` in them.
+//!
+//! The pre-streaming monolithic framing (`viewport_ipc`: one `u32` prefix on the tile stream
+//! only, everything else concatenated bare) is deleted rather than kept alongside — decision
+//! 0048: no deployment, bundle or client exists outside this repository, and two framings would
+//! be two conformance surfaces forever.
 
 use std::sync::Arc;
 
@@ -48,10 +45,20 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
-/// One named scalar column of declared-scalar values for the points batch.
+/// Frame kinds, one `u8` each. An unknown kind is a decoder error, never skipped: skipping would
+/// let a future frame kind carry data an old reader silently drops.
+pub const FRAME_TILES: u8 = 1;
+pub const FRAME_SUB_CELLS: u8 = 2;
+pub const FRAME_POINTS: u8 = 3;
+pub const FRAME_TRAILER: u8 = 4;
+
+/// Bytes of frame header preceding every payload: the kind byte and the `u32 LE` length.
+pub const FRAME_HEADER_BYTES: usize = 5;
+
+/// One named scalar column of declared-scalar values for a points frame.
 ///
 /// Plain data only — no engine or store type. Each variant's slice must be the same length as
-/// `points_tessera_ids`/`codes` in the corresponding [`viewport_ipc`] call.
+/// `tessera_ids`/`codes` in the corresponding [`points_frame`] call.
 pub enum ScalarColumn<'a> {
     Bool(&'a [bool]),
     U8(&'a [u8]),
@@ -70,34 +77,7 @@ pub enum ScalarColumn<'a> {
     Utf8(&'a [String]),
 }
 
-/// One `/v1/viewport` response's columns, ready to encode.
-///
-/// A struct rather than a positional argument list because the count reached double figures once
-/// `served` and the §3.3 underlay landed, and four of them are `&[u64]` — positional arguments of
-/// the same type are exactly the shape a silent transposition hides in.
-pub struct ViewportColumns<'a> {
-    /// Tile batch: one row per non-empty tile. All four must be the same length.
-    pub tile: &'a [u64],
-    pub visible: &'a [u64],
-    pub matched: &'a [u64],
-    /// How many points this tile contributed to `points_tessera_ids`, in tile order — §7.2's
-    /// `m(T)`. The points batch is a flat concatenation, so this is what lets a reader split it.
-    pub served: &'a [u64],
-
-    /// Points batch: one row per served point. All must be the same length.
-    pub points_tessera_ids: &'a [u64],
-    /// Each point's 64-bit Morton position code (see [`encode_points_batch`]).
-    pub codes: &'a [u64],
-    /// Declared-scalar columns in the schema's declared order, each tagged with its field name.
-    pub scalars: &'a [(&'a str, ScalarColumn<'a>)],
-
-    /// §3.3 underlay sub-cells: `(morton prefix at depth zoom+offset, exact masked count)`. `None`
-    /// when the request did not ask for the underlay, which emits **zero** trailing bytes rather
-    /// than an empty stream — see this module's doc. Both slices must be the same length.
-    pub sub_cells: Option<(&'a [u64], &'a [u64])>,
-}
-
-/// The three per-variant facts `viewport_ipc` needs from a [`ScalarColumn`]: its length, its Arrow
+/// The three per-variant facts this module needs from a [`ScalarColumn`]: its length, its Arrow
 /// type and its array.
 ///
 /// **One table, three functions**, because the three were three separate `match`es over the same
@@ -165,72 +145,232 @@ fn wire_column_array(col: &ScalarColumn) -> ArrayRef {
     wire_columns!(arms)
 }
 
-/// Build the framed Arrow IPC payload for one `/v1/viewport` response.
+/// Append one frame header to `out`, returning the offset of its length field so
+/// [`patch_frame_len`] can complete it once the payload is written. Splitting the write this way
+/// is what lets the points payload stream straight into the response buffer (see
+/// [`points_frame`]) instead of materialising once and being copied behind a known length.
+fn begin_frame(out: &mut Vec<u8>, kind: u8) -> usize {
+    out.push(kind);
+    let len_at = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+    len_at
+}
+
+/// Complete the frame begun at `len_at`: everything appended since is the payload.
 ///
 /// # Panics
 ///
-/// Panics if [`ViewportColumns`]' stated length invariants are violated, or if Arrow's batch/stream
-/// construction fails — both indicate a caller bug, not a runtime condition this crate can recover
-/// from.
-pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
-    let tiles = cols.tile.len();
-    assert_eq!(tiles, cols.visible.len(), "tile/visible length mismatch");
-    assert_eq!(tiles, cols.matched.len(), "tile/matched length mismatch");
-    assert_eq!(tiles, cols.served.len(), "tile/served length mismatch");
+/// Panics if the payload exceeds `u32::MAX` bytes — a caller bug (an unflushed accumulation)
+/// rather than a runtime condition: the emit pass caps every points frame at 1 GiB regardless of
+/// the configured flush threshold (`tessera_engine`'s `MAX_POINTS_FRAME_BYTES`), and no other
+/// frame kind grows with the corpus.
+fn patch_frame_len(out: &mut [u8], len_at: usize) {
+    let len = out.len() - len_at - 4;
+    let len = u32::try_from(len).expect("frame payload exceeds u32::MAX");
+    out[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+}
 
-    let points = cols.points_tessera_ids.len();
-    assert_eq!(points, cols.codes.len(), "points/codes length mismatch");
-    // The points batch is a flat concatenation whose only grouping key is `served`; if they
-    // disagree, every consumer mis-splits it, so catch it here rather than at the client.
-    let served_total: u64 = cols.served.iter().sum();
-    assert_eq!(
-        served_total, points as u64,
-        "sum of served ({served_total}) != number of points ({points})"
-    );
-    for (name, col) in cols.scalars {
-        let len = wire_column_len(col);
-        assert_eq!(points, len, "scalar column {name:?} length mismatch");
-    }
-    if let Some((cells, counts)) = cols.sub_cells {
-        assert_eq!(cells.len(), counts.len(), "sub-cell length mismatch");
-    }
+/// The kind-1 tiles frame: one row per non-empty tile, `(tile, visible, matched, served)`.
+///
+/// # Panics
+///
+/// Panics on a length mismatch between the four columns, or on Arrow construction failure —
+/// caller bugs, not runtime conditions this crate can recover from.
+pub fn tiles_frame(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u64]) -> Vec<u8> {
+    let tiles = tile.len();
+    assert_eq!(tiles, visible.len(), "tile/visible length mismatch");
+    assert_eq!(tiles, matched.len(), "tile/matched length mismatch");
+    assert_eq!(tiles, served.len(), "tile/served length mismatch");
 
-    // **The point stream is written straight into the response buffer**, rather than built into a
-    // `Vec` of its own and copied in afterwards. At a saturated viewport that stream is tens of
-    // megabytes, so the copy it replaces was the largest single memmove in the request — and the
-    // `Vec` it copied from had itself grown from zero by doubling, reallocating and copying its
-    // whole contents roughly `log2(bytes)` times on the way up.
-    //
-    // The tile stream still materialises first, because its **length prefixes the body** and is
-    // not knowable until it is written. It is bounded by the tile count rather than the point
-    // count, so it is small.
-    let tile_stream = encode_tile_batch(cols.tile, cols.visible, cols.matched, cols.served);
+    // `served` is APPENDED. Decoders that index this batch positionally exist, so inserting it
+    // earlier would silently rebind `visible`/`matched` in them.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tile", DataType::UInt64, false),
+        Field::new("visible", DataType::UInt64, false),
+        Field::new("matched", DataType::UInt64, false),
+        Field::new("served", DataType::UInt64, false),
+    ]));
+    let columns: Vec<ArrayRef> = [tile, visible, matched, served]
+        .into_iter()
+        .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
+        .collect();
+    let batch =
+        RecordBatch::try_new(schema.clone(), columns).expect("tiles frame batch construction");
 
-    let mut out = Vec::with_capacity(
-        4 + tile_stream.len() + estimated_points_bytes(points, cols.scalars) + subcell_bytes(cols),
-    );
-    out.extend_from_slice(&(tile_stream.len() as u32).to_le_bytes());
-    out.extend_from_slice(&tile_stream);
-    encode_points_batch(
-        cols.points_tessera_ids,
-        cols.codes,
-        cols.scalars,
-        &mut out,
-    );
-    // Absent means zero bytes, not an empty stream — that is what keeps a no-underlay payload
-    // byte-identical to the pre-underlay format.
-    if let Some((cells, counts)) = cols.sub_cells {
-        encode_subcell_batch(cells, counts, &mut out);
-    }
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tiles * 32 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_TILES);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
     out
 }
 
-/// How large the points stream will be, near enough to size the response buffer once.
+/// The kind-2 sub-cells frame: the §3.3 density underlay's exact masked counts over contiguous
+/// Morton ranges at depth `zoom + offset`.
+///
+/// The depth is **not** carried here: it is `zoom + offset` from the caller's own request, and the
+/// server rejects rather than clamps an out-of-range offset, so the client always knows it. A
+/// Morton prefix does not encode its own depth, so the alternative would have been to echo it.
+///
+/// Emitted iff the request asked for the underlay — a requested-but-empty underlay is this frame
+/// with a schema-only, zero-row stream, never an absent frame, so presence is decided by the
+/// request rather than by the result (contracts §3.2 r12's rule, carried forward).
+///
+/// # Panics
+///
+/// Panics on a `cells`/`counts` length mismatch or Arrow construction failure.
+pub fn sub_cells_frame(cells: &[u64], counts: &[u64]) -> Vec<u8> {
+    assert_eq!(cells.len(), counts.len(), "sub-cell length mismatch");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cell", DataType::UInt64, false),
+        Field::new("count", DataType::UInt64, false),
+    ]));
+    let columns: Vec<ArrayRef> = [cells, counts]
+        .into_iter()
+        .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
+        .collect();
+    let batch =
+        RecordBatch::try_new(schema.clone(), columns).expect("sub-cells frame batch construction");
+
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + cells.len() * 16 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_SUB_CELLS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// The kind-3 points frame: one `tessera_id` and one 64-bit position `code` per point, plus the
+/// declared scalars in schema order.
+///
+/// `code` is the Morton interleave of the point's two 32-bit fixed-point axes against the extent
+/// `/v1/meta` publishes — the same 16 bytes per point the `x`/`y` `f32` pair cost, carrying 32
+/// bits per axis instead of an `f32` mantissa's 24, and letting the client derive the containing
+/// tile at any zoom by a shift rather than by re-quantising (contracts §2.5).
+///
+/// **The stream is written straight into the frame buffer**, sized once from
+/// [`estimated_points_bytes`]: at a saturated flush this payload is a megabyte-plus, so the copy
+/// a materialise-then-frame shape would cost is the largest single memmove in the response.
+///
+/// # Panics
+///
+/// Panics on any column length mismatch or Arrow construction failure.
+pub fn points_frame(
+    tessera_ids: &[u64],
+    codes: &[u64],
+    scalars: &[(&str, ScalarColumn)],
+) -> Vec<u8> {
+    let points = tessera_ids.len();
+    assert_eq!(points, codes.len(), "points/codes length mismatch");
+    for (name, col) in scalars {
+        let len = wire_column_len(col);
+        assert_eq!(points, len, "scalar column {name:?} length mismatch");
+    }
+
+    let mut fields = vec![
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("code", DataType::UInt64, false),
+    ];
+    for (name, col) in scalars {
+        fields.push(Field::new(*name, wire_column_type(col), false));
+    }
+    let schema = Arc::new(Schema::new(fields));
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(2 + scalars.len());
+    columns.push(Arc::new(UInt64Array::from_iter_values(
+        tessera_ids.iter().copied(),
+    )));
+    columns.push(Arc::new(UInt64Array::from_iter_values(codes.iter().copied())));
+    for (_, col) in scalars {
+        columns.push(wire_column_array(col));
+    }
+    let batch =
+        RecordBatch::try_new(schema.clone(), columns).expect("points frame batch construction");
+
+    let mut out =
+        Vec::with_capacity(FRAME_HEADER_BYTES + estimated_points_bytes(points, scalars));
+    let len_at = begin_frame(&mut out, FRAME_POINTS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// The kind-4 trailer frame. The payload is caller-supplied JSON bytes — this module frames, it
+/// does not author; what the object must contain is contracts §3.2's business, and the server is
+/// the one place it is written.
+pub fn trailer_frame(json: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + json.len());
+    let len_at = begin_frame(&mut out, FRAME_TRAILER);
+    out.extend_from_slice(json);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// Split a complete response body into `(kind, payload)` frames.
+///
+/// Strict: a short header, a payload running past the end of the body, or an unknown kind is an
+/// error, never a partial success — a truncated body must not decode to a plausible shorter
+/// response. This is the reader half every Rust consumer (the server's own tests, the bench
+/// harness) shares; the Python oracle and the TS client carry independent implementations of the
+/// same walk, deliberately (contracts §0.2's second-reader posture).
+pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
+    let mut frames = Vec::new();
+    let mut at = 0usize;
+    while at < body.len() {
+        if body.len() - at < FRAME_HEADER_BYTES {
+            return Err(FrameError::TruncatedHeader { at });
+        }
+        let kind = body[at];
+        if !matches!(
+            kind,
+            FRAME_TILES | FRAME_SUB_CELLS | FRAME_POINTS | FRAME_TRAILER
+        ) {
+            return Err(FrameError::UnknownKind { kind, at });
+        }
+        let len = u32::from_le_bytes(body[at + 1..at + 5].try_into().expect("4 bytes")) as usize;
+        let start = at + FRAME_HEADER_BYTES;
+        let end = start
+            .checked_add(len)
+            .ok_or(FrameError::TruncatedPayload { at })?;
+        if end > body.len() {
+            return Err(FrameError::TruncatedPayload { at });
+        }
+        frames.push((kind, &body[start..end]));
+        at = end;
+    }
+    Ok(frames)
+}
+
+/// [`split_frames`]' failures. Byte offsets are into the body, for the error message's benefit —
+/// nothing programmatic hangs off them.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FrameError {
+    TruncatedHeader { at: usize },
+    TruncatedPayload { at: usize },
+    UnknownKind { kind: u8, at: usize },
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::TruncatedHeader { at } => {
+                write!(f, "truncated frame header at byte {at}")
+            }
+            FrameError::TruncatedPayload { at } => {
+                write!(f, "frame at byte {at} claims a payload past the end of the body")
+            }
+            FrameError::UnknownKind { kind, at } => {
+                write!(f, "unknown frame kind {kind} at byte {at}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
+/// How large a points payload will be, near enough to size the frame buffer once.
 ///
 /// **A hint, never a contract.** A short estimate costs a reallocation and a long one costs
 /// transient memory; neither changes a byte of output, which is why this is allowed to approximate
-/// `utf8` rather than walk it twice. The fixed-width columns — which are all of them on every
-/// bundle measured — are exact.
+/// nothing — the fixed-width columns are exact and `utf8` is walked.
 fn estimated_points_bytes(points: usize, scalars: &[(&str, ScalarColumn)]) -> usize {
     // `tessera_id` and `code`, both u64.
     let mut bytes = points * 16;
@@ -247,10 +387,6 @@ fn estimated_points_bytes(points: usize, scalars: &[(&str, ScalarColumn)]) -> us
     }
     // Schema and record-batch metadata: a few hundred bytes, plus a field descriptor apiece.
     bytes + 1024 + 128 * scalars.len()
-}
-
-fn subcell_bytes(cols: &ViewportColumns<'_>) -> usize {
-    cols.sub_cells.map_or(0, |(cells, _)| cells.len() * 16 + 1024)
 }
 
 /// Element width in bytes for the fixed-width families. `Bool` and `Utf8` are not fixed-width and
@@ -275,103 +411,73 @@ macro_rules! wire_elem {
 }
 use wire_elem;
 
-fn encode_tile_batch(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u64]) -> Vec<u8> {
-    // `served` is APPENDED. Decoders that index this batch positionally exist, so inserting it
-    // earlier would silently rebind `visible`/`matched` in them.
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("tile", DataType::UInt64, false),
-        Field::new("visible", DataType::UInt64, false),
-        Field::new("matched", DataType::UInt64, false),
-        Field::new("served", DataType::UInt64, false),
-    ]));
-
-    let columns: Vec<ArrayRef> = [tile, visible, matched, served]
-        .into_iter()
-        .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
-        .collect();
-
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .expect("viewport_ipc: tile batch construction");
-
-    write_stream(&schema, &batch)
-}
-
-/// The §3.3 density underlay's sub-cell counts: exact masked cardinalities over contiguous Morton
-/// ranges at depth `zoom + offset`.
-///
-/// The depth is **not** carried here: it is `zoom + offset` from the caller's own request, and the
-/// server rejects rather than clamps an out-of-range offset, so the client always knows it. A Morton
-/// prefix does not encode its own depth, so the alternative would have been to echo it.
-fn encode_subcell_batch(cells: &[u64], counts: &[u64], out: &mut Vec<u8>) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("cell", DataType::UInt64, false),
-        Field::new("count", DataType::UInt64, false),
-    ]));
-    let columns: Vec<ArrayRef> = [cells, counts]
-        .into_iter()
-        .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
-        .collect();
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .expect("viewport_ipc: sub-cell batch construction");
-    write_stream_into(&schema, &batch, out);
-}
-
-/// The points batch: one `tessera_id` and one 64-bit position `code` per point.
-///
-/// `code` is the Morton interleave of the point's two 32-bit fixed-point axes against the extent
-/// `/v1/meta` publishes — the same 16 bytes per point the `x`/`y` `f32` pair cost, carrying 32
-/// bits per axis instead of an `f32` mantissa's 24, and letting the client derive the containing
-/// tile at any zoom by a shift rather than by re-quantising (contracts §3.2).
-fn encode_points_batch(
-    points_tessera_ids: &[u64],
-    codes: &[u64],
-    scalars: &[(&str, ScalarColumn)],
-    out: &mut Vec<u8>,
-) {
-    let mut fields = vec![
-        Field::new("tessera_id", DataType::UInt64, false),
-        Field::new("code", DataType::UInt64, false),
-    ];
-    for (name, col) in scalars {
-        let ty = wire_column_type(col);
-        fields.push(Field::new(*name, ty, false));
-    }
-    let schema = Arc::new(Schema::new(fields));
-
-    let id_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(
-        points_tessera_ids.iter().copied(),
-    ));
-    let code_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(codes.iter().copied()));
-
-    let mut columns: Vec<ArrayRef> = vec![id_col, code_col];
-    for (_, col) in scalars {
-        let array: ArrayRef = wire_column_array(col);
-        columns.push(array);
-    }
-
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .expect("viewport_ipc: points batch construction");
-
-    write_stream_into(&schema, &batch, out);
-}
-
-/// Serialise `batch` and return the bytes. Only the tile stream uses this: its length prefixes
-/// the body, so it has to exist before anything else is written.
-fn write_stream(schema: &Schema, batch: &RecordBatch) -> Vec<u8> {
-    let mut out = Vec::new();
-    write_stream_into(schema, batch, &mut out);
-    out
-}
-
-/// Serialise `batch` by **appending** to `out`.
-///
-/// `&mut Vec<u8>` is a `Write`, so the writer emits straight into the response buffer — no
-/// intermediate allocation, and no copy of the finished stream. Appending rather than replacing is
-/// what lets the three streams share one buffer, which is the whole framing (see this module's
-/// header).
+/// Serialise `batch` by **appending** to `out` — straight into the frame buffer, no intermediate
+/// allocation and no copy of the finished stream.
 fn write_stream_into(schema: &Schema, batch: &RecordBatch, out: &mut Vec<u8>) {
     let mut writer =
-        StreamWriter::try_new(out, schema).expect("viewport_ipc: stream writer construction");
-    writer.write(batch).expect("viewport_ipc: stream write");
-    writer.finish().expect("viewport_ipc: stream finish");
+        StreamWriter::try_new(out, schema).expect("frame stream writer construction");
+    writer.write(batch).expect("frame stream write");
+    writer.finish().expect("frame stream finish");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_roundtrip_through_split() {
+        let tiles = tiles_frame(&[5, 9], &[100, 3], &[100, 3], &[10, 3]);
+        let subs = sub_cells_frame(&[], &[]);
+        let names3 = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let points = points_frame(
+            &[1, 2, 3],
+            &[10, 20, 30],
+            &[("w", ScalarColumn::U16(&[7, 8, 9])), ("n", ScalarColumn::Utf8(&names3))],
+        );
+        let trailer = trailer_frame(br#"{"stream_us":1}"#);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&tiles);
+        body.extend_from_slice(&subs);
+        body.extend_from_slice(&points);
+        body.extend_from_slice(&trailer);
+
+        let frames = split_frames(&body).expect("well-formed body splits");
+        let kinds: Vec<u8> = frames.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, vec![FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER]);
+        assert_eq!(frames[3].1, br#"{"stream_us":1}"#);
+        // Each payload is a complete Arrow stream: decodable alone.
+        for (kind, payload) in &frames[..3] {
+            let cursor = std::io::Cursor::new(payload.to_vec());
+            let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)
+                .unwrap_or_else(|e| panic!("frame kind {kind} not a complete stream: {e}"));
+            for batch in reader {
+                batch.expect("frame batch decodes");
+            }
+        }
+    }
+
+    #[test]
+    fn split_refuses_truncation_and_unknown_kinds() {
+        let tiles = tiles_frame(&[1], &[1], &[1], &[1]);
+        // Truncated payload: cut the last byte.
+        let cut = &tiles[..tiles.len() - 1];
+        assert!(matches!(
+            split_frames(cut),
+            Err(FrameError::TruncatedPayload { .. })
+        ));
+        // Truncated header: a lone kind byte.
+        assert!(matches!(
+            split_frames(&[FRAME_TILES]),
+            Err(FrameError::TruncatedHeader { .. })
+        ));
+        // Unknown kind: refused, never skipped.
+        let mut body = tiles.clone();
+        body.push(9);
+        body.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            split_frames(&body),
+            Err(FrameError::UnknownKind { kind: 9, .. })
+        ));
+    }
 }

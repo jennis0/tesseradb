@@ -67,7 +67,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r38 | 22 |
+| `architecture.md` | Normative — r41 | 22 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
@@ -76,6 +76,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `contracts.md` | Normative — r26 | 20 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
+| `delta-serving.md` | Provisional — under review | 3 |
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `filter-index.md` | Provisional — under review | 11 |
 | `filter-surface.md` | Provisional — under review | 7 |

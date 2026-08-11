@@ -226,6 +226,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         config.row_projection_cache_bytes,
         config.fragment_cache_bytes,
     );
+    // `single_flight_wait_ms`' consumer — how long a request parks on another request's
+    // row-projection build before it is shed (decision 0058).
+    engine.set_single_flight_wait_ms(config.single_flight_wait_ms);
     // `overlay_soft_limit`'s consumer. **It alarms; it does not act.**
     // ⊘ Specified, not implemented: the compaction fold that would bring an over-limit overlay back
     // down does not exist, so crossing the limit raises a counter and a log line and nothing else —
@@ -266,6 +269,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         ingest_buffer_max_items: config.ingest_buffer_max_items,
         ingest_max_batch_bytes: config.ingest_max_batch_bytes,
         stage_timing: config.stage_timing,
+        stream_flush_bytes: config.stream_flush_bytes,
+        stream_write_stall_ms: config.stream_write_stall_ms,
+        stream_deadline_ms: config.stream_deadline_ms,
         min_visible_members: config.min_visible_members,
         session_credential: config.session_credential.clone(),
         operator_credential: config.operator_credential.clone(),

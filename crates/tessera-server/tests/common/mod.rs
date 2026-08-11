@@ -211,6 +211,32 @@ pub fn default_engine_config() -> EngineConfig {
     }
 }
 
+/// [`spawn_server`], with a caller-chosen streamed-viewport flush threshold and write-stall
+/// budget — the two knobs the streaming tests pin (a tiny flush for the multi-frame path, a
+/// short stall for the shed path).
+pub async fn spawn_server_with_stream_flush(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    stream_flush_bytes: usize,
+    stream_write_stall_ms: u64,
+) -> TestServer {
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
+    mount_server_with_flush(
+        engine,
+        max_k,
+        generous_test_gate(),
+        generous_ingest_limits(),
+        Vec::new(),
+        stream_flush_bytes,
+        stream_write_stall_ms,
+    )
+    .await
+}
+
 pub async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> TestServer {
     spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
 }
@@ -382,6 +408,30 @@ async fn mount_server_with(
     ingest_limits: IngestLimits,
     dev_cors_origins: Vec<String>,
 ) -> TestServer {
+    mount_server_with_flush(
+        engine,
+        max_k,
+        compute_gate,
+        ingest_limits,
+        dev_cors_origins,
+        1 << 20,
+        10_000,
+    )
+    .await
+}
+
+/// [`mount_server_with`], with the streamed viewport's flush threshold and write-stall budget
+/// explicit — the tests that pin the multi-frame and shed paths mount a threshold far below one
+/// response's bytes and a stall far below the default.
+async fn mount_server_with_flush(
+    engine: Engine,
+    max_k: usize,
+    compute_gate: ComputeGate,
+    ingest_limits: IngestLimits,
+    dev_cors_origins: Vec<String>,
+    stream_flush_bytes: usize,
+    stream_write_stall_ms: u64,
+) -> TestServer {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
@@ -397,6 +447,13 @@ async fn mount_server_with(
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,
+        // The op-point default (1 MiB) leaves every fixture-sized response in one points frame,
+        // which is exactly the degenerate case contracts §3.2 requires readers to accept; the
+        // multi-frame path is exercised by the tests that mount a tiny threshold explicitly
+        // (`spawn_server_with_stream_flush`).
+        stream_flush_bytes,
+        stream_write_stall_ms,
+        stream_deadline_ms: 60_000,
         min_visible_members: 10,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
@@ -457,59 +514,168 @@ pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> req
 pub type TileRow = (u64, u64, u64);
 pub type PointRow = (u64, u64);
 
-/// Decode the framed Arrow payload `tessera_wire::viewport_ipc` builds: a 4-byte LE length, the
-/// tile stream, then the points stream. Returns `(tiles, points)` where each tile is
-/// `(tile, visible, matched)` and each point is `(tessera_id, code)` — `code` being the point's
-/// 64-bit Morton position (contracts §3.2).
-pub fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
-    let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let tile_bytes = &bytes[4..4 + tile_len];
-    let points_bytes = &bytes[4 + tile_len..];
+/// One decoded `/v1/viewport` response body, every frame kind (contracts §3.2 r26).
+pub struct DecodedViewport {
+    /// `(tile, visible, matched)` per row — `served` is asserted where a test needs it, via
+    /// [`decode_viewport_frames`]' `served` field.
+    pub tiles: Vec<TileRow>,
+    pub served: Vec<u64>,
+    /// `(tessera_id, code)` per point, concatenated across every kind-3 frame in order.
+    pub points: Vec<PointRow>,
+    /// `(cell, count)` — `None` when no kind-2 frame was present (underlay unrequested).
+    pub sub_cells: Option<Vec<(u64, u64)>>,
+    /// The kind-4 trailer, parsed. Its key set is asserted here — the one server-authored JSON
+    /// region of the body must not quietly acquire a field the comparator never sees
+    /// (`streamed-serving.md` §7).
+    pub trailer: serde_json::Value,
+    /// How many kind-3 frames the body carried — the chunking, which is NOT contract, but which
+    /// the multi-frame tests pin against their configured flush threshold.
+    pub point_frames: usize,
+    /// The body minus the trailer frame: the deterministic region, what byte-equality
+    /// assertions compare (`streamed-serving.md` §7).
+    pub deterministic_bytes: Vec<u8>,
+}
+
+fn u64_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> UInt64Array {
+    batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap()
+        .clone()
+}
+
+/// Decode a complete streamed `/v1/viewport` body: walk the tagged length-prefixed frames
+/// (contracts §3.2 r26), decode each payload as the complete Arrow IPC stream (or trailer JSON)
+/// it is, and enforce the frame grammar — tiles first, exactly one trailer last, unknown kinds
+/// refused (`tessera_wire::split_frames`).
+pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
+    let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
+    assert!(!frames.is_empty(), "a response carries at least tiles + trailer");
+    assert_eq!(
+        frames.first().unwrap().0,
+        tessera_wire::FRAME_TILES,
+        "the tiles frame is first"
+    );
+    assert_eq!(
+        frames.last().unwrap().0,
+        tessera_wire::FRAME_TRAILER,
+        "the trailer frame is last — its presence is the completeness signal"
+    );
 
     let mut tiles = Vec::new();
-    let reader = StreamReader::try_new(Cursor::new(tile_bytes), None).unwrap();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let tile = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let visible = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let matched = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            tiles.push((tile.value(i), visible.value(i), matched.value(i)));
-        }
-    }
-
+    let mut served = Vec::new();
     let mut points = Vec::new();
-    let reader = StreamReader::try_new(Cursor::new(points_bytes), None).unwrap();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let tessera_id = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let code = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            points.push((tessera_id.value(i), code.value(i)));
+    let mut sub_cells: Option<Vec<(u64, u64)>> = None;
+    let mut trailer: Option<serde_json::Value> = None;
+    let mut point_frames = 0usize;
+    let mut deterministic_end = 0usize;
+    let mut at = 0usize;
+
+    for (index, (kind, payload)) in frames.iter().enumerate() {
+        let frame_len = tessera_wire::FRAME_HEADER_BYTES + payload.len();
+        match *kind {
+            tessera_wire::FRAME_TILES => {
+                assert_eq!(index, 0, "exactly one tiles frame, first");
+                let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let tile = u64_col(&batch, 0);
+                    let visible = u64_col(&batch, 1);
+                    let matched = u64_col(&batch, 2);
+                    let served_col = u64_col(&batch, 3);
+                    for i in 0..batch.num_rows() {
+                        tiles.push((tile.value(i), visible.value(i), matched.value(i)));
+                        served.push(served_col.value(i));
+                    }
+                }
+                deterministic_end = at + frame_len;
+            }
+            tessera_wire::FRAME_SUB_CELLS => {
+                assert!(sub_cells.is_none(), "at most one sub-cells frame");
+                assert_eq!(index, 1, "the sub-cells frame immediately follows tiles");
+                let cells = sub_cells.get_or_insert_with(Vec::new);
+                let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let cell = u64_col(&batch, 0);
+                    let count = u64_col(&batch, 1);
+                    for i in 0..batch.num_rows() {
+                        cells.push((cell.value(i), count.value(i)));
+                    }
+                }
+                deterministic_end = at + frame_len;
+            }
+            tessera_wire::FRAME_POINTS => {
+                point_frames += 1;
+                let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let tessera_id = u64_col(&batch, 0);
+                    let code = u64_col(&batch, 1);
+                    for i in 0..batch.num_rows() {
+                        points.push((tessera_id.value(i), code.value(i)));
+                    }
+                }
+                deterministic_end = at + frame_len;
+            }
+            tessera_wire::FRAME_TRAILER => {
+                assert!(trailer.is_none(), "exactly one trailer");
+                let parsed: serde_json::Value = serde_json::from_slice(payload).unwrap();
+                // The closed key set (contracts §3.2 r26): `stage_ns` is the one optional key
+                // (double-gated); everything else is exact.
+                let object = parsed.as_object().expect("trailer is a JSON object");
+                let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+                keys.retain(|k| *k != "stage_ns");
+                keys.sort_unstable();
+                assert_eq!(
+                    keys,
+                    vec!["arrow_serialise_ns", "flushes", "points", "stream_us"],
+                    "the trailer's key set is closed"
+                );
+                trailer = Some(parsed);
+            }
+            other => panic!("split_frames returned an unknown kind {other}"),
         }
+        at += frame_len;
     }
 
-    (tiles, points)
+    let trailer = trailer.expect("trailer asserted present above");
+    // Cross-check the counts the trailer claims against what the body actually carried.
+    assert_eq!(
+        trailer["points"].as_u64().unwrap(),
+        points.len() as u64,
+        "trailer points total matches the body"
+    );
+    assert_eq!(
+        trailer["flushes"].as_u64().unwrap(),
+        point_frames as u64,
+        "trailer flush count matches the body"
+    );
+    // The r7 invariant, now asserted at the reader: served splits the concatenated points.
+    assert_eq!(
+        served.iter().sum::<u64>(),
+        points.len() as u64,
+        "sum of served equals the points delivered"
+    );
+
+    DecodedViewport {
+        tiles,
+        served,
+        points,
+        sub_cells,
+        trailer,
+        point_frames,
+        deterministic_bytes: bytes[..deterministic_end].to_vec(),
+    }
+}
+
+/// The two-tuple view most tests want: `(tiles, points)` with tiles as `(tile, visible,
+/// matched)` and points as `(tessera_id, code)` — the same shape the pre-streaming decoder
+/// returned, over the framed body.
+pub fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
+    let decoded = decode_viewport_frames(bytes);
+    (decoded.tiles, decoded.points)
 }
 
 /// `GET /control/status`'s body, for asserting `entity_id_high_water` is unchanged across a

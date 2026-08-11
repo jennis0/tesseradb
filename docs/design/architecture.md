@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 38
+**Status:** Draft for review — revision 41
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -194,7 +194,9 @@ The key must therefore never leave the server on any plane: no API response, no 
 
 **I13 — An answer that was not computed is a refusal, never a vacuous success.** This number names **two distinct properties** with different scopes, different implementations and different evidence. They are stated separately because a reviewer who confirms one must not conclude the other is covered.
 
-**I13a — a request that fails or is cancelled yields no partial answer.** Where work is shared between concurrent requests (single-flight caching of a session's row projection, and the cancellation of an abandoned request), a panic, a cancellation or a poisoned shared slot must propagate as a typed refusal to every waiter. The failure it forbids is a waiter observing a half-built shared artifact as though it were complete. This is the property the implementation annotates and tests.
+**I13a — a request that fails or is cancelled yields no partial answer.** Where work is shared between concurrent requests (single-flight caching of a session's row projection, and the cancellation of an abandoned request), a panic, a cancellation or a poisoned shared slot must never be observable by another request as a completed result, and **no failure is ever cached**. A caller sharing a build that dies is therefore either handed a typed refusal — which is what a cancellation, an exhausted wait budget and a fallible build still produce — or finds the plain miss a fresh arrival would find, and builds for itself ([decision 0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md)). The failure the first clause forbids is a waiter observing a half-built shared artifact as though it were complete; the failure the second forbids is a dead build refusing a later caller for whom it would have succeeded. This is the property the implementation annotates and tests.
+
+> **Annotated for the streamed viewport response** *(2026-08-11, with `streamed-serving.md`; ratified by owner ruling the same day — [decision 0061](../decisions/0061-i13a-forbids-undetectable-partials-not-streaming.md))*. A streamed `/v1/viewport` cut mid-body — disconnect, shed, or a mid-stream fault — leaves the **requesting client itself** holding a prefix of its own response. This does not weaken the invariant, read precisely: what I13a forbids is a partial answer *observable as a complete one*, and a truncated stream is client-detectable by construction (the trailer frame never arrived — contracts §3.2's truncation rule) while every delivered frame is exact against one generation snapshot and drawable under `delta-serving.md` §7's prefix licence. No *other* request can observe anything partial, no failure is cached, and nothing here changes the shared-work clauses. A change that made a truncated stream indistinguishable from a complete response would violate this invariant as written.
 
 **I13b — a partition not consulted fails closed.** Where a query or a containment test spans partitions (§12), a partition the token cannot reach counts as contributing *nothing satisfied* — never as vacuously satisfied. The natural implementation, which checks only the partitions it queried, serves labels it should withhold.
 
@@ -486,7 +488,7 @@ At 10<sup>7</sup> this is a modest optimisation. At 10<sup>9</sup> it substantia
 ### 8.1 Two masks
 
 - **`M_auth`** — what the token permits (**I1**). Governs label containment, maximum frontier depth, node geometry, and the security boundary.
-- **`M_sel = M_auth ∧ expr`** — what the query asked for, where `expr` is any boolean combination of leaf predicates *(r38, decision 0062; was a conjunction of operands)*. Governs which points render and matched counts. **Every node evaluates inside the candidate**, so `M_sel ⊆ M_auth` holds by the shape of the expression rather than by a check, whatever combinators it uses.
+- **`M_sel = M_auth ∧ expr`** — what the query asked for, where `expr` is any boolean combination of leaf predicates *(r39, decision 0062; was a conjunction of operands)*. Governs which points render and matched counts. **Every node evaluates inside the candidate**, so `M_sel ⊆ M_auth` holds by the shape of the expression rather than by a check, whatever combinators it uses.
 
 **The failure this prevents.** With a single composed mask, containment would be tested against `M_auth ∧ text ∧ vector`. A generating set contains items that do not match the text query, so containment fails for essentially every label the instant anyone types, and every label vanishes. A frontier descending on filtered counts would likewise dissolve as the filter narrows, destroying the frame of reference exactly when it is most needed. **I3** and **I12** prevent both.
 
@@ -496,9 +498,9 @@ There is no leak in preserving labels under filtering: the principal could alrea
 
 ### 8.2 The filter contract
 
-**Every filter returns a set of entity IDs as a bitmap.** Composition is any boolean combination of leaf predicates, evaluated inside the candidate *(r38, decision 0062)* — `all_of`, `any_of` and `none_of`. Every node returns a subset of the candidate because every leaf does, so **I12** holds structurally rather than by check. This is also the extension discipline for the retrieval surface: new filter forms add operands rather than changing the shape of the call (§2.2). Five rules.
+**Every filter returns a set of entity IDs as a bitmap.** Composition is any boolean combination of leaf predicates, evaluated inside the candidate *(r39, decision 0062)* — `all_of`, `any_of` and `none_of`. Every node returns a subset of the candidate because every leaf does, so **I12** holds structurally rather than by check. This is also the extension discipline for the retrieval surface: new filter forms add operands rather than changing the shape of the call (§2.2). Five rules.
 
-**Negation requires a value, and names one column** *(r40, [decision 0066](../decisions/0066-none-of-requires-a-value-and-names-one-column.md))*. `none_of` means *carries a value in this column, and none of these matches it* — not `candidate ∖ matched`. The presence requirement is what keeps a negation **positive**, which every "this failure degrades safely" argument in `filter-index.md` depends on: an entity whose value is unreachable matches nothing, so losing values under-reports and under-reporting narrows. It also closes C11's existence oracle without a second mechanism — an entity in the candidate carrying a value *is* the witness that makes that value visible, so a negation can only reach values the principal was offered. One column, because a negation must require presence in the column it negates and two columns give two answers to which; `all_of` of single-column negations is the same set and says which.
+**Negation requires a value, and names one column** *(r41, [decision 0066](../decisions/0066-none-of-requires-a-value-and-names-one-column.md))*. `none_of` means *carries a value in this column, and none of these matches it* — not `candidate ∖ matched`. The presence requirement is what keeps a negation **positive**, which every "this failure degrades safely" argument in `filter-index.md` depends on: an entity whose value is unreachable matches nothing, so losing values under-reports and under-reporting narrows. It also closes C11's existence oracle without a second mechanism — an entity in the candidate carrying a value *is* the witness that makes that value visible, so a negation can only reach values the principal was offered. One column, because a negation must require presence in the column it negates and two columns give two answers to which; `all_of` of single-column negations is the same set and says which.
 
 **Threshold, never top-k.** A filter whose result depends on what else is in the query cannot be composed independently. A top-*k* nearest-neighbour query evaluated alone is computed over the whole corpus, so intersecting afterwards *is* post-filtering — the principal's nearest neighbours would vary observably with items they cannot see. Express ranked filters as thresholds and apply top-*k* **after** intersection.
 
@@ -514,9 +516,9 @@ There is no leak in preserving labels under filtering: the principal could alrea
 
 **Label filtering — core, effectively free.** Resolve labels to nodes, union membership bitmaps, intersect. The label vocabulary *offered* must itself be containment-filtered, or the existence of a filterable label reveals a label the principal is not cleared to see (C11).
 
-**Per-item attributes — a scanned entity-space column, or a bitmap where values repeat.** A `filter` attribute is stored in entity space and evaluated with the mask as the scan's candidate, so its work is a function of the candidate and the column and never of the value being sought — which is what makes a value the principal cannot see indistinguishable in *work*, not merely in outcome, from one that does not exist. A per-value bitmap is derived on top only where the values carry an identity of their own and repeat heavily (categories), where it closes broad coverage at a measured 107×. §10.5 r37 states the placement rule; `filter-index.md` owns the choice.
+**Per-item attributes — a scanned entity-space column, or a bitmap where values repeat.** A `filter` attribute is stored in entity space and evaluated with the mask as the scan's candidate, so its work is a function of the candidate and the column and never of the value being sought — which is what makes a value the principal cannot see indistinguishable in *work*, not merely in outcome, from one that does not exist. A per-value bitmap is derived on top only where the values carry an identity of their own and repeat heavily (categories), where it closes broad coverage at a measured 107×. §10.5 r38 states the placement rule; `filter-index.md` owns the choice.
 
-**Text — a column type, not a filter family** *(r38, decision 0062)*. An earlier revision made text a single corpus-wide embedded index reached by its own operand. It is instead an attribute with a declared type, which gives a document as many text fields as it declares rather than the one body a global operand could address: `utf8` matches stored bytes (`eq`, `prefix`, `contains`), `text` matches analysed tokens (`match`, ⊘ unbuilt). **Filter, do not rank** survives the change and is the load-bearing half: relevance scores and rank shifts computed from corpus-global statistics are a demonstrated channel for inferring the content of unreadable documents (Appendix D). The global-cache argument does not survive it — under masked evaluation every operand result is principal-specific, so there was never a shared cache to key.
+**Text — a column type, not a filter family** *(r39, decision 0062)*. An earlier revision made text a single corpus-wide embedded index reached by its own operand. It is instead an attribute with a declared type, which gives a document as many text fields as it declares rather than the one body a global operand could address: `utf8` matches stored bytes (`eq`, `prefix`, `contains`), `text` matches analysed tokens (`match`, ⊘ unbuilt). **Filter, do not rank** survives the change and is the load-bearing half: relevance scores and rank shifts computed from corpus-global statistics are a demonstrated channel for inferring the content of unreadable documents (Appendix D). The global-cache argument does not survive it — under masked evaluation every operand result is principal-specific, so there was never a shared cache to key.
 
 **Vectors — a sidecar in a different format.** Cold, large (Appendix A), read in a completely different pattern from the hot columns. This is where chunked object-store-native storage earns its place.
 
@@ -585,7 +587,7 @@ The organising property is that **the row ID is the array index**. Nothing is st
 
 One file per column per segment: raw little-endian, fixed-width, uncompressed, in **`(morton, tessera_id)`** order — the intra-leaf tiebreak is the item's identity, of which `priority` is the leading 16 bits (§7.2, contracts §2.6). Alongside them a sorted `morton.u32` column, 32 bits because §5.2 fixes the grid at 2¹⁶ × 2¹⁶ (contracts §2.5), which is also what tile ranges are derived from. Use the Arrow IPC file format with uncompressed buffers: self-describing, and the buffers remain page-aligned raw arrays that can be mmap'd and sliced zero-copy.
 
-**Route by access ratio, not data type** *(r21)*. The rule the sentence above is an instance of: data read once per **rendered mark** belongs in a fixed-width hot column; data read once per **query** belongs in **entity space behind the filter contract (§8.2)** — which is a flat value column scanned under the candidate mask, or a Roaring bitmap per value where the values already carry an identity of their own and repeat heavily, i.e. categories *(r37)*; data read once per **interaction** belongs in a cold sidecar keyed by the wire identity and opened on first use. A viewport draws ~10⁵ marks and a user clicks a handful, so the three cadences are four orders of magnitude apart and the placement decision follows from the ratio rather than from the type of the data. The caller's external ID is the first instance decided this way: it is per-interaction, so it is a sidecar (contracts §2.4), not a column. **The per-interaction row and §8.3's vector sidecar name one slot, not two**: per-point metadata, the full record, provenance, text and vectors are all per-interaction, and the intention is that a single adopted store eventually serves them rather than each growing its own format. The external-ID sidecar is that slot's first and deliberately transitional occupant. **Appendix D does not bar such an adoption:** it rejects adopting a search engine, vector database or relationship-based authorisation service **for the access-control layer**, where a wrong or stale answer is a disclosure. A cold store read only after the mask has already decided visibility never participates in masking; it inherits instead the ordinary conditions — fail-closed with typed errors, integrity verified before an answer leaves it, and off the request path. **Expanding the hot columnar store remains an available trade** — more per-point data on the render path, paid for in resident memory at 0.93 GiB per byte per row per 10⁹ items — and a proposal to take it should state that number against Appendix A's budget rather than treat the store as closed.
+**Route by access ratio, not data type** *(r21)*. The rule the sentence above is an instance of: data read once per **rendered mark** belongs in a fixed-width hot column; data read once per **query** belongs in **entity space behind the filter contract (§8.2)** — which is a flat value column scanned under the candidate mask, or a Roaring bitmap per value where the values already carry an identity of their own and repeat heavily, i.e. categories *(r38)*; data read once per **interaction** belongs in a cold sidecar keyed by the wire identity and opened on first use. A viewport draws ~10⁵ marks and a user clicks a handful, so the three cadences are four orders of magnitude apart and the placement decision follows from the ratio rather than from the type of the data. The caller's external ID is the first instance decided this way: it is per-interaction, so it is a sidecar (contracts §2.4), not a column. **The per-interaction row and §8.3's vector sidecar name one slot, not two**: per-point metadata, the full record, provenance, text and vectors are all per-interaction, and the intention is that a single adopted store eventually serves them rather than each growing its own format. The external-ID sidecar is that slot's first and deliberately transitional occupant. **Appendix D does not bar such an adoption:** it rejects adopting a search engine, vector database or relationship-based authorisation service **for the access-control layer**, where a wrong or stale answer is a disclosure. A cold store read only after the mask has already decided visibility never participates in masking; it inherits instead the ordinary conditions — fail-closed with typed errors, integrity verified before an answer leaves it, and off the request path. **Expanding the hot columnar store remains an available trade** — more per-point data on the render path, paid for in resident memory at 0.93 GiB per byte per row per 10⁹ items — and a proposal to take it should state that number against Appendix A's budget rather than treat the store as closed.
 
 ### 10.4 The query path
 
@@ -969,7 +971,7 @@ At 10<sup>9</sup> items:
 | Category postings, per filterable category column | 8 B – 125 MB | proportional |
 | Source embeddings, if served | ~3 TB | separate store |
 
-**The filter rows are per *declared column*, and that is the whole of their arithmetic** *(r37)*. A
+**The filter rows are per *declared column*, and that is the whole of their arithmetic** *(r38)*. A
 filter column is stored in entity space at its declared width, so a `u8` category costs 1 GB at 10⁹ and
 a `u32` numeric 4 GB — and a schema declaring sixteen of them costs sixteen times whatever it declared,
 which is the number a plan step must report rather than let a deployment discover. The presence bitmap
@@ -1034,7 +1036,7 @@ I2 requires displayed quantities to derive from visible data only. These are the
 | C1 | Node membership derives from global density | That the principal's visible items in a region group together — a fact about structure including unseen items | Low | `min_visible_members` against `M_auth` bounds how finely this is exposed; filtering cannot deepen it (**I12**) | Accepted |
 | C2 | Node bounding box and hull shape | Recomputed per user from masked members only — no leak by construction; listed to record that it was checked | None | — | Closed |
 | C3 | Label existence | A principal learns only of labels they satisfy | None | Response omits all unsatisfied candidates (§10.6) | Closed |
-| C4 | Response timing | Viewport service time varies with the row *span* a tile covers, which includes items the viewer cannot see. Selection walks the tile's `[lo, hi)` range, so cost is a function of both the viewer's own visible count — already disclosed exactly by §7.1 — and the range length, which is corpus density including unauthorised rows | Low | Unmitigated; quantify before treating as acceptable. Measured cost correlates 0.999 (*k* = 50) / 0.994 (*k* = 1000) with the viewer's **own** Σvisible at ~4–4.5 ns/visible row. That the disclosing component is therefore the residual after that correlation, and not the bulk of the signal, is **analysis of those figures, not a measurement of the residual** — the residual is unquantified and the row stays open on that account | Open |
+| C4 | Response timing | Viewport service time varies with the row *span* a tile covers, which includes items the viewer cannot see. Selection walks the tile's `[lo, hi)` range, so cost is a function of both the viewer's own visible count — already disclosed exactly by §7.1 — and the range length, which is corpus density including unauthorised rows | Low | Unmitigated; quantify before treating as acceptable. Measured cost correlates 0.999 (*k* = 50) / 0.994 (*k* = 1000) with the viewer's **own** Σvisible at ~4–4.5 ns/visible row. That the disclosing component is therefore the residual after that correlation, and not the bulk of the signal, is **analysis of those figures, not a measurement of the residual** — the residual is unquantified and the row stays open on that account. **Streaming refines this channel's granularity** *(2026-08-11, `streamed-serving.md`)*: the first-flush header (`x-tessera-server-us`) and frame-arrival pacing publish the count-select/gather-serialise split unconditionally, where it was previously visible only behind the stage-timing double gate. Same quantities, finer sampling of the same channel, to the same audience (a session-token holder); recorded so the row's eventual quantification measures the surface as it now is; the granularity change was owner-accepted 2026-08-11 within this row's open status | Open |
 | C5 | Extractive-tier background frequencies | Corpus-wide term distributions, if drawn from the live corpus | Low | Fixed public reference corpus (§7.7) | Closed |
 | C6 | External ID gaps on the wire *(r21; was "Entity ID gaps on the wire")* | Where the caller's external IDs carry structure (sequential keys, ingest-ordered surrogates), the gap between two visible IDs is a count of unauthorised items | Medium | `tessera_id` is a keyed permutation of entity space and carries no order, so it discloses nothing; a caller who supplies structured external IDs and exports them is choosing that disclosure. Entity IDs still never cross the boundary (**I10**) | Accepted — caller's control |
 | C7 | Generating-set shrinking under deletion | A label reflecting content the principal may never have been entitled to | Medium | Not adopted; caller regenerates (§7.6) | Not adopted |
@@ -1172,7 +1174,7 @@ Both were checked exhaustively against explicit quantification over all well-for
 
 ## Appendix G — Revision history
 
-- **r40** — **`none_of` is built, and the fence decision 0062 raised comes down on a stronger
+- **r41** — **`none_of` is built, and the fence decision 0062 raised comes down on a stronger
   footing than it went up** (2026-08-11, decision 0066). §8.2 gains negation's rule: it requires the
   item to *carry a value* in the column, which makes it a positive operand and therefore leaves
   `filter-index.md` §5's failure arithmetic — and every "degrades safely under I12" argument resting
@@ -1183,7 +1185,7 @@ Both were checked exhaustively against explicit quantification over all well-for
   refused otherwise, which costs no expressiveness — `all_of` of single-column negations is the same
   set — and narrows the query surface the leak register enumerates.
 
-- **r39** — **the inverse permutation is stored** (2026-08-11, decision 0065). §5.1 said row→entity
+- **r40** — **the inverse permutation is stored** (2026-08-11, decision 0065). §5.1 said row→entity
   "is not stored at all" and is derivable from the row's `tessera_id`. It is derivable, and for a
   single item that is still what happens; for a filtered viewport the keyed bijection's ~17.5 ns per
   row is the whole cost of the crossing, so `row-entity.u32` materialises it at 4 bytes per row per
@@ -1195,7 +1197,7 @@ Both were checked exhaustively against explicit quantification over all well-for
   architecture §5.3/§9 were each relying on. Contracts §0.2, §0.3 deviation 6 and §2.6 carry the
   file.
 
-- **r38** — **filters compose as a boolean tree, and text becomes a column type** (2026-08-09,
+- **r39** — **filters compose as a boolean tree, and text becomes a column type** (2026-08-09,
   decision 0062). §8.2's "composition by intersection only" was written for operands evaluated
   *unmasked*; under masked evaluation every node of an expression returns a subset of the candidate,
   so union and negation cannot widen what a principal may see and **I12** holds structurally. The
@@ -1207,7 +1209,7 @@ Both were checked exhaustively against explicit quantification over all well-for
   **not** adopted — its `should` is a scoring clause, not a disjunction, and §8.3 already rules
   filter-do-not-rank.
 
-- **r37** — **§10.5's per-query placement admits a scanned column, not only a bitmap** (2026-08-08).
+- **r38** — **§10.5's per-query placement admits a scanned column, not only a bitmap** (2026-08-08).
   r21 routed per-query data to "an entity-space bitmap behind the filter contract", which reads as
   prescribing an inverted posting per distinct value. Measurement does not support that as the general
   shape (`probes/2026-08-08-filter-layout/`): a masked scan over a flat entity-indexed column costs
@@ -1220,6 +1222,18 @@ Both were checked exhaustively against explicit quantification over all well-for
   operand still returns a bitmap, still takes the mask first, and still composes only by intersection.
   The placement rule is what widens, from one structure to a choice between two with the criterion
   stated. `filter-index.md` owns that choice.
+- **r37** — **I13a's wording is corrected, not its property** (2026-08-09). It required a
+  failure to *"propagate as a typed refusal to every waiter"*, written when a waiter was a losing
+  arrival handed a refusal and nothing else. [Decision
+  0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) gives a racer a
+  real wait, and a waiter whose build panics is now woken to an absent key and builds for itself —
+  no refusal reaches it, and none should: that is the plain miss a fresh arrival finds. The
+  invariant did not move. What the old sentence risked was the opposite reading — an implementer
+  taking it literally and adding an error path back, reinstating the refusal 0058 removed. The
+  restatement names both halves the property always had: nothing half-built is observable as
+  complete, **and** no failure is cached. The typed refusal survives everywhere a refusal is still
+  what happens — a cancellation, an exhausted wait budget, and `tessera-authz`'s fallible build,
+  whose `Result` is carried through the slot state machine rather than cached.
 
 - **r36** — **C11 acquires the channel it was written for** (2026-08-07). `/v1/categories`
   publishes a category vocabulary, so the row's *"upheld by there being no channel"* is no longer

@@ -1,4 +1,4 @@
-import {decodeViewport} from './decode.js';
+import {createDecoder, type Decoder} from './decoder.js';
 import type {
   ArrowType,
   CategoryValue,
@@ -49,6 +49,13 @@ export type TesseraClientOptions = {
    * typed, and client-interaction §7 for the topology that is actually recommended.
    */
   sessionCredential?: string;
+  /**
+   * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
+   *
+   * Exists for tests and for a consumer that already owns a worker pool — not as a switch anyone
+   * needs to think about.
+   */
+  decoder?: Decoder;
 };
 
 /**
@@ -60,7 +67,21 @@ export type TesseraClientOptions = {
  * check against the contracts spec.
  */
 export class TesseraClient {
+  /**
+   * Where responses are turned into typed arrays.
+   *
+   * Created lazily and shared across requests. In a browser this is a worker, so decode does not
+   * compete with drawing; everywhere else it is the same synchronous call this always made.
+   */
+  private decoder: Decoder | null = null;
+
   constructor(private readonly opts: TesseraClientOptions) {}
+
+  /** Release the decode worker, if one was created. */
+  close(): void {
+    this.decoder?.close();
+    this.decoder = null;
+  }
 
   async authorise(terms: string[]): Promise<Session> {
     if (!this.opts.sessionCredential) {
@@ -127,9 +148,15 @@ export class TesseraClient {
   async viewport(
     token: string,
     req: ViewportRequest,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** Route decode to the speculative lane — see {@link Decoder.decode}. */
+    background = false
   ): Promise<ViewportResponse> {
-    const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom, bbox: req.bbox};
+    const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom};
+    if (req.bbox) body.bbox = req.bbox;
+    // JSON has no 64-bit integer, and a Morton prefix at depth 16 needs 32 bits — inside `Number`'s
+    // exact range, so the narrowing is lossless here and stays so for every depth the grid allows.
+    if (req.tiles) body.tiles = req.tiles.map(Number);
     if (req.k !== undefined) body.k = req.k;
     if (req.underlayOffset) body.underlay_offset = req.underlayOffset;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
@@ -144,17 +171,26 @@ export class TesseraClient {
     });
     if (!response.ok) await fail(response);
     const bytes = new Uint8Array(await response.arrayBuffer());
+    // Read BEFORE decode: the worker path transfers the buffer zero-copy, which detaches it —
+    // `byteLength` afterwards is 0, and every byte ledger downstream (the anticipation budget,
+    // the traces, the ring-spend measurement) silently read that zero.
+    const size = bytes.byteLength;
     const stage = response.headers.get('x-tessera-stage-ns');
+    this.decoder ??= this.opts.decoder ?? createDecoder();
     return {
-      result: decodeViewport(bytes),
+      result: await this.decoder.decode(bytes, background),
       timings: {
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
         stageNs: stage ? stage.split(',').map(Number) : null
       },
+      identityKey: response.headers.get('x-tessera-identity-key') ?? '',
+      // Unquoted here: the quotes are HTTP's entity-tag syntax, not part of the value, and every
+      // comparison this client makes is against another value it took from this same header.
+      contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
       pin: response.headers.get('x-tessera-pin'),
       stale: response.headers.get('x-tessera-stale') === '1',
-      bytes: bytes.byteLength
+      bytes: size
     };
   }
 
