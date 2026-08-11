@@ -650,9 +650,21 @@ fn parse_ingest_batch(
                     .column_by_name(&d.name)
                     .expect("every declared column was found by the validation above");
                 let value = match d.vocabulary.as_deref() {
+                    // A category's absence is in band and `category_code` already spends it: null
+                    // resolves to the reserved code 0, which its vocabulary keeps out of the value
+                    // space.
                     Some(vocabulary) => {
                         category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
                     }
+                    // **Null is absence, and it must be carried rather than read through.**
+                    // `a.value(row)` on a null slot returns whatever the values buffer holds
+                    // there — 0 for every numeric width — so reading without this check stores an
+                    // item with no score as one scoring zero, present and indistinguishable. It
+                    // then matches `{gte: -10, lte: 10}`, which is a wrong answer rather than a
+                    // missing feature (decision 0062). Every other family has somewhere in band to
+                    // put absence; a number has no spare bit pattern, so it travels beside the
+                    // value as `WalScalar::Null`.
+                    None if col.is_null(i) => WalScalar::Null,
                     None => {
                         scalar_of(col.as_ref(), i)
                             .expect("every declared column's type was checked above")

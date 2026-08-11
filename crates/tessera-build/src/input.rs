@@ -822,12 +822,28 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
     Ok(())
 }
 
-/// One batch's worth of a declared column, decoded to the shape the row loop indexes.
+/// One batch's worth of a declared column, decoded to the shape the row loop indexes, together
+/// with the source's own record of which rows carry nothing.
 ///
-/// The variants are the *source* shapes, not the declared types: several declarations read from
-/// one shape (every integer width from `Ints`), and the declaration decides what a row's value
-/// becomes, not what the file holds.
-enum BatchColumn {
+/// **The null buffer is kept rather than dropped, and that is the whole of decision 0062's build
+/// half.** Every numeric variant below is built from `values()`, which is the values buffer alone:
+/// a null slot holds whatever is in it, which for every Arrow numeric is `0`. Reading that back
+/// stores an item with no score as one scoring zero — present, and indistinguishable from a real
+/// zero — so it matches a range containing zero, which is a wrong answer rather than an absent
+/// feature. `NullBuffer` is an `Arc`'d bitmap, so carrying it costs a clone of a pointer.
+///
+/// The two families that already had somewhere to put absence keep doing so and do not consult
+/// this: a category spends the reserved code 0, and `Text` carries its own null through to
+/// `ScalarValue::Null`.
+struct BatchColumn {
+    nulls: Option<arrow::buffer::NullBuffer>,
+    values: BatchValues,
+}
+
+/// The *source* shapes, not the declared types: several declarations read from one shape (every
+/// integer width from `Ints`), and the declaration decides what a row's value becomes, not what the
+/// file holds.
+enum BatchValues {
     /// Category keys under a **declared** vocabulary, resolved per row: `value` looks each key up
     /// against `schema_decl` and refuses an unknown one (§5's declare-then-use).
     Keys(arrow::array::StringArray),
@@ -866,6 +882,19 @@ impl BatchColumn {
         attribute: &crate::schema::Attribute,
         minters: &mut HashMap<String, VocabularyMinter>,
     ) -> Result<Self> {
+        let nulls = column.nulls().cloned();
+        Ok(BatchColumn {
+            nulls,
+            values: Self::decode_values(path, column, attribute, minters)?,
+        })
+    }
+
+    fn decode_values(
+        path: &Path,
+        column: &arrow::array::ArrayRef,
+        attribute: &crate::schema::Attribute,
+        minters: &mut HashMap<String, VocabularyMinter>,
+    ) -> Result<BatchValues> {
         let mismatch = || BuildError::Schema {
             path: path.to_path_buf(),
             detail: format!(
@@ -913,17 +942,17 @@ impl BatchColumn {
                              have seeded it before this scan began"
                         )
                     });
-                    Ok(BatchColumn::Discovered(mint_batch(
+                    Ok(BatchValues::Discovered(mint_batch(
                         keys, minter, attribute,
                     )?))
                 }
                 // Declared (or a `values_of` share of one): resolved per row in `value`,
                 // unchanged from the declare-then-use rule.
-                _ => Ok(BatchColumn::Keys(keys.clone())),
+                _ => Ok(BatchValues::Keys(keys.clone())),
             };
         }
         Ok(match attribute.ty {
-            ScalarType::Bool => BatchColumn::Bool(
+            ScalarType::Bool => BatchValues::Bool(
                 any.downcast_ref::<arrow::array::BooleanArray>()
                     .ok_or_else(mismatch)?
                     .clone(),
@@ -934,7 +963,7 @@ impl BatchColumn {
             // produces the nearest value the declared width holds, which is what declaring `f32`
             // asks for. A caller who wants the precision declares `f64`.
             ScalarType::F32 => {
-                BatchColumn::F32(if let Some(a) = any.downcast_ref::<Float32Array>() {
+                BatchValues::F32(if let Some(a) = any.downcast_ref::<Float32Array>() {
                     a.values().to_vec()
                 } else if let Some(a) = any.downcast_ref::<Float64Array>() {
                     a.values().iter().map(|v| *v as f32).collect()
@@ -943,7 +972,7 @@ impl BatchColumn {
                 })
             }
             ScalarType::F64 => {
-                BatchColumn::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
+                BatchValues::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
                     a.values().to_vec()
                 } else if let Some(a) = any.downcast_ref::<Float32Array>() {
                     a.values().iter().map(|v| *v as f64).collect()
@@ -954,20 +983,20 @@ impl BatchColumn {
             // Reached only by a `filter`-only column: `render` on `utf8` is still refused at parse
             // (§4.3 — a non-fixed-width type in the hot column), but a filter column lives in
             // entity space and costs the hot column nothing.
-            ScalarType::Utf8 => BatchColumn::Text(
+            ScalarType::Utf8 => BatchValues::Text(
                 any.downcast_ref::<arrow::array::StringArray>()
                     .ok_or_else(mismatch)?
                     .clone(),
             ),
             // A `u64` declaration over a `u64` source keeps the full range; every other
             // combination widens, which is lossless for it.
-            ScalarType::U64 if any.is::<UInt64Array>() => BatchColumn::U64(
+            ScalarType::U64 if any.is::<UInt64Array>() => BatchValues::U64(
                 any.downcast_ref::<UInt64Array>()
                     .expect("checked by is::<>")
                     .values()
                     .to_vec(),
             ),
-            _ => BatchColumn::Ints(read_integer(any, column.data_type()).ok_or_else(mismatch)?),
+            _ => BatchValues::Ints(read_integer(any, column.data_type()).ok_or_else(mismatch)?),
         })
     }
 
@@ -977,19 +1006,33 @@ impl BatchColumn {
         attribute: &crate::schema::Attribute,
         schema_decl: &crate::schema::Schema,
     ) -> Result<ScalarValue> {
-        Ok(match self {
+        // **Absence, for every family that has no in-band marker.** The two that do are handled in
+        // their own arms below and never reach this: a category spends the reserved code 0, and
+        // `Text` carries the source's null through itself. Everything else is a number, whose every
+        // bit pattern is a legal value — so the source's null buffer is the only thing that
+        // distinguishes "carries no score" from "scores zero", and reading `values()` past it
+        // silently makes the two the same (decision 0062).
+        if self.nulls.as_ref().is_some_and(|n| n.is_null(row))
+            && !matches!(
+                self.values,
+                BatchValues::Keys(_) | BatchValues::Discovered(_) | BatchValues::Text(_)
+            )
+        {
+            return Ok(ScalarValue::Null);
+        }
+        Ok(match &self.values {
             // A null is *absent*; the empty string is a value the caller supplied. Carried apart
             // rather than folded together, because a string has no spare in-band value to spend on
             // absence the way a category spends code 0 — and folding them would report an item as
             // matching a value it does not have.
-            BatchColumn::Text(values) => {
+            BatchValues::Text(values) => {
                 if values.is_null(row) {
                     ScalarValue::Null
                 } else {
                     ScalarValue::Utf8(values.value(row).to_string())
                 }
             }
-            BatchColumn::Keys(keys) => {
+            BatchValues::Keys(keys) => {
                 let code = if keys.is_null(row) {
                     crate::schema::ABSENT_CODE
                 } else {
@@ -1015,12 +1058,12 @@ impl BatchColumn {
             }
             // Already resolved by `decode`'s mint pre-pass — a pure index, like every other
             // variant here, and no lookup against `schema_decl` at all.
-            BatchColumn::Discovered(codes) => code_as(attribute.ty, codes[row]),
-            BatchColumn::Bool(values) => ScalarValue::Bool(values.value(row)),
-            BatchColumn::U64(values) => ScalarValue::U64(values[row]),
-            BatchColumn::F32(values) => ScalarValue::F32(values[row]),
-            BatchColumn::F64(values) => ScalarValue::F64(values[row]),
-            BatchColumn::Ints(values) => {
+            BatchValues::Discovered(codes) => code_as(attribute.ty, codes[row]),
+            BatchValues::Bool(values) => ScalarValue::Bool(values.value(row)),
+            BatchValues::U64(values) => ScalarValue::U64(values[row]),
+            BatchValues::F32(values) => ScalarValue::F32(values[row]),
+            BatchValues::F64(values) => ScalarValue::F64(values[row]),
+            BatchValues::Ints(values) => {
                 let v = values[row];
                 let range = |min: i64, max: i64| narrow(v, min, max, attribute);
                 match attribute.ty {

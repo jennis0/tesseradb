@@ -86,6 +86,11 @@ used_for = ["filter"]
 name     = "score"
 type     = "i32"
 used_for = ["render", "filter"]
+
+[[attribute]]
+name     = "bonus"
+type     = "i32"
+used_for = ["filter"]
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -121,6 +126,20 @@ fn score_of(e: u64) -> i32 {
     (e as i32 * 7) % 100
 }
 
+/// A numeric column **with absences**, and the one place this corpus exercises them.
+///
+/// Every third item carries no bonus, and the values that *are* carried straddle zero — which is
+/// the whole point. Absence used to be stored as `0` and marked present (decision 0062), so an item
+/// with no bonus matched every range containing zero; a fixture whose values were all positive
+/// could not tell the two apart.
+fn bonus_of(e: u64) -> Option<i32> {
+    if e.is_multiple_of(3) {
+        None
+    } else {
+        Some((e as i32 % 21) - 10)
+    }
+}
+
 fn title_of(e: u64) -> String {
     format!("paper-{e:02}")
 }
@@ -134,6 +153,7 @@ fn write_points(path: &Path) {
         Field::new("archive", DataType::Utf8, true),
         Field::new("title", DataType::Utf8, true),
         Field::new("score", DataType::Int32, false),
+        Field::new("bonus", DataType::Int32, true),
     ]));
     let ids: Vec<u64> = (0..N).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
@@ -148,6 +168,7 @@ fn write_points(path: &Path) {
         .collect();
     let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
+    let bonuses: Vec<Option<i32>> = ids.iter().map(|&e| bonus_of(e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -158,6 +179,7 @@ fn write_points(path: &Path) {
             Arc::new(StringArray::from(archives)),
             Arc::new(StringArray::from(titles)),
             Arc::new(arrow::array::Int32Array::from(scores)),
+            Arc::new(arrow::array::Int32Array::from(bonuses)),
         ],
     )
     .unwrap();
@@ -545,11 +567,20 @@ fn ingest_and_flush(
     title: &str,
     score: i32,
 ) -> u64 {
-    ingest_and_flush_with(engine, external, department, WalScalar::U8(0), title, score)
+    ingest_and_flush_with(
+        engine,
+        external,
+        department,
+        WalScalar::U8(0),
+        title,
+        score,
+        WalScalar::Null,
+    )
 }
 
 /// As [`ingest_and_flush`], but naming the `public` column's value too — the case the routed filter
 /// and `/v1/categories`' extent sweep both have to see.
+#[allow(clippy::too_many_arguments)]
 fn ingest_and_flush_with(
     engine: &tessera_engine::Engine,
     external: &str,
@@ -557,6 +588,7 @@ fn ingest_and_flush_with(
     archive: WalScalar,
     title: &str,
     score: i32,
+    bonus: WalScalar,
 ) -> u64 {
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
@@ -573,6 +605,9 @@ fn ingest_and_flush_with(
             archive,
             WalScalar::Utf8(title.to_string()),
             WalScalar::I32(score),
+            // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
+            // how an ingested item says it carries no value for a column (decision 0062).
+            bonus,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -793,6 +828,81 @@ fn an_ingested_entity_with_no_value_is_absent_from_every_predicate_on_that_colum
             .unwrap()
             .contains(new),
         "the same flush's other columns still carry it"
+    );
+}
+
+/// **The flush writes absence the way the build does**, so a flushed item with no number and a
+/// built one answer a range identically.
+///
+/// The two write paths are separate code — `write_column_values` reads a `ScalarValue` out of a
+/// points file, `extent_values` reads a `WalScalar` out of the buffer — and the failure this pins is
+/// one of them treating every entity as present. That is invisible against the build's own items
+/// (they are in another layer) and shows up only where a range containing zero meets a flushed item
+/// with no value.
+#[test]
+fn a_flushed_item_with_no_number_matches_no_range_either() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-flush-absent");
+    let wal = fx._dir.path().join("wal-flush-absent");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let with_bonus = ingest_and_flush_with(
+        &engine,
+        "has-bonus",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "paper-90",
+        11,
+        WalScalar::I32(4),
+    ) as u32;
+    let without = ingest_and_flush_with(
+        &engine,
+        "no-bonus",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "paper-91",
+        12,
+        WalScalar::Null,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let range = |lo: i128, hi: i128| FilterOperand::Range {
+        lo: Some(Endpoint {
+            value: Scalar::Int(lo),
+            inclusive: true,
+        }),
+        hi: Some(Endpoint {
+            value: Scalar::Int(hi),
+            inclusive: true,
+        }),
+    };
+
+    let straddling_zero = generation
+        .filter_columns
+        .resolve("bonus", &range(-100, 100), &cand)
+        .unwrap();
+    assert!(
+        straddling_zero.contains(with_bonus),
+        "the flushed item that carries a bonus lost it"
+    );
+    assert!(
+        !straddling_zero.contains(without),
+        "a flushed item with no bonus matched a range containing zero"
+    );
+
+    // And the same flush's other columns still carry the item — absence in one column is not
+    // absence from the corpus.
+    assert!(
+        generation
+            .filter_columns
+            .resolve(
+                "title",
+                &FilterOperand::TextEquals("paper-91".into()),
+                &cand
+            )
+            .unwrap()
+            .contains(without),
+        "the item disappeared from a column it does carry a value for"
     );
 }
 
@@ -1048,7 +1158,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares four columns.
+        // The schema declares five columns.
         scalars: vec![WalScalar::Utf8("eng".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -1056,7 +1166,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
         .expect_err("a short row is refused");
     assert!(
-        format!("{err}").contains("carries 1 scalars, but the schema declares 4"),
+        format!("{err}").contains("carries 1 scalars, but the schema declares 5"),
         "{err}"
     );
 
@@ -1073,6 +1183,9 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
             WalScalar::Utf8("xx".to_string()),
             WalScalar::Utf8("paper-98".to_string()),
             WalScalar::I32(43),
+            // A value for every declared column, absence included: `bonus` is nullable and this
+            // row carries none, which is a complete row rather than a short one.
+            WalScalar::Null,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     };
@@ -1529,6 +1642,124 @@ fn a_numeric_range_agrees_with_the_corpus() {
     assert!(got.andnot(&cand).is_empty());
 }
 
+/// **An item with no value for a numeric column matches no range — including one containing zero.**
+///
+/// The bug this pins: absence was stored as `0` and marked present, so "score between −10 and 10"
+/// returned every item that never had a score. It is a wrong answer rather than a missing feature,
+/// which is why it is asserted against a range straddling zero rather than any range at all —
+/// against `[1, 10]` the broken and the fixed build agree, and the test would pass on both.
+///
+/// [Decision 0062]: absence is the presence bitmap beside the column, which is the same mechanism
+/// the other two families already use.
+///
+/// [Decision 0062]: ../../../../docs/decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md
+#[test]
+fn an_item_with_no_number_matches_no_range_not_even_one_containing_zero() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let straddling_zero = leaf(
+        "bonus",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(-10),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(10),
+                inclusive: true,
+            }),
+        },
+    );
+    let got = fx.columns.evaluate(&straddling_zero, &cand).unwrap();
+
+    // Every item that carries a bonus is inside [-10, 10] by construction, so this range is
+    // "everything with a value" — and the absent third must be missing from it.
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| bonus_of(e).is_some()),
+        "an item with no bonus matched a range containing zero"
+    );
+    // Non-degenerate: the fixture really does have absences, and really does have values that
+    // would land in the range if they were read.
+    assert!((0..N).any(|e| bonus_of(e).is_none()), "no absences to test");
+    assert!(
+        (0..N).any(|e| bonus_of(e) == Some(0)),
+        "no genuine zero to distinguish absence from"
+    );
+    // And a genuine zero still matches — the fix must not have thrown out the value with the
+    // absence, which an over-eager presence rule would.
+    let zero_only = leaf(
+        "bonus",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+        },
+    );
+    assert_eq!(
+        as_vec(&fx.columns.evaluate(&zero_only, &cand).unwrap()),
+        expected(&fx, &[ALL_TERM], |e| bonus_of(e) == Some(0)),
+        "a real zero stopped matching"
+    );
+}
+
+/// The presence bitmap and the value slots must stay in step: the *k*-th set bit's value is at slot
+/// *k*, so an absent entity occupying a slot would shift every later item's number onto its
+/// neighbour — every value present, none against its own identity, and no error anywhere.
+///
+/// Asserted by reading every entity's value back individually rather than through a predicate,
+/// because a uniform shift is exactly what a predicate over a whole column can miss.
+#[test]
+fn every_entity_reads_back_its_own_number_across_the_absences() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    for source in 0..N {
+        let Some(&entity) = fx.entity_of.get(&source) else {
+            continue;
+        };
+        let entity = entity as u32;
+        if !cand.contains(entity) {
+            continue;
+        }
+        let want = bonus_of(source);
+        // A one-value range is the narrowest question the numeric surface can ask.
+        let hit = |v: i32| {
+            let expr = leaf(
+                "bonus",
+                FilterOperand::Range {
+                    lo: Some(Endpoint {
+                        value: Scalar::Int(v as i128),
+                        inclusive: true,
+                    }),
+                    hi: Some(Endpoint {
+                        value: Scalar::Int(v as i128),
+                        inclusive: true,
+                    }),
+                },
+            );
+            fx.columns.evaluate(&expr, &cand).unwrap().contains(entity)
+        };
+        match want {
+            Some(v) => assert!(hit(v), "source {source} (entity {entity}) lost its bonus {v}"),
+            None => {
+                for v in -10..=10 {
+                    assert!(
+                        !hit(v),
+                        "source {source} (entity {entity}) has no bonus but matched {v}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// An open side is a bound on one end only.
 #[test]
 fn an_open_ended_range_bounds_one_side() {
@@ -1741,6 +1972,7 @@ fn a_routed_public_category_unions_the_postings_with_every_extent() {
         WalScalar::Utf8("xx".to_string()),
         "routed-alpha",
         1,
+        WalScalar::Null,
     ) as u32;
     let second = ingest_and_flush_with(
         &engine,
@@ -1749,6 +1981,7 @@ fn a_routed_public_category_unions_the_postings_with_every_extent() {
         WalScalar::Utf8("yy".to_string()),
         "routed-beta",
         2,
+        WalScalar::Null,
     ) as u32;
     // `ww` is declared and carried by nothing in the build, so this entity is its *only* member —
     // the case a postings-only answer gets exactly backwards.
@@ -1759,6 +1992,7 @@ fn a_routed_public_category_unions_the_postings_with_every_extent() {
         WalScalar::Utf8("ww".to_string()),
         "routed-gamma",
         3,
+        WalScalar::Null,
     ) as u32;
 
     let (generation, cand) = live_candidate(&engine);
@@ -2036,6 +2270,7 @@ fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
         WalScalar::U8(0),
         "ops-paper",
         9,
+        WalScalar::Null,
     );
 
     assert_eq!(
@@ -2182,6 +2417,7 @@ fn a_folded_bundle_answers_every_filter_it_answered_before() {
         WalScalar::Utf8("xx".to_string()),
         "paper-77",
         42,
+        WalScalar::Null,
     ) as u32;
 
     let (generation, cand) = live_candidate(&engine);
@@ -2250,6 +2486,7 @@ fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
         WalScalar::Utf8("zz".to_string()),
         "paper-88",
         11,
+        WalScalar::Null,
     );
     fold(&engine);
     let (generation, cand) = live_candidate(&engine);
@@ -2480,6 +2717,7 @@ fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed()
         WalScalar::Utf8("yy".to_string()),
         "paper-66",
         7,
+        WalScalar::Null,
     ) as u32;
     engine.set_fold_paused_for_test(false);
     loop {
@@ -2635,6 +2873,7 @@ fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Ve
                 WalScalar::Utf8(["xx", "yy", "zz"][i % 3].to_string()),
                 &format!("{tag}-title-{i:02}"),
                 1_000 + i as i32,
+                WalScalar::Null,
             )
         })
         .collect();

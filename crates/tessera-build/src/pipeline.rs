@@ -1627,14 +1627,23 @@ fn write_column_values(
             push!(category_chunk(attribute.ty, &held));
         }
     } else {
-        // **A plain numeric has no absent representation, and that is a real gap rather than a
-        // simplification.** A category spends the reserved code 0 and a string carries a null; an
-        // integer column's every bit pattern is a legal value, so nothing distinguishes "carries
-        // no score" from "carries 0". The attribute reader initialises unset slots to the type's
-        // zero, so every entity is treated as present with whatever it holds. The consequence is
-        // bounded and stated rather than hidden: an item with no value for a numeric column
-        // matches a range containing zero. Fixing it needs the same null-aware attribute reader
-        // the string column's ⊘ names, and the presence bitmap is already there to receive it.
+        // **A number's absence is the presence bitmap, because a number has no spare value to
+        // spend** (decision 0062). A category reserves code 0 out of its vocabulary and a string
+        // carries an explicit null; every bit pattern of an integer is a legal integer, so there is
+        // nothing in band to mean "no score". The bitmap beside the column is where it goes, which
+        // is the same mechanism the other two families already use — so absence has one
+        // representation across all three rather than three.
+        //
+        // Reached only where the source said so: `BatchColumn::value` returns `ScalarValue::Null`
+        // for a null slot and the values buffer's zero otherwise, which is the distinction that
+        // used to be dropped at decode.
+        for (entity, value) in values.iter().enumerate() {
+            if matches!(value, ScalarValue::Null) {
+                universal = false;
+            } else {
+                present.add(entity as u32);
+            }
+        }
         push_numeric_chunks(&mut writer, values_path, attribute, values)?;
     }
     let presence = (!universal).then_some(&present);
@@ -1693,8 +1702,11 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
 
 /// One numeric column's values, at the declared width, pushed in bounded chunks.
 ///
-/// Every entity is present: see [`write_column_values`]'s note on why a plain numeric has no absent
-/// representation yet.
+/// **`ScalarValue::Null` is skipped, not pushed**, which is what makes the slot addressing agree
+/// with the presence bitmap [`write_column_values`] builds alongside: the *k*-th set bit's value is
+/// at slot *k* (filter-index §2.1), so an absent entity must occupy no slot. Pushing a placeholder
+/// instead would shift every later value along by one — every entity after the first absent one
+/// reporting its neighbour's number, with no error anywhere.
 fn push_numeric_chunks(
     writer: &mut ValueColumnWriter,
     values_path: &Path,
@@ -1707,6 +1719,8 @@ fn push_numeric_chunks(
             for v in values {
                 match v {
                     ScalarValue::$variant(x) => out.push($map(*x)),
+                    // No slot at all — see this function's doc.
+                    ScalarValue::Null => continue,
                     other => {
                         return Err(BuildError::Invalid(format!(
                             "attribute '{}' is declared {:?} but carries {other:?}",
@@ -1818,7 +1832,12 @@ fn permute_attribute_tail(
         let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
         for &entity in entity_row {
             column
-                .push(values[entity as usize].clone(), &attribute.name)
+                .push(
+                    // A render column is non-nullable, so an absent value is drawn at the type's
+                    // zero until decision 0062's render half lands — see `or_render_placeholder`.
+                    values[entity as usize].or_render_placeholder(attribute.ty),
+                    &attribute.name,
+                )
                 .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))?;
         }
         out.push((attribute.name.clone(), column));

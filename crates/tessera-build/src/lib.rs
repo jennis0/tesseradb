@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 
 use tessera_authz::{write_postings, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
-use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
+use tessera_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
@@ -530,13 +530,25 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // Narrow each item's scalars to the render columns, in declaration order, so they align with
     // `scalar_schema_of`'s filtered list. Done after the filter emit above, which needs every
     // declared column including the `filter`-only ones.
-    if args.schema.attributes.iter().any(|a| !a.render) {
-        let keep: Vec<bool> = args.schema.attributes.iter().map(|a| a.render).collect();
+    //
+    // **Unconditional, where it used to be skipped when every column rendered.** It also
+    // substitutes the render placeholder for an absent value: `columns.arrow` is non-nullable
+    // (contracts R4), and a `ScalarValue::Null` reaching its writer is a typed error rather than a
+    // drawn point. See `ScalarValue::or_render_placeholder` for what is lost and why decision 0062
+    // defers recovering it.
+    {
+        let render: Vec<(bool, ScalarType)> = args
+            .schema
+            .attributes
+            .iter()
+            .map(|a| (a.render, a.ty))
+            .collect();
         for item in &mut tiler_items {
-            let mut kept = Vec::with_capacity(keep.iter().filter(|k| **k).count());
+            let mut kept = Vec::with_capacity(render.iter().filter(|(k, _)| *k).count());
             for (i, v) in item.scalars.iter().enumerate() {
-                if keep[i] {
-                    kept.push(v.clone());
+                let (keep, ty) = render[i];
+                if keep {
+                    kept.push(v.or_render_placeholder(ty));
                 }
             }
             item.scalars = kept;

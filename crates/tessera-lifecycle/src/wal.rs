@@ -128,6 +128,17 @@ pub enum WalScalar {
     /// Microseconds since the Unix epoch — an `i64` whose unit the declaration fixes.
     TimestampUs(i64),
     Utf8(String),
+    /// **No value at all** — `tessera_spatial::ScalarValue::Null`'s mirror, and the reason this
+    /// enum has one is that the ingest plane needs to say what the build's source file can already
+    /// say.
+    ///
+    /// A category never travels as this: its absence is the reserved code 0, in band, because a
+    /// vocabulary keeps 0 out of its value space. Every other family has no spare value to spend —
+    /// every bit pattern of a number is a legal number, and the empty string is one a corpus may
+    /// hold — so absence has to travel beside the value rather than inside it. Without this variant
+    /// an item ingested with no score is stored as `0` and marked present, and then matches a range
+    /// containing zero ([decision 0062](../../../docs/decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md)).
+    Null,
 }
 
 /// One item within an `IngestBatch` record.
@@ -356,8 +367,11 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// enum in width order, which renumbers `F32` and `Utf8`; appending them instead would have kept
 /// the discriminants stable for a reader that does not exist (decision 0048), at the price of two
 /// mirrored enums whose orders disagree. Version 7 completed the set — `bool`, the three narrow
-/// signed widths, `f64` and `timestamp_us` — renumbering it again, for the same reason.
-const WAL_VERSION: u16 = 8;
+/// signed widths, `f64` and `timestamp_us` — renumbering it again, for the same reason. Version 9
+/// adds [`WalScalar::Null`], so the ingest plane can say "this item carries no value for that
+/// column" — appended after `Utf8` because that is where `ScalarValue::Null` sits in the enum this
+/// one mirrors, so no existing discriminant moves and the two still agree variant for variant.
+const WAL_VERSION: u16 = 9;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

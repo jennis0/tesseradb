@@ -299,7 +299,9 @@ pub(crate) fn execute_flush(
     let mut rows: Vec<FlushRow> = Vec::with_capacity(plan.items.len());
     for (entity, item) in &plan.items {
         let mut scalars = Vec::with_capacity(ctx.render_indices.len());
-        for &index in &ctx.render_indices {
+        // `scalar_schema` is positionally parallel to `render_indices` — both are the render subset
+        // in declaration order — so this zip pairs each value with its own column's type.
+        for (&index, (_, ty)) in ctx.render_indices.iter().zip(&ctx.scalar_schema) {
             let value = item.scalars.get(index).ok_or_else(|| {
                 FlushFailed(format!(
                     "a buffered row carries {} scalars, but a render column is declared at \
@@ -307,7 +309,11 @@ pub(crate) fn execute_flush(
                     item.scalars.len()
                 ))
             })?;
-            scalars.push(to_scalar_value(value));
+            // Non-nullable on the render side (contracts R4): an item that carries no value for
+            // this column is drawn at the type's zero until decision 0062's render half lands. The
+            // *filter* extent written from the same buffered row does record the absence, which is
+            // the narrowing disagreement `or_render_placeholder` documents.
+            scalars.push(to_scalar_value(value).or_render_placeholder(*ty));
         }
         rows.push(FlushRow {
             entity_id: *entity,
@@ -646,9 +652,10 @@ fn write_filter_extents(
 /// read different shapes: the build reads a `ScalarValue` out of a points file, and this reads the
 /// `WalScalar` the buffer holds, on the other side of a crate boundary the layer script draws. A
 /// category spends the reserved code 0, which its vocabulary keeps out of the value space, so an
-/// item carrying it gets no slot at all. Every other family carries a value for every row the
-/// ingest plane accepted — `WalScalar` has no null, and contracts §2.4 refuses the empty string on
-/// that plane — so presence is the flush's whole entity set.
+/// item carrying it gets no slot at all. Every other family has no spare value to spend — every bit
+/// pattern of a number is a legal number, and contracts §2.4 refuses the empty string on the ingest
+/// plane precisely because an unset field and a client bug both produce it — so absence travels as
+/// `WalScalar::Null` and lands in the presence bitmap (decision 0062).
 ///
 /// A value of the wrong shape for its declared column **fails the flush** rather than being
 /// dropped: the commit window narrows a category key to its declared width before the row is
@@ -690,6 +697,11 @@ fn extent_values(
     if spec.ty == ScalarType::Utf8 {
         let mut held: Vec<String> = Vec::with_capacity(entities.len());
         for (entity, value) in entities {
+            // No slot for an absent value — the k-th set bit's value is at slot k, so a
+            // placeholder here would shift every later entity's string onto its neighbour.
+            if matches!(value, WalScalar::Null) {
+                continue;
+            }
             let WalScalar::Utf8(text) = value else {
                 return Err(wrong(value));
             };
@@ -706,6 +718,9 @@ fn extent_values(
                 WalScalar::U8(c) => u32::from(*c),
                 WalScalar::U16(c) => u32::from(*c),
                 WalScalar::U32(c) => *c,
+                // The ingest plane resolves a null key to the reserved code, so this arm is
+                // belt-and-braces rather than the live route — and it lands on the same answer.
+                WalScalar::Null => tessera_store::vocabulary::ABSENT_CODE,
                 other => return Err(wrong(other)),
             };
             if code == tessera_store::vocabulary::ABSENT_CODE {
@@ -728,16 +743,17 @@ fn extent_values(
         return Ok((codes, presence));
     }
 
-    // A plain numeric: every entity is present, carrying whatever it holds. The build has the same
-    // shape and the same gap — no bit pattern is spare, so nothing distinguishes "carries no score"
-    // from "carries 0" — and an extent inventing a presence rule the base column does not have
-    // would make one flush's entities answer a range differently from the build's.
+    // A plain numeric: absent where the item carried no value, present otherwise — the same rule
+    // the batch build writes by (`tessera-build`'s `write_column_values`), so a flushed entity and a
+    // built one answer a range identically. An extent that treated every entity as present would
+    // make one flush's items match a range containing zero while the base's did not.
     macro_rules! gather {
         ($variant:ident, $ctor:expr) => {{
             let mut held = Vec::with_capacity(entities.len());
             for (entity, value) in entities {
                 match value {
                     WalScalar::$variant(x) => held.push(*x),
+                    WalScalar::Null => continue,
                     other => return Err(wrong(other)),
                 }
                 presence.add(entity);
@@ -751,6 +767,7 @@ fn extent_values(
             for (entity, value) in entities {
                 match value {
                     WalScalar::Bool(b) => held.push(u8::from(*b)),
+                    WalScalar::Null => continue,
                     other => return Err(wrong(other)),
                 }
                 presence.add(entity);
@@ -794,6 +811,7 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
             match scalar {
                 $(WalScalar::$v(x) => ScalarValue::$v(*x),)*
                 WalScalar::Utf8(x) => ScalarValue::Utf8(x.clone()),
+                WalScalar::Null => ScalarValue::Null,
             }
         };
     }

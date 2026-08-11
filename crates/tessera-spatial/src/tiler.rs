@@ -40,6 +40,49 @@ pub enum ScalarValue {
     Null,
 }
 
+impl ScalarValue {
+    /// This value as a **render** column holds it — `columns.arrow`, which is contractually
+    /// non-nullable (contracts R4) and has nowhere to put [`ScalarValue::Null`].
+    ///
+    /// ⊘ **Absence is lost here, deliberately and visibly.** [Decision 0062] rules that a render
+    /// column records absence in a presence bitmap beside it, exactly as a filter column does, and
+    /// **defers the render half while the client is under active development**: it needs a file, a
+    /// manifest entry, a way for the points batch to say "absent", and a client that understands
+    /// it. Until that lands an absent number is drawn at the type's zero, so the two artefacts
+    /// disagree — the filter says an item has no score while the map draws it at 0. That is a
+    /// *narrowing* disagreement (**I12**: the filter shows fewer items, never more), which is why
+    /// it is a stated residual rather than a blocker.
+    ///
+    /// This function is the one place that substitution happens, so the three render paths — the
+    /// linear build, the streaming build and the flush — cannot come to disagree about it, and so
+    /// the render half has one call site to delete when it lands.
+    ///
+    /// [Decision 0062]: ../../../docs/decisions/0062-an-absent-number-is-a-presence-bitmap-beside-the-column.md
+    pub fn or_render_placeholder(&self, ty: ScalarType) -> ScalarValue {
+        if !matches!(self, ScalarValue::Null) {
+            return self.clone();
+        }
+        match ty {
+            ScalarType::Bool => ScalarValue::Bool(false),
+            ScalarType::U8 => ScalarValue::U8(0),
+            ScalarType::U16 => ScalarValue::U16(0),
+            ScalarType::U32 => ScalarValue::U32(0),
+            ScalarType::U64 => ScalarValue::U64(0),
+            ScalarType::I8 => ScalarValue::I8(0),
+            ScalarType::I16 => ScalarValue::I16(0),
+            ScalarType::I32 => ScalarValue::I32(0),
+            ScalarType::I64 => ScalarValue::I64(0),
+            ScalarType::F32 => ScalarValue::F32(0.0),
+            ScalarType::F64 => ScalarValue::F64(0.0),
+            ScalarType::TimestampUs => ScalarValue::TimestampUs(0),
+            // Unreachable in practice — `render` on `utf8` is refused at schema parse — and the
+            // empty string rather than a panic, because this function's whole job is to keep a
+            // non-nullable column writable.
+            ScalarType::Utf8 => ScalarValue::Utf8(String::new()),
+        }
+    }
+}
+
 /// The Arrow type of a declared scalar column, used to build `columns.arrow`'s schema
 /// (`scalar_schema` in [`crate::tiler`]'s consumers, e.g. `tessera_store::write::write_segment`).
 ///
