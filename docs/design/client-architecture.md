@@ -161,9 +161,11 @@ fidelity assertions range over one structure instead of three reconstructions.
 
 Two constructions this hardens, per the review's Question E audit: the ascending-id premise
 every prefix operation rests on gains its assertion at `bandSplitter` (wire order, checked
-once, everything downstream is construction); and the fold filter's float-recovered tile
-indices are replaced by the composition's own integer grid, closing the boundary-mark leak
-`rects.ts` bans in its own domain.
+once, everything downstream is construction); and the *band-level* supersession tests move to
+the integer tile grid. The *per-mark* ancestor filter remains positional — `floor(f32/span)` —
+so a boundary mark can land one tile over: kept over exact ground it double-draws one point,
+dropped over open ground it thins by one. Both tiers use the same test, so they cannot
+disagree; the residue is cosmetic, measure-zero, and accepted rather than closed.
 
 `tessera-vis` consumes the draw list: concatenation, colours, slab writes. Nothing in it
 subsets data again.

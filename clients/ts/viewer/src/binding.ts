@@ -85,8 +85,12 @@ export class DriverBinding {
     this.pending = null;
   }
 
-  /** Verdicts coalesce to one application per animation frame; the newest wins. */
+  /** Verdicts coalesce to one application per animation frame; the newest wins — except that a
+   * fold never replaces a pending derive: the fold's contract is that its information may ride
+   * one step stale, while a dropped derive would leave the driver's presented handle describing
+   * a frame the screen never showed. */
   private apply(verdict: Verdict): void {
+    if (this.pending?.tier === 'derive' && verdict.tier === 'fold') return;
     this.pending = verdict;
     if (this.raf !== null) return;
     this.raf = requestAnimationFrame(() => {

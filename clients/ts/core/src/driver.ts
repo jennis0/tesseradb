@@ -136,6 +136,20 @@ export class Driver {
   private settleDeadline = 0;
   private lastFullDeriveAt = 0;
 
+  /**
+   * The banked-calibration release. A settle marks the bank ready; the next `schedule` — motion,
+   * by construction — suspends the depth-hold so the calibrated depth can win, and the derive
+   * that adopts a depth re-arms the hold by becoming the new `presented`. Without this the hold
+   * fed itself forever and the bidirectional calibration was inert (review finding 1): every
+   * plan held to `presented.depth`, and the derive the hold forced wrote that same depth back.
+   * At rest the hold never releases, which is what keeps marks from popping with no user action.
+   */
+  private bankReady = false;
+  private holdSuspended = false;
+
+  /** The counts-only refresh's own slot — never the foreground's (D2; review finding 3). */
+  private revalidating: AbortController | null = null;
+
   // Anticipation.
   private idleHandle: unknown = null;
   private background: AbortController | null = null;
@@ -179,7 +193,7 @@ export class Driver {
       velocity,
       heldBytes: this.replica.bytes,
       budgetBytes: this.replica.budgetBytes,
-      holdDepth: this.presented?.depth
+      holdDepth: this.holdSuspended ? undefined : this.presented?.depth
     };
     return plan(inputs);
   }
@@ -191,6 +205,10 @@ export class Driver {
   /** Every view-state change enters here. */
   schedule(view: ViewState, width: number, height: number): void {
     const now = this.clock.now();
+    if (this.bankReady) {
+      this.holdSuspended = true;
+      this.bankReady = false;
+    }
     this.lastView = view;
     this.width = width;
     this.height = height;
@@ -219,6 +237,9 @@ export class Driver {
     }
 
     if (this.covers(view)) {
+      // The unheld plan agreed with the presented depth: nothing banked mattered, and a latched
+      // suspension would leave later at-rest plans unheld — the pop risk the hold prevents.
+      this.holdSuspended = false;
       this.trace('covered', {depth: this.heldBbox?.depth ?? -1});
       this.movedAt = 0;
       // D2 (latency-neutral staleness): the covered path is where a warm client lives, so it is
@@ -267,11 +288,18 @@ export class Driver {
       handle.version === this.replica.version &&
       (trigger !== 'settle' || !handle.standInStale)
     ) {
+      // A settle that found nothing to do still readies the bank: calibration corrections from
+      // the arrivals before it apply on the next motion.
+      if (trigger === 'settle') this.bankReady = true;
+      // Reuse under an unheld plan is agreement — the suspension has done its job.
+      this.holdSuspended = false;
       this.trace('reuse', {depth: handle.depth});
       return;
     }
 
     if (covered && trigger !== 'settle') {
+      // Covered under an unheld plan means the depths agree — the suspension has done its job.
+      this.holdSuspended = false;
       this.presented = {...handle, version: this.replica.version, standInStale: true};
       this.events.onFrame({tier: 'fold', plan: planned});
       this.scheduleSettle();
@@ -291,6 +319,10 @@ export class Driver {
       version: frame.version,
       standInStale: false
     };
+    // A derive adopted a depth: the hold re-arms around it, and a completed settle readies the
+    // bank so the next motion can adopt a recalibrated depth.
+    this.holdSuspended = false;
+    if (trigger === 'settle') this.bankReady = true;
     this.events.onFrame({tier: 'derive', plan: planned, frame});
   }
 
@@ -311,23 +343,23 @@ export class Driver {
     );
   }
 
-  /** D2: fire the counts-only refresh only when the foreground slot is otherwise idle. */
+  /**
+   * D2: the counts-only refresh runs in its own slot, started only when everything is idle and
+   * aborted the moment a real fetch wants the wire — it may never occupy the foreground slot,
+   * because `inFlightUseful` would then queue a user's pan behind it (review finding 3).
+   */
   private revalidateIfDue(view: ViewState): void {
-    if (this.inFlight || this.queued || !this.replica.dueForRevalidation()) return;
+    if (this.inFlight || this.queued || this.revalidating) return;
+    if (!this.replica.dueForRevalidation()) return;
     const planned = this.planFor(view);
     const controller = new AbortController();
-    this.inFlight = controller;
-    this.inFlightAt = {rect: planned.render, depth: planned.choice.depth, since: this.clock.now()};
+    this.revalidating = controller;
     void this.replica
       .fetchRegion(planned.visible.rect, planned.choice.depth, this.meta.kMaxMarks, controller.signal, planned.render, undefined, false)
       .then(() => this.trace('revalidate', {depth: planned.choice.depth}))
       .catch(() => {})
       .finally(() => {
-        if (this.inFlight === controller) {
-          this.inFlight = null;
-          this.inFlightAt = null;
-          this.dispatchQueued();
-        }
+        if (this.revalidating === controller) this.revalidating = null;
       });
   }
 
@@ -377,6 +409,8 @@ export class Driver {
     this.retryHandle = null;
     this.background?.abort();
     this.background = null;
+    this.revalidating?.abort();
+    this.revalidating = null;
     this.inFlight?.abort();
     this.inFlight = null;
     this.inFlightAt = null;
@@ -439,6 +473,10 @@ export class Driver {
     const planned = this.planFor(view);
     const choice: DepthChoice = planned.choice;
 
+    // A real fetch displaces a running revalidation unconditionally — the refresh is the one
+    // request the user must never wait behind.
+    this.revalidating?.abort();
+    this.revalidating = null;
     if (this.inFlight && this.inFlightUseful(planned.render, choice.depth)) {
       this.queued = view;
       return;
@@ -498,13 +536,15 @@ export class Driver {
       );
       this.events.onStatus?.(actual === 0 && visible === 0 ? 'empty' : 'shown');
       this.movedAt = 0;
-      this.inFlight = null;
       if (this.queued) {
+        this.inFlight = null;
         this.dispatchQueued();
         return;
       }
 
-      // The margin leg — an explicit phase of the lifecycle, superseded by a queued view.
+      // The margin leg — an explicit phase of the lifecycle, still owning the foreground slot so
+      // a new request supersedes it through the same abort it would use on the primary; its
+      // failure or supersession must not touch the *new* request's bookkeeping (review finding 7).
       if (planned.foreground.rect !== planned.visible.rect) {
         try {
           await this.replica.fetchRegion(
@@ -522,6 +562,8 @@ export class Driver {
           // Already drawn; the margin buys the next gesture, not this one.
         }
       }
+      if (generation !== this.generation) return;
+      this.inFlight = null;
       this.dispatchQueued();
     } catch (error) {
       if (controller.signal.aborted || generation !== this.generation) return;

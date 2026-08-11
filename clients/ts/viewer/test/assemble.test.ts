@@ -207,10 +207,15 @@ describe('assemble', () => {
 });
 
 describe('assertAssemblyMatchesServed', () => {
-  it('throws when an exact tile draws fewer marks than were served', () => {
+  it('demotes a short band to a stand-in rather than failing the served count', () => {
+    // A band holding fewer marks than `served` is what eviction truncation produces; counting it
+    // exact made this assert a crash-per-paint loop under memory pressure (review finding 2).
+    // Its head draws as a stand-in — counts suppressed — and the equality's domain excludes it.
     const short = band(2, 0n, 2, 3); // holds 2, server said it served 3
     const out = assemble(frame(2, [short]));
-    expect(() => assertAssemblyMatchesServed(out)).toThrow(/assembly: drawing 2 marks/);
+    expect(out.exactDrawn).toBe(0);
+    expect(out.provisional).toBe(2);
+    expect(() => assertAssemblyMatchesServed(out)).not.toThrow();
   });
 
   it('throws when a provisional tile carries counts', () => {

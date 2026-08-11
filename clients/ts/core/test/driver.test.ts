@@ -77,7 +77,7 @@ function fakeClock(): Clock & {advance(ms: number): Promise<void>; t(): number} 
 function harness(opts: {
   revalidateAfterMs?: number;
   fail?: (call: number) => boolean;
-  hang?: (call: number) => boolean;
+  hang?: (call: number, k?: number) => boolean;
 } = {}) {
   const clock = fakeClock();
   const calls: {zoom: number; k?: number; background?: boolean}[] = [];
@@ -87,7 +87,7 @@ function harness(opts: {
     async (req, _signal, background) => {
       const n = calls.length;
       calls.push({zoom: req.zoom, k: req.k, background});
-      if (opts.hang?.(n)) await new Promise<void>((resolve) => hung.push(resolve));
+      if (opts.hang?.(n, req.k)) await new Promise<void>((resolve) => hung.push(resolve));
       if (opts.fail?.(n)) throw new TesseraError(429, 'shed', 'saturated');
       return emptyResponse();
     },
@@ -222,5 +222,37 @@ describe('driver', () => {
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(10);
     expect(h.calls.filter((c) => c.k === 0)).toHaveLength(0);
+  });
+
+  it('a real fetch never queues behind a running revalidation — it displaces it', async () => {
+    // Review finding 3: the refresh in the foreground slot made a warm-cache pan wait out a
+    // full counting pass. It has its own slot now, and a request aborts it on sight.
+    const h = harness({revalidateAfterMs: 1, hang: (_n, k) => k === 0});
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(3_000); // cold fetch settles; revalidation becomes due
+    h.driver.schedule(h.view, 400, 300); // covered pan starts the (hanging) k=0 refresh
+    await h.clock.advance(100);
+    const before = h.calls.length;
+    // A jump to novel ground must go straight to the wire, not into the queued slot.
+    h.driver.schedule({target: [400, 400, 0], zoom: 6}, 400, 300);
+    await h.clock.advance(600);
+    expect(h.calls.length).toBeGreaterThan(before);
+  });
+
+  it('a settle readies the bank and the next motion suspends the depth-hold once', async () => {
+    // Review finding 1: nothing released the hold, so the derive it forced wrote the held depth
+    // back into `presented` and banked calibration was inert. The mechanics pinned here: settle
+    // sets the bank, the next schedule consumes it into a one-shot suspension, and the derive
+    // that adopts a depth re-arms the hold. (The end-to-end density-boundary test needs an
+    // in-bbox serving fixture — a recorded follow-up, not a substitute for this.)
+    const h = harness();
+    const d = h.driver as unknown as {bankReady: boolean; holdSuspended: boolean};
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(3_000); // fetch + settle
+    expect(d.bankReady).toBe(true);
+    h.driver.schedule({target: [0.6, 0.5, 0], zoom: h.view.zoom}, 400, 300);
+    expect(d.bankReady).toBe(false);
+    await h.clock.advance(3_000); // the motion resolves at some tier; the hold re-arms
+    expect(d.holdSuspended).toBe(false);
   });
 });

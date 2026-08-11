@@ -82,8 +82,18 @@ export function compose(frame: ReplicaFrame): Composition {
   let exactServed = 0;
   let visibleInView = 0;
 
+  // **A truncated band is not exact.** Eviction keeps a band's head and its `served` figure;
+  // counting it exact would fail the drawn-equals-served fidelity check on every paint until the
+  // refetch heals it — a crash loop under exactly the memory pressure eviction exists for. Its
+  // head is still an id-order prefix, so it is demoted to a stand-in over its own tile: drawn,
+  // stale-marked, counts suppressed, refetched when its ground is next planned.
+  const truncated: Band[] = [];
   for (const band of frame.exact) {
     if (band.ids.length === 0) continue;
+    if (band.ids.length < band.served) {
+      truncated.push(band);
+      continue;
+    }
     exact.push(band);
     exactDrawn += band.ids.length;
     exactServed += band.served;
@@ -99,10 +109,16 @@ export function compose(frame: ReplicaFrame): Composition {
 
   const dim = 2 ** frame.depth;
   const exactTiles = exactTileSet(exact, dim);
+  // A truncated head still answers its tile for supersession: without this, held descendants
+  // would draw over the same ground and the patch reads dense-then-thin instead of loading.
+  for (const band of truncated) exactTiles.add(band.x * dim + band.y);
   const span = WORLD_SIZE / dim;
 
   const pieces: StandInPiece[] = [];
   const groups = new Map<bigint, number[]>();
+  for (const band of truncated) {
+    pieces.push({band, indices: null, limit: band.ids.length});
+  }
   for (const {band, clip} of frame.fallback) {
     if (band.depth > frame.depth) {
       const shift = band.depth - frame.depth;
@@ -181,6 +197,7 @@ export function compose(frame: ReplicaFrame): Composition {
 export function fold(held: Composition, exact: Band[], version: number): Composition {
   const tiles: ComposedTile[] = [];
   const live: Band[] = [];
+  const truncated: Band[] = [];
   let exactDrawn = 0;
   let exactServed = 0;
   let visibleInView = 0;
@@ -188,6 +205,11 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
   const span = WORLD_SIZE / dim;
   for (const band of exact) {
     if (band.ids.length === 0) continue;
+    if (band.ids.length < band.served) {
+      // Same demotion as {@link compose}: eviction's head is a stand-in now, never exact.
+      truncated.push(band);
+      continue;
+    }
     live.push(band);
     exactDrawn += band.ids.length;
     exactServed += band.served;
@@ -201,13 +223,17 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
     });
   }
   const exactTiles = exactTileSet(live, dim);
+  // As in {@link compose}: a truncated head answers its tile for supersession purposes.
+  for (const band of truncated) exactTiles.add(band.x * dim + band.y);
 
   let standIn = held.standIn;
-  let provisional = held.provisional;
-  if (exactTiles.size > 0) {
-    let changed = false;
-    const kept: StandInPiece[] = [];
-    provisional = 0;
+  if (exactTiles.size > 0 || truncated.length > 0) {
+    let changed = truncated.length > 0;
+    const kept: StandInPiece[] = truncated.map((band) => ({
+      band,
+      indices: null,
+      limit: band.ids.length
+    }));
     for (const piece of held.standIn) {
       const band = piece.band;
       if (band.depth > held.depth) {
@@ -217,7 +243,15 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
           continue;
         }
         kept.push(piece);
-        provisional += piece.limit;
+        continue;
+      }
+      if (band.depth === held.depth) {
+        // A carried truncated head; superseded if its tile has become exact.
+        if (exactTiles.has(band.x * dim + band.y)) {
+          changed = true;
+          continue;
+        }
+        kept.push(piece);
         continue;
       }
       const filtered = filterAncestor(band, piece.indices, exactTiles, dim, span);
@@ -228,19 +262,18 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
       }
       if (filtered !== piece.indices) changed = true;
       kept.push(filtered === piece.indices ? piece : {band, indices: filtered, limit: length});
-      provisional += length;
     }
     if (changed) standIn = kept;
-    else provisional = held.provisional;
   }
 
-  // Stale stand-in tile entries do not ride along: an entry whose ground is now exact would make
-  // every per-tile reader — the density audit first among them — sum marks that are not drawn.
-  const liveBands = new Set<Band>(standIn.map((p) => p.band));
-  for (const tile of held.tiles) {
-    if (tile.exact) continue;
-    const band = standInBandOf(held, tile);
-    if (band && liveBands.has(band)) tiles.push(tile);
+  // Non-exact tile entries are rebuilt from the pieces that actually survived — a carried entry
+  // keeps a `drawn` its refiltered piece no longer has, and every per-tile reader (the density
+  // audit first among them) would sum marks that are not drawn.
+  let provisional = 0;
+  for (const piece of standIn) {
+    const drawn = piece.indices ? Math.min(piece.indices.length, piece.limit) : piece.limit;
+    provisional += drawn;
+    tiles.push({prefix: piece.band.prefix, depth: piece.band.depth, exact: false, drawn, counts: null});
   }
 
   return {
@@ -256,31 +289,6 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
     provisional,
     standInStale: true
   };
-}
-
-/** The band behind a held stand-in tile entry, for the fold's carried-entry filter. */
-function standInBandOf(held: Composition, tile: ComposedTile): Band | undefined {
-  // Entries and pieces are created in step; a linear scan would be O(n^2) across the fold, so
-  // the map is built once per fold call by the caller pattern below.
-  return bandByTile(held).get(tileKeyOf(tile));
-}
-
-const bandTileCache = new WeakMap<Composition, Map<string, Band>>();
-
-function tileKeyOf(tile: ComposedTile): string {
-  return `${tile.depth}:${tile.prefix}`;
-}
-
-function bandByTile(held: Composition): Map<string, Band> {
-  let map = bandTileCache.get(held);
-  if (!map) {
-    map = new Map();
-    for (const piece of held.standIn) {
-      map.set(`${piece.band.depth}:${piece.band.prefix}`, piece.band);
-    }
-    bandTileCache.set(held, map);
-  }
-  return map;
 }
 
 /** Ancestor marks over exact tiles are dropped — the same integer-grid test at both tiers. */
