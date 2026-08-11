@@ -445,6 +445,30 @@ impl std::fmt::Display for FilterError {
     }
 }
 
+impl FilterError {
+    /// Is this the caller's fault or the deployment's?
+    ///
+    /// **The distinction decides a status code, so it lives with the variants rather than at the
+    /// mapping.** A malformed expression is a `422` — the caller can fix it, and refusing tells
+    /// them nothing about the corpus, since a column's existence and its family are deployment
+    /// schema published to every principal alike (`/v1/meta`). An artefact that cannot be read is a
+    /// `500` — fail-closed, because the alternatives are answering short or answering empty and
+    /// neither is distinguishable from a right answer.
+    ///
+    /// Note which side [`FilterError::UndeclaredColumn`] falls on: the *name* of a filterable
+    /// column is public, so refusing by name discloses nothing. An unknown **value** is a different
+    /// matter entirely and is never an error at all — it is an empty operand, because refusing it
+    /// would make the filter an existence oracle over exactly what `listing = "per_viewer"` hides.
+    pub fn is_callers_fault(&self) -> bool {
+        match self {
+            FilterError::UndeclaredColumn(_)
+            | FilterError::TooDeep { .. }
+            | FilterError::NegationSpansColumns { .. } => true,
+            FilterError::PostingsUnreadable { .. } | FilterError::MembershipUnavailable(_) => false,
+        }
+    }
+}
+
 impl std::error::Error for FilterError {}
 
 /// The `listing` of the vocabulary a column draws from, or `None` where it is not a category.

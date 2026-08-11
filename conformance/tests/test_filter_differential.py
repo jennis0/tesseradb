@@ -58,7 +58,7 @@ import pytest
 from oracle import catalogue as cat
 from oracle import filters as filt
 from oracle import viewport as vp
-from oracle.wire import decode_viewport, decode_viewport_points
+from oracle.wire import FRAME_TRAILER, decode_viewport, decode_viewport_points, split_frames
 
 ZOOM = 3
 
@@ -79,8 +79,18 @@ def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
 
 def _served_entities(raw: bytes) -> set[int]:
     """The served set as entity ids, joined through the planted `fx_key` — the suite's one
-    legitimate handle→item route (no reverse map, no I10 tension)."""
+    legitimate handle→item route (no reverse map, no I10 tension).
+
+    **A response that served nothing carries no points frame**, and therefore no points schema:
+    under the streamed format a frame is written per non-empty chunk, so zero points is zero
+    frames rather than one empty batch (`decode_viewport_points` raises on it deliberately, and
+    that is the right shape for a caller who expected points). Here the empty set is the answer —
+    the zero-visibility principal and a filter that matches nothing both reach it legitimately, and
+    both are cases this differential exists to check rather than to skip.
+    """
     entity_of_fx = {key: e for e, key in enumerate(cat.fx_keys())}
+    if not any(kind == 3 for kind, _ in split_frames(raw)):
+        return set()
     points = decode_viewport_points(raw)
     return {entity_of_fx[k] for k in points.column("fx_key").to_pylist()}
 
@@ -309,9 +319,19 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
         )
         bodies[label] = resp.content
 
+    # **Compared frame by frame with the trailer excluded, not byte for byte over the body.**
+    # The trailer carries `stream_us` and `arrow_serialise_ns` — this request's own wall time — so
+    # two identical answers have different bodies by construction under the streamed format. What
+    # C11 requires is that the *answer* be indistinguishable, which is exactly the non-trailer
+    # frames; comparing the timings too would make the test flake, and a flaky test of a disclosure
+    # property gets weakened rather than fixed. The timing channel itself is C4's row, quantified
+    # there rather than asserted away here.
+    def _answer(body: bytes) -> list[tuple[int, bytes]]:
+        return [(kind, payload) for kind, payload in split_frames(body) if kind != FRAME_TRAILER]
+
     first_label, first = next(iter(bodies.items()))
     for label, body in bodies.items():
-        assert body == first, (
+        assert _answer(body) == _answer(first), (
             f"the {label!r} response differs from the {first_label!r} response — the outcomes "
             "are distinguishable, so the filter surface is an existence oracle over what "
             "`listing = \"per_viewer\"` hides (C11)"
@@ -495,15 +515,86 @@ def test_an_unknown_column_refuses_and_an_unknown_value_does_not(
 
 
 def test_the_unbuilt_operators_refuse_by_name(catalogue_server, sweep_cases):
-    """Decision 0062 and decision 0013: `none_of` and `match` are specified and unbuilt, so
-    naming either is a `422` — never an ignored clause, which would answer a different question
-    while looking like an answer to this one."""
+    """Decision 0013: `match` is specified and unbuilt, so naming it is a `422` — never an ignored
+    clause, which would answer a different question while looking like an answer to this one.
+
+    `none_of` was in this list until decision 0066 built it; it is covered positively below."""
     case = sweep_cases["crossover_below"]
     token = catalogue_server.authorise(list(case.grants))["token"]
 
+    resp = catalogue_server.viewport_request(
+        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"title": {"match": "smith"}}
+    )
+    assert resp.status_code == 422, f"match on utf8: {resp.status_code} {resp.text}"
+    assert resp.json()["error"] == "contract"
+
+
+def test_an_over_deep_expression_is_a_contract_refusal_not_a_server_fault(
+    catalogue_server, sweep_cases
+):
+    """Nesting past the deployment's limit is **`422`**, and the status is the point.
+
+    An over-deep expression is the caller's to fix, and refusing it discloses nothing — the limit is
+    deployment schema, identical for every principal. It reached the engine (the parse has no depth
+    check) and came back a fail-closed `500`, because every `FilterError` was flattened into one
+    string variant on the way out. Depth is refused rather than flattened for the reason contracts
+    §3.2 gives: a flattened expression answers a different question.
+    """
+    case = sweep_cases["crossover_below"]
+    token = catalogue_server.authorise(list(case.grants))["token"]
+
+    expr = {"department": {"eq": "alpha"}}
+    for _ in range(6):  # MAX_FILTER_DEPTH is 4; six wrappings clears it under any small change
+        expr = {"all_of": [expr]}
+
+    resp = catalogue_server.viewport_request(
+        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+    )
+    assert resp.status_code == 422, f"{resp.status_code} {resp.text}"
+    assert resp.json()["error"] == "contract"
+
+
+def test_none_of_requires_a_value_and_names_one_column(
+    catalogue_server, catalogue_filter_columns, sweep_cases
+):
+    """**Decision 0066 on the wire**: `none_of` means *carries a value in this column, and none of
+    these matches it* — so an item carrying no value for the column is outside it, where a
+    complement would return it.
+
+    Asserted against the oracle's own brute-force evaluation rather than against a hand-written
+    expectation, and against a `department` column the fixture leaves absent for some entities —
+    without absences the two readings agree and this proves nothing. The two refusals the decision
+    introduces are checked here too, since both are things a client can provoke.
+    """
+    case = sweep_cases["crossover_above"]
+    token = catalogue_server.authorise(list(case.grants))["token"]
+    expr = {"none_of": [{"department": {"eq": "alpha"}}]}
+
+    raw = catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
+    served = _served_entities(raw)
+
+    m_auth = set(case.entities)
+    expected = filt.evaluate(expr, catalogue_filter_columns, m_auth)
+    assert served == expected
+
+    # The premise: the column really does have absences among this principal's own entities, and
+    # the negation really did exclude something.
+    carried = set(catalogue_filter_columns["department"].values)
+    assert m_auth - carried, "no entity here lacks a department, so the two readings agree"
+    assert (m_auth & carried) - expected, "the negation excluded nothing"
+    assert not (served & (m_auth - carried)), (
+        "an item carrying no department was returned by `none_of` — that is the complement "
+        "reading, and it puts every entity whose value is merely unreachable into the result"
+    )
+
+    # An empty negation names no column to require a value in; one spanning two columns gives two
+    # answers to which. Both are `422`, not a silently-chosen reading.
     for label, filters in [
-        ("none_of", {"none_of": [{"department": {"eq": "alpha"}}]}),
-        ("match on utf8", {"title": {"match": "smith"}}),
+        ("empty", {"none_of": []}),
+        (
+            "two columns",
+            {"none_of": [{"department": {"eq": "alpha"}}, {"title": {"prefix": "smith"}}]},
+        ),
     ]:
         resp = catalogue_server.viewport_request(
             token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=filters

@@ -134,6 +134,26 @@ class StringColumn:
         raise UnbuiltOperator(f"utf8 operator {operator!r}")
 
 
+def _carries_a_value(column, entity: int) -> bool:
+    """Does `entity` hold any value in this column at all?
+
+    **The predicate `none_of` rests on** (decision 0066). Both column kinds record absence the same
+    way here — the entity is simply not in `values` — which mirrors the artefact, where a category
+    spends its reserved code 0 and every other family is left out of the presence bitmap.
+    """
+    return entity in column.values
+
+
+def _columns_named(expr: dict) -> set[str]:
+    """Every column named anywhere under `expr` — what the one-column rule is checked against."""
+    if not isinstance(expr, dict) or len(expr) != 1:
+        raise ValueError(f"a filter node is one key: {expr!r}")
+    (name, body), = expr.items()
+    if name in ("all_of", "any_of", "none_of"):
+        return set().union(*(_columns_named(sub) for sub in body)) if body else set()
+    return {name}
+
+
 def _leaf_matches(column, operator: str, operand, entity: int) -> bool:
     """One leaf against one entity — the smallest unit of the definition."""
     if isinstance(column, CategoryColumn):
@@ -150,7 +170,8 @@ def _leaf_matches(column, operator: str, operand, entity: int) -> bool:
 def matches(expr: dict, columns: dict, entity: int) -> bool:
     """Does `entity` satisfy `expr`? — decision 0062's tree, one entity at a time.
 
-    `expr` is the wire form exactly: `{"all_of": [...]}`, `{"any_of": [...]}`, or a leaf
+    `expr` is the wire form exactly: `{"all_of": [...]}`, `{"any_of": [...]}`, `{"none_of": [...]}`,
+    or a leaf
     `{"<column>": {"<operator>": <operand>}}`. `all` over an empty list is `True` and `any` is
     `False`, which are precisely the empty-combinator identities contracts §3.2 specifies — the
     definition inherits them from the quantifiers rather than special-casing them.
@@ -163,7 +184,23 @@ def matches(expr: dict, columns: dict, entity: int) -> bool:
     if name == "any_of":
         return any(matches(sub, columns, entity) for sub in body)
     if name == "none_of":
-        raise UnbuiltOperator("none_of is specified and not built (decision 0062)")
+        # **Carries a value in this column, and none of these matches it** — decision 0066, and
+        # deliberately not `not any(...)`. The complement would admit every entity whose value is
+        # merely *unreachable*, which inverts the failure arithmetic `filter-index.md` §5 rests on;
+        # requiring presence keeps a negation positive. Written from the decision rather than from
+        # the engine: an oracle that transcribed the implementation would ratify whatever it does.
+        named = _columns_named(expr)
+        if len(named) != 1:
+            raise ValueError(
+                f"a none_of names exactly one column, not {sorted(named)} — it requires the item "
+                "to carry a value in the column it negates (decision 0066)"
+            )
+        (column_name,) = named
+        if column_name not in columns:
+            raise UnknownColumn(column_name)
+        if not _carries_a_value(columns[column_name], entity):
+            return False
+        return not any(matches(sub, columns, entity) for sub in body)
     if name not in columns:
         raise UnknownColumn(name)
     if not isinstance(body, dict) or len(body) != 1:

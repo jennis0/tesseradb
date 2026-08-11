@@ -330,6 +330,11 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // contract error (422) rather than a fail-closed 500. Its `Display` names only the
         // offending numbers and the configured bounds — no path, no corpus fact.
         EngineError::UnderlayRefused(detail) => ApiError::Contract(detail),
+        // A malformed filter expression: the caller can fix it, and naming the fault back
+        // discloses nothing — a column's existence and its family are deployment schema, published
+        // to every principal alike in `/v1/meta`. Its sibling `FilterRefused` is an unreadable
+        // artefact and stays a fail-closed 500 through the catch-all below.
+        EngineError::FilterMalformed(detail) => ApiError::Contract(detail),
         // Also a request the caller can fix by asking for less, and its Display names only the
         // caller's own numbers and the configured limit.
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),

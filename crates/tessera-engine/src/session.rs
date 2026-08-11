@@ -296,13 +296,22 @@ pub struct SliceSegments {
 /// hand back a partial or best-effort result.
 #[derive(Debug)]
 pub enum EngineError {
-    /// An attribute filter could not be answered. The message names why — an undeclared column, or
-    /// a candidate reaching past the artefact's coverage (`filter::FilterError`).
+    /// An attribute filter could not be answered because an artefact it needs could not be read
+    /// (`filter::FilterError`, the half `is_callers_fault` calls the deployment's).
     ///
     /// **A refusal, never an empty result.** An empty answer is a real one — it is what a principal
     /// who can see no matching item is given — so serving it for a filter that could not be
     /// computed would make an underived answer indistinguishable from a derived one.
     FilterRefused(String),
+    /// The filter **expression** is malformed: an undeclared column, too deep, or a negation that
+    /// does not name exactly one column (`filter::FilterError`, the caller's half).
+    ///
+    /// **Separate from [`Self::FilterRefused`] because the two are different status codes**, and
+    /// flattening them into one string variant made every caller error a fail-closed `500`. What
+    /// a caller may be told is decided by whether the fact is deployment schema — a column's
+    /// existence and family are published to every principal alike — so naming them back discloses
+    /// nothing. An unknown *value* is neither of these: it is an empty operand, never an error.
+    FilterMalformed(String),
     Store(StoreError),
     Wal(WalError),
     Plugin(PluginError),
@@ -440,6 +449,7 @@ impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineError::FilterRefused(why) => write!(f, "filter refused: {why}"),
+            EngineError::FilterMalformed(why) => write!(f, "filter refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),

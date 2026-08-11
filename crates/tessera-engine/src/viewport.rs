@@ -1274,7 +1274,16 @@ impl Engine {
                     generation
                         .filter_columns
                         .evaluate(expr, &candidate)
-                        .map_err(|e| EngineError::FilterRefused(e.to_string()))?,
+                        .map_err(|e| {
+                            // Caller's fault or the deployment's — `FilterError` decides, at the
+                            // variants, because that is where the argument for each one lives.
+                            let detail = e.to_string();
+                            if e.is_callers_fault() {
+                                EngineError::FilterMalformed(detail)
+                            } else {
+                                EngineError::FilterRefused(detail)
+                            }
+                        })?,
                 )
             }
         };
