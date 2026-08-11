@@ -66,29 +66,23 @@ slot, and the affine-rank traversal, the fold's blanking and the coalesce's merg
 that. §2.6's older claim that "lists cost no format work" was withdrawn for this reason; §6.2 and
 §5.2 now scope themselves to the shipped families explicitly.
 
-## 3. Decisions waiting on the owner
+## 3. Decisions that were waiting on the owner — all ruled
 
-**First-touch digest deferral for `attrs/`** (§8, an amendment contracts §2.4 already records as
-owed). This is the one with a real win: `verify_files` hashes every named file in full at open, and
-for a text column that is the *first* of two passes over its bytes. The asymmetry that makes it
-rulable: a corrupt **value column** can only narrow `M_sel`, because the scan runs inside the
-candidate and I12 holds structurally — but a corrupt **posting** now feeds `/v1/categories`'
-`per_viewer` visibility predicate under decision 0061, which is a disclosure control. Deferral is
-arguable for value columns and not obviously safe for postings.
+The four this section listed were ruled on 2026-08-10 and are recorded in
+[`2026-08-10-filter-rulings.md`](2026-08-10-filter-rulings.md), which carries the arguments. In
+short:
 
-**Where the fold's flip opens `FilterColumns`.** §6.2 says the columns join the rotation the way the
-postings reader and the external-id sidecar do — and that rotation runs *after* the `CURRENT` flip,
-so a failure there is an alarm and a restart onto the committed bundle. An implementer was briefed
-to carry opened columns so publication could not fail after the manifest edit, which is the opposite
-order. It followed the document; the conflict is unresolved and stated here rather than buried.
+- **First-touch digest deferral for `attrs/`** — **declined**; the sweep is parallelised instead
+  (`verify_files`, rayon over the file list, first-in-sorted-order error preserved), because the
+  measurement said it was I/O-bound rather than hash-bound. Deferral would have traded a disclosure
+  control for something a `par_iter` recovered.
+- **Where the fold's flip opens `FilterColumns`** — **keep as built**, post-flip, as §6.2 says.
+- **Crate isolation for the scan** — **neither**. The cause was instruction-address alignment, not
+  crate layout; `-C llvm-args=-align-all-functions=6` is applied (§1).
+- **An r-letter for the contracts tree lines** — **no letter**.
 
-**Whether the crate-isolation of §1 is worth doing**, and whether `codegen-units = 1` is an
-acceptable interim (measured: it costs the baseline ~15% and removes the presence path's
-sensitivity, not the packing path's).
-
-**A contracts edit landed without minting a revision letter** — three tree lines adding
-`coalesced/<id>/attrs/<column>/`, no field or behaviour change. r19 documented a comparable tree
-addition, so whether this owes an r-note is a small call nobody has made.
+One consequence to carry: with deferral declined, §5's reverted text-offset bounds check stays
+reverted. It was redundant while Arrow validates offsets on decode, and nothing has changed that.
 
 ## 4. Promotion
 
@@ -135,8 +129,8 @@ written are in the dispatch log line and in `/control/status` as `last_attr_byte
 
 - **The text-offset bounds check**, implemented, tested and **reverted** — it cost 70% of the scan
   for the reason in §1, which is now understood and pinned. It is redundant while Arrow validates
-  offsets on decode; restore it if the R1 digest deferral lands, at which point it stops being
-  redundant. Not before: a redundant check bought at any price is still redundant.
+  offsets on decode, and the digest deferral that would have made it non-redundant was declined
+  (§3), so it stays out. A redundant check bought at any price is still redundant.
 
 - **An item with no number is stored as zero, so it matches filters it should not.** If an item
   carries no value for a number column — no score, no price — the build writes 0 and marks the item
