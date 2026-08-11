@@ -535,6 +535,16 @@ impl RowSpace {
         self
     }
 
+    /// Can this row space cross row→entity at all?
+    ///
+    /// A caller choosing between the per-tile and projecting routes asks this once, before
+    /// committing to a route, rather than discovering row by row that [`Self::entity_of`] cannot
+    /// answer. True when the base published a `row-entity.u32` — or when there is no base to
+    /// invert, every row belonging to an extent, whose mapping is always recoverable.
+    pub fn can_invert(&self) -> bool {
+        self.base_inverse.is_some() || self.base_rows == 0
+    }
+
     /// The entity occupying `row`, or `None` when this row space cannot answer — either `row` is
     /// out of range, or the slice published no `row-entity.u32` and the base cannot be inverted
     /// without one.

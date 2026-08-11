@@ -208,15 +208,19 @@ The key must therefore never leave the server on any plane: no API response, no 
 
 Every item has a permanent **entity ID**, stable across temporal slices and rebuilds, never reused (**I9**), and never exposed (**I10**). All permission data is expressed in this space. IDs are allocated in append-only batches; the order *within* a batch is a free choice and §11.1 spends it deliberately.
 
-Each temporal slice separately assigns **row IDs** by Morton rank (§5.2). A slice stores a `u32` permutation array mapping entity ID to row ID, sized by maximum live entity ID rather than item count, with a sentinel for absent entities; the inverse direction is not stored at all. Row→entity is the **inverse of the keyed bijection at the row** — a pure function of the `tessera_id` that `columns.arrow` already carries, needing no file, no map and no consistency obligation (contracts §2.6, §0.3 deviations 2 and 6). *(r22 — a correction. Earlier revisions said the inverse "is the entity-ID column of the row-ordered store", naming an artifact contracts r6 removed: `columns.arrow` carries `tessera_id` in its place and no request-path artifact stores an entity ID at all. The policy is unchanged — the inverse permutation was never stored, and after r6 it is not stored anywhere.)* With deletions and append-only IDs the gap between maximum live entity ID and item count grows, which is the exhaustion concern in §16.
+Each temporal slice separately assigns **row IDs** by Morton rank (§5.2). A slice stores a `u32` permutation array mapping entity ID to row ID, sized by maximum live entity ID rather than item count, with a sentinel for absent entities. With deletions and append-only IDs the gap between maximum live entity ID and item count grows, which is the exhaustion concern in §16.
 
-**Only the entity→row direction is stored, and it is irreducible** *(r22, recorded because the question recurs in exactly this form: now that the wire identity is order-free, is the indirection still needed?)*. It is not, and never was, a disclosure mechanism — what the keyed identity retired was the per-session handle table and the stored inverse, neither of which is this array. Three reasons keep it, none of them a leak argument:
+**Row→entity is stored as well, and only because one path needs it per row.** It is derivable without a file — it is the inverse of the keyed bijection at the row, a pure function of the `tessera_id` that `columns.arrow` already carries (contracts §2.6, §0.3 deviations 2 and 6) — and for a single item that is what happens, `/v1/items` inverting one identifier and touching nothing else. A **filtered viewport** asks the same question of every row it is about to draw, where the bijection's four rounds cost *measured* ~17.5 ns each and dominate everything around them. `row-entity.u32` answers it in a mapped read instead: a `u32` per row, dense because every row has an entity, 4 bytes per row per *slice* and shared across every filter column, since it is a property of the slice's geometry rather than of any attribute. [Decision 0063](../decisions/0063-the-inverse-permutation-is-stored-for-the-filtered-viewport.md) records the reversal; `filter-surface.md` §4 carries the measurement and the rule that decides when the file is read at all.
+
+**I10's structural half is about what the *gather* can reach, not about what exists on disk.** `columns.arrow` is the only artifact the point gather reads, it carries `tessera_id` and no entity ID, and so a served point cannot carry one. `permutation.bin` and `row-entity.u32` are index structures over one and the same bijection, consulted by masking and filtering and never by serialisation — and a bundle-holder learns nothing from the second that the first did not already give them, both directions of a permutation being one fact.
+
+**The entity→row direction is the irreducible one** *(recorded because the question recurs in exactly this form: now that the wire identity is order-free, is the indirection still needed?)*. It is not, and never was, a disclosure mechanism — what the keyed identity retired was the per-session handle table, not this array. Three reasons keep it, none of them a leak argument:
 
 - **Permanence against churn.** Entity IDs are permanent and never reused (**I9**); a row ID is a Morton *rank*, and one new item interleaving into the ranking shifts a large fraction of it (§11.1). No single integer holds both properties.
 - **The entity ordering is already spent.** §11.1 assigns entity IDs in term-signature order within each batch — measured at 8.9–36.7× on posting storage and up to 130× on union cost (r18). An ordering spent on posting contiguity cannot also be spatial rank.
 - **One index, many row spaces.** Slices rank independently, and so do partitions (§12.3), while the term index exists once per partition in entity space. Collapsing the two spaces duplicates the index per slice — which is what the next paragraph says this factoring prevents.
 
-Nor is this direction derivable the way the inverse now is: entity→row is a function of the item's *geometry*, and no key encodes a rank. What remains genuinely open is the array's **encoding**, not its existence — it is a flat uncompressed `u32` array precisely because entity order and row order are unrelated, making the values maximum-entropy; a signature-major row layout would make it near-monotone within groups and worth compressing (the deferred sketch is [signature-major layout](deferred-signature-major-layout.md)).
+Nor is this direction derivable the way the inverse is: entity→row is a function of the item's *geometry*, and no key encodes a rank. What remains genuinely open is the array's **encoding**, not its existence — it is a flat uncompressed `u32` array precisely because entity order and row order are unrelated, making the values maximum-entropy; a signature-major row layout would make it near-monotone within groups and worth compressing (the deferred sketch is [signature-major layout](deferred-signature-major-layout.md)).
 
 This factoring is what stops the term index being duplicated per slice. Within a partition there is exactly one index, in entity space, shared across all slices; a mask fragment is built once there and permuted into a slice's row space on demand.
 
@@ -676,7 +680,7 @@ Row space is where the churn lives. New items interleave arbitrarily into the ex
 
 **Spend the entity-ID ordering on posting compression.** Because entity and row space are related only by a permutation, the two orderings can be optimised independently. Row space is fixed by geometry; entity space is free *within* each append-only batch. Assign entity IDs within a batch sorted by term signature, so term postings form long runs inside each batch's ID range and head terms encode as run containers. It costs nothing, does not weaken **I9**, and is safe only because of **I10**.
 
-*(r21)* Contracts r6 makes this stronger in substance while changing its mechanism. With `columns.arrow` carrying a `tessera_id` instead of the entity ID, no request-path artifact stores an entity ID at all — the gather cannot produce one — so the ordering freedom this section spends on posting compression is protected by construction and not only by a discipline at the serialisation chokepoint. What the viewer sees instead is a keyed permutation of `(shard, entity)`, which is order-free: signature order does not survive it, and gaps in it count nothing. The residual channel is a caller's own external IDs where the caller chooses to carry structure in them, which is C6 as revised.
+*(r21)* Contracts r6 makes this stronger in substance while changing its mechanism. With `columns.arrow` carrying a `tessera_id` instead of the entity ID, no artifact the gather reads stores an entity ID — it cannot produce one — so the ordering freedom this section spends on posting compression is protected by construction and not only by a discipline at the serialisation chokepoint. (§5.1: the index structures either side of the gather, `permutation.bin` and `row-entity.u32`, hold the mapping in both directions and are never serialised.) What the viewer sees instead is a keyed permutation of `(shard, entity)`, which is order-free: signature order does not survive it, and gaps in it count nothing. The residual channel is a caller's own external IDs where the caller chooses to carry structure in them, which is C6 as revised.
 
 Entity IDs must **not** be assigned in Morton order, which is the tempting alternative because it would make new segments permutation-free.
 
@@ -1165,6 +1169,18 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r39** — **the inverse permutation is stored** (2026-08-11, decision 0063). §5.1 said row→entity
+  "is not stored at all" and is derivable from the row's `tessera_id`. It is derivable, and for a
+  single item that is still what happens; for a filtered viewport the keyed bijection's ~17.5 ns per
+  row is the whole cost of the crossing, so `row-entity.u32` materialises it at 4 bytes per row per
+  slice (`filter-surface.md` §4, `probes/2026-08-11-viewport-crossing/`). **I10 is unchanged in
+  substance and its wording is corrected in three places**: the structural half was always about what
+  the *gather* can reach, and `permutation.bin` already held the same bijection in the other
+  direction, so a bundle-holder gains nothing — "no request-path artifact stores an entity ID"
+  becomes "no artifact the gather reads stores an entity ID", which is what §5.1, §11.1 and system
+  architecture §5.3/§9 were each relying on. Contracts §0.2, §0.3 deviation 6 and §2.6 carry the
+  file.
 
 - **r38** — **filters compose as a boolean tree, and text becomes a column type** (2026-08-09,
   decision 0060). §8.2's "composition by intersection only" was written for operands evaluated

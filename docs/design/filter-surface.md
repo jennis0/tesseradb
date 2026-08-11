@@ -1,12 +1,12 @@
 # The filter surface — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r3, revised where the artefact changed under it.** `filter-index.md` r4
+**Status:** **Provisional — r4, revised where the artefact changed under it.** `filter-index.md` r4
 made the flat value column the artefact of record and the mask its scan candidate, which withdraws two
-controls this document had registered (§2.1, §3.2) and suspends most of §4. To become normative: a ruling accepting §4's
-measured project-vs-per-tile rule in place of the superseded cache, and the served-surface sections
-(§6–§7) re-read against it. Reviewed once under three lenses (Appendix R). Nothing here is
-built.
+controls this document had registered (§2.1, §3.2) and withdrew §4.1–§4.5's shared projection cache.
+§4's measured project-vs-per-tile rule replaces it and is built. To become normative: an owner ruling
+accepting that rule, and the served-surface sections (§6–§7) re-read against it. Reviewed once under
+three lenses (Appendix R).
 **Reads against:** architecture §4 (I2, I3, I7, I12), §8.1–§8.5, §10.2–§10.4, Appendix C (C8, C11, C22);
 [`contracts.md`](contracts.md) §3.2; [`per-point-attributes.md`](per-point-attributes.md) §3.3, §3.8;
 [`conformance.md`](conformance.md) §3–§4; decisions
@@ -39,10 +39,11 @@ Three things decide the design, and none of them is the index.
   principal cannot see has leaked it. §3.2 states the channel this design accepts and what actually bounds
   it.
 
-> **⊘ Specified, not implemented — all of it.** `/v1/meta` publishes `filter_operands` as an empty list
-> and no viewport request carries an operand. That is fail-closed: a filter cannot be expressed, so
-> nothing narrows. `listing = "per_viewer"` **is** filtered at `/v1/categories` by §3.3's membership
-> predicate.
+> **⊘ The operand surface and §4's crossing are built. §4.1–§4.5's shared projection cache is
+> withdrawn rather than pending** — see the note above it, and do not implement it. `/v1/meta`
+> publishes `filter_operands` from the schema's filterable columns, a viewport request carries an
+> operand, and a filtered request crosses into row space by whichever of §4's two routes the rule
+> chooses. `listing = "per_viewer"` is filtered at `/v1/categories` by §3.3's membership predicate.
 
 ---
 
@@ -196,48 +197,57 @@ enumerates its values at all (index §2.3).
 
 ## 4. From entity space to row space
 
-**The rule is measured, and it is one line:** *project the result while it is no larger than the
-viewport's row count; beyond that test membership per tile and project nothing.*
+**The rule is measured, and it is one line:** *project the result while it is no more than three
+times the viewport's row count; past that, test the viewport's own rows and project nothing.*
 
-Two constants set it, and the second is not the one an earlier revision quoted. A projection costs
-**~20–30 ns per set bit** and scales with the result
+Two costs set it. A projection costs **~20–30 ns per set bit** and scales with the result
 ([`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/) arm 3 at 10⁹ and
 [`probes/2026-08-11-viewport-crossing/`](../../probes/2026-08-11-viewport-crossing/) at 10⁸ agree on
 this). A per-tile test costs **~20–29 ns per viewport row** on a contiguous result and **~57–106 ns**
-on a scattered one.
+on a scattered one, and scales with the viewport.
 
-> **⊘ The 6–22 ns/row this section quoted before 2026-08-11 was a route the system cannot build.**
-> Arm 3's per-tile test indexes a materialised `row_to_entity` array, and none exists: `permutation.bin`
-> is entity→row, and the only crossing back is the row's `tessera_id` through `IdentityKey::invert` —
-> a 4-round Feistel costing **~17–25 ns per row**, which dominates wherever the rest of the loop is
-> cheap. The real route is 3–9× the idealised one, so the crossover moves by roughly that factor: at a
-> 300,000-row viewport it sits between 10⁵ and 10⁶, not at the ~75,000 a quarter-rule gives. The
-> per-tile route still wins decisively where it matters — 216 ms against 32 ms at a 10⁷ result — but
-> it is not free, and a threshold set from the old constant sends work to it far too early.
->
-> **A Morton-cell → entity pre-filter was measured and refused** in the same campaign: a bitmap per
-> coarse cell holding the entities whose rows fall in it, so a filtered viewport would be an
-> intersection in entity space with no per-row crossing at all. It is the slowest of the three routes
-> at every point measured and its structure is *larger* than the inverse permutation it emulates
+The asymmetry is the whole point. A projection scales with **the result**; a per-tile test scales with
+**the viewport**, which is already bounded by the drawn-mark budget (§7.2), so it scales with neither
+the corpus nor how much the filter matched. Projecting a 10⁸-entity result costs **2,779 ms — more
+than the 730 ms scan that produced it** — and at 10⁹ it is outside §2.2's 0.5–1 s filter budget
+outright, while the per-tile route stays in tens of milliseconds however much matched. **That is what
+makes a mid-to-high coverage principal affordable at all**: a viewer seeing half the corpus and
+filtering to a tenth of what they see is well past the crossover, not near it. The route that remains
+for narrow results is cheap precisely because they are narrow: 3.8 ms at 10⁵.
+
+**The crossing back is a file, not a computation.** `row-entity.u32` — a `u32` per row beside
+`permutation.bin`, written by the batch build and the compaction fold and by nothing else — answers
+"which entity holds this row" in one mapped read. Deriving it instead from the row's `tessera_id`
+through `IdentityKey::invert` costs **~17.5 ns per row**, which dominates every other term in the
+loop and cannot be batched away: inverting a whole tile into a scratch buffer before testing
+membership measures *slightly worse* than interleaving (6.22 ms against 6.00 ms), because the cost is
+the four Feistel rounds and not a stalled pipeline. The table removes it for **4 bytes per row per
+slice**, shared across every filter column — it is a property of the slice's geometry, not of any
+attribute, so sixteen filterable columns need no more of it than one does.
+
+**Both constants are shape-dependent and neither may be quoted flat.** Arm 3's results are contiguous,
+the cheap end for a gather *and* for a membership test. The corpus's 127 ns/set-bit point
+(`probes/results.md` §6) is ~4.7× its projection constant and is the likely shape of a scattered
+result; the per-tile constant moves in the same direction. **They move together**, which is why the
+crossover is more stable than either constant — but the two do not move by the *same* factor, and the
+threshold sits at 3× rather than the 1× a contiguous pair would give because scattered is the
+realistic shape for an ingest-ordered column. Erring towards projecting costs milliseconds either
+side of the crossover; the win the per-tile route exists for is two orders of magnitude out.
+
+> **A Morton-cell → entity pre-filter is refuted by measurement.** The idea was a bitmap per coarse
+> cell holding the entities whose rows fall in it, so a filtered viewport would be an intersection in
+> entity space with no per-row crossing at all. It is the slowest of the three routes at every point
+> measured, by 4–400×, and its structure is *larger* than the inverse permutation it emulates
 > (3.2–7.9 B/entity against 4 B). A cell's entity set is scattered in entity space — entity ids are
 > assigned in permission-signature order, uncorrelated with position — so the union over a viewport's
 > cells touches every container and costs O(corpus), which is exactly what it was meant to avoid. The
 > property that makes authorisation postings compress works against it.
 
-The asymmetry is the whole point. A projection scales with **the result**; a per-tile test scales with
-**the viewport**, which is already bounded by the drawn-mark budget (§7.2), so it scales with neither
-the corpus nor how much the filter matched. Projecting a 10⁸-entity result costs **2,779 ms — more
-than the 730 ms scan that produced it**, so for any broad filter the projection is the dominant term
-and this removes it. The route that remains for narrow results is cheap precisely because they are
-narrow: 3.8 ms at 10⁵.
-
-**Both constants are shape-dependent and neither may be quoted flat.** Arm 3's results are contiguous,
-the cheap end for a gather *and* for a membership test. The corpus's 127 ns/set-bit point
-(`probes/results.md` §6) is ~4.7× its projection constant and is the likely shape of a scattered
-result; the per-tile constant moves by a similar factor in the same direction (34–60 ns/row idealised
-scattered against 2.2–9.2 contiguous). **They move together**, which is why the crossover is more
-stable than either constant — but a threshold hard-coded from the contiguous pair is wrong on both
-sides at once.
+> **⊘ Not measured: how the crossover moves with thread count.** The probe was single-threaded. Both
+> routes parallelise, each over its own axis — the projection over the result, the per-tile crossing
+> over the viewport — so the ratio is *modelled* to survive, not shown to. The engine counts requests
+> by route (`Engine::filter_crossing_routes`, unconditional rather than behind a bench feature) so a
+> deployment where the split is nothing like the model's prediction is visible without a bench.
 
 > **⊘ §4.1–§4.5 below are superseded and retained only as a record.** They specify a **shared
 > projection cache**: an operand projected once, principal-independently, reused across principals.

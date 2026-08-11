@@ -49,11 +49,11 @@ use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
-use tessera_types::{EntityId, GenerationStamp, TesseraId, API_VERSION};
+use tessera_types::{EntityId, GenerationStamp, RowId, TesseraId, API_VERSION};
 
 use crate::cache::{Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
+use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, RowProjection};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
@@ -899,46 +899,42 @@ impl Engine {
 
         // **Above composition, and only ever narrowing.** The operand is resolved in entity space
         // under the composed candidate — so the result already excludes suppressed and
-        // deleted-but-unfolded entities — and then projected into this slice's row space to meet
-        // the mask.
-        //
-        // ⊘ **Projected, not tested per tile.** A projection costs ~20–30 ns per set bit and scales
-        // with the *result*; a per-tile membership test costs ~20–29 ns per viewport row on a
-        // clumped result and ~57–106 ns on a scattered one, and scales with the *viewport*
-        // (`probes/2026-08-11-viewport-crossing/`, which supersedes arm 3's 6–22 ns — that figure
-        // was measured against a materialised row→entity array the system did not then have).
-        // The crossover is therefore around a result of ~10⁶ against a 300,000-row viewport, not
-        // the ~75,000 an earlier quarter-rule gave. Only the projecting route is built. It is exact
-        // at every size; what is missing is the cheap route for the broad case, where the gap is
-        // large — 216 ms against 32 ms at a 10⁷ result — and is a latency gap, not a correctness
-        // one. `row-entity.u32` (`tessera_store::row_entity`) is the half of that route that now
-        // exists: `RowSpace::entity_of` answers the per-row question without a Feistel.
-        let mask = if let Some(expr) = &req.filter {
-            // **The fragment is brought forward, not read off the session.** A session's own
-            // fragment is fixed at authorise, and composition treats entities below the live
-            // watermark as fragment-resident — so composing against the stale one silently omits
-            // every entity flushed since, and a filtered viewport under a long-lived session
-            // under-reports. Narrowing, and safe under **I12**, which is exactly what makes it the
-            // dangerous kind: the answer is indistinguishable from a correct one. `/v1/categories`
-            // takes the same care for the same reason.
-            //
-            // This costs nothing here: `session_geometry` above has already resolved the same
-            // fragment on this request, so this is the identity short-circuit or a cache hit.
-            let fragment = self.fragment_for(session, &generation)?;
-            let candidate = crate::filter::candidate(
-                &fragment,
-                &session.satisfied,
-                &generation.overlay,
-                &generation.buffer,
-            );
-            let entities = generation
-                .filter_columns
-                .evaluate(expr, &candidate)
-                .map_err(|e| EngineError::FilterRefused(e.to_string()))?;
-            mask.with_filter(slice_data.row_space.project(&entities))
-        } else {
-            mask
+        // deleted-but-unfolded entities. What it is *not* yet is a row-space set; that crossing is
+        // deferred to `cross_filter_into_row_space` below, which needs the request's tile ranges to
+        // choose its route and so cannot run until they are resolved.
+        let filter_entities = match &req.filter {
+            None => None,
+            Some(expr) => {
+                // **The fragment is brought forward, not read off the session.** A session's own
+                // fragment is fixed at authorise, and composition treats entities below the live
+                // watermark as fragment-resident — so composing against the stale one silently
+                // omits every entity flushed since, and a filtered viewport under a long-lived
+                // session under-reports. Narrowing, and safe under **I12**, which is exactly what
+                // makes it the dangerous kind: the answer is indistinguishable from a correct one.
+                // `/v1/categories` takes the same care for the same reason.
+                //
+                // This costs nothing here: `session_geometry` above has already resolved the same
+                // fragment on this request, so this is the identity short-circuit or a cache hit.
+                let fragment = self.fragment_for(session, &generation)?;
+                let candidate = crate::filter::candidate(
+                    &fragment,
+                    &session.satisfied,
+                    &generation.overlay,
+                    &generation.buffer,
+                );
+                Some(
+                    generation
+                        .filter_columns
+                        .evaluate(expr, &candidate)
+                        .map_err(|e| EngineError::FilterRefused(e.to_string()))?,
+                )
+            }
         };
+        probe.lap(|t| &mut t.filter_eval_ns);
+        probe.count(
+            |t| &mut t.filter_matched,
+            filter_entities.as_ref().map_or(0, |e| e.cardinality()),
+        );
 
         let q = &generation.bundle.manifest.quantisation;
         let extent = Bounds {
@@ -1130,6 +1126,29 @@ impl Engine {
         probe.count(|t| &mut t.rows_in_ranges, rows_in_ranges);
         let total_rows_in_ranges: u64 = rows_in_ranges + underlay_cells_demanded;
 
+        // The filter's entity-space result meets the mask here, and this is the one place in the
+        // request that crosses from entity space into row space by a route that is *chosen* rather
+        // than fixed. It sits below the tile sweep because the cheap route needs `ranges`: it works
+        // by testing the viewport's own rows, so it cannot run until the viewport's rows are known.
+        //
+        // Everything above this line is deliberately blind to the filter — `visible_total()` is
+        // θ's anchor and stays unfiltered under **I12**, and `rows_in_ranges` is C4's leak-register
+        // numerator and stays mask-free (§14.2). Both are already computed.
+        let mask = match &filter_entities {
+            None => mask,
+            Some(entities) => {
+                let rows = self.cross_filter_into_row_space(
+                    &slice_data.row_space,
+                    entities,
+                    &ranges,
+                    &segments,
+                    rows_in_ranges,
+                );
+                mask.with_filter(rows)
+            }
+        };
+        probe.lap(|t| &mut t.filter_cross_ns);
+
         // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_result` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
         // own entry/scheduling cost exceeds the per-tile work it would parallelise (measured; see
@@ -1256,6 +1275,162 @@ impl Engine {
             timings: probe.finish(),
         })
     }
+
+    /// Cross a filter's entity-space result into one slice's row space, by whichever of the two
+    /// routes is cheaper for this request.
+    ///
+    /// **Project** — [`RowSpace::project`] — crosses the whole result and costs ~20–30 ns per set
+    /// bit, so it scales with *what matched*. **Per tile** walks the rows the request's own tiles
+    /// span and asks each one whether its entity matched, at ~20–29 ns per row on a clumped result
+    /// and ~57–106 ns on a scattered one, so it scales with *what is on screen*. Neither dominates:
+    /// at a 300,000-row viewport over 10⁸ items, project is 1.2 ms against 18.3 ms at a 10⁴ result
+    /// and 216 ms against 32 ms at a 10⁷ one (`probes/2026-08-11-viewport-crossing/`).
+    ///
+    /// **The per-tile route is what makes a mid-to-high coverage principal affordable at scale**,
+    /// which is the case it exists for. Project scales with the result, so a 10⁸-match result is
+    /// ~2.2 s at 10⁹ rows — outside §2.2's 0.5–1 s filter budget outright — while the per-tile route
+    /// stays in tens of milliseconds however much matched. A principal seeing half the corpus and
+    /// filtering to a tenth of what they see is past the crossover, not near it.
+    ///
+    /// The route is **latency only**: the two answers agree exactly over every range the request
+    /// can ask about, which is what [`FilterRows`] carries the domain to keep true, and what
+    /// `filter_routes_agree_over_the_domain` asserts. A slice that published no `row-entity.u32`
+    /// cannot take the per-tile route at all and silently gets the projecting one.
+    fn cross_filter_into_row_space(
+        &self,
+        row_space: &tessera_store::permutation::RowSpace,
+        entities: &croaring::Bitmap,
+        ranges: &[Vec<(usize, Range<u32>)>],
+        segments: &[(&SegmentData, u32)],
+        rows_in_ranges: u64,
+    ) -> FilterRows {
+        let per_tile_looks_cheaper =
+            entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
+        if per_tile_looks_cheaper && row_space.can_invert() {
+            let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+            let domain = crossing_domain(ranges, &row_bases);
+            // `None` is the row space declining to answer — a row it cannot invert, which
+            // `can_invert` says should not happen and which is corruption if it does. Falling
+            // through to the exact route is the right response either way: it costs latency and
+            // nothing else, where trusting a partial answer would drop rows from the map.
+            if let Some(rows) = self
+                .pool
+                .install(|| per_tile_crossing(row_space, entities, &domain, rows_in_ranges))
+            {
+                self.filter_crossings_per_tile.fetch_add(1, Ordering::Relaxed);
+                return FilterRows::Viewport { rows, domain };
+            }
+        }
+        self.filter_crossings_projected
+            .fetch_add(1, Ordering::Relaxed);
+        FilterRows::Complete(row_space.project(entities))
+    }
+}
+
+/// How many times larger than the viewport a filter result must be before the per-tile crossing is
+/// taken instead of projecting — the crossover of [`Engine::cross_filter_into_row_space`]'s two
+/// cost curves, expressed as a ratio because that is what the measurement supports.
+///
+/// **Measured range 1–5, and this sits at the high end deliberately.** The crossover is 1× the
+/// viewport's rows for a result contiguous in entity space and 3–5× for a scattered one
+/// (`probes/2026-08-11-viewport-crossing/`), and the realistic case for an ingest-ordered column is
+/// scattered: entity ids are assigned in permission-signature order and are uncorrelated with any
+/// attribute. Sitting at 3 keeps the exact-everywhere route in play a little longer than the
+/// contiguous case would justify, which is the cheap direction to be wrong in — the loss is
+/// milliseconds either side of the crossover, while the win the route exists for is two orders of
+/// magnitude out (216 ms against 32 ms at a 10⁷ result).
+///
+/// **Not measured: how this moves with thread count.** The probe was single-threaded and both
+/// routes parallelise, each over its own axis — project over the result, the per-tile crossing over
+/// the viewport — so the ratio is *modelled* to survive, not shown to.
+/// `Engine::filter_crossing_routes` is the observable that would catch it being wrong in a way a
+/// bench never reproduces.
+const PER_TILE_CROSSING_RATIO: u64 = 3;
+
+/// Split a chunk of the crossing domain no smaller than this, so a viewport small enough that the
+/// fan-out costs more than the walk does not pay for one. 4,096 rows is ~0.1 ms of crossing work at
+/// the scattered constant — comfortably above rayon's own per-task cost, and small enough that a
+/// realistic viewport still splits hundreds of ways.
+const CROSSING_CHUNK_MIN_ROWS: u32 = 4096;
+
+/// The slice-space rows a request's tiles span: every tile part shifted into slice row space by its
+/// segment's `row_base`, sorted, and merged.
+///
+/// **Merged, and that is not tidiness.** Adjacent tiles are adjacent Morton ranges, so merging
+/// turns a few hundred separate walks into a handful of long contiguous ones — which is what makes
+/// the per-tile crossing's reads of `row-entity.u32` sequential, and what lets
+/// [`FilterRows::covers`] answer with one binary search. Merging `[a, b)` with `[b, c)` yields
+/// exactly their union, so the domain is never widened by it.
+fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Vec<Range<u32>> {
+    let mut spans: Vec<Range<u32>> = ranges
+        .iter()
+        .flat_map(|parts| parts.iter())
+        .map(|(s, r)| row_bases[*s] + r.start..row_bases[*s] + r.end)
+        .collect();
+    spans.sort_unstable_by_key(|r| r.start);
+    let mut merged: Vec<Range<u32>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.start <= last.end => last.end = last.end.max(span.end),
+            _ => merged.push(span),
+        }
+    }
+    merged
+}
+
+/// Test every row of `domain` against `entities`, giving the rows that matched.
+///
+/// `None` where the row space declined to invert a row — see the call site.
+///
+/// Parallel over the domain, on the engine's own pool (D-D: there is one), because the route it
+/// competes with is parallel over *its* axis and a serial walk here would move the crossover
+/// without anything in the design saying so. Chunks are cut by row count rather than by range, so
+/// neither a viewport of one huge range nor one of a thousand slivers defeats the split.
+fn per_tile_crossing(
+    row_space: &tessera_store::permutation::RowSpace,
+    entities: &croaring::Bitmap,
+    domain: &[Range<u32>],
+    rows_in_ranges: u64,
+) -> Option<croaring::Bitmap> {
+    let threads = rayon::current_num_threads().max(1) as u64;
+    let target = (rows_in_ranges / (threads * 8))
+        .max(CROSSING_CHUNK_MIN_ROWS as u64)
+        .min(u32::MAX as u64) as u32;
+    let chunks: Vec<Range<u32>> = domain
+        .iter()
+        .flat_map(|range| {
+            (range.start..range.end)
+                .step_by(target as usize)
+                .map(move |start| start..range.end.min(start.saturating_add(target)))
+        })
+        .collect();
+
+    let parts: Option<Vec<croaring::Bitmap>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            // Rows accumulate ascending into a small buffer and enter the bitmap in batches:
+            // `add_many` on a sorted run appends to the container being built, where a per-row
+            // `add` re-locates it every time.
+            let mut rows = croaring::Bitmap::new();
+            let mut buf: Vec<u32> = Vec::with_capacity(1024);
+            for row in chunk.clone() {
+                let entity = row_space.entity_of(RowId::new(row))?;
+                if entities.contains(entity.raw() as u32) {
+                    buf.push(row);
+                    if buf.len() == 1024 {
+                        rows.add_many(&buf);
+                        buf.clear();
+                    }
+                }
+            }
+            rows.add_many(&buf);
+            Some(rows)
+        })
+        .collect();
+
+    let parts = parts?;
+    let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
+    Some(croaring::Bitmap::fast_or(&refs))
 }
 
 /// Calibration task threshold: below this many total rows spanned by a request's resolved tiles
@@ -2052,5 +2227,150 @@ mod tests {
                 "collect order diverged from input order at threads={threads} min_len={min_len}"
             );
         }
+    }
+
+    /// A row space over a deliberately non-identity row order, with its `row-entity.u32` attached —
+    /// the shape both crossing routes read. An identity order would let a route that returned the
+    /// row back as the entity pass.
+    fn row_space_over(
+        dir: &std::path::Path,
+        row_order: &[u32],
+    ) -> tessera_store::permutation::RowSpace {
+        use tessera_store::permutation::{Permutation, RowSpace};
+        use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
+
+        let perm_path = dir.join("permutation.bin");
+        let entities: Vec<EntityId> = row_order.iter().map(|&e| EntityId::new(e as u64)).collect();
+        tessera_store::write::write_permutation(&perm_path, &entities, row_order.len() as u64)
+            .expect("permutation writes");
+        let table_path = dir.join(ROW_ENTITY_FILE);
+        write_row_entity(&table_path, row_order).expect("table writes");
+
+        RowSpace::new(
+            Arc::new(Permutation::load(&perm_path).expect("permutation loads")),
+            row_order.len() as u32,
+        )
+        .with_row_entity(Arc::new(
+            RowToEntity::load(&table_path).expect("table loads"),
+        ))
+    }
+
+    /// **The claim the whole two-route design rests on**: over every range the request can ask
+    /// about, testing the viewport's rows one at a time and projecting the whole result give the
+    /// same set. The route is a latency choice and nothing else.
+    ///
+    /// Asserted against a domain with all three shapes a real viewport produces — a long run, a
+    /// sliver, and a gap between them — and at a chunk size small enough that the parallel split
+    /// genuinely happens, since a route that is correct only when it runs as one chunk is not
+    /// correct.
+    #[test]
+    fn filter_routes_agree_over_the_domain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 20,011 is coprime with the row count, so the order is a genuine shuffle rather than a
+        // shift, and no row's entity is near it.
+        let rows = 40_000u32;
+        let row_order: Vec<u32> = (0..rows).map(|r| (r as u64 * 20_011 % rows as u64) as u32).collect();
+        let space = row_space_over(dir.path(), &row_order);
+
+        // Every seventh entity, plus a dense block — a result that is neither uniform nor one run.
+        let mut entities = croaring::Bitmap::new();
+        entities.add_many(&(0..rows).step_by(7).collect::<Vec<u32>>());
+        entities.add_range(1_000u32..9_000);
+
+        let domain = vec![0u32..12_345, 20_000..20_003, 30_000..40_000];
+        let mut domain_rows = croaring::Bitmap::new();
+        for range in &domain {
+            domain_rows.add_range(range.clone());
+        }
+
+        // `rows_in_ranges` here is only the chunker's sizing hint; pass the real span so the split
+        // is the one a viewport of this size would take.
+        let per_tile = per_tile_crossing(&space, &entities, &domain, domain_rows.cardinality())
+            .expect("a row space with a table can always invert");
+        let projected = space.project(&entities);
+
+        assert_eq!(
+            per_tile,
+            projected.and(&domain_rows),
+            "the per-tile crossing and the projection disagree inside the domain"
+        );
+        // And the per-tile route claims nothing outside it — the property `FilterRows::Viewport`
+        // exists to keep a consumer honest about.
+        assert!(
+            per_tile.andnot(&domain_rows).is_empty(),
+            "the per-tile crossing returned rows it never tested"
+        );
+        assert!(
+            !projected.andnot(&domain_rows).is_empty(),
+            "the fixture is degenerate: every matching row is inside the domain, so the two routes \
+             would agree even if the domain were ignored"
+        );
+    }
+
+    /// A slice with no `row-entity.u32` declines the per-tile route rather than answering from a
+    /// base it cannot invert. `entity_of` returning `None` on such a row means "ask another way",
+    /// and reading it as "this row has no entity" would drop rows from a filtered viewport
+    /// silently — so the route decision asks `can_invert` before committing, and the walk itself
+    /// still bails if it ever meets one.
+    #[test]
+    fn a_row_space_without_a_table_declines_the_per_tile_route() {
+        use tessera_store::permutation::{Permutation, RowSpace};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let perm_path = dir.path().join("permutation.bin");
+        let entities_in_order: Vec<EntityId> =
+            [4u64, 2, 0, 5, 1, 3].iter().map(|&e| EntityId::new(e)).collect();
+        tessera_store::write::write_permutation(&perm_path, &entities_in_order, 6)
+            .expect("permutation writes");
+        let space = RowSpace::new(Arc::new(Permutation::load(&perm_path).expect("loads")), 6);
+
+        assert!(!space.can_invert());
+        let mut entities = croaring::Bitmap::new();
+        entities.add_many(&[0, 1, 2, 3, 4, 5]);
+        let domain = vec![0u32..2, 4..6];
+        assert!(
+            per_tile_crossing(&space, &entities, &domain, 4).is_none(),
+            "the walk must decline rather than return the rows it happened to resolve"
+        );
+    }
+
+    /// The domain is the request's tile parts in slice row space: shifted by each segment's
+    /// `row_base`, sorted across segments, and merged where they touch. Merging is what makes the
+    /// walk sequential and `FilterRows::covers` a single binary search; it must never widen.
+    #[test]
+    fn the_crossing_domain_shifts_by_row_base_and_merges_only_what_touches() {
+        // Two segments: segment 0 based at row 0, segment 1 at row 1,000. Three tiles, the first
+        // two adjacent within segment 0 and the third split across both.
+        let ranges = vec![
+            vec![(0usize, 0u32..10)],
+            vec![(0usize, 10u32..25)],
+            vec![(0usize, 40u32..50), (1usize, 0u32..5)],
+        ];
+        let domain = crossing_domain(&ranges, &[0, 1_000]);
+        assert_eq!(
+            domain,
+            vec![0u32..25, 40..50, 1_000..1_005],
+            "adjacent tiles merge, a gap survives, and segment 1's rows land at its row_base"
+        );
+        assert_eq!(
+            domain.iter().map(|r| r.len()).sum::<usize>(),
+            10 + 15 + 10 + 5,
+            "merging changed how many rows the domain covers"
+        );
+    }
+
+    /// The route decision, at its boundary. Strictly greater, so a result exactly at the ratio
+    /// still projects — the exact-everywhere route wins ties.
+    #[test]
+    fn the_per_tile_route_is_taken_only_past_the_ratio() {
+        let looks_cheaper =
+            |matched: u64, viewport: u64| matched > viewport.saturating_mul(PER_TILE_CROSSING_RATIO);
+        assert!(!looks_cheaper(300_000, 300_000), "1x projects");
+        assert!(!looks_cheaper(900_000, 300_000), "exactly at the ratio projects");
+        assert!(looks_cheaper(900_001, 300_000), "just past it does not");
+        // An empty viewport: the per-tile route walks nothing and is free, where projecting would
+        // pay for the whole result to reach the same empty answer.
+        assert!(looks_cheaper(1, 0));
+        assert!(!looks_cheaper(0, 0), "nothing matched -- either route is empty");
     }
 }

@@ -1201,6 +1201,110 @@ fn a_filtered_viewport_serves_only_matching_marks() {
     }
 }
 
+/// A viewport far smaller than the filter's result crosses into row space by **testing its own
+/// rows** rather than projecting the whole result, and the two routes agree.
+///
+/// This is the end-to-end half of `viewport::tests::filter_routes_agree_over_the_domain`, which
+/// asserts the same equality directly over a 40,000-row domain. What it adds is the wiring: that
+/// the route is actually reached through a served request, that the restricted bitmap it produces
+/// survives every count and selection the request goes on to take (the debug assertion in
+/// `EffectiveMask` fires here if a range outside the tile set is ever consulted under a filter),
+/// and that the answer is the same one the projecting route gives for the same window.
+///
+/// The window is chosen to sit past `PER_TILE_CROSSING_RATIO`, and the route counters assert it
+/// landed there rather than leaving the test to pass on the route it was meant to exercise.
+#[test]
+fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-pertile");
+    let wal = fx._dir.path().join("wal-pertile");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Every department: 48 of the 60 items, against a window holding ~11 rows. Broad enough to
+    // clear the ratio, and still a genuine narrowing — the every-fifth item carries no department.
+    let any_department = FilterExpr::AnyOf(
+        ["eng", "sales", "legal"]
+            .iter()
+            .map(|d| leaf("department", FilterOperand::Equals(AttrLocalId::new(fx.codes[*d]))))
+            .collect(),
+    );
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let zoom = 8;
+
+    let unfiltered_narrow = engine
+        .viewport(&session, ViewportRequest::new("s0", zoom, narrow, 10_000))
+        .expect("the narrow window answers unfiltered");
+
+    let before = engine.filter_crossing_routes();
+    let filtered_narrow = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", zoom, narrow, 10_000).filter(any_department.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    let after = engine.filter_crossing_routes();
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (0, 1),
+        "this request was supposed to take the per-tile route; the window or the ratio moved"
+    );
+
+    // The same filter over the whole extent is far below the ratio and projects — so this is the
+    // other route's answer to the same question, computed independently of the one under test.
+    let before = engine.filter_crossing_routes();
+    let filtered_full = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(any_department),
+        )
+        .expect("the full extent answers filtered");
+    let after = engine.filter_crossing_routes();
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (1, 0),
+        "the control request was supposed to project"
+    );
+
+    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+    let (narrow_all, narrow_matched, full_matched) = (
+        ids(&unfiltered_narrow),
+        ids(&filtered_narrow),
+        ids(&filtered_full),
+    );
+
+    assert_eq!(
+        narrow_matched,
+        full_matched.intersection(&narrow_all).copied().collect(),
+        "the per-tile route's marks differ from the projecting route's over the same window"
+    );
+    // Non-degenerate in both directions: the window holds items, and the filter removed some of
+    // them. Without this the equality above would hold over two empty sets.
+    assert!(!narrow_matched.is_empty(), "the window matched nothing");
+    assert!(
+        narrow_matched.len() < narrow_all.len(),
+        "the filter removed nothing from this window, so the routes agreeing proves little"
+    );
+
+    // And the per-tile bitmap is a legitimate answer for the *counts* too, not just the marks: a
+    // restricted bitmap that under-reported would show up here first, since `matched` is a count
+    // over the whole tile rather than over the served prefix.
+    let matched_total: u64 = filtered_narrow.tiles.iter().map(|t| t.matched).sum();
+    assert_eq!(
+        matched_total,
+        narrow_matched.len() as u64,
+        "Σ matched over tiles disagrees with the marks the same request served"
+    );
+    let visible_total: u64 = filtered_narrow.tiles.iter().map(|t| t.visible).sum();
+    assert_eq!(
+        visible_total,
+        narrow_all.len() as u64,
+        "a filter changed `visible`, which is the composed count and must not move (§7.1)"
+    );
+}
+
 /// **The selection threshold stays anchored on the unfiltered total** (§8.4, I12). A filter may
 /// move the frontier up, never down — so the anchor a filtered request uses is the same one the
 /// unfiltered request uses, and a viewer typing does not coarsen their own map.

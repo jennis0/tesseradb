@@ -21,7 +21,7 @@ the pre-existing WAL and overlay ones and not filter work.
 | **R2** | Where the fold's flip opens `FilterColumns` | **Keep as built** — post-flip (option a) | Nothing — closes a stated conflict |
 | **R3** | Isolate the scan in its own crate? | **Neither, yet — the cause is under investigation.** The owner's reading is that a never-called function moving a constant 65% indicates something is wrong rather than something to route around, and no remedy is chosen before the mechanism is known | The order of every §5 gap |
 | **R4** | An r-letter for the contracts tree lines? | **Leave it** (option c) — no letter, no annotation | Nothing |
-| **R5** | Surface §4's project-vs-per-tile rule | **Build the per-tile route** (option a) — **and two further routes the viewport wants, which this memo did not anticipate** (below) | `filter-index.md` promotion |
+| **R5** | Surface §4's project-vs-per-tile rule | **Build the per-tile route** (option a) — **built 2026-08-11**; two further routes the viewport wants are deferred with the client (R5b) | `filter-index.md` promotion |
 
 R3 is now an investigation rather than a choice, and it still gates the order of the work that
 follows it. R5 grew: the two-route rule stands, and the surface needs two more routes beside it.
@@ -233,10 +233,19 @@ bounded by the viewport.
 **The scattered arm has since run, and it moved the rule rather than confirming it**
 ([`viewport-crossing`](../../../probes/2026-08-11-viewport-crossing/results.md), 2026-08-11). Arm 3's
 per-tile constant was measured against a materialised `row_to_entity` array the system does not have;
-the real crossing is a Feistel per row at ~17–25 ns, making the route 3–9× dearer than published. The
-two-route design stands and the per-tile route still wins decisively for broad filters, but the
-crossover sits between 10⁵ and 10⁶ against a 300,000-row viewport rather than at the ~75,000 the
-quarter-rule gives. Surface §4 now carries both constants and the ⊘ explaining what changed.
+the real crossing is a Feistel per row at ~17–25 ns, making the route 3–9× dearer than published.
+
+**Built, 2026-08-11.** The array arm 3 assumed now exists — `row-entity.u32`, 4 bytes per row per
+slice and shared across every filter column
+([decision 0063](../../decisions/0063-the-inverse-permutation-is-stored-for-the-filtered-viewport.md))
+— so the Feistel is off the per-row path and the route costs what arm 3 said it would. The rule is
+`PER_TILE_CROSSING_RATIO = 3`: project while the result is no more than three times the viewport's
+row count, test per tile past that. Three is the scattered end of the measured 1–5× band, honouring
+the owner's "set it from the scattered constant" — with the sign of the error stated at the constant,
+since erring toward projecting costs milliseconds and the win is two orders of magnitude out. The
+routes are asserted to agree over every range a request can ask about, and `Engine::filter_crossing_routes`
+counts which one ran, because the constant is calibrated rather than derived. Surface §4 carries the
+rule; the coarse Morton-cell pre-filter measured alongside it is refuted there.
 
 **One correction to make either way.** §4's closing paragraphs still assert that a filter operand's
 projection is principal-independent and "computed once and shared across every principal". The ⊘

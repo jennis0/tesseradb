@@ -556,6 +556,17 @@ pub struct Engine {
     /// `pub(crate)`: `viewport.rs`'s `Engine::viewport` (a different module, same crate) reads it
     /// on every request.
     pub(crate) serial_fallback_max_rows: AtomicU64,
+    /// Which route each filtered viewport took to cross its result into row space — projected, and
+    /// tested per tile (`viewport::Engine::cross_filter_into_row_space`).
+    ///
+    /// **Unconditional, not `bench-timing`-gated**, for the same reason
+    /// [`Self::full_projection_builds`] is: the constant that chooses between the two routes
+    /// (`viewport::PER_TILE_CROSSING_RATIO`) is calibrated from a single-threaded probe at one
+    /// scale, and the way a calibration like that is found to be wrong is a deployment where the
+    /// split is nothing like what the model predicts. A number only a bench build can see is not
+    /// that observable.
+    pub(crate) filter_crossings_projected: AtomicU64,
+    pub(crate) filter_crossings_per_tile: AtomicU64,
     /// Requests served from a one-generation-stale entry — the steady-state observable behind
     /// decision 0044's stale-serve. A deployment where this rises and
     /// [`Self::full_projection_builds`] does not is one where the refresh is keeping up.
@@ -912,6 +923,8 @@ impl Engine {
             write: WritePath::new(write_state),
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
+            filter_crossings_projected: AtomicU64::new(0),
+            filter_crossings_per_tile: AtomicU64::new(0),
             stale_serves: AtomicU64::new(0),
             refreshes: Arc::new(AtomicU64::new(0)),
             refresh_in_flight: Arc::clone(&refresh_in_flight),
@@ -1050,6 +1063,16 @@ impl Engine {
     /// See [`Self::stale_serves`].
     pub fn refreshes(&self) -> u64 {
         self.refreshes.load(Ordering::Relaxed)
+    }
+
+    /// Filtered viewports served by each crossing route, `(projected, per_tile)` — see
+    /// [`Self::filter_crossings_projected`]'s doc for why this is worth watching. Unfiltered
+    /// requests cross nothing and are counted in neither.
+    pub fn filter_crossing_routes(&self) -> (u64, u64) {
+        (
+            self.filter_crossings_projected.load(Ordering::Relaxed),
+            self.filter_crossings_per_tile.load(Ordering::Relaxed),
+        )
     }
 
     #[cfg(feature = "bench-timing")]

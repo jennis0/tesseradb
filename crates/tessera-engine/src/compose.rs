@@ -211,6 +211,64 @@ impl RowProjection {
     }
 }
 
+/// An attribute filter's rows, **with the part of row space they are an answer about**.
+///
+/// The two crossings from the filter's entity-space result into row space produce sets of
+/// different extent, and the difference is not an implementation detail a consumer may ignore.
+/// [`RowSpace::project`](tessera_store::permutation::RowSpace::project) crosses the whole result
+/// and yields every matching row in the slice; the per-tile route tests only the rows the
+/// request's tiles actually span, and is *silent* — not negative — everywhere else. Handing a
+/// counting path the second while it believes it holds the first under-reports `matched` with no
+/// error anywhere, which is why the extent travels with the bitmap rather than in a comment at
+/// the call site.
+pub enum FilterRows {
+    /// Every matching row in the slice. Exact at any range.
+    Complete(Bitmap),
+    /// Only the rows inside `domain` were tested. Outside it the bitmap is empty and that
+    /// emptiness means nothing at all.
+    ///
+    /// `domain` is ascending, disjoint and maximally merged — [`Self::covers`] binary-searches it.
+    Viewport { rows: Bitmap, domain: Vec<Range<u32>> },
+}
+
+impl FilterRows {
+    fn rows(&self) -> &Bitmap {
+        match self {
+            FilterRows::Complete(rows) => rows,
+            FilterRows::Viewport { rows, .. } => rows,
+        }
+    }
+
+    /// Is `r` a range this set can answer about?
+    ///
+    /// The debug assertions below are the only callers. They are assertions rather than a
+    /// fail-closed check because the domain is not a permission boundary: it is the request's own
+    /// tile set, computed three statements earlier in the same function, and a range outside it is
+    /// a coding error in this crate rather than anything a caller can provoke. What the assertion
+    /// buys is that the error surfaces in the test suite instead of as a quietly low `matched`.
+    fn covers(&self, r: &Range<u32>) -> bool {
+        let domain = match self {
+            FilterRows::Complete(_) => return true,
+            FilterRows::Viewport { domain, .. } => domain,
+        };
+        if r.start >= r.end {
+            return true;
+        }
+        // The range containing `r.start`, if any — `domain` is disjoint and ascending, so at most
+        // one qualifies, and `r` is covered exactly when that one also reaches `r.end`.
+        let found = domain.binary_search_by(|d| {
+            if d.end <= r.start {
+                std::cmp::Ordering::Less
+            } else if d.start > r.start {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        matches!(found, Ok(i) if domain[i].end >= r.end)
+    }
+}
+
 /// The composed, effective visibility mask for one request: `base` plus a small diff (`minus`,
 /// `plus`) capturing every overlay/buffer effect since `base` was cached. Never materialises the
 /// full mask — every operation below costs O(containers touched) in the diffs, which are
@@ -228,7 +286,7 @@ pub struct EffectiveMask {
     ///
     /// It is a *row-space* set because that is the space counts are taken in. Its entity-space
     /// origin already met the composed verdict, so intersecting here narrows and cannot widen.
-    filter: Option<Bitmap>,
+    filter: Option<FilterRows>,
 }
 
 impl EffectiveMask {
@@ -236,7 +294,7 @@ impl EffectiveMask {
     ///
     /// Consumes and returns, so a filtered mask cannot be built by mutating one already handed to
     /// a counting path — the unfiltered mask and the filtered one are different values.
-    pub fn with_filter(mut self, rows: Bitmap) -> Self {
+    pub fn with_filter(mut self, rows: FilterRows) -> Self {
         self.filter = Some(rows);
         self
     }
@@ -299,6 +357,18 @@ impl EffectiveMask {
         }
     }
 
+    /// Every range this mask is asked about must be one the filter was evaluated over — see
+    /// [`FilterRows`]. Called from the two methods that read `filter`; compiled out in release.
+    #[inline]
+    fn debug_assert_in_domain(&self, r: &Range<u32>) {
+        debug_assert!(
+            self.filter.as_ref().is_none_or(|f| f.covers(r)),
+            "filtered count over {r:?}, which the per-tile crossing never tested — the answer \
+             would be silently low. Either the range came from outside the request's tile set or \
+             the domain was built from something other than `ranges`."
+        );
+    }
+
     /// The effective mask restricted to `r`: `(base ∩ r) ∖ minus ∪ (plus ∩ r)`, as a bitmap.
     ///
     /// **Returns the set, not an iterator, and that is the point.** This replaced an `iter_range`
@@ -324,6 +394,7 @@ impl EffectiveMask {
     /// from the caller's `visible` instead would be cheaper still and worthless: the counter exists
     /// to be compared against `visible`.
     pub fn rows_in_range(&self, r: Range<u32>) -> Bitmap {
+        self.debug_assert_in_domain(&r);
         let range_mask = Bitmap::from_range(r);
         let mut result = self.base.bitmap().and(&range_mask);
         result.andnot_inplace(&self.minus);
@@ -335,13 +406,14 @@ impl EffectiveMask {
         // earlier — to `base`, or before the `plus` union — would let a filtered row be reinstated
         // by the diff, which is the fold `filter-surface.md` §5.1 forbids.
         if let Some(filter) = &self.filter {
-            result.and_inplace(filter);
+            result.and_inplace(filter.rows());
         }
         result
     }
 
     pub fn contains_row(&self, row: u32) -> bool {
-        if self.filter.as_ref().is_some_and(|f| !f.contains(row)) {
+        self.debug_assert_in_domain(&(row..row + 1));
+        if self.filter.as_ref().is_some_and(|f| !f.rows().contains(row)) {
             return false;
         }
         if self.minus.contains(row) {

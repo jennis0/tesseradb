@@ -93,13 +93,15 @@ addition, so whether this owes an r-note is a small call nobody has made.
 ## 4. Promotion
 
 `filter-index.md` is **Provisional at r7**, with its adversarial round dispositioned and §6.3's
-rulings closed. Two things stand between it and normative:
+rulings closed. One thing stands between it and normative:
 
 - **§2's constants confirmed at a value width other than `u32` and on a string column.** The
   campaign swept `u32` and text separately and never crossed them.
-- **Surface §4's project-vs-per-tile rule**, which is its own ruling: arm 3 measured the crossover
-  (a projection costs ~27 ns per set bit and scales with the *result*; a per-tile membership test
-  ~6–22 ns per viewport row and scales with the *viewport*) and only the projecting route is built.
+
+Surface §4's project-vs-per-tile rule was the second, and it is **ruled and built** (2026-08-11,
+decision 0063): both routes exist, `row-entity.u32` carries the crossing, and the threshold is three
+times the viewport's rows. Surface §4 itself is still Provisional pending an owner ruling on the rule
+it now describes.
 
 Two amendments are owed to **normative** documents and should ride their own reviews, not this one:
 compaction §2's table and §3's pass list gain the attribute pass and the band budget; write-path §7

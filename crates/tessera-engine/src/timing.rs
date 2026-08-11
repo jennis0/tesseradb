@@ -82,6 +82,18 @@ pub struct StageTimings {
     pub row_projection_ns: u64,
     /// `compose()` — the I1 effective-mask composition. Cost is linear in overlay + buffer size.
     pub compose_ns: u64,
+    /// Evaluating the request's filter expression against the composed candidate — entity space
+    /// throughout, no row ever touched. Zero on an unfiltered request.
+    pub filter_eval_ns: u64,
+    /// Crossing that entity-space result into row space — `Engine::cross_filter_into_row_space`,
+    /// either route. Zero on an unfiltered request.
+    ///
+    /// **Separated from `filter_eval_ns` because the two scale with different things** and the
+    /// constant that chooses the crossing's route (`viewport::PER_TILE_CROSSING_RATIO`) is
+    /// calibrated, not derived. Read against `filter_matched` and `rows_in_ranges` — the two
+    /// quantities the route decision is made from — and against
+    /// `Engine::filter_crossing_routes` for which route ran.
+    pub filter_cross_ns: u64,
     /// `EffectiveMask::visible_total()` — resolving §7.2's θ anchor, once per request.
     ///
     /// Separated from `compose_ns` because the claim made for it is specific and worth holding to
@@ -150,6 +162,13 @@ pub struct StageTimings {
     /// unlike every per-tile field below. See this struct's doc for why that distinction is now
     /// load-bearing and the fold-discards-`Ok(None)` bug that motivated it.
     pub rows_in_ranges: u64,
+    /// Entities the filter admitted, before any crossing into row space. Zero on an unfiltered
+    /// request, and zero-because-nothing-matched is indistinguishable from it here — `filter_eval_ns`
+    /// is what separates the two.
+    ///
+    /// The numerator of the route decision, whose denominator is `rows_in_ranges`: the per-tile
+    /// crossing runs when this exceeds `PER_TILE_CROSSING_RATIO` times that.
+    pub filter_matched: u64,
     /// Σ over tiles of the rows selection actually **read**, counted inside the loops that read
     /// them (`Selection::rows_visited`).
     ///
@@ -205,6 +224,8 @@ impl StageTimings {
             + self.slice_lookup_ns
             + self.row_projection_ns
             + self.compose_ns
+            + self.filter_eval_ns
+            + self.filter_cross_ns
             + self.tiles_for_bbox_ns
             + self.tile_ranges_ns
             + self.theta_anchor_ns
