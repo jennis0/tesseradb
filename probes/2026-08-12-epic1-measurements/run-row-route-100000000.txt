@@ -1,0 +1,88 @@
+fixture /tmp/tessera-bench/fixtures/100000000/attrs-subclass — 100000000 items, slice s0, 4930 terms, 12 cores
+
+== viewport: the built route's per-row cost ==
+column                thr         rows    matched    sel %    cross ms      ns/row   total ms
+archive=acc-phys        1       343391          9    0.003       0.927       2.700      1.061
+archive=acc-phys        1      1733284         35    0.002       4.318       2.491      5.029
+archive=acc-phys        1     17859862        363    0.002      47.831       2.678     52.226
+archive=acc-phys        1    100000000       1890    0.002     271.401       2.714    292.335
+archive=hep-lat         1       343391        345    0.100       0.897       2.613      1.052
+archive=hep-lat         1      1733284       2424    0.140       4.355       2.513      5.092
+archive=hep-lat         1     17859862     141681    0.793      50.293       2.816     58.987
+archive=hep-lat         1    100000000     742371    0.742     278.576       2.786    317.839
+primary_category=acc-phys      1       343391          9    0.003       0.894       2.604      1.018
+primary_category=acc-phys      1      1733284         35    0.002       4.360       2.515      4.887
+primary_category=acc-phys      1     17859862        363    0.002      49.271       2.759     53.483
+primary_category=acc-phys      1    100000000       1890    0.002     278.049       2.780    299.316
+primary_category=math.CT      1       343391        827    0.241       1.052       3.063      1.295
+primary_category=math.CT      1      1733284       6730    0.388       4.538       2.618      5.394
+primary_category=math.CT      1     17859862      26236    0.147      48.372       2.708     54.443
+primary_category=math.CT      1    100000000     162738    0.163     274.180       2.742    301.282
+archive=acc-phys       12       343391          9    0.003       0.455       1.324      0.607
+archive=acc-phys       12      1733284         35    0.002       1.548       0.893      2.131
+archive=acc-phys       12     17859862        363    0.002       6.595       0.369     10.653
+archive=acc-phys       12    100000000       1890    0.002      36.906       0.369     45.867
+archive=hep-lat        12       343391        345    0.100       0.587       1.709      0.761
+archive=hep-lat        12      1733284       2424    0.140       1.719       0.992      2.495
+archive=hep-lat        12     17859862     141681    0.793       7.403       0.414     16.612
+archive=hep-lat        12    100000000     742371    0.742      35.537       0.355     49.319
+primary_category=acc-phys     12       343391          9    0.003       0.538       1.568      0.733
+primary_category=acc-phys     12      1733284         35    0.002       1.322       0.763      1.786
+primary_category=acc-phys     12     17859862        363    0.002       7.557       0.423     11.947
+primary_category=acc-phys     12    100000000       1890    0.002      41.433       0.414     50.260
+primary_category=math.CT     12       343391        827    0.241       0.555       1.617      0.744
+primary_category=math.CT     12      1733284       6730    0.388       1.279       0.738      2.133
+primary_category=math.CT     12     17859862      26236    0.147       7.114       0.398     13.128
+primary_category=math.CT     12    100000000     162738    0.163      36.463       0.365     47.492
+
+== coarse: zoom 0, the whole extent — the domain is the slice ==
+column                thr         rows    matched    cross ms      ns/row   total ms
+archive=acc-phys        1    100000000       1890     280.405       2.804    285.122
+archive=hep-lat         1    100000000     742371     299.278       2.993    312.974
+primary_category=acc-phys      1    100000000       1890     284.417       2.844    287.426
+primary_category=math.CT      1    100000000     162738     282.833       2.828    289.255
+archive=acc-phys       12    100000000       1890      32.897       0.329     37.325
+archive=hep-lat        12    100000000     742371      36.237       0.362     48.674
+primary_category=acc-phys     12    100000000       1890      36.099       0.361     39.961
+primary_category=math.CT     12    100000000     162738      38.474       0.385     45.047
+
+== routes: the same predicate answered both ways (/tmp/tessera-bench/fixtures/100000000/attrs-both) ==
+column                thr         rows    matched    eval ms   cross ms   total ms   route
+archive=acc-phys        1       343391          9      0.020      0.927      1.008     row
+archive=acc-phys        1      1733284         35      0.016      4.321      4.549     row
+archive=acc-phys        1     17859862         12      0.028      0.569      2.765  entity
+archive=acc-phys        1    100000000         12      0.049      0.611      1.178  entity
+archive=hep-lat         1       343391        345      0.015      0.899      0.984     row
+archive=hep-lat         1      1733284       2424      0.017      4.291      4.658     row
+archive=hep-lat         1     17859862     107112      0.235      2.123      6.211  entity
+archive=hep-lat         1    100000000     107112      0.209      2.511      5.420  entity
+primary_category=acc-phys      1       343391          9      0.019      0.909      0.990     row
+primary_category=acc-phys      1      1733284         35      0.020      4.449      4.772     row
+primary_category=acc-phys      1     17859862         12      0.021      0.611      3.307  entity
+primary_category=acc-phys      1    100000000         12      0.054      0.878      1.465  entity
+primary_category=math.CT      1       343391        827      0.018      0.910      1.009     row
+primary_category=math.CT      1      1733284       6730      0.022      4.989      5.303     row
+primary_category=math.CT      1     17859862      21286      0.174      1.330      4.141  entity
+primary_category=math.CT      1    100000000      21286      0.186      1.713      2.750  entity
+archive=acc-phys       12       343391          9      0.016      0.497      0.576     row
+archive=acc-phys       12      1733284         35      0.016      1.471      1.740     row
+archive=acc-phys       12     17859862         12      0.020      0.681      2.849  entity
+archive=acc-phys       12    100000000         12      0.041      0.773      1.591  entity
+archive=hep-lat        12       343391        345      0.015      0.993      1.044     row
+archive=hep-lat        12      1733284       2424      0.015      1.457      1.737     row
+archive=hep-lat        12     17859862     107112      0.249      2.836      8.349  entity
+archive=hep-lat        12    100000000     107112      0.211      2.340      5.378  entity
+primary_category=acc-phys     12       343391          9      0.020      0.522      0.626     row
+primary_category=acc-phys     12      1733284         35      0.018      0.787      1.002     row
+primary_category=acc-phys     12     17859862         12      0.023      0.786      3.180  entity
+primary_category=acc-phys     12    100000000         12      0.045      0.479      1.431  entity
+primary_category=math.CT     12       343391        827      0.026      0.545      0.616     row
+primary_category=math.CT     12      1733284       6730      0.016      1.403      1.681     row
+primary_category=math.CT     12     17859862      21286      0.201      1.901      5.063  entity
+primary_category=math.CT     12    100000000      21286      0.147      1.411      2.557  entity
+
+ns/row divides `filter_cross_ns` by `rows_in_ranges`: on a pure row leaf that stage is
+`evaluate_row_route` and nothing else. In the routes block the two columns mean different
+things per route — on the entity route `eval ms` is the scan and `cross ms` the crossing,
+on the row route `eval ms` is only the routing and `cross ms` is the scan — so read
+`eval + cross` there, and the two blocks are not one table.
