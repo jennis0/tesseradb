@@ -2961,7 +2961,7 @@ mod segment_schema_tests {
     #[test]
     fn a_segments_writer_schema_omits_filter_only_columns() {
         let manifest = tessera_store::manifest::Manifest {
-            bundle_format: 1,
+            bundle_format: 2,
             created_at: String::new(),
             data_plugin_hash: String::new(),
             declared_bounds: serde_json::json!({}),
@@ -2990,14 +2990,14 @@ mod segment_schema_tests {
                     name: "department".to_string(),
                     arrow_type: ScalarType::U16,
                     vocabulary: Some("departments".to_string()),
-                    filter: true,
+                    index: true,
                     render: true,
                 },
                 DeclaredScalar {
                     name: "title".to_string(),
                     arrow_type: ScalarType::Utf8,
                     vocabulary: None,
-                    filter: true,
+                    index: true,
                     render: false,
                 },
             ],
@@ -3032,6 +3032,7 @@ mod vocabulary_extensions_tests {
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
+            record_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -4700,6 +4701,7 @@ impl Executor {
             // wrong answer with no symptom, and strictly worse than a refusal to open. The two
             // halves are written here, in one manifest write.
             attr_extents: carried_attrs.clone(),
+            record_extents: Vec::new(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -7156,6 +7158,9 @@ impl Executor {
                         column: e.column.clone(),
                         values: e.values_rel.clone(),
                         presence: e.presence_rel.clone(),
+                        dict: None,
+                        postings: None,
+                        offsets: None,
                     }),
             );
         write_deny_state(&mut manifest, &live.overlay);

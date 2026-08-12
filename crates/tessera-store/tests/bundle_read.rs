@@ -122,6 +122,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         deltas: vec![],
         dict_extents: vec![],
         attr_extents: Vec::new(),
+        record_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
         tombstones: vec![],
@@ -133,7 +134,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 1,
+        bundle_format: 2,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         data_plugin_hash: "builtin:passthrough:1".to_string(),
         declared_bounds: serde_json::json!({}),
@@ -187,7 +188,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, 1);
+    assert_eq!(bundle.manifest.bundle_format, 2);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);

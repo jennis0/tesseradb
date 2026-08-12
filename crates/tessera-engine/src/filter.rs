@@ -500,7 +500,7 @@ pub(crate) fn owes_value_column(
     scalar: &tessera_store::manifest::DeclaredScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> bool {
-    scalar.filter || listing_of(scalar, vocabularies) == Some(Listing::PerViewer)
+    scalar.index || listing_of(scalar, vocabularies) == Some(Listing::PerViewer)
 }
 
 /// Does the build write derived postings for this column? Only a category earns them — a string's
@@ -587,7 +587,7 @@ impl FilterColumns {
                         values: base,
                     }],
                     covered,
-                    filterable: scalar.filter,
+                    filterable: scalar.index,
                     postings,
                     route,
                 },

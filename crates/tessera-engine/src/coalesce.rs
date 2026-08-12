@@ -479,6 +479,9 @@ pub(crate) fn execute_coalesce(
                 column: window.column.clone(),
                 values: values_rel,
                 presence: presence_rel,
+                dict: None,
+                postings: None,
+                offsets: None,
             },
             values: Arc::new(values),
         });
@@ -702,6 +705,7 @@ mod tests {
                 records: 4,
             }],
             attr_extents: Vec::new(),
+            record_extents: Vec::new(),
             external_id_runs: vec!["entities/external-ids-0.arrow".to_string()],
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -755,6 +759,9 @@ mod tests {
             column: column.to_string(),
             values: format!("{dir}/{flush}.arrow"),
             presence: format!("{dir}/{flush}.roaring"),
+            dict: None,
+            postings: None,
+            offsets: None,
         }
     }
 
@@ -770,6 +777,9 @@ mod tests {
                     column: window.column.clone(),
                     values: format!("{out_rel}/attrs/{}/values.arrow", window.column),
                     presence: format!("{out_rel}/attrs/{}/presence.roaring", window.column),
+                    dict: None,
+                    postings: None,
+                    offsets: None,
                 },
                 values: Arc::new(
                     tessera_filter::ValueColumn::partial(

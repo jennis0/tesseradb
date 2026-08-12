@@ -199,7 +199,7 @@ async fn meta(
         //
         // The combinators (`all_of`, `any_of`) are not published per column — they compose
         // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
-        "filter_operands": meta.declared_scalars.iter().filter(|d| d.filter).map(|d| {
+        "filter_operands": meta.declared_scalars.iter().filter(|d| d.index).map(|d| {
             let family = family_of(d);
             serde_json::json!({
                 "column": d.name,
@@ -600,7 +600,7 @@ fn run_viewport_stream(
             let filterable: std::collections::HashMap<&str, tessera_engine::filter::Family> = meta
                 .declared_scalars
                 .iter()
-                .filter(|d| d.filter)
+                .filter(|d| d.index)
                 .map(|d| (d.name.as_str(), family_of(d)))
                 .collect();
             let vocab_of: std::collections::HashMap<&str, &str> = meta

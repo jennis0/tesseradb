@@ -77,7 +77,10 @@ pub struct GenerationStamp {
 }
 
 // Constants (contracts spec r3)
-pub const BUNDLE_FORMAT: u32 = 1;
+// 2: `declared_scalars[..].filter` renamed to `index` and `record_extents` required in
+// SEGMENTS-<n>.json (records-and-search §2/§3/§7). The bump makes a stale local bundle a loud
+// refusal rather than a silent misread — a fail-closed guard, not compatibility (decision 0048).
+pub const BUNDLE_FORMAT: u32 = 2;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -101,7 +104,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 1);
+        assert_eq!(BUNDLE_FORMAT, 2);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

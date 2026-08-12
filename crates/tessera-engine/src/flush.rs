@@ -919,7 +919,7 @@ mod tests {
 
     fn generation_of(overlay: Overlay, buffer: IngestBuffer) -> Generation {
         let manifest = Manifest {
-            bundle_format: 1,
+            bundle_format: 2,
             created_at: "2026-08-02T00:00:00Z".to_string(),
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),

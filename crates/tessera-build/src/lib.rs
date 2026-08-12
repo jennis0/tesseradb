@@ -695,6 +695,7 @@ fn write_manifests(
         deltas: Vec::new(),
         dict_extents,
         attr_extents: Vec::new(),
+        record_extents: Vec::new(),
         external_id_runs,
         locator_extents: Vec::new(),
         tombstones: Vec::new(),
@@ -728,7 +729,7 @@ fn write_manifests(
                 name: a.name.clone(),
                 arrow_type: a.ty,
                 vocabulary: a.vocabulary.clone(),
-                filter: a.filter,
+                index: a.filter,
                 render: a.render,
             })
             .collect(),

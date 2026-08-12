@@ -43,7 +43,8 @@ pub struct DeclaredScalar {
     /// not tolerance of an older manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
-    /// Whether this column carries an entity-space filter index (`filter-index.md` §2).
+    /// Whether this column carries an entity-space index (`records-and-search.md` §3;
+    /// `filter-index.md` §2). Declared `index = true`, compiled here.
     ///
     /// **A flag rather than a descriptor, because everything else about the placement is derivable
     /// from the declaration already here.** The family is `vocabulary.is_some()` — a category or
@@ -52,7 +53,12 @@ pub struct DeclaredScalar {
     /// second copy of a fact this struct can answer, and `wire_type` exists because that kind of
     /// second copy has already disagreed with itself once here.
     ///
-    /// **No `serde(default)`**: a manifest that omits it is malformed, not filter-free. Decision
+    /// A column with neither this nor [`DeclaredScalar::render`] set is **blob-resident**
+    /// (records §3): its values live in the record blob and it is absent from `/v1/meta`'s
+    /// operand list. That home is derived from the two flags, never stored — a third flag would
+    /// be a second copy of a fact these two already answer.
+    ///
+    /// **No `serde(default)`**: a manifest that omits it is malformed, not index-free. Decision
     /// 0048's rule is the whole argument — do not default a field so that an older bundle still
     /// opens, because there is no older bundle. This is the distinction [`DeclaredScalar::vocabulary`]
     /// draws next door: its `default` is the `Option`'s own absence, a plain scalar genuinely having
@@ -62,7 +68,7 @@ pub struct DeclaredScalar {
     /// as such: a column silently non-filterable is simply absent from `/v1/meta`'s operand list, so
     /// no caller can name it. That is a capability that quietly went missing, not a wrong answer —
     /// still worth refusing, but not for the reason a first draft of this comment gave.
-    pub filter: bool,
+    pub index: bool,
     /// Declared `render`: this column occupies a slot in every row of `columns.arrow`.
     ///
     /// **The tail is exactly the render columns.** A `filter`-only column is entity-space and must
@@ -101,18 +107,18 @@ impl DeclaredScalar {
         }
     }
 
-    /// Whether this column's filter postings are addressed by a scattered identifier (a keyed file)
+    /// Whether this column's index postings are addressed by a scattered identifier (a keyed file)
     /// rather than a dense ordinal (a positional one) — `filter-index.md` §2.5.
     ///
-    /// Derived, never stored, for the reason [`DeclaredScalar::filter`] gives. A category's codes are
+    /// Derived, never stored, for the reason [`DeclaredScalar::index`] gives. A category's codes are
     /// drawn at random over the declared width, so a positional file would need one record per code
     /// point — 4×10⁹ for a `u32`. Every other family's identifiers are interned positions and dense
     /// by construction.
     ///
-    /// Meaningless unless [`DeclaredScalar::filter`] is set; a caller reaching this on a
+    /// Meaningless unless [`DeclaredScalar::index`] is set; a caller reaching this on a
     /// non-filterable column has already lost track of what it is doing, which is why this answers
     /// the format question and not the "does it have postings" question.
-    pub fn filter_is_keyed(&self) -> bool {
+    pub fn index_is_keyed(&self) -> bool {
         self.vocabulary.is_some()
     }
 }
@@ -545,6 +551,56 @@ pub struct AttrExtent {
     pub values: String,
     /// Prefix-relative path of the presence bitmap.
     pub presence: String,
+    /// Prefix-relative path of the layer's front-coded sorted dictionary — keyword and text
+    /// columns only (`records-and-search.md` §4.3/§4.4). `None` for every family whose values
+    /// file carries the values themselves rather than ordinals into a dictionary.
+    ///
+    /// **⊘ Written by nobody yet.** The slot is reserved here rather than added when the keyword
+    /// family lands so that the three string epics change this struct once, not three times —
+    /// each layer's files must swap atomically (records §7), and that is a property of the
+    /// *struct*, not of any one family. The `Option`'s absence is the field's own (a number has
+    /// no dictionary), not tolerance of an older manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dict: Option<String>,
+    /// Prefix-relative path of the layer's per-term postings — keyword (derived, decision 0067)
+    /// and text columns (records §4.3/§4.4). Same reservation as [`AttrExtent::dict`].
+    ///
+    /// **⊘ Written by nobody yet.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postings: Option<String>,
+    /// Prefix-relative path of the CSR offsets file — multi-valued columns only (records §5).
+    /// Same reservation as [`AttrExtent::dict`].
+    ///
+    /// **⊘ Written by nobody yet.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offsets: Option<String>,
+}
+
+/// One entry of `record_extents`: one flush's record-blob layer (`records-and-search.md` §3, §7).
+///
+/// The record blob is not a column, so its extents cannot live in [`AttrExtent`]'s list — that
+/// list is keyed by [`DeclaredScalar::name`] and `record` is a reserved column name precisely so
+/// this namespace cannot collide with a declaration. Each entry names one flush's three files
+/// explicitly, for [`AttrExtent`]'s own reason: a reader that recovered them from a path
+/// convention would be inferring an artefact's identity from its filename, and a missing file
+/// must be an error rather than an absence — **a blob file that is missing, short, or fails its
+/// digest refuses at open** (records §3's fail-closed rule), never "those entities have no
+/// record".
+///
+/// Not part of the honoured-state machinery, for the reason [`SegmentsManifest::attr_extents`]
+/// is not: that list gates state a reader might not be able to act on, and this field lands in
+/// the same epic as the code that reads it. A reader that ignored it would answer drill-down
+/// short over post-build entities — the failure the extent exists to remove — so there is no
+/// version of this reader for which ignoring it is a posture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordExtent {
+    /// Prefix-relative path of the extent's zstd blocks, rows in entity order (records §3).
+    pub blocks: String,
+    /// Prefix-relative path of the extent's has-row Roaring bitmap — the entities whose rows
+    /// this extent holds. Rank in it addresses the within-block offsets.
+    pub hasrow: String,
+    /// Prefix-relative path of the extent's block directory and rank-indexed offsets.
+    pub directory: String,
 }
 
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
@@ -614,6 +670,16 @@ pub struct SegmentsManifest {
     /// over post-build entities, which is the failure the extent exists to remove — so there is no
     /// version of this reader for which ignoring it is a posture.
     pub attr_extents: Vec<AttrExtent>,
+    /// Every record-blob extent this partition holds — see [`RecordExtent`]. Empty in a bundle
+    /// straight out of `tessera build`, whose base blob (`attrs/record/*`) covers every entity
+    /// it knows about. Ordered oldest-first, like [`SegmentsManifest::attr_extents`]; the layers
+    /// are disjoint in entity space (**I9**), so order only decides which layer answers first.
+    ///
+    /// **⊘ Written by nobody yet** — the flush's blob extent lands with the blob lifecycle in
+    /// the same epic as this field; until then every manifest carries it empty. No
+    /// `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
+    /// omits it is malformed, not extent-free.
+    pub record_extents: Vec<RecordExtent>,
     #[serde(default)]
     pub external_id_runs: Vec<String>,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
@@ -795,7 +861,7 @@ mod tests {
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar = serde_json::from_str(
-            r#"{"name": "score", "arrow_type": "f32", "filter": false, "render": true}"#,
+            r#"{"name": "score", "arrow_type": "f32", "index": false, "render": true}"#,
         )
         .expect("f32 parses");
         assert_eq!(good.arrow_type, ScalarType::F32);
@@ -825,7 +891,7 @@ mod tests {
             name: "department".to_string(),
             arrow_type: ScalarType::U16,
             vocabulary: Some("departments".to_string()),
-            filter: false,
+            index: false,
             render: true,
         };
         assert_eq!(category.wire_type(), ScalarType::Utf8);
@@ -835,7 +901,7 @@ mod tests {
             name: "score".to_string(),
             arrow_type: ScalarType::U16,
             vocabulary: None,
-            filter: false,
+            index: false,
             render: true,
         };
         assert_eq!(
@@ -881,6 +947,7 @@ mod tests {
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
+            record_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),

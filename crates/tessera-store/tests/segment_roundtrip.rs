@@ -424,7 +424,7 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
     // cannot invert a tessera_id, and a *defaulted* key would invert every identifier to the
     // wrong entity -- suppressing the wrong item on /control/changes.
     let json = serde_json::json!({
-        "bundle_format": 1,
+        "bundle_format": 2,
         "created_at": "2026-07-28T00:00:00Z",
         "data_plugin_hash": "builtin:passthrough:1",
         "small_term_threshold": 32,
