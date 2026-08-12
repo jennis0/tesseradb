@@ -244,6 +244,99 @@ async fn meta_publishes_the_category_descriptor_and_no_values() {
     );
 }
 
+/// **`/v1/meta` publishes what a client may filter on, and a rendered number is on that list** with
+/// its family's full operator set — decision 0064's render half, which put a number's absence in a
+/// bitmap beside the hot column and so made the row route safe for one.
+///
+/// The fixture's `score` is `render`-only: it has no entity-space column at all, so if it appears
+/// here it can only be answered over the request's own rows. A client cannot tell which route
+/// served it, which is 0068's whole licence to have two — so the operand list says `numeric` and
+/// nothing about placement.
+#[tokio::test]
+async fn meta_publishes_a_rendered_number_as_a_filterable_numeric_operand() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, body) = get(&server, &token, "/v1/meta").await;
+    assert_eq!(status, 200);
+    let operands = body["filter_operands"].as_array().unwrap();
+    let of = |column: &str| {
+        operands
+            .iter()
+            .find(|o| o["column"] == column)
+            .unwrap_or_else(|| panic!("{column} must be filterable: {body}"))
+            .clone()
+    };
+
+    let score = of("score");
+    assert_eq!(score["family"], "numeric");
+    assert_eq!(
+        score["operands"].as_array().unwrap(),
+        &vec!["eq", "in", "range"],
+        "a rendered number takes its family's whole operator set, `range` included"
+    );
+
+    // The rendered categories are still published as they were, by the same predicate.
+    assert_eq!(of("archive")["family"], "category");
+    assert_eq!(of("department")["family"], "category");
+}
+
+/// **A client can actually filter on the rendered number `/v1/meta` offers it**, end to end: the
+/// request parses, the row route answers it, and the counts narrow.
+///
+/// The published list and the parse gate are the same predicate (`filter::is_filterable`), so an
+/// operand advertised and then refused would be a contradiction inside one function — which is
+/// exactly why the pair is asserted from the outside rather than trusted.
+#[tokio::test]
+async fn a_viewport_filters_on_a_rendered_number_over_its_own_rows() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let viewport = |filter: Option<serde_json::Value>| {
+        let mut body = serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1000
+        });
+        if let Some(filter) = filter {
+            body["filters"] = filter;
+        }
+        server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+    };
+
+    // `score` is `(e % 97) * 0.5` over 64 items, so this is the lower half of the corpus — a real
+    // narrowing, and a fractional bound, which is the endpoint form an integer column would have
+    // had to round and a float column must not.
+    let resp = viewport(Some(serde_json::json!({"score": {"range": {"lt": 16.0}}})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a rendered number must be filterable");
+    let (tiles, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let matched: u64 = tiles.iter().map(|t| t.2).sum();
+    let visible: u64 = tiles.iter().map(|t| t.1).sum();
+
+    let expected = (0..N).filter(|e| ((e % 97) as f32) * 0.5 < 16.0).count() as u64;
+    assert_eq!(
+        matched, expected,
+        "the filtered count disagrees with the corpus"
+    );
+    assert!(matched < visible, "the filter narrowed nothing");
+    assert_eq!(points.len() as u64, matched, "every matching item is drawn");
+
+    // The unfiltered request over the same window: `visible` is the composed mask's own count and
+    // must not have moved (§7.1, I12).
+    let resp = viewport(None).await.unwrap();
+    let (all_tiles, _) = decode_viewport(&resp.bytes().await.unwrap());
+    assert_eq!(
+        all_tiles.iter().map(|t| t.1).sum::<u64>(),
+        visible,
+        "the filter moved `visible`, which is computed above it"
+    );
+}
+
 /// The viewer's normal path: it knows which codes it drew, so it resolves exactly those.
 #[tokio::test]
 async fn bulk_lookup_returns_the_named_codes_and_omits_the_rest() {
