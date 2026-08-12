@@ -17,20 +17,24 @@ the **whole write side**: a flush appends one extent per filterable column and t
 reader composes base with extents (§5); the **extent coalesce** bounds their number between folds,
 as the fourth axis of the engine's entity-space pass (§5.2); and the **fold's attribute pass** folds
 what survives back into one base, blanks the deleted entities and rebuilds the derived postings
-(§6.2). What remains unbuilt is two operands and one family: lists, `none_of` and `match` are
-specified and refuse by name. Marked at each claim.
+(§6.2). `none_of` is built to §5's positivity rule (decision 0066). What remains unbuilt is one
+operand and one family: lists and `match` are specified and refuse by name. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4, §6, §9;
-[`per-point-attributes.md`](per-point-attributes.md) §2–§3; design memo 2026-07-29 (secondary
-attribute indexing); decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
+[`per-point-attributes.md`](per-point-attributes.md) §2–§3;
+[`records-and-search.md`](records-and-search.md) §2–§3, §5, §6.2 (cited as **records §n**); design
+memo 2026-07-29 (secondary attribute indexing); decisions
+[0013](../decisions/0013-mark-specified-vs-implemented.md),
 [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
 [0042](../decisions/0042-a-dictionary-extent-never-repeats-a-descriptor.md),
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
 [0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md),
 [0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
 [0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
-[0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
+[0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
+[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
+[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md);
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **index §n**. The companion read-side design is
@@ -40,12 +44,22 @@ cited as **index §n**. The companion read-side design is
 
 ## 1. Summary
 
-A per-item attribute declared `used_for = "filter"` is stored as a **flat entity-space value column**:
+A per-item attribute declared `index = true` is stored as a **flat entity-space value column**:
 values addressed by entity id, scanned under the viewer's authorised set to produce a bitmap, composed
 by intersection under the filter contract (§8.2). Where a family's values have an integer identity of
 their own and repeat heavily — which is **categories, and only categories** — a Roaring posting per
 value is derived on top as an accelerator. This document owns the artefact and its lifecycle. What a
 query does with it is [`filter-surface.md`](filter-surface.md).
+
+**Which declarations reach this artefact, and which do not.** `index = true` is the plain one. A
+category whose vocabulary is `listing = "per_viewer"` owes the column and its postings whatever its
+flags say, because that disclosure control is membership-derived (§2.3). A column with neither
+`render` nor `index` is **blob-resident** and owns nothing here — its values are the record blob's
+and it is no operand at all (records §3). And a **rendered category** is filterable over the
+request's own rows against the hot column, which is a second evaluation space rather than a second
+artefact: decision 0068's operand kind, owned by surface §4 and records §6.2. A rendered *number*
+is not filterable at all — refused at parse until decision 0064's render half lands, the hot column
+storing an absent value as zero (records §6.2).
 
 **The flat column is the record; every accelerator is derived from it.** That is the whole organising
 rule, and three things follow that an inverted-postings design could not give. A derived structure is
@@ -69,7 +83,7 @@ of it (§7).
 > `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
 > them (§2.3). A flush appends an extent per column and a generation composes them (§5), and the
 > **fold folds them back in**, blanks the deleted entities' slots and rebuilds the postings from the
-> folded column (§6.2). Lists, `none_of` and `match` are unbuilt and marked at their claims.
+> folded column (§6.2). Lists and `match` are unbuilt and marked at their claims.
 > Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
 > nothing, and a postings file or an extent that will not open refuses rather than reading as "those
 > entities carry no value".
@@ -325,9 +339,8 @@ only if the principal can see an item carrying it (per-point-attributes §3.3). 
 *are* these postings. Deriving them instead by scanning the value column per request is inside a
 *filter's* latency budget but not inside `/v1/categories`', and it would falsify contracts §3.2's
 compute-admission justification for that endpoint — "no mask composition, no projection, no file IO".
-So a `per_viewer` category gets postings whatever its `used_for` says, where a `public` one gets them
-only from `used_for = "filter"` — a published value set is served as authored and derives no membership
-at all.
+So a `per_viewer` category gets postings whatever its flags say, where a `public` one gets them only
+from `index = true` — a published value set is served as authored and derives no membership at all.
 
 **The postings answer a filter only under `listing = "public"`** (decision 0063). Under `per_viewer`
 they exist for the membership question above and the *filter* is answered by the masked scan, for the
@@ -451,8 +464,9 @@ one-presence-bit-one-slot rule, on which the affine-rank traversal, §6.2's blan
 merge are all built — so the list family needs its own addressing (a per-entity value count or
 offset beside presence) before any of those specifications extend to it, and none of them claims
 to cover it meanwhile. Lifting the parse refusal is therefore an addressing design plus a schema
-and build change, and it lifts **for `filter` only** — `inspect` has no sidecar to place data in,
-and decision 0013 requires an unimplemented placement to stay refused naming itself.
+and build change, and it lifts **for every placement but `render`** (records §5): an indexed list
+gets the CSR addressing above, an unindexed one is a length-prefixed list in its blob row and needs
+no addressing at all, and decision 0039's fence keeps the rendered combination refused permanently.
 
 Decision 0039's fence stands, restated because this is where someone will look for permission to cross
 it: a multi-valued attribute is **never** `render`, and **no projection, derived value or summary of one
@@ -650,7 +664,7 @@ it negates, and two columns give two answers to which; `all_of: [{none_of: [A]},
 the same set and says which presence each clause requires, so nothing is lost but the ambiguity.
 
 > **⊘ Built, and the accelerator's tail is answered by scanning it.** A flush writes one extent per
-> column that **owes a value column** — `used_for = "filter"`, *or* a category whose vocabulary is
+> column that **owes a value column** — `index = true`, *or* a category whose vocabulary is
 > `listing = "per_viewer"`, which is the build's own `postings_are_owed` rule mirrored on the write
 > side (§2.3). It writes one for a column no flushed entity carries a value in too, so the file set
 > is a function of the schema rather than of the data; it names both files in the partition's
@@ -660,7 +674,7 @@ the same set and says which presence each clause requires, so nothing is lost bu
 > **The two halves of that rule have to agree, and for a while they did not.** The build owed a
 > `per_viewer` render-only category its postings — that column's postings are not an accelerator but
 > the evidence §3.3's visibility predicate is derived from — while the flush selected extents on
-> `used_for` alone. A value first carried by an entity ingested after the build then existed in no
+> the placement flag alone. A value first carried by an entity ingested after the build then existed in no
 > artefact any reader consults, so `/v1/categories` could never offer it, permanently and with no
 > symptom. One predicate now serves the flush's selection and the reader's open.
 >
@@ -1230,6 +1244,14 @@ the dependency one-way and the read crate's codegen a function of its own source
 ---
 
 ## Appendix R — review trail
+
+**2026-08-12 — re-read against the built declaration surface.** The placement key this document
+spelt is gone: a column earns its value column from `index = true`, or from being a `per_viewer`
+category, and §1 now says which declarations reach the artefact and which do not — a blob-resident
+column owning nothing here, and a rendered category filterable over the request's own rows through
+a second evaluation space rather than a second artefact (decision 0068). §2.6's list refusal lifts
+for every placement but `render` rather than for one placement, an unindexed list needing no
+addressing at all. No mechanism of this design moved.
 
 **2026-08-10 (r7) — adversarial review, two lenses, dispositioned in one pass.** Both lenses held
 the shape and attacked load-bearing claims; every finding was accepted except one whose *remedy*

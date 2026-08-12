@@ -199,15 +199,27 @@ scan at the column's own precision, all four bounds. All three write paths are v
 at 2.4×10⁶ and 2.5×10⁷ against an independently decoded oracle
 ([`probes/2026-08-10-filter-lifecycle/`](../probes/2026-08-10-filter-lifecycle/)).
 
-**What remains of [#43] is two operands and one family** — `none_of`, `match` and multi-valued
-attributes, each refusing by name — and they are not equal in cost: lists need their own addressing
-before the fold's blanking and the coalesce's merge are sound for them, and `none_of` inverts the
-positivity property every "degrades safely under I12" argument in `filter-index.md` §5 rests on. The
-open work is handed over in
+**What remains of [#43] is one operand and one family** — `match` and multi-valued attributes, each
+refusing by name; `none_of` landed with decision 0066. They are not equal in cost: lists need their
+own addressing before the fold's blanking and the coalesce's merge are sound for them. The open work
+is handed over in
 [`2026-08-10-filter-handover.md`](evidence/memos/2026-08-10-filter-handover.md).
 
-**[#83] is closed.** A `per_viewer` category gets its membership postings whatever its `used_for`
-says, and `/v1/categories` now derives visibility from them rather than refusing — composing the
+**That remainder is sequenced by [`records-and-search.md`](design/records-and-search.md) §13, which
+subsumes it.** That design generalises per-item data to five families under one declaration — a
+`type`, and whether the field renders and whether it is indexed — with everything else derived, and
+its **first epic has landed**: the declaration surface, the **record blob** that holds a field
+claiming neither flag, and the render-column route that makes a rendered category filterable over a
+request's own rows (decision 0068). What follows is ordered by what each stage needs, not by
+preference. The **keyword** family replaces `utf8` wholesale, so it goes alone and first; **text**
+follows it — the icu4x analyser, the token index, `match` and its m-of-n form — and **multi-value**,
+which is this theme's list remainder, runs beside text where the seams allow, the two touching
+largely disjoint machinery. A keyword *list* needs both. The **large dataset tiers wait for all
+three** and are then built once, full-schema, so the scale measurements are taken over the machinery
+rather than before it; masked scoring is last and waits on a measurement of what it buys.
+
+**[#83] is closed.** A `per_viewer` category gets its membership postings whatever its placement
+flags say, and `/v1/categories` now derives visibility from them rather than refusing — composing the
 candidate, filtering the page **before** it is cut, and offering a value carried only by entities
 ingested since the build. The amendment it owed landed with it: contracts §3.2 had classified the
 endpoint outside the compute-admission gate on the grounds that it does *"no mask composition, no
