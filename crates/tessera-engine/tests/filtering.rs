@@ -44,8 +44,13 @@ const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// owes membership postings *and* keeps the scan for filtering (decision 0063); `archive` is
 /// `public`, which is the shape whose filter is routed through those postings. The two carry the
 /// same value distribution under different names, so the routed answer and the scanned one are
-/// comparable value by value. The string is `filter`-only, which is the shape that owes no postings
+/// comparable value by value. The string is `index`-only, which is the shape that owes no postings
 /// at all.
+///
+/// `score` is `index`-only where it was once rendered-and-filterable: `index` on a rendered
+/// number is refused until decision 0064's render half lands (records §6.2 — review X3's named
+/// regression), and what this file exercises is the filter, which the entity-space column
+/// serves either way.
 ///
 /// `ops` and `ww` are declared and carried by nothing, which is the empty-value case: a code the
 /// vocabulary binds, that no posting holds, and that no principal may be offered until something
@@ -55,7 +60,8 @@ const SCHEMA_TOML: &str = r#"
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
@@ -68,7 +74,8 @@ listing    = "per_viewer"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -80,17 +87,17 @@ listing    = "public"
 [[attribute]]
 name     = "title"
 type     = "utf8"
-used_for = ["filter"]
+index    = true
 
 [[attribute]]
 name     = "score"
 type     = "i32"
-used_for = ["render", "filter"]
+index    = true
 
 [[attribute]]
 name     = "bonus"
 type     = "i32"
-used_for = ["filter"]
+index    = true
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -1339,7 +1346,12 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let any_department = FilterExpr::AnyOf(
         ["eng", "sales", "legal"]
             .iter()
-            .map(|d| leaf("department", FilterOperand::Equals(AttrLocalId::new(fx.codes[*d]))))
+            .map(|d| {
+                leaf(
+                    "department",
+                    FilterOperand::Equals(AttrLocalId::new(fx.codes[*d])),
+                )
+            })
             .collect(),
     );
     let narrow = [0.0, 0.0, 400.0, 400.0];
@@ -1656,10 +1668,7 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
         "'legal' must be carried by something, or withholding it discloses nothing"
     );
 
-    let expr = FilterExpr::NoneOf(vec![leaf(
-        "department",
-        FilterOperand::In(offered.clone()),
-    )]);
+    let expr = FilterExpr::NoneOf(vec![leaf("department", FilterOperand::In(offered.clone()))]);
     let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
 
     assert!(
@@ -1691,8 +1700,14 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
         .evaluate(&spanning, &cand)
         .expect_err("a negation over two columns is refused");
     let text = format!("{err}");
-    assert!(text.contains("department") && text.contains("title"), "{text}");
-    assert!(text.contains("all_of"), "the refusal names the way to say it: {text}");
+    assert!(
+        text.contains("department") && text.contains("title"),
+        "{text}"
+    );
+    assert!(
+        text.contains("all_of"),
+        "the refusal names the way to say it: {text}"
+    );
 
     // And the composition it points at is accepted, and is the intersection of the two negations.
     let composed = FilterExpr::AllOf(vec![
@@ -1700,7 +1715,10 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
             "department",
             FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
         )]),
-        FilterExpr::NoneOf(vec![leaf("title", FilterOperand::TextPrefix("paper-1".into()))]),
+        FilterExpr::NoneOf(vec![leaf(
+            "title",
+            FilterOperand::TextPrefix("paper-1".into()),
+        )]),
     ]);
     let got = fx.columns.evaluate(&composed, &cand).unwrap();
     assert_eq!(
@@ -1970,7 +1988,10 @@ fn every_entity_reads_back_its_own_number_across_the_absences() {
             fx.columns.evaluate(&expr, &cand).unwrap().contains(entity)
         };
         match want {
-            Some(v) => assert!(hit(v), "source {source} (entity {entity}) lost its bonus {v}"),
+            Some(v) => assert!(
+                hit(v),
+                "source {source} (entity {entity}) lost its bonus {v}"
+            ),
             None => {
                 for v in -10..=10 {
                     assert!(

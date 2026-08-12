@@ -229,7 +229,7 @@ const DISCOVERED_NO_SEED: &str = r#"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "per_viewer"
 "#;
@@ -362,7 +362,7 @@ fn a_values_key_seed_pins_codes_and_mints_only_the_rest() {
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "per_viewer"
 values_key = "dept_seed"
@@ -419,7 +419,7 @@ fn a_declared_vocabulary_still_refuses_an_unknown_key() {
 name = "department"
 type = "category"
 width = "u8"
-used_for = ["render"]
+render = true
 vocabulary = "declared"
 listing = "per_viewer"
   [attribute.values]
@@ -454,7 +454,7 @@ fn exhaustion_at_build_is_a_typed_error_naming_column_and_width() {
 name = "department"
 type = "category"
 width = "u8"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "per_viewer"
 "#;
@@ -498,7 +498,7 @@ fn a_retired_code_is_never_minted_to_a_new_key() {
 name = "department"
 type = "category"
 width = "u8"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "per_viewer"
 
@@ -567,7 +567,7 @@ fn public_listing_with_a_discovered_vocabulary_builds() {
 name = "department"
 type = "category"
 width = "u8"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "public"
 "#;

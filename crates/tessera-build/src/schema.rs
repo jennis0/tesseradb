@@ -1,13 +1,13 @@
-//! `schema.toml`: the caller declares what per-item data is *for*, and the placement follows.
+//! `schema.toml`: the caller declares what a field *is*, and the placement follows.
 //!
-//! Per-point-attributes §2 is the design. A caller says `used_for = ["render"]` and gets a
-//! fixed-width column in `columns.arrow`. `filter` (an entity-space posting) is built **for a
-//! category**, whose identifier is its vocabulary code; every other family's filter index needs a
-//! per-column value dictionary that does not exist, and `inspect` (a cold sidecar) has nowhere to
-//! put data — both are declarable and **refused at parse**, each naming what is absent rather than
-//! saying "unsupported", per decision 0013. Nothing here derives a placement from the
-//! shape of the data file: a column that costs 0.93 GiB per byte per row per 10⁹ items is
-//! declared or it does not exist (§4.1).
+//! Records §2 is the design. A declaration is a `type` and three booleans, each defaulting
+//! `false`: `render = true` buys a fixed-width slot in every row of `columns.arrow`;
+//! `index = true` buys the family's entity-space search structure; `multi = true` is specified
+//! and not built (records §5) and is **refused at parse**, naming that, per decision 0013. A
+//! declaration setting neither `render` nor `index` is legal and **blob-resident** (records §3):
+//! its values belong to the per-entity record blob, answered at drill-down and offered as no
+//! operand. Nothing here derives a placement from the shape of the data file: a column that
+//! costs 0.93 GiB per byte per row per 10⁹ items is declared or it does not exist (§4.1).
 //!
 //! **This is a build input, never server config** (§4.1). It compiles into `MANIFEST.json`, and
 //! the server reads the compiled form. A server holding a schema of its own could be restarted
@@ -78,7 +78,18 @@ struct AttributeDecl {
     ty: String,
     #[serde(default)]
     width: Option<String>,
-    used_for: Vec<String>,
+    /// The three placement booleans (records §2), each defaulting `false` — the cheapest
+    /// placement, made more expensive only by an explicit word. Booleans rather than the
+    /// retired list-valued key: its `filter` and `inspect` entries forced two faithful copies
+    /// of one value, chosen separately, and the collapse removed that double store (records
+    /// §2's table is the translation). A schema still carrying the retired key refuses loudly
+    /// through `deny_unknown_fields` — decision 0048's shape: replaced, not aliased.
+    #[serde(default)]
+    render: bool,
+    #[serde(default)]
+    index: bool,
+    #[serde(default)]
+    multi: bool,
     #[serde(default)]
     render_in: Option<Vec<String>>,
     #[serde(default)]
@@ -91,8 +102,6 @@ struct AttributeDecl {
     values_key: Option<String>,
     #[serde(default)]
     values_of: Option<String>,
-    #[serde(default)]
-    multi: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -118,8 +127,8 @@ pub struct Schema {
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: String,
-    /// The declared type. For a `render` column this is the hot column's width; for a
-    /// `filter`-only one it is the entity-space column's.
+    /// The declared type. For a `render` column this is the hot column's width; for an
+    /// `index`-only one it is the entity-space column's.
     pub ty: ScalarType,
     /// The vocabulary this column's values are drawn from, for a category; `None` for a plain
     /// numeric attribute. Names a key in [`Schema::vocabularies`].
@@ -128,16 +137,17 @@ pub struct Attribute {
     /// decide whether to mint without a second lookup into [`Schema::vocabularies`]. `None` iff
     /// `vocabulary` is `None`.
     pub vocabulary_kind: Option<VocabularyKind>,
-    /// Whether this column carries an entity-space filter index (`filter-index.md` §2).
+    /// Whether this column carries an entity-space filter index (records §3; `filter-index.md`
+    /// §2). The compiled form reaches the reader as `MANIFEST.declared_scalars[..].index`.
     ///
-    /// Categories and strings may set it, checked at parse; a numeric may not, its range predicate
-    /// being unbuilt. The compiled form reaches the reader as
-    /// `MANIFEST.declared_scalars[..].filter`.
-    pub filter: bool,
+    /// Checked at parse: refused on a rendered number or datetime until decision 0064's render
+    /// half lands, because store-once would serve that filter from a hot column that cannot
+    /// express absence.
+    pub index: bool,
     /// Whether this column occupies a slot in every row of `columns.arrow`.
     ///
     /// **Load-bearing, not informational.** The hot column's tail is *exactly* the render columns.
-    /// A `filter`-only column is entity-space and must not appear in it — that is the whole of
+    /// An `index`-only column is entity-space and must not appear in it — that is the whole of
     /// §10.3's routing distinction, and it is what lets a `utf8` column be filterable while
     /// `render` on `utf8` stays refused. A build that wrote every declared attribute into the tail
     /// would put a per-row string in the hot column by the back door, at 0.93 GiB per byte per row
@@ -225,9 +235,9 @@ pub const ABSENT_CODE: u32 = 0;
 impl Schema {
     /// Parse `path`, with `values` binding each `values_key` to a file (§4.4).
     ///
-    /// **⊘ Specified, not implemented**, each refused at parse rather than accepted and ignored:
-    /// `filter` and `inspect` in `used_for` (§1 — there is no attribute dictionary or postings
-    /// file, and no `inspect` sidecar); and `multi = true` (§3.7).
+    /// **⊘ Specified, not implemented**, refused at parse rather than accepted and ignored:
+    /// `multi = true` (records §5 — the list addressing lands in its own epic, records §13), and
+    /// `index` on a rendered number or datetime (decision 0064's render half).
     ///
     /// **`vocabulary = "discovered"` is built** (§3.4, §5): an attribute may declare it, and the
     /// batch build mints a code for every key its value set (if any) does not already pin, through
@@ -275,13 +285,24 @@ impl Schema {
                     decl.name
                 )));
             }
-            let placement = Placement::parse(&decl.used_for, &decl.name)?;
-            if decl.multi == Some(true) {
+            // `render` + `multi` before bare `multi`: the first is a permanent fence (0039) and
+            // the second an unbuilt stage, and a caller who set both must hear the fence — it
+            // survives the epic that lifts the other refusal.
+            if decl.render && decl.multi {
                 return Err(schema_error(format!(
-                    "attribute '{}': `multi = true` is specified and not built \
-                     (per-point-attributes §3.7). Multi-valued attributes are postings-only — \
-                     admissible under `filter` and `inspect`, never under `render`, a rendered \
-                     mark having one colour",
+                    "attribute '{}': `render` with `multi = true` is never admissible \
+                     (decision 0039) — a rendered mark has one colour, and no projection or \
+                     summary of a list earns a hot column. Declare an ordinary single-valued \
+                     attribute carrying the value to colour by",
+                    decl.name
+                )));
+            }
+            if decl.multi {
+                return Err(schema_error(format!(
+                    "attribute '{}': `multi = true` is specified and not built (records §5 — \
+                     the list addressing lands with the multi-value epic, records §13). Refused \
+                     rather than read as single-valued: accepting it would store one value per \
+                     item under a declaration promising several",
                     decl.name
                 )));
             }
@@ -297,29 +318,13 @@ impl Schema {
                     decl.name
                 )));
             }
-            if !placement.render && !placement.filter {
-                return Err(schema_error(format!(
-                    "attribute '{}': `used_for` must contain \"render\" or \"filter\". `inspect` \
-                     is specified and not built (per-point-attributes §1), so an attribute \
-                     declaring only it would declare nothing",
-                    decl.name
-                )));
-            }
-            // `filter` is built for categories and strings (filter-index §2.3). Both are a flat
-            // entity-indexed value column scanned under the candidate mask; a category adds a
-            // derived per-value posting because its values already carry a vocabulary code and
-            // repeat heavily. The numeric families are unbuilt — not for want of a structure, since
-            // a numeric column is a value column and nothing else (§3), but because nothing yet
-            // parses or emits a range predicate. Refused here rather than accepted and ignored: a
-            // column that parsed as filterable and emitted nothing would serve an empty operand for
-            // every value it holds, indistinguishable from a correctly-computed empty answer
-            // (decision 0013).
-            // `filter` is built for every declarable type: a category (flat code column plus
-            // derived postings), a string, and every numeric width including `timestamp_us` and
-            // `bool` — all of them a flat entity-indexed value column scanned under the candidate
-            // mask. The refusal that stood here named the numeric families' absent range
-            // predicate; it is built (filter-index §3), so the refusal is gone rather than
-            // narrowed.
+            // Neither `render` nor `index` is not a refusal: the declaration is blob-resident
+            // (records §3) — no hot-column slot, no entity-space structure, no `/v1/meta`
+            // operand; the record blob holds its values and drill-down returns them. The old
+            // surface refused this shape because `inspect` had nowhere to put data; the blob is
+            // that place. ⊘ The blob store lands beside this surface (records §13's first
+            // epic); until it does, such a column exists only as its manifest declaration
+            // (`index = false`, `render = false`).
 
             let attribute = match decl.ty.as_str() {
                 "category" => {
@@ -340,8 +345,11 @@ impl Schema {
                         ty,
                         vocabulary: Some(vocab_name),
                         vocabulary_kind: Some(vocab_kind),
-                        filter: placement.filter,
-                        render: placement.render,
+                        // Every flag combination is legal for a category — a rendered category
+                        // stays filterable because its entity-space structures are the constant
+                        // floor, not a placement (records §4.2).
+                        index: decl.index,
+                        render: decl.render,
                     }
                 }
                 other => {
@@ -375,19 +383,38 @@ impl Schema {
                         }
                     }
                     // **`render`, not the type.** A string is refused from the *hot column*, which
-                    // is per-row and fixed-width; it is not refused from the bundle. A
-                    // `filter`-only string lives in entity space, is read once per query rather
+                    // is per-row and fixed-width; it is not refused from the bundle. An
+                    // `index`-only string lives in entity space, is read once per query rather
                     // than once per rendered mark, and costs the hot column nothing — which is
                     // exactly the placement distinction §10.3 routes by. An earlier revision
-                    // refused the type outright, which was right while `filter` was unbuilt and
-                    // became wrong when the value column landed.
-                    if ty == ScalarType::Utf8 && placement.render {
+                    // refused the type outright, which was right while the filter placement was
+                    // unbuilt and became wrong when the value column landed.
+                    if ty == ScalarType::Utf8 && decl.render {
                         return Err(schema_error(format!(
                             "attribute '{}': `render` on `utf8` is refused \
                              (per-point-attributes §4.3 — a non-fixed-width type in the hot \
                              column). A per-row string is the vocabulary stored once per row; \
-                             declare a category, whose row cost is its width. `used_for = \
-                             [\"filter\"]` is available and costs the hot column nothing",
+                             declare a category, whose row cost is its width. `index = true` is \
+                             available and costs the hot column nothing",
+                            decl.name
+                        )));
+                    }
+                    // Store-once (records §6.2): a rendered number or datetime keeps no
+                    // entity-space copy, so its filter would read the hot column — which stores
+                    // an absent value as zero, the exact defect decision 0064's presence bitmap
+                    // removed from entity space. Refused until 0064's render half lands rather
+                    // than served wrongly: an item with no value would match every range
+                    // containing zero. `utf8` cannot reach here rendered, so this is precisely
+                    // the number-and-datetime rule records §2 states.
+                    if decl.render && decl.index {
+                        return Err(schema_error(format!(
+                            "attribute '{}': `index` on a rendered `{other}` is refused until \
+                             decision 0064's render half lands (records §6.2). Store-once \
+                             serves that filter from the hot column, which stores an absent \
+                             value as zero, so an item with no value would match every range \
+                             containing zero. `index = true` alone filters now — the \
+                             entity-space column carries presence — and `render = true` alone \
+                             draws now",
                             decl.name
                         )));
                     }
@@ -396,8 +423,8 @@ impl Schema {
                         ty,
                         vocabulary: None,
                         vocabulary_kind: None,
-                        filter: placement.filter,
-                        render: placement.render,
+                        index: decl.index,
+                        render: decl.render,
                     }
                 }
             };
@@ -427,14 +454,23 @@ impl Schema {
         })
     }
 
-    /// **Bits** this schema adds to every row, and `None` if any column is variable-width.
+    /// **Bits** this schema adds to every row, and `None` if any counted column is
+    /// variable-width.
     ///
     /// §2.3's residency figure, **totalled across attributes rather than reported per column** —
     /// several categories are what makes the cost bite, and a per-column table lets each one look
     /// affordable. Bits rather than bytes because a `bool` costs one: rounding it to a byte would
     /// erase the whole reason to declare one.
+    ///
+    /// Render columns only: the hot column's tail is exactly the render columns, and an
+    /// `index`-only or blob-resident column adds nothing to any row — counting it would price
+    /// the cheap placements as the expensive one.
     pub fn row_bits(&self) -> Option<u64> {
-        self.attributes.iter().map(|a| a.ty.row_bits()).sum()
+        self.attributes
+            .iter()
+            .filter(|a| a.render)
+            .map(|a| a.ty.row_bits())
+            .sum()
     }
 
     /// Whether this schema declares any column at all — the empty case being every bundle built
@@ -482,44 +518,6 @@ impl Schema {
             minters.insert(vocabulary.name.clone(), minter);
         }
         minters
-    }
-}
-
-/// Which of §10.3's three cadences an attribute declares.
-struct Placement {
-    render: bool,
-    filter: bool,
-}
-
-impl Placement {
-    fn parse(used_for: &[String], attribute: &str) -> Result<Placement> {
-        let mut render = false;
-        let mut filter = false;
-        for use_ in used_for {
-            match use_.as_str() {
-                "render" => render = true,
-                "filter" => filter = true,
-                // Named individually, each stating what is absent rather than "unsupported":
-                // decision 0013's rule is that present-tense about absent machinery reads as an
-                // assurance, and so does a generic refusal that hides which half is missing.
-                "inspect" => {
-                    return Err(schema_error(format!(
-                        "attribute '{attribute}': `inspect` is specified and not built \
-                         (per-point-attributes §1). §8.3's vector sidecar and §10.3's \
-                         per-interaction row are one slot, whose first occupant — the external-ID \
-                         store — is explicitly transitional"
-                    )));
-                }
-                other => {
-                    return Err(schema_error(format!(
-                        "attribute '{attribute}': unknown `used_for` entry '{other}'. The three \
-                         are \"render\", \"filter\" and \"inspect\" — §10.3's three access \
-                         cadences"
-                    )));
-                }
-            }
-        }
-        Ok(Placement { render, filter })
     }
 }
 
@@ -858,6 +856,13 @@ fn check_column_name(name: &str) -> Result<()> {
              reader refuses such a segment at load"
         )));
     }
+    if name == "record" {
+        return Err(schema_error(
+            "attribute 'record': the name is reserved — `attrs/record/` is the record blob's \
+             namespace (records §2, review N10), so a column of that name would address the \
+             blob's files as its own",
+        ));
+    }
     if INGEST_RESERVED.contains(&name) {
         return Err(schema_error(format!(
             "attribute '{name}' shadows a reserved `/control/ingest` column (contracts §3.4), so \
@@ -894,7 +899,7 @@ mod tests {
     /// `base` with `line` added to its first `[[attribute]]` table.
     ///
     /// **Inserted at a structural landmark, not by matching a formatted line.** A case that built
-    /// its input with `str::replace` on `"used_for = [...]"` silently stopped substituting when
+    /// its input with `str::replace` on a placement line silently stopped substituting when
     /// the constant's alignment changed — and a case asserting that something is *refused* then
     /// passes plain `SEVERITY`, which is accepted, so the no-op presents as the refusal failing to
     /// fire rather than as a broken fixture. Panics if the landmark is gone, which is the whole
@@ -913,7 +918,7 @@ mod tests {
 name = "severity"
 type = "category"
 width = "u8"
-used_for = ["render"]
+render = true
 vocabulary = "declared"
 listing = "public"
   [attribute.values]
@@ -977,40 +982,54 @@ listing = "public"
         }
     }
 
-    /// A category may declare `filter`, and it reaches the compiled form.
+    /// A category may declare `index` beside `render`, and it reaches the compiled form.
     ///
-    /// This is the placement's whole observable effect at parse: `Attribute::filter` is what the
-    /// build compiles into `MANIFEST.declared_scalars[..].filter`, and a reader picks the postings
+    /// This is the placement's whole observable effect at parse: `Attribute::index` is what the
+    /// build compiles into `MANIFEST.declared_scalars[..].index`, and a reader picks the postings
     /// record format from the declaration rather than from a stored second copy (manifest §2.5).
+    /// A rendered category is the one rendered shape that may set it — its entity-space
+    /// structures are the constant floor, not a placement (records §4.2) — where a rendered
+    /// number is refused below.
     #[test]
-    fn a_category_may_declare_filter() {
-        let text = SEVERITY.replace("[\"render\"]", "[\"render\", \"filter\"]");
-        let schema = parse_str(&text).expect("filter is built for a category");
-        assert!(schema.attributes[0].filter);
+    fn a_category_may_declare_index() {
+        let text = SEVERITY.replace("render = true", "render = true\nindex = true");
+        let schema = parse_str(&text).expect("index is built for a category");
+        assert!(schema.attributes[0].index);
 
         let render_only = parse_str(SEVERITY).expect("render alone stays legal");
-        assert!(!render_only.attributes[0].filter);
+        assert!(!render_only.attributes[0].index);
     }
 
-    /// `filter` alone is a legal declaration — a column indexed for querying and never drawn.
+    /// `index` alone is a legal declaration — a column indexed for querying and never drawn.
     /// §10.3 routes by access cadence, so per-query and per-mark are independent choices.
     #[test]
-    fn filter_without_render_is_legal() {
-        let text = SEVERITY.replace("[\"render\"]", "[\"filter\"]");
-        let schema = parse_str(&text).expect("filter alone declares something");
-        assert!(schema.attributes[0].filter);
+    fn index_without_render_is_legal() {
+        let text = SEVERITY.replace("render = true", "index = true");
+        let schema = parse_str(&text).expect("index alone declares something");
+        assert!(schema.attributes[0].index);
         assert!(!schema.attributes[0].vocabulary.is_none());
     }
 
-    /// `filter` is built for categories only, and the refusal says which machinery is missing
-    /// rather than "unsupported" (decision 0013). A plain numeric accepted-and-ignored here would
-    /// serve an empty operand for every value it holds, indistinguishable from a correct empty.
-    /// Every declarable type is filterable — a numeric is a value column and nothing else, so
-    /// there is no structure left for it to be waiting on.
+    /// `index` alone is accepted on every declarable type — a numeric is a value column and
+    /// nothing else, so there is no structure left for it to be waiting on.
+    ///
+    /// `index` *alone*: the fixture once declared these rendered-and-filterable, and that
+    /// combination is now the refusal below (review X3's named regression) — restructured
+    /// index-only here because what this case exercises is the filter placement.
     #[test]
-    fn filter_is_accepted_on_every_declarable_type() {
+    fn index_is_accepted_on_every_declarable_type() {
         for ty in [
-            "bool", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64",
+            "bool",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "f32",
+            "f64",
             "timestamp_us",
         ] {
             let text = format!(
@@ -1018,25 +1037,94 @@ listing = "public"
 [[attribute]]
 name = "measure"
 type = "{ty}"
-used_for = ["render", "filter"]
+index = true
 "#
             );
             let schema = parse_str(&text).unwrap_or_else(|e| panic!("{ty} must filter: {e}"));
-            assert!(schema.attributes[0].filter, "{ty}");
+            assert!(schema.attributes[0].index, "{ty}");
+            assert!(!schema.attributes[0].render, "{ty}");
         }
     }
 
-    /// Decision 0013: absent machinery names itself rather than refusing generically.
+    /// Store-once: `index` on a rendered number or datetime is refused until decision 0064's
+    /// render half lands, and the refusal names that decision rather than "unsupported"
+    /// (decision 0013). The message must say what serves instead — index alone or render alone.
     #[test]
-    fn the_unbuilt_placements_name_themselves() {
-        let inspect = SEVERITY.replace("[\"render\"]", "[\"render\", \"inspect\"]");
-        assert!(err(&inspect).contains("sidecar"), "{}", err(&inspect));
+    fn index_on_a_rendered_number_is_refused_naming_0064() {
+        for ty in ["bool", "i32", "f64", "timestamp_us"] {
+            let text = format!(
+                r#"
+[[attribute]]
+name = "measure"
+type = "{ty}"
+render = true
+index = true
+"#
+            );
+            let message = err(&text);
+            assert!(message.contains("0064"), "{ty}: {message}");
+            assert!(message.contains("zero"), "{ty}: {message}");
+            assert!(message.contains("`index = true` alone"), "{ty}: {message}");
+        }
+    }
 
-        let multi = SEVERITY.replace(
-            "used_for = [\"render\"]",
-            "used_for = [\"render\"]\nmulti = true",
-        );
-        assert!(err(&multi).contains("§3.7"), "{}", err(&multi));
+    /// Decision 0013: absent machinery names itself rather than refusing generically. Bare
+    /// `multi` names records §5 and the epic that lifts it; `render` + `multi` names decision
+    /// 0039's permanent fence instead, whatever else the declaration says.
+    #[test]
+    fn multi_is_refused_naming_what_is_absent_and_0039_when_rendered() {
+        let multi = SEVERITY.replace("render = true", "index = true\nmulti = true");
+        assert!(err(&multi).contains("records §5"), "{}", err(&multi));
+
+        let rendered = SEVERITY.replace("render = true", "render = true\nmulti = true");
+        assert!(err(&rendered).contains("0039"), "{}", err(&rendered));
+    }
+
+    /// A declaration with neither `render` nor `index` parses and is blob-resident
+    /// (records §3): compiled with both flags false, occupying no row bits. The old "must
+    /// contain render or filter" refusal is deleted, not reworded.
+    #[test]
+    fn a_declaration_with_neither_key_is_blob_resident() {
+        let text = r#"
+[[attribute]]
+name = "band"
+type = "category"
+width = "u8"
+render = true
+vocabulary = "declared"
+listing = "public"
+  [attribute.values]
+  low = 1
+
+[[attribute]]
+name = "notes"
+type = "utf8"
+
+[[attribute]]
+name = "revision"
+type = "i64"
+"#;
+        let schema = parse_str(text).expect("neither key declares a blob-resident column");
+        for i in [1, 2] {
+            assert!(!schema.attributes[i].index, "{}", schema.attributes[i].name);
+            assert!(
+                !schema.attributes[i].render,
+                "{}",
+                schema.attributes[i].name
+            );
+        }
+        // The hot column's tail is exactly the render columns, so the blob-resident `i64` and
+        // the variable-width `utf8` cost no row bits — only the rendered `u8` counts.
+        assert_eq!(schema.row_bits(), Some(8));
+    }
+
+    /// `record` is reserved: `attrs/record/` is the record blob's namespace (records §2,
+    /// review N10).
+    #[test]
+    fn record_is_a_reserved_column_name() {
+        let text = SEVERITY.replace("\"severity\"", "\"record\"");
+        let message = err(&text);
+        assert!(message.contains("record blob"), "{message}");
     }
 
     /// The refusal is lifted: `vocabulary = "discovered"` compiles, with its own pinned inline
@@ -1064,7 +1152,7 @@ used_for = ["render", "filter"]
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "per_viewer"
 "#;
@@ -1083,7 +1171,7 @@ listing = "per_viewer"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "declared"
 listing = "per_viewer"
 "#;
@@ -1133,13 +1221,11 @@ listing = "per_viewer"
 [[attribute]]
 name = "title"
 type = "utf8"
-used_for = ["render"]
+render = true
 "#;
         assert!(err(text).contains("non-fixed-width"), "{}", err(text));
     }
 
-    /// A string is refused from the **hot column**, not from the bundle: `filter` puts it in
-    /// entity space, where it is read once per query rather than once per rendered mark.
     /// A column may not take a combinator's name — refused at the build, not resolved at the
     /// request.
     #[test]
@@ -1150,23 +1236,28 @@ used_for = ["render"]
 [[attribute]]
 name = "{name}"
 type = "utf8"
-used_for = ["filter"]
+index = true
 "#
             );
             assert!(err(&text).contains("filter combinator"), "{}", err(&text));
         }
     }
 
+    /// A string is refused from the **hot column**, not from the bundle: `index` puts it in
+    /// entity space, where it is read once per query rather than once per rendered mark. This
+    /// is the utf8 bridge — the type survives this surface under the new keys, its flat value
+    /// column and string scan unchanged; `keyword`/`text` replace it in their own epic
+    /// (records §4.3, §13).
     #[test]
-    fn a_filter_only_string_is_accepted() {
+    fn an_index_only_string_is_accepted() {
         let text = r#"
 [[attribute]]
 name = "title"
 type = "utf8"
-used_for = ["filter"]
+index = true
 "#;
-        let schema = parse_str(text).expect("a filter-only string parses");
-        assert!(schema.attributes[0].filter);
+        let schema = parse_str(text).expect("an index-only string parses");
+        assert!(schema.attributes[0].index);
         assert_eq!(schema.attributes[0].ty, ScalarType::Utf8);
     }
 
@@ -1176,12 +1267,12 @@ used_for = ["filter"]
 [[attribute]]
 name = "ingested_at"
 type = "i64"
-used_for = ["render"]
+render = true
 
 [[attribute]]
 name = "score"
 type = "f32"
-used_for = ["render"]
+render = true
 "#;
         let schema = parse_str(text).unwrap();
         assert_eq!(schema.attributes[0].ty, ScalarType::I64);
@@ -1198,7 +1289,7 @@ used_for = ["render"]
 [[attribute]]
 name = "score"
 type = "f32"
-used_for = ["render"]
+render = true
 listing = "public"
 "#;
         assert!(err(text).contains("has no meaning"), "{}", err(text));
@@ -1213,7 +1304,7 @@ listing = "public"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "declared"
 listing = "per_viewer"
   [attribute.values]
@@ -1224,7 +1315,7 @@ listing = "per_viewer"
 name = "reviewing_department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 values_of = "department"
 listing = "per_viewer"
 "#;
@@ -1239,8 +1330,8 @@ listing = "per_viewer"
         assert!(err(&listing).contains("must agree"), "{}", err(&listing));
 
         let width = base.replace(
-            "width = \"u16\"\nused_for = [\"render\"]\nvalues_of",
-            "width = \"u8\"\nused_for = [\"render\"]\nvalues_of",
+            "width = \"u16\"\nrender = true\nvalues_of",
+            "width = \"u8\"\nrender = true\nvalues_of",
         );
         assert!(err(&width).contains("one code space"), "{}", err(&width));
     }
@@ -1302,7 +1393,9 @@ listing = "per_viewer"
         assert!(message.contains("no attribute declares"), "{message}");
     }
 
-    /// A mistyped disclosure control must not read as an absent one.
+    /// A mistyped disclosure control must not read as an absent one. The same
+    /// `deny_unknown_fields` is what makes the retired placement key refuse loudly rather than
+    /// read as an empty placement (decision 0048: the surface is replaced, not aliased).
     #[test]
     fn an_unknown_key_is_refused_rather_than_ignored() {
         let text = SEVERITY.replace("listing =", "listnig =");

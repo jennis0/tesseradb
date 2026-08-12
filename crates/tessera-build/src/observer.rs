@@ -36,7 +36,7 @@ pub enum BuildStage {
     ExternalIds,
     /// 8. One pass over the points file, geometry in entity order.
     GeometryScan,
-    /// 8b. Entity-space filter postings, one file per `used_for = "filter"` column. Its own
+    /// 8b. Entity-space filter postings, one file per `index = true` column. Its own
     ///    stage rather than a rider on `PostingsWrite`, which runs before the attribute values
     ///    have been read; zero-length for a schema that declares no filterable column.
     FilterPostings,

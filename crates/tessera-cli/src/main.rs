@@ -41,8 +41,8 @@ enum Command {
         #[arg(long)]
         limit: Option<u64>,
         /// `schema.toml`: the per-item columns to carry alongside the point
-        /// (per-point-attributes §4.2). Each declares what it is *for* and the placement follows;
-        /// `used_for = ["render"]` puts it in `columns.arrow`. Omit for a bundle with no
+        /// (per-point-attributes §4.2, records §2). Each declares what it *is* and the placement
+        /// follows; `render = true` puts it in `columns.arrow`. Omit for a bundle with no
         /// per-item columns, which is what every build wrote before this flag existed.
         ///
         /// **A build input, never server configuration** (§4.1). It compiles into MANIFEST.json

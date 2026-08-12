@@ -1407,7 +1407,7 @@ fn read_attributes_by_entity(
     Ok(by_entity)
 }
 
-/// Write the entity-space filter postings for every column declared `used_for = "filter"`, and
+/// Write the entity-space filter postings for every column declared `index = true`, and
 /// return the paths so the manifest digests them.
 ///
 /// **One file per column** — `attrs/<column>/postings.arrow` — never one file for the whole
@@ -1767,7 +1767,7 @@ fn push_numeric_chunks(
 ///
 /// Two independent reasons, and the second is the one a reader will not expect.
 ///
-/// **`used_for = "filter"`** is the obvious one: the column is declared filterable, and postings are
+/// **`index = true`** is the obvious one: the column is declared filterable, and postings are
 /// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
 ///
 /// **`listing = "per_viewer"`** is the other, and it is *not* optional. That control gates the
@@ -1778,12 +1778,12 @@ fn push_numeric_chunks(
 /// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
 /// compute-admission justification ("no mask composition, no projection, no file IO") false.
 ///
-/// So a `per_viewer` category gets postings whatever its `used_for` says. This is the one place the
+/// So a `per_viewer` category gets postings whatever its `index` says. This is the one place the
 /// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
 /// that does not answer identically and differ only in latency, but here a disclosure control depends
 /// on them existing.
 fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::Attribute) -> bool {
-    if attribute.filter {
+    if attribute.index {
         return true;
     }
     attribute
@@ -1795,9 +1795,9 @@ fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::
 
 /// The vocabulary code a category column's value carries.
 ///
-/// The schema refuses `used_for = "filter"` on anything but a category, so the three unsigned
-/// widths §3.6 allows are the whole domain; anything else reaching here is a schema-compilation
-/// defect, and it fails loudly rather than filtering on a value it invented.
+/// Reached only for a category — postings are derived for the vocabulary-bearing family alone —
+/// so the three unsigned widths §3.6 allows are the whole domain; anything else reaching here is
+/// a schema-compilation defect, and it fails loudly rather than filtering on a value it invented.
 fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
     match value {
         ScalarValue::U8(c) => Ok(*c as u32),
@@ -1822,7 +1822,7 @@ fn permute_attribute_tail(
 ) -> Result<Vec<(String, ScalarColumnData)>> {
     let mut out = Vec::with_capacity(by_entity.len());
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
-        // **The tail is exactly the render columns.** A `filter`-only column is entity-space and
+        // **The tail is exactly the render columns.** An `index`-only column is entity-space and
         // has already been written there; including it here would give it a slot in every row as
         // well, which is the per-row cost §10.3's routing exists to avoid and — for a `utf8`
         // column — the one `render` on `utf8` is refused for outright.

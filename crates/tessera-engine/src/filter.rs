@@ -335,8 +335,8 @@ struct Layers {
     /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
     /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
     covered: Bitmap,
-    /// **Declared `used_for = "filter"`.** A column may be held here without being filterable: a
-    /// `listing = "per_viewer"` category owes membership postings whatever its `used_for` says
+    /// **Declared `index = true`.** A column may be held here without being filterable: a
+    /// `listing = "per_viewer"` category owes membership postings whatever its `index` says
     /// (`filter-index.md` §2.3), and `/v1/categories` reads them from here. [`FilterColumns::resolve`]
     /// refuses such a column exactly as it refuses an undeclared one, so holding it opens no
     /// operand the schema did not declare.
@@ -492,9 +492,9 @@ fn listing_of(
 /// **The mirror of `tessera_build`'s `postings_are_owed`, and it must stay one.** Reading a file set
 /// the build did not write is a refusal at open; failing to read one it did write is a column whose
 /// values are on disk and unserved. Two reasons, and the second is the one a reader will not expect:
-/// `used_for = "filter"` is the obvious one, and `listing = "per_viewer"` is the other — that
+/// `index = true` is the obvious one, and `listing = "per_viewer"` is the other — that
 /// control's gate is membership-derived (per-point-attributes §3.3) and the member sets it needs are
-/// the postings derived from this column, so it gets both whatever its `used_for` says
+/// the postings derived from this column, so it gets both whatever its `index` says
 /// (`filter-index.md` §2.3).
 pub(crate) fn owes_value_column(
     scalar: &tessera_store::manifest::DeclaredScalar,

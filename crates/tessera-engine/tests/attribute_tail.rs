@@ -50,7 +50,7 @@ const SCHEMA_TOML: &str = r#"
 name       = "band"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -61,12 +61,12 @@ listing    = "public"
 [[attribute]]
 name     = "ingested_at"
 type     = "i64"
-used_for = ["render"]
+render = true
 
 [[attribute]]
 name     = "score"
 type     = "f32"
-used_for = ["render"]
+render = true
 "#;
 
 /// The band key an entity carries in the fixture — three-way, so every declared code is exercised

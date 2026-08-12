@@ -114,7 +114,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 #
 # **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
 # presentation, and declaring a category would need a value set enumerating every item — the
-# fixture would then be maintaining a 1:1 vocabulary to say nothing. `used_for = ["render"]` is
+# fixture would then be maintaining a 1:1 vocabulary to say nothing. `render = true` is
 # what puts it in `columns.arrow` and therefore in the points batch, which is the join this exists
 # for.
 #
@@ -154,13 +154,13 @@ SCHEMA_TOML = """\
 [[attribute]]
 name     = "fx_key"
 type     = "u64"
-used_for = ["render"]
+render = true
 
 [[attribute]]
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["filter"]
+index      = true
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
@@ -175,7 +175,7 @@ listing    = "per_viewer"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["filter"]
+index      = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -187,7 +187,7 @@ listing    = "public"
 [[attribute]]
 name     = "title"
 type     = "utf8"
-used_for = ["filter"]
+index    = true
 """
 
 # The declaration's own key→code pinning, transcribed for the filter oracle. The oracle resolves
