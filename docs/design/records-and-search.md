@@ -1,7 +1,6 @@
 # Records and search — design
 
-**Date:** 2026-08-12 (r4 — reviewed once, findings dispositioned, and **every ruling made**;
-Appendix R)
+**Date:** 2026-08-12 (r5 — reviewed once, every ruling made, and epic 1 built; Appendix R)
 **Status:** **Provisional — nothing remains open; promotion awaits only the §13 amendments pass,
 which is an editing round rather than a decision.** Its **first epic is built** — §2's
 declaration, §3's record blob through the whole lifecycle, drill-down's assembly from the three
@@ -264,11 +263,22 @@ membership gate, `/v1/categories`' answer from postings plus the value-column ex
 0063's public-listing filter route all run on those structures, and the row-space route cannot
 answer the membership question (placement §2.1's third bound, which an earlier revision silently
 dropped). So for a category, `render` adds the hot column, `index` offers the filter operand, and
-the entity-space structures are the constant floor — which is exactly what the built system stores
-for a rendered category today, so nothing regresses. A category is therefore never blob-resident,
-and `listing` and `vocabulary` keep their meaning at every flag combination. The second copy this
-keeps is bounded by the code width: 1–4 GB per rendered category column at 10⁹, the price of the
-vocabulary machinery rather than of a filter.
+the entity-space structures are the floor — which is exactly what the built system stores for a
+rendered category today, so nothing regresses. `listing` and `vocabulary` keep their meaning at
+every flag combination. The second copy this keeps is bounded by the code width: 1–4 GB per
+rendered category column at 10⁹, the price of the vocabulary machinery rather than of a filter.
+
+**The floor is the readers', not the family's, and one shape falls outside it** (owner,
+2026-08-12, narrowing the ruling above). Every reader named in the argument is a reader of a
+*membership* set: the `per_viewer` gate, `/v1/categories`, 0063's public-listing route. So the
+floor is exactly what the build grants it to — an `index`ed category, or a `per_viewer` one — and
+a **`public` category declared with neither flag has no reader and no floor**. Stating the
+exemption as the whole family's cost that field its only home: unrendered, unindexed, and skipped
+by the blob as a category, its values were stored nowhere and the declaration was accepted. **A
+field is blob-resident exactly when it has no other home**, categories included, which is the
+question both placement passes ask and what makes them exhaustive between them (§3). Granting the
+floor unconditionally instead was the declined alternative: it buys structures nothing reads, at
+1–4 GB per column at 10⁹.
 
 The contrast with §4.3 is the design argument for both, so it is stated once, here: **a category's
 value is a vocabulary entry — durable, served, authorable; a keyword's value is row data, and its
@@ -1008,6 +1018,16 @@ edit at the named site, and an unlisted falsified claim is a spec contradiction 
 ---
 
 ## Appendix R — review trail
+
+**2026-08-12 (r5) — epic 1 is built, and §4.2's exemption narrows to its readers** (owner). The
+declaration surface, the record blob through its whole lifecycle, drill-down's assembly from the
+three homes and §6.2's row-space route are implemented; the ⊘ markers on those move. The narrowing
+is what building it found: r3 stated the category exemption as the family's, and the build grants
+the entity-space floor to an `index`ed or `per_viewer` category only — so a `public` category with
+neither flag had no home at all and its values were dropped silently. §4.2 now states the floor as
+its readers' and §3's rule — a field is blob-resident exactly when it has no other home — as the
+one both placement passes ask. No mechanism moved; the exemption's argument is unchanged where its
+premise holds.
 
 **2026-08-12 (r4) — the six open rulings are made** (owner): keyword, text, the row-space operand
 ([decision 0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md)),
