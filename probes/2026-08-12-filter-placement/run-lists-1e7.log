@@ -1,0 +1,7 @@
+n=10000000 mean=2 domain=200: building
+
+thread 'main' (18327) panicked at src/bin/lists.rs:291:29:
+assertion `left == right` failed: csr/pairs disagree on all_of
+  left: Bitmap<[6551, 7259, 7829, 21808, 28138, 33024, 35095, 98036]>
+ right: Bitmap<[6551, 7259, 7829, 21808, 26091, 28138, 33024, 35095, 52492, 54926, 55848, 91801, 93153, 98036]>
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

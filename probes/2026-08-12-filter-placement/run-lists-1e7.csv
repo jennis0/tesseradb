@@ -1,0 +1,4 @@
+n,mean_values,domain,candidate,candidates,operator,layout,ms,ns_per_candidate,hits,bytes
+10000000,2,200,contiguous-1pct,100000,any_of,csr,0.773,7.73,3001,119994508
+10000000,2,200,contiguous-1pct,100000,any_of,postings,1.121,11.21,3001,40109304
+10000000,2,200,contiguous-1pct,100000,any_of,pairs,0.907,9.07,3001,159989008

@@ -1,0 +1,81 @@
+n,mask,coverage,match_share,route,detail,ms,ns_per_corpus_row,result_entities,hits
+10000000,blocked,0.01,0.00100,E-scan,entity-space column,0.05,0.01,146,146
+10000000,blocked,0.01,0.00100,E-project+count,project,0.06,0.01,146,146
+10000000,blocked,0.01,0.00100,E-total,project,0.12,0.01,146,146
+10000000,blocked,0.01,0.00100,R-dense,render column,4.25,0.42,146,146
+10000000,blocked,0.01,0.00100,R-masked,render column,1.02,0.10,146,146
+10000000,blocked,0.25,0.00100,E-scan,entity-space column,1.06,0.11,2588,2588
+10000000,blocked,0.25,0.00100,E-project+count,project,0.18,0.02,2588,2588
+10000000,blocked,0.25,0.00100,E-total,project,1.24,0.12,2588,2588
+10000000,blocked,0.25,0.00100,R-dense,render column,4.29,0.43,2588,2588
+10000000,blocked,0.25,0.00100,R-masked,render column,8.03,0.80,2588,2588
+10000000,scattered,0.01,0.00100,E-scan,entity-space column,0.66,0.07,87,87
+10000000,scattered,0.01,0.00100,E-project+count,project,0.05,0.00,87,87
+10000000,scattered,0.01,0.00100,E-total,project,0.71,0.07,87,87
+10000000,scattered,0.01,0.00100,R-dense,render column,4.18,0.42,87,87
+10000000,scattered,0.01,0.00100,R-masked,render column,0.56,0.06,87,87
+10000000,scattered,0.25,0.00100,E-scan,entity-space column,20.28,2.03,2565,2565
+10000000,scattered,0.25,0.00100,E-project+count,project,0.25,0.03,2565,2565
+10000000,scattered,0.25,0.00100,E-total,project,20.53,2.05,2565,2565
+10000000,scattered,0.25,0.00100,R-dense,render column,4.23,0.42,2565,2565
+10000000,scattered,0.25,0.00100,R-masked,render column,7.91,0.79,2565,2565
+10000000,blocked,0.01,0.25000,E-scan,entity-space column,0.05,0.00,32905,32905
+10000000,blocked,0.01,0.25000,E-project+count,project,0.68,0.07,32905,32905
+10000000,blocked,0.01,0.25000,E-total,project,0.73,0.07,32905,32905
+10000000,blocked,0.01,0.25000,R-dense,render column,24.88,2.49,32905,32905
+10000000,blocked,0.01,0.25000,R-masked,render column,1.71,0.17,32905,32905
+10000000,blocked,0.25,0.25000,E-scan,entity-space column,1.04,0.10,632094,632094
+10000000,blocked,0.25,0.25000,E-project+count,project,16.01,1.60,632094,632094
+10000000,blocked,0.25,0.25000,E-total,project,17.05,1.71,632094,632094
+10000000,blocked,0.25,0.25000,R-dense,render column,29.71,2.97,632094,632094
+10000000,blocked,0.25,0.25000,R-masked,render column,8.12,0.81,632094,632094
+10000000,scattered,0.01,0.25000,E-scan,entity-space column,1.16,0.12,25016,25016
+10000000,scattered,0.01,0.25000,E-project+count,project,1.13,0.11,25016,25016
+10000000,scattered,0.01,0.25000,E-total,project,2.29,0.23,25016,25016
+10000000,scattered,0.01,0.25000,R-dense,render column,24.55,2.46,25016,25016
+10000000,scattered,0.01,0.25000,R-masked,render column,1.20,0.12,25016,25016
+10000000,scattered,0.25,0.25000,E-scan,entity-space column,27.23,2.72,625800,625800
+10000000,scattered,0.25,0.25000,E-project+count,project,15.06,1.51,625800,625800
+10000000,scattered,0.25,0.25000,E-total,project,42.29,4.23,625800,625800
+10000000,scattered,0.25,0.25000,R-dense,render column,28.26,2.83,625800,625800
+10000000,scattered,0.25,0.25000,R-masked,render column,7.99,0.80,625800,625800
+100000000,blocked,0.01,0.00100,E-scan,entity-space column,0.42,0.00,1072,1072
+100000000,blocked,0.01,0.00100,E-project+count,project,0.15,0.00,1072,1072
+100000000,blocked,0.01,0.00100,E-total,project,0.58,0.01,1072,1072
+100000000,blocked,0.01,0.00100,R-dense,render column,43.45,0.43,1072,1072
+100000000,blocked,0.01,0.00100,R-masked,render column,17.16,0.17,1072,1072
+100000000,blocked,0.25,0.00100,E-scan,entity-space column,10.53,0.11,24803,24803
+100000000,blocked,0.25,0.00100,E-project+count,project,1.40,0.01,24803,24803
+100000000,blocked,0.25,0.00100,E-total,project,11.93,0.12,24803,24803
+100000000,blocked,0.25,0.00100,R-dense,render column,42.31,0.42,24803,24803
+100000000,blocked,0.25,0.00100,R-masked,render column,81.90,0.82,24803,24803
+100000000,scattered,0.01,0.00100,E-scan,entity-space column,8.91,0.09,1022,1022
+100000000,scattered,0.01,0.00100,E-project+count,project,0.26,0.00,1022,1022
+100000000,scattered,0.01,0.00100,E-total,project,9.17,0.09,1022,1022
+100000000,scattered,0.01,0.00100,R-dense,render column,42.21,0.42,1022,1022
+100000000,scattered,0.01,0.00100,R-masked,render column,16.92,0.17,1022,1022
+100000000,scattered,0.25,0.00100,E-scan,entity-space column,205.08,2.05,24828,24828
+100000000,scattered,0.25,0.00100,E-project+count,project,1.47,0.01,24828,24828
+100000000,scattered,0.25,0.00100,E-total,project,206.55,2.07,24828,24828
+100000000,scattered,0.25,0.00100,R-dense,render column,42.32,0.42,24828,24828
+100000000,scattered,0.25,0.00100,R-masked,render column,80.37,0.80,24828,24828
+100000000,blocked,0.01,0.25000,E-scan,entity-space column,0.41,0.00,262033,262033
+100000000,blocked,0.01,0.25000,E-project+count,project,4.99,0.05,262033,262033
+100000000,blocked,0.01,0.25000,E-total,project,5.41,0.05,262033,262033
+100000000,blocked,0.01,0.25000,R-dense,render column,257.18,2.57,262033,262033
+100000000,blocked,0.01,0.25000,R-masked,render column,17.43,0.17,262033,262033
+100000000,blocked,0.25,0.25000,E-scan,entity-space column,9.42,0.09,6257532,6257532
+100000000,blocked,0.25,0.25000,E-project+count,project,144.50,1.45,6257532,6257532
+100000000,blocked,0.25,0.25000,E-total,project,153.92,1.54,6257532,6257532
+100000000,blocked,0.25,0.25000,R-dense,render column,258.22,2.58,6257532,6257532
+100000000,blocked,0.25,0.25000,R-masked,render column,80.76,0.81,6257532,6257532
+100000000,scattered,0.01,0.25000,E-scan,entity-space column,11.14,0.11,250268,250268
+100000000,scattered,0.01,0.25000,E-project+count,project,9.39,0.09,250268,250268
+100000000,scattered,0.01,0.25000,E-total,project,20.53,0.21,250268,250268
+100000000,scattered,0.01,0.25000,R-dense,render column,249.44,2.49,250268,250268
+100000000,scattered,0.01,0.25000,R-masked,render column,16.87,0.17,250268,250268
+100000000,scattered,0.25,0.25000,E-scan,entity-space column,283.58,2.84,6249194,6249194
+100000000,scattered,0.25,0.25000,E-project+count,project,150.82,1.51,6249194,6249194
+100000000,scattered,0.25,0.25000,E-total,project,434.41,4.34,6249194,6249194
+100000000,scattered,0.25,0.25000,R-dense,render column,267.06,2.67,6249194,6249194
+100000000,scattered,0.25,0.25000,R-masked,render column,82.08,0.82,6249194,6249194
