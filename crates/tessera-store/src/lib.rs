@@ -12,6 +12,7 @@ pub mod manifest_write;
 pub mod merge;
 pub mod pairs;
 pub mod permutation;
+pub mod render_presence;
 pub mod read;
 pub mod row_entity;
 pub mod reclaim;

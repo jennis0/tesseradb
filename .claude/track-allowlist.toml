@@ -28,6 +28,7 @@
 [frozen]
 paths = [
   "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-store/src/render_presence.rs",
   "crates/tessera-authz/*",
   "crates/tessera-spatial/*",
   "crates/tessera-wire/*",
@@ -135,4 +136,37 @@ paths = [
   "crates/tessera-bench/*",
   "docs/evidence/memos/*",
   "probes/*",
+]
+
+# 0064's render half, server side (#101) — dispatched 2026-08-13. The seam is
+# `crates/tessera-store/src/render_presence.rs`, frozen above once landed.
+# `write` owns the three render paths and the lifecycle that carries the bitmap; `read` owns the
+# scan, the parse refusal it lifts, and the surface that publishes the result.
+[track.write]
+paths = [
+  "crates/tessera-build/src/input.rs",
+  "crates/tessera-build/src/pipeline.rs",
+  "crates/tessera-build/src/lib.rs",
+  "crates/tessera-spatial/*",
+  "crates/tessera-store/src/flush.rs",
+  "crates/tessera-store/src/merge.rs",
+  "crates/tessera-store/src/fold.rs",
+  "crates/tessera-store/src/read.rs",
+  "crates/tessera-engine/src/flush.rs",
+  "crates/tessera-engine/src/merge.rs",
+  "crates/tessera-engine/src/compact.rs",
+  "crates/tessera-engine/tests/merge.rs",
+  "crates/tessera-engine/tests/fold.rs",
+  "crates/tessera-build/tests/*",
+]
+
+[track.read]
+paths = [
+  "crates/tessera-engine/src/viewport.rs",
+  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/src/compose.rs",
+  "crates/tessera-build/src/schema.rs",
+  "crates/tessera-server/src/viewer.rs",
+  "crates/tessera-engine/tests/filtering.rs",
+  "crates/tessera-server/tests/*",
 ]
