@@ -1,0 +1,97 @@
+"""The record blob's addressing self-consistency — the one artefact-level check records §10
+licenses (review B7): rank, offsets, block bounds, discriminants, walked over the catalogue's
+built `attrs/record/` by `oracle.record_blob`.
+
+Why an artefact check exists at all in a suite whose relation is the fixture's inputs: the
+addressing is the one property the served surface cannot exhibit. A mis-addressed blob still
+serves *some* value for every entity — a neighbour's — and B6's fail-closed refusals (bounds,
+discriminants) only mean something if the artefact's addressing is independently checkable. The
+walk is structure-only: `oracle/record_blob.py`'s module doc states the licence, and nothing
+here reads a field's value out of the artefact.
+
+**What is deliberately NOT here, and where it is instead** — the blob-resident *values*:
+
+- at build level, `crates/tessera-build/tests/record_blob.rs` reads every value back through the
+  Rust `RecordBlob` reader and compares against its fixture's own generation functions;
+- at the served surface, the record-always-exists differential (records §10; the epic's gate 3)
+  asserts `/v1/items/{tessera_id}` returns every declared field equal to
+  `oracle.catalogue.record_of` — that test lands when drill-down assembles the record from its
+  three homes, and writing it against the artefact instead now would be the weaker relation
+  records §3 declines.
+
+Until then this suite's value coverage for `note` and `pages` is exactly: the fixture builds
+green with them declared, the has-row bitmap matches the generation functions' presence, and
+the addressing that will serve them is self-consistent.
+"""
+
+from __future__ import annotations
+
+from oracle import catalogue as cat
+from oracle import record_blob as rb
+
+
+def _blob_tags(manifest: dict) -> set[int]:
+    """The manifest positions of the blob-resident columns — a row's `tag` is the column's
+    position in `declared_scalars` (an index internal, resolved server-side, never on the
+    wire), and only a neither-key column may appear in a row."""
+    return {
+        position
+        for position, declared in enumerate(manifest["declared_scalars"])
+        if not declared["index"] and not declared["render"]
+    }
+
+
+def test_the_blob_declares_exactly_the_fixtures_blob_columns(catalogue_bundle):
+    """The placement half, from the manifest: `note` and `pages` are blob-resident, and nothing
+    else is — in particular not the render-only category (`shelf`), because a category is never
+    blob-resident (records §4.2: its entity-space structures are the constant floor)."""
+    by_name = {d["name"]: d for d in catalogue_bundle.manifest["declared_scalars"]}
+    blob_resident = {
+        name for name, d in by_name.items() if not d["index"] and not d["render"]
+    }
+    assert blob_resident == {"note", "pages"}
+    assert by_name["shelf"]["render"] and not by_name["shelf"]["index"]
+
+
+def test_the_blob_addressing_is_self_consistent(catalogue_bundle_root, catalogue_bundle):
+    """The whole walk, one call: blocks tile the file, ranks tile the rank space, rows tile
+    their blocks, discriminants agree with has-row's rank order, fields frame exactly, tags are
+    blob-resident columns only — and has-row's membership is what the generation functions
+    planted, which is the fixture-input half of the relation."""
+    failures = rb.self_check(
+        rb.record_dir_of(catalogue_bundle_root),
+        expected_entities=cat.blob_entities_expected(),
+        allowed_tags=_blob_tags(catalogue_bundle.manifest),
+    )
+    assert not failures, "the blob's addressing has drifted:\n" + "\n".join(failures)
+
+
+def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_root):
+    """Records §3's "a target, not a cap", on the artefact: the planted > 256 KiB note must land
+    in a block above the target holding exactly that one row — never split across blocks — and
+    the corpus must cut enough ordinary blocks that the first/last-of-block drill-down cases
+    (records §10's catalogue) are non-degenerate when they land."""
+    import pyarrow.ipc as ipc  # noqa: PLC0415
+    from pyroaring import BitMap  # noqa: PLC0415
+
+    record_dir = rb.record_dir_of(catalogue_bundle_root)
+    with ipc.open_file(record_dir / rb.DIRECTORY_FILE) as reader:
+        directory = reader.read_all().to_pylist()
+    hasrow = list(BitMap.deserialize((record_dir / rb.HASROW_FILE).read_bytes()))
+
+    assert len(directory) > 2, (
+        f"{len(directory)} blocks — too few for block-boundary cases to mean anything"
+    )
+    oversized = [b for b in directory if b["uncompressed_len"] > rb.BLOCK_TARGET]
+    assert oversized, "no block exceeds the target, so the oversize rule is untested"
+    for block in oversized:
+        assert len(block["row_offsets"]) == 1, (
+            f"an oversized block holds {len(block['row_offsets'])} rows — only a single row "
+            "larger than the target may pass it"
+        )
+    # The planted oversize entity is the one carrying such a row (rank → entity via has-row).
+    oversize_entities = {hasrow[b["first_rank"]] for b in oversized}
+    assert oversize_entities == {cat.NOTE_OVERSIZE_ID}, (
+        f"the oversized rows belong to {sorted(oversize_entities)}, not the planted "
+        f"{cat.NOTE_OVERSIZE_ID}"
+    )
