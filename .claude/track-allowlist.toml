@@ -1,218 +1,111 @@
-# Stage 2.1 file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
+# Epic 1 file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
 #
-# Transcribed from the stage-2.1 plan's "How the work parallelises" table
-# (docs/archive/plans/2026-07-31-phase2-roadmap-and-stage-2.1.md), including the two
-# corrections that revision makes to r1's map: `check_bearer` lives in `state.rs`, so its fix is
-# Track C's, and `error.rs`/`health.rs` are Track B's (Task 3b needs both).
+# Rewritten 2026-08-12 for records-and-search epic 1 (#84), replacing the stage-2.1 map whose
+# campaign closed. Transcribed from the epic-1 brief's "Parallel-work seams"
+# (.superpowers/sdd/2026-08-12-records-and-search/brief-1.md), with one controller correction
+# recorded here: `crates/tessera-build/src/{lib.rs,pipeline.rs}` are `[shared]` rather than one
+# track's, because track A's mechanical rename of the compiled placement field crosses the same
+# files track B's blob build stage extends — the stage-2.1 `session.rs` precedent: an expected
+# textual conflict, reviewed at integration, never a licence to edit the other track's logic.
 #
-# The rule this file gives teeth to is the plan's rule 3: "Ownership is an allowlist, not an
-# intention." A track that discovers it needs a file outside its list **stops and reports** — the
-# controller either reassigns the file or sequences the two tracks. Editing this file to make a
-# check pass is the failure mode it exists to prevent; it is a controller decision, recorded with
-# its reason, never a worker's convenience.
+# The rule this file gives teeth to: ownership is an allowlist, not an intention. A track that
+# needs a file outside its list **stops and reports** — the controller reassigns or sequences.
+# Editing this file to make a check pass is the failure mode it exists to prevent.
 #
-# Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/` — that is
-# why `crates/tessera-lifecycle/**` covers the whole subtree. Paths are repo-relative, exactly as
-# `git diff --name-only` prints them.
+# Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
+# are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Not listed, because git never sees them: `.superpowers/**` (the SDD ledgers and briefs) is
-# gitignored, so each track's `progress-<track>.md` can never show up in a diff.
-#
-# **Three sections, and the order they are consulted in is the point.** `[frozen]` is checked
-# FIRST and always refuses; `[shared]` and `[track.<t>]` are then unioned into the track's
-# allowlist. A path in `[frozen]` is refused for every track — that is what distinguishes it from
-# `[shared]`, which permits for every track. Putting a frozen path in `[shared]` says the exact
-# opposite of what a freeze means, and did (Task 0 gate, C1).
+# Wave 1 tracks: a (declaration surface + used_for migration, T4), b (record blob core, T6).
+# Wave 2 tracks: b2 (blob lifecycle, T7 + T8's engine half), c (render-column route, T9/T10 +
+# T8's serve half), d (conformance + oracle, T11). Waves are sequential; a wave-2 track listing
+# a file a wave-1 track owned is not an overlap, because wave 2 branches from wave 1's merged
+# seam.
 
-# FROZEN for stage 2.1 (controller ruling 2026-07-31, on the Task 0c report; the section itself
-# added by the Task 0 gate fixes after the ruling was found to be recorded in `[shared]`, which
-# *permitted* these files for all four tracks instead of refusing them).
-#
-# After Task 0c's split these two files hold the residue no track owns — viewer plane, config,
-# byte shape, selection, counting, gather, density — plus a handful of cases that genuinely span
-# two tracks (`never_gated_routes_succeed_while_the_viewer_gate_is_saturated` has five owners in
-# one body). Every track has its own file to ADD tests to, so nothing should need to change here.
-#
-# `check-track-allowlist.sh` refuses any change to these for EVERY track, with its own message:
-# needing to edit one is usually the signal that a seam was drawn in the wrong place. Stop and
-# report to the controller (plan rule 3) — the controller either moves the cases out into a
-# track-owned file, as the Task 0c ruling did, or unfreezes the path deliberately and records why.
+# FROZEN for epic 1 (controller ruling 2026-08-12). The manifest is the seam commit and is
+# spent; the authz/spatial/wire/plugin crates are outside the epic (0064's render half is NOT
+# this epic — `or_render_placeholder` does not move); decisions and the two normative designs
+# change only through the owner; scripts are the checks themselves.
 [frozen]
 paths = [
-  "crates/tessera-server/tests/http.rs",
-  "crates/tessera-engine/tests/viewport.rs",
+  "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-authz/*",
+  "crates/tessera-spatial/*",
+  "crates/tessera-wire/*",
+  "crates/tessera-plugin/*",
+  "docs/decisions/*",
+  "docs/design/architecture.md",
+  "docs/design/write-path.md",
+  "docs/design/records-and-search.md",
+  "scripts/*",
 ]
 
-# Files more than one track legitimately touches. Every one of these is expected to conflict
-# textually at merge and is reviewed at integration — the plan's merge protocol already assumes
-# this ("C rebases onto B's merged head ... both moved code out of session.rs and their residual
-# edits to Engine::open will conflict textually even though they are semantically disjoint").
-# Nothing here is a licence to edit another track's *logic*; it is a licence to touch a
-# construction site.
+# Files more than one track legitimately touches; expected to conflict textually at merge and
+# reviewed at integration. `tessera-build/src/{lib.rs,pipeline.rs}`: track A's edits are the
+# mechanical placement rename and `used_for` doc sweeps ONLY; track B's are the blob build
+# stage. `tessera-types`: controller-approved edits in practice — say so in the report.
 [shared]
 paths = [
-  # Engine::open constructs both B's WritePath and C's PinManager/RowProjectionCache. The plan's
-  # ownership table lists neither this file nor server/src/lib.rs — see the Task 0b report; the
-  # plan's own merge protocol proves this one is shared.
-  "crates/tessera-engine/src/session.rs",
-  # Declares the modules both tracks' files live in, and holds `Generation`.
-  "crates/tessera-engine/src/lib.rs",
-  # The engine's integration-test fixtures, factored out by Task 0c's split of `tests/viewport.rs`.
-  # Shared rather than Track C's, because the frozen `tests/viewport.rs` compiles it too: a change
-  # here is a change to what both binaries build against, and is reviewed as one.
-  "crates/tessera-engine/tests/common/**",
-  # The server's integration-test fixtures, the same situation one crate over: `tests/http.rs`
-  # (frozen), `http_write.rs` (B) and `http_engine_state.rs` (C) all compile it. Listed here rather
-  # than in both `[track.b]` and `[track.c]` — one mechanism for one situation (Task 0 gate, minor).
-  "crates/tessera-server/tests/common/**",
-  # `prepare`/`run`: builds EngineConfig from Config and mounts all three routers. Task 3b's
-  # readiness wiring ("touches all three routers") and any Task 5 config-to-cache wiring both
-  # land here.
-  "crates/tessera-server/src/lib.rs",
-  # Manifests and the lockfile: a dependency change is regenerable and reviewed at integration,
-  # never a silent claim on another track's code. The ROOT manifest is here too (Task 0 gate, F8):
-  # every crate takes its dependencies `{ workspace = true }`, so a track adding one must edit
-  # `[workspace.dependencies]` — listing the per-crate manifests without the root one made the
-  # common case a violation.
-  "Cargo.lock",
   "Cargo.toml",
-  "crates/*/Cargo.toml",
-  # Prose (Task 0 gate, F8). Track A's Task 2 is *required* to edit
-  # `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`, and the controller
-  # revises `docs/archive/plans/**` on whichever branch is in hand — both were violations while
-  # `docs/**` went unlisted. Documents are reviewed by reading them, so mechanical ownership buys
-  # nothing here; a track rewriting another track's memo is a review matter, not a check failure.
-  "docs/**",
-  # Build-fixup sites that belong to no track's subject but break when any track changes a shared
-  # type (controller ruling 2026-07-31, on the Task 3a report's F1/F2). `EngineConfig` is
-  # constructed by EXHAUSTIVE struct literal at fifteen sites across seven files — four in
-  # `tessera-bench`, four in `tessera-engine/examples`, one in `benches/viewport.rs`, the rest in
-  # owned or shared files — so adding one field breaks all fifteen, and most were reachable by no
-  # track. The same applies to any public engine signature a track changes.
-  #
-  # **Mechanical call-site updates only.** `tessera-bench` is the instrument the serving gates
-  # measure with, and `benches/viewport.rs` carries Track C's criterion gate: changing what an arm
-  # or a bench MEASURES is a controller decision, recorded with its reason, never a track's
-  # convenience. Reviewed at integration like every other `[shared]` path.
-  "crates/tessera-bench/**",
-  "crates/tessera-engine/examples/**",
-  "crates/tessera-engine/benches/viewport.rs",
+  "Cargo.lock",
+  "crates/tessera-types/*",
+  "crates/tessera-build/src/lib.rs",
+  "crates/tessera-build/src/pipeline.rs",
 ]
 
-# Track A — store and reader. Tasks 1, 2.
-# `scripts/check-layers.sh` is shared with Track B by the plan's own arrangement: "touched by A
-# and B — split by rule, each track appending its own, reviewed together at integration".
+# Wave 1 — the declaration surface and the used_for migration sweep (T4).
 [track.a]
 paths = [
-  "crates/tessera-store/src/read.rs",
-  "crates/tessera-store/src/manifest.rs",
-  "crates/tessera-store/src/error.rs",
-  "crates/tessera-store/tests/bundle_read.rs",
-  "crates/tessera-engine/src/select.rs",
-  "scripts/check-layers.sh",
+  "crates/tessera-build/src/schema.rs",
+  "crates/tessera-build/src/observer.rs",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-engine/src/session.rs",
+  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/src/categories.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/control.rs",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-cli/src/main.rs",
+  "crates/tessera-bench/src/arms/*",
+  "reference/oracle/catalogue.py",
 ]
 
-# Track B — the writer. Tasks 3a, 3b, 6, 7a, 7b, 8, 9, 10.
+# Wave 1 — the record blob: format, writer, reader, build stage (T6).
 [track.b]
 paths = [
-  "crates/tessera-lifecycle/**",
-  "crates/tessera-engine/src/write.rs",
-  "crates/tessera-server/src/control.rs",
-  "crates/tessera-server/src/error.rs",
-  "crates/tessera-server/src/health.rs",
-  "crates/tessera-server/tests/http_write.rs",
-  # Track B's engine-level test file (controller ruling 2026-07-31, on the Task 3a report's F1).
-  # Task 3a changes `accept_ingest`'s shape — entity IDs move from the caller to the executor —
-  # and its only engine-test call site was in `tests/viewport.rs`, frozen for every track. Without
-  # this file B could not migrate that case, and its four ordering tests would all have had to
-  # reach the executor through HTTP to observe a property that is not an HTTP one. Same remedy as
-  # Task 0c's `tests/pins.rs` and the gate's `http_engine_state.rs`.
-  "crates/tessera-engine/tests/write.rs",
-  # Controller ruling 2026-08-01, on Task 6's charter. The SHIPPED serving runtime is built at
-  # `crates/tessera-cli/src/main.rs:640` with `Builder::new_multi_thread().enable_all()` and no
-  # `max_blocking_threads`, so the pool bound is tokio's *undeclared default* (512). Task 6's
-  # headroom arithmetic has that number as an operand; asserting a startup relation against a
-  # figure no line of this repository states is disciplinary, not structural — a tokio upgrade or
-  # an embedder's own builder invalidates it silently, which is precisely the defect class this
-  # stage kept finding. Granted so the operand can be SET rather than assumed.
-  #
-  # **Scoped to the runtime builder and its refusal path.** Every other subcommand in this file is
-  # the build pipeline's, belongs to no stage-2.1 track, and is not Track B's to touch. Safe to
-  # grant now only because A, C and T are merged and B is the sole live track.
-  "crates/tessera-cli/src/main.rs",
-  # Controller ruling 2026-08-01, on the owner's correction: **if the right design is prevented by
-  # this file, that is a defect in this file, not a constraint on the design.**
-  #
-  # The first draft of Task 6's brief told the worker it could not add a config key, citing the
-  # plan's rule 2 ("config keys are landed by the seam, not the tracks"), and instructed it to
-  # derive every operand of its headroom arithmetic from keys the seam happened to land. That is a
-  # coordination mechanism deciding an engineering question. Rule 2's REASON was that `config.rs`
-  # is "the file every track wants" — it is contention control, and with A, C and T all merged
-  # there is no contention left to control. Task 6 also has a live case for a key: an ingest
-  # ADMISSION bound (concurrent handlers holding blocking-pool threads) is a different quantity
-  # from `ingest_queue_bound` (queued commands), and forcing them onto one number to avoid an
-  # allowlist edit is exactly the "silently admits the collapsing configuration" shape
-  # `validate_cache_bounds` refuses.
-  #
-  # Granted with its obligations, which the REVIEW gate polices rather than the hook: a new key
-  # carries the same argued doc block, `deny_unknown_fields` section placement, non-zero
-  # validation, default-pinning test and stated inertness-or-consumer that every one of the
-  # seam's fourteen carries. `config.rs` is 1,767 lines of argued prose and is reviewed by being
-  # read.
-  "crates/tessera-server/src/config.rs",
-  # Same ruling, same reason. `AppState` was Track C's for stage 2.1 and C is merged. Task 6 needs
-  # config values (batch caps, the admission bound) to reach `control.rs`, and the alternative —
-  # a module-private `OnceLock` in `control.rs` on the `init_deny_runtime` pattern — is the right
-  # answer for a RUNTIME resource and the wrong one for plain configuration, where a field on the
-  # state every handler already holds is both simpler and honest about lifetime. The worker
-  # chooses; it is no longer chosen for it by an allowlist.
-  #
-  # **Not a licence to touch `check_bearer` or the session registry.** S17 (the session-registry
-  # expiry sweep) is an OPEN OWNER DECISION and stays out of scope regardless of this grant —
-  # ownership was never what excluded it.
-  "crates/tessera-server/src/state.rs",
-  "scripts/check-layers.sh",
+  "crates/tessera-filter/*",
+  "crates/tessera-filter-write/*",
+  "crates/tessera-build/tests/record_blob.rs",
 ]
 
-# Track C — engine state. Tasks 4, 5.
+# Wave 2 — blob lifecycle: flush extent, coalesce repack, fold rewrite (T7, T8's engine half).
+[track.b2]
+paths = [
+  "crates/tessera-engine/src/flush.rs",
+  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/coalesce.rs",
+  "crates/tessera-engine/src/compact.rs",
+  "crates/tessera-filter-write/*",
+  "crates/tessera-engine/tests/fold.rs",
+  "crates/tessera-engine/tests/merge.rs",
+  "crates/tessera-engine/tests/attribute_tail.rs",
+  "crates/tessera-engine/tests/coalesce.rs",
+]
+
+# Wave 2 — the render-column route and the widened meta surface (T9, T10, T8's serve half).
 [track.c]
 paths = [
-  "crates/tessera-engine/src/pins.rs",
-  "crates/tessera-engine/src/cache.rs",
-  # The ONLY call site of both of C's seams — `pins.resolve` and
-  # `row_projection_cache.get_or_build` — so any signature change Task 4 or Task 5 makes lands
-  # here (Task 0 gate, C2: without this C could not execute either of its tasks). Not `[shared]`:
-  # no other track has a reason to touch the viewport path this stage.
   "crates/tessera-engine/src/viewport.rs",
-  # Task 5 rewrites this: `prune_token`, `prune_generation`, the LRU list and the byte bound all
-  # need removal, iteration and value sizing, and the type exposes only `new`/`len`/`get_or_build`
-  # today — so `RowProjectionCache` cannot implement pruning through it (Task 0 gate, C2). The
-  # plan's ownership table named the `tessera-authz` twin below and this file, the one Task 5
-  # actually rewrites, went unlisted.
-  "crates/tessera-engine/src/single_flight.rs",
-  "crates/tessera-authz/src/fragment.rs",
-  "crates/tessera-authz/src/single_flight.rs",
-  # ALSO in `[track.b]` from 2026-08-01, and `--audit` therefore reports it as an overlap
-  # alongside `check-layers.sh`. Deliberate, not drift: Track C is merged and this stage's
-  # remaining work is all Track B's. Left listed here so C's history reads correctly and so a
-  # re-parallelised 2.2 starts from the real map rather than from a grant made when B was alone.
-  "crates/tessera-server/src/state.rs",
-  "crates/tessera-server/src/session.rs",
-  "crates/tessera-engine/tests/pins.rs",
-  "crates/tessera-engine/tests/cache.rs",
-  # Controller ruling (2026-07-31, on the Task 0c report): C had no server-plane test file, so
-  # Task 4's drain list and Task 5's revoke-prunes-the-cache had nowhere to land an end-to-end
-  # assertion. Created by moving `c_revoke_then_viewport_is_rejected`, `g_stale_pin_is_410` and
-  # `g2_pins_survive_overlay_swaps` out of the now-frozen `tests/http.rs`. Named for C's subject in
-  # the plan (engine state), not for pins alone — it already holds a session-revocation case, and
-  # Task 5's cache-pruning assertions land here too (Task 0 gate, minor).
-  "crates/tessera-server/tests/http_engine_state.rs",
+  "crates/tessera-engine/src/compose.rs",
+  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/src/session.rs",
+  "crates/tessera-server/src/viewer.rs",
+  "crates/tessera-engine/tests/filtering.rs",
 ]
 
-# Track T — the standing conformance track. Branches from 9f2424a and touches no crate the seam
-# moves, which is why it can start immediately.
-[track.t]
+# Wave 2 — conformance and oracle capability (T11).
+[track.d]
 paths = [
-  "reference/**",
-  "conformance/**",
+  "reference/*",
+  "conformance/*",
 ]
