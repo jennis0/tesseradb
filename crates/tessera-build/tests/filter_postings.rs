@@ -1,4 +1,4 @@
-//! The build half of `used_for = "filter"`: one keyed postings file per declared column
+//! The build half of `index = true`: one keyed postings file per declared column
 //! (filter-index §2.2, §2.5, §4).
 //!
 //! `schema.rs`'s unit tests cover the parse rules. These read what the build actually wrote,
@@ -278,7 +278,8 @@ const FILTER_SCHEMA: &str = r#"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render", "filter"]
+render = true
+index = true
 vocabulary = "discovered"
 listing = "per_viewer"
 "#;
@@ -288,7 +289,7 @@ const RENDER_ONLY_SCHEMA: &str = r#"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "per_viewer"
 "#;
@@ -298,7 +299,7 @@ const PUBLIC_RENDER_ONLY_SCHEMA: &str = r#"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "declared"
 listing = "public"
   [attribute.values]
@@ -396,7 +397,7 @@ fn the_postings_file_is_under_the_manifest_digest() {
     );
 }
 
-/// A `per_viewer` category gets postings whatever its `used_for` says, because the listing control
+/// A `per_viewer` category gets postings whatever its `index` says, because the listing control
 /// is membership-derived and the member sets *are* these postings (per-point-attributes §3.3).
 /// `RENDER_ONLY_SCHEMA` declares `listing = "per_viewer"` without `filter`, so this is the case.
 #[test]
@@ -468,7 +469,11 @@ fn the_column_answers_entity_to_value() {
                 Some(AttrLocalId::new(codes[&key])),
                 "source {source}"
             ),
-            None => assert_eq!(column.value_of(entity), None, "source {source} carries none"),
+            None => assert_eq!(
+                column.value_of(entity),
+                None,
+                "source {source} carries none"
+            ),
         }
     }
 }
@@ -484,7 +489,13 @@ fn a_universal_column_writes_no_presence_bitmap() {
     write_points_dense(&points);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
-    build(&args(&points, &pairs, out.clone(), parse_schema(FILTER_SCHEMA))).unwrap();
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(FILTER_SCHEMA),
+    ))
+    .unwrap();
 
     let cdir = column_dir(&out, "department");
     assert!(cdir.join("values.arrow").exists());
@@ -501,14 +512,14 @@ const STRING_SCHEMA: &str = r#"
 name = "department"
 type = "category"
 width = "u16"
-used_for = ["render"]
+render = true
 vocabulary = "discovered"
 listing = "public"
 
 [[attribute]]
 name = "title"
 type = "utf8"
-used_for = ["filter"]
+index = true
 "#;
 
 /// A string column is a value column and nothing else — no dictionary, no FST, no postings
@@ -521,7 +532,13 @@ fn a_string_filter_column_emits_values_and_no_postings() {
     write_points_with_title(&points);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
-    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(STRING_SCHEMA),
+    ))
+    .unwrap();
 
     let cdir = column_dir(&out, "title");
     assert!(cdir.join("values.arrow").exists());
@@ -529,6 +546,63 @@ fn a_string_filter_column_emits_values_and_no_postings() {
         !cdir.join("postings.arrow").exists(),
         "a string column earns no accelerator: its values neither repeat densely nor carry an \
          identity a posting could be keyed by"
+    );
+}
+
+/// A declaration with neither `render` nor `index` builds, and the manifest records it with
+/// both flags false — the blob-resident home is derived from the two flags, never stored
+/// (records §3; `DeclaredScalar`'s rule). ⊘ The record blob itself is not built here: until its
+/// build stage lands, the declaration is the column's only artefact, so the assertion is that
+/// the build accepts it, compiles it, and materialises nothing under `attrs/` for it.
+const BLOB_RESIDENT_SCHEMA: &str = r#"
+[[attribute]]
+name = "department"
+type = "category"
+width = "u16"
+render = true
+vocabulary = "discovered"
+listing = "public"
+
+[[attribute]]
+name = "title"
+type = "utf8"
+"#;
+
+#[test]
+fn a_declaration_with_neither_key_builds_and_the_manifest_records_it_blob_resident() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_title(&points);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(BLOB_RESIDENT_SCHEMA),
+    ))
+    .unwrap();
+
+    let bundle = open_bundle(&out).unwrap();
+    let scalar_of = |name: &str| {
+        bundle
+            .manifest
+            .declared_scalars
+            .iter()
+            .find(|s| s.name == name)
+            .expect("every declared column reaches the manifest, whatever its flags")
+    };
+    let title = scalar_of("title");
+    assert!(!title.index, "neither key compiles to `index = false`");
+    assert!(!title.render, "neither key compiles to `render = false`");
+    let department = scalar_of("department");
+    assert!(department.render && !department.index);
+
+    assert!(
+        !column_dir(&out, "title").exists(),
+        "a blob-resident column owes no entity-space files; writing any would be the old \
+         surface's double store coming back unasked"
     );
 }
 
@@ -543,7 +617,13 @@ fn a_string_column_answers_all_three_predicates() {
     write_points_with_title(&points);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
-    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(STRING_SCHEMA),
+    ))
+    .unwrap();
 
     let entity_of = source_to_entity(&out);
     let cdir = column_dir(&out, "title");
@@ -567,15 +647,24 @@ fn a_string_column_answers_all_three_predicates() {
     };
 
     assert_eq!(
-        column.scan_text_eq(&all, "paper-3").iter().collect::<Vec<_>>(),
+        column
+            .scan_text_eq(&all, "paper-3")
+            .iter()
+            .collect::<Vec<_>>(),
         expect(&|t| t == "paper-3")
     );
     assert_eq!(
-        column.scan_text_prefix(&all, "paper-1").iter().collect::<Vec<_>>(),
+        column
+            .scan_text_prefix(&all, "paper-1")
+            .iter()
+            .collect::<Vec<_>>(),
         expect(&|t: &str| t.starts_with("paper-1"))
     );
     assert_eq!(
-        column.scan_text_contains(&all, "er-2").iter().collect::<Vec<_>>(),
+        column
+            .scan_text_contains(&all, "er-2")
+            .iter()
+            .collect::<Vec<_>>(),
         expect(&|t: &str| t.contains("er-2"))
     );
     // And `entity → value`, the direction that made the substring route possible at all.
@@ -599,7 +688,13 @@ fn an_absent_string_is_not_an_empty_string() {
     write_points_with_title(&points);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
-    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(STRING_SCHEMA),
+    ))
+    .unwrap();
 
     let entity_of = source_to_entity(&out);
     let cdir = column_dir(&out, "title");
@@ -635,7 +730,13 @@ fn the_manifest_records_the_placement_the_tail_was_built_from() {
     write_points_with_title(&points);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
-    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(STRING_SCHEMA),
+    ))
+    .unwrap();
 
     let bundle = open_bundle(&out).unwrap();
     let declared: Vec<&str> = bundle
@@ -672,7 +773,13 @@ fn a_filter_only_column_is_absent_from_the_hot_column() {
     write_points_with_title(&points);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
-    build(&args(&points, &pairs, out.clone(), parse_schema(STRING_SCHEMA))).unwrap();
+    build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(STRING_SCHEMA),
+    ))
+    .unwrap();
 
     let bundle = open_bundle(&out).unwrap();
     let slice = &bundle.partitions.values().next().unwrap().slices["s0"];

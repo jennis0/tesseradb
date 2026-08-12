@@ -37,7 +37,7 @@ const DISCOVERED_WIDE: &str = r#"
 name       = "department"
 type       = "category"
 width      = "u16"
-used_for   = ["render"]
+render     = true
 vocabulary = "discovered"
 listing    = "per_viewer"
 "#;
@@ -54,7 +54,7 @@ fn discovered_sparse_schema_toml() -> String {
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "discovered"
 listing    = "per_viewer"
 
@@ -72,7 +72,7 @@ const DECLARED_BAND: &str = r#"
 name       = "band"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]

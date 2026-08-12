@@ -529,7 +529,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // ---- 7. tiler and segment ---------------------------------------------------------
     // Narrow each item's scalars to the render columns, in declaration order, so they align with
     // `scalar_schema_of`'s filtered list. Done after the filter emit above, which needs every
-    // declared column including the `filter`-only ones.
+    // declared column including the `index`-only ones.
     //
     // **Unconditional, where it used to be skipped when every column rendered.** It also
     // substitutes the render placeholder for an absent value: `columns.arrow` is non-nullable
@@ -729,7 +729,7 @@ fn write_manifests(
                 name: a.name.clone(),
                 arrow_type: a.ty,
                 vocabulary: a.vocabulary.clone(),
-                index: a.filter,
+                index: a.index,
                 render: a.render,
             })
             .collect(),

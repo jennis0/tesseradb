@@ -171,7 +171,7 @@ fn write_pairs(path: &Path) {
 /// `BatchColumn::Keys`, resolved per row), and only the declared one refuses an unknown key —
 /// so a build that confused them would still produce a column, with different bytes in it.
 ///
-/// Both carry `filter` as well, which is what puts the two builds' filter postings under this
+/// Both carry `index` as well, which is what puts the two builds' filter postings under this
 /// file's byte comparison. The emits are written from different shapes — the streaming build
 /// reads its attribute values column-major, the reference transposes them out of the staged
 /// items — and a keyed postings file that disagreed on code order or on which empty postings it
@@ -181,7 +181,8 @@ const ATTRIBUTED_SCHEMA: &str = r#"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "declared"
 values_key = "archive"
 # `public` is only reachable with `declared` (§3.8), so this fixture covers both listings.
@@ -191,7 +192,8 @@ listing    = "public"
 name       = "department"
 type       = "category"
 width      = "u16"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "discovered"
 listing    = "per_viewer"
 values_key = "department"
@@ -199,22 +201,22 @@ values_key = "department"
 [[attribute]]
 name     = "author_count"
 type     = "u8"
-used_for = ["render"]
+render = true
 
 [[attribute]]
 name     = "score"
 type     = "f64"
-used_for = ["render"]
+render = true
 
 [[attribute]]
 name     = "submitted_at"
 type     = "timestamp_us"
-used_for = ["render"]
+render = true
 
 [[attribute]]
 name     = "active"
 type     = "bool"
-used_for = ["render"]
+render = true
 "#;
 
 /// The keys the attributed fixture uses, with **scattered** codes — a seed file is the one place

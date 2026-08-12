@@ -45,7 +45,7 @@ const SCHEMA_TOML: &str = r#"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -59,7 +59,7 @@ listing    = "public"
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
@@ -78,7 +78,7 @@ listing    = "per_viewer"
 [[attribute]]
 name     = "score"
 type     = "f32"
-used_for = ["render"]
+render = true
 "#;
 
 /// Five archives, so several codes are live and no code is the only one present.
