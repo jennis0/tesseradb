@@ -675,9 +675,7 @@ pub struct SegmentsManifest {
     /// it knows about. Ordered oldest-first, like [`SegmentsManifest::attr_extents`]; the layers
     /// are disjoint in entity space (**I9**), so order only decides which layer answers first.
     ///
-    /// **⊘ Written by nobody yet** — the flush's blob extent lands with the blob lifecycle in
-    /// the same epic as this field; until then every manifest carries it empty. No
-    /// `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
+    /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
     /// omits it is malformed, not extent-free.
     pub record_extents: Vec<RecordExtent>,
     #[serde(default)]

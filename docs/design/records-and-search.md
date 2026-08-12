@@ -3,8 +3,10 @@
 **Date:** 2026-08-12 (r4 — reviewed once, findings dispositioned, and **every ruling made**;
 Appendix R)
 **Status:** **Provisional — nothing remains open; promotion awaits only the §13 amendments pass,
-which is an editing round rather than a decision.** Nothing in this document is built; every
-mechanism below is ⊘ unless it names an existing one. The adversarial review
+which is an editing round rather than a decision.** Its **first epic is built** — §2's
+declaration, §3's record blob through the whole lifecycle, drill-down's assembly from the three
+homes, and §6.2's row-space route; every other mechanism below is ⊘ unless it names an existing
+one. The adversarial review
 ([`2026-08-12-records-and-search-review.md`](../evidence/memos/2026-08-12-records-and-search-review.md))
 found the security argument sound, the read-side cost argument sound with figure corrections, and
 the seams not yet survivable; every finding was applied per its recommendation, and the six
@@ -175,7 +177,7 @@ second copy** — the search structure is the record. For `text` it adds the tok
 postings (~24 B/entity measured on titles), and buys the only mechanism that serves its aggregate
 surface (§6.3).
 
-**The record blob** (⊘ unbuilt) is the one new storage format, and it is deliberately the
+**The record blob** is the one new storage format, and it is deliberately the
 `_source` shape every ES reader knows: per entity, the blob-resident fields serialised as one
 compact self-describing row — field tag, then the typed value; a `multi` field is a
 length-prefixed list — rows concatenated in entity order, cut into zstd-compressed blocks with a
@@ -588,7 +590,7 @@ index §5.
 
 ### 6.2 Row space: the render column is filterable
 
-⊘ Unbuilt. A column with `render = true` is filterable **over the request's own rows**, against the
+A column with `render = true` is filterable **over the request's own rows**, against the
 hot column in `columns.arrow`, producing `FilterRows::Viewport { rows, domain }` — a type that
 exists, is consumed by `EffectiveMask::with_filter`, and is exact over its domain (placement §2).
 The probe measured 0.48–0.73 ns per viewport row — invariant in corpus size, mask shape and
