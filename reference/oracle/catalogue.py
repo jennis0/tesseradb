@@ -124,7 +124,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # route.
 #
 # The two filter columns exist for `conformance/tests/test_filter_differential.py` (I12's mask
-# half). Both are `filter`-only, so neither touches the points batch, the hot column, or any
+# half). Both are `index`-only, so neither touches the points batch, the hot column, or any
 # existing point-set assertion — a mask-catalogue test built before them sees the same wire bytes.
 #
 # **`department` is deliberately decorrelated from the grant structure.** The catalogue's terms
@@ -154,7 +154,7 @@ SCHEMA_TOML = """\
 [[attribute]]
 name     = "fx_key"
 type     = "u64"
-render = true
+render   = true
 
 [[attribute]]
 name       = "department"
