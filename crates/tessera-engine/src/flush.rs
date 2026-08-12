@@ -312,8 +312,9 @@ pub(crate) fn execute_flush(
     for (entity, item) in &plan.items {
         let mut scalars = Vec::with_capacity(ctx.render_indices.len());
         // `scalar_schema` is positionally parallel to `render_indices` — both are the render subset
-        // in declaration order — so this zip pairs each value with its own column's type.
-        for (&index, (_, ty)) in ctx.render_indices.iter().zip(&ctx.scalar_schema) {
+        // in declaration order — so this zip takes exactly the render subset's values, in the
+        // order the writer's own schema names them.
+        for (&index, _) in ctx.render_indices.iter().zip(&ctx.scalar_schema) {
             let value = item.scalars.get(index).ok_or_else(|| {
                 FlushFailed(format!(
                     "a buffered row carries {} scalars, but a render column is declared at \
@@ -321,11 +322,13 @@ pub(crate) fn execute_flush(
                     item.scalars.len()
                 ))
             })?;
-            // Non-nullable on the render side (contracts R4): an item that carries no value for
-            // this column is drawn at the type's zero until decision 0064's render half lands. The
-            // *filter* extent written from the same buffered row does record the absence, which is
-            // the narrowing disagreement `or_render_placeholder` documents.
-            scalars.push(to_scalar_value(value).or_render_placeholder(*ty));
+            // **The absence travels, and is not resolved here.** `write_flush_segment` records it
+            // in the column's presence bitmap and only then writes the type's zero into the
+            // non-nullable column (contracts R4, decision 0064) — and it must, because the bitmap
+            // is over rows and the sort that decides them happens inside that call. Substituting
+            // the zero here would leave the writer nothing to tell "scores zero" from "has no
+            // score".
+            scalars.push(to_scalar_value(value));
         }
         rows.push(FlushRow {
             entity_id: *entity,

@@ -38,6 +38,7 @@ use tessera_types::{EntityId, IdentityKey, TesseraId, ROW_ABSENT};
 use crate::error::{Result, StoreError};
 use crate::manifest::{FileDigest, LocatorExtent, Quantisation, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
+use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
 use crate::write::{write_segment, RunWriter};
 
 /// One item a flush is about to give geometry to.
@@ -54,6 +55,10 @@ pub struct FlushRow {
     pub external_id: Option<Vec<u8>>,
     pub x: f32,
     pub y: f32,
+    /// One value per **render** column, in declared order. [`ScalarValue::Null`] is a legal member
+    /// and is the caller's only way to say "this item has no value here": the writer records it in
+    /// the column's presence bitmap and stores the type's zero in the row (decision 0064).
+    /// Substituting the zero *before* this point loses the distinction irrecoverably.
     pub scalars: Vec<ScalarValue>,
 }
 
@@ -160,6 +165,45 @@ pub fn write_flush_segment(
     }
     let mut entity_ids: Vec<EntityId> = input.rows.iter().map(|r| r.entity_id).collect();
     let codes = sort_batch(&mut items, &mut entity_ids);
+
+    // ---- the render columns' presence (decision 0064) ---------------------------------------
+    //
+    // After the sort, because the bitmap is over **rows** and the sort is what decides them.
+    //
+    // A [`ScalarValue::Null`] in a render column is a *non-category* absence by construction: the
+    // ingest plane resolves a category's missing key to the reserved code 0 its vocabulary keeps
+    // out of the value space, before the row is ever buffered. So keying off `Null` writes a
+    // bitmap for exactly the columns 0064 rules should have one, and a category keeps its single
+    // in-band mechanism rather than acquiring a second.
+    let mut presence_written: Vec<&str> = Vec::new();
+    for (column, (name, _)) in input.scalar_schema.iter().enumerate() {
+        let mut present = croaring::Bitmap::new();
+        let mut any_absent = false;
+        for (row, item) in items.iter().enumerate() {
+            match item.scalars.get(column) {
+                Some(ScalarValue::Null) => any_absent = true,
+                _ => present.add(row as u32),
+            }
+        }
+        if !any_absent {
+            continue;
+        }
+        if write_render_presence(&seg_dir, name, present, items.len() as u32)?.is_some() {
+            presence_written.push(name.as_str());
+        }
+    }
+    // The column itself stays non-nullable (contracts R4) and stores the type's zero; the bitmap
+    // above is what makes that zero readable as "nothing" rather than as a value. Substituted
+    // here, at the last moment before the writer, so everything upstream still carries the
+    // distinction.
+    for item in &mut items {
+        for (value, (_, ty)) in item.scalars.iter_mut().zip(input.scalar_schema) {
+            if matches!(value, ScalarValue::Null) {
+                *value = value.or_render_placeholder(*ty);
+            }
+        }
+    }
+
     write_segment(&seg_dir, &items, &codes, input.scalar_schema).map_err(|source| {
         StoreError::Io {
             path: seg_dir.join("columns.arrow"),
@@ -212,6 +256,10 @@ pub fn write_flush_segment(
         "ext-locator.u32",
     ] {
         files.insert(rel(name), digest_of(&seg_dir.join(name))?);
+    }
+    for column in presence_written {
+        let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
+        files.insert(rel(&name), digest_of(&seg_dir.join(&name))?);
     }
 
     Ok(FlushOutput {
@@ -275,6 +323,44 @@ pub(crate) fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Resul
     Ok(())
 }
 
+/// Write one render column's presence bitmap into `segment_dir`, or nothing at all if every row of
+/// `0..row_count` is present. Returns the path written.
+///
+/// **The one writer, for the same reason [`digest_of`] is the one digester**: three render paths
+/// produce a segment — the linear build, the streaming build and this flush — and a fourth and
+/// fifth rewrite one (the merge and the compaction fold). They agree about where the file goes and
+/// what is in it because they all come through here; the format itself is
+/// [`crate::render_presence`]'s.
+///
+/// `present` is run-optimised before serialisation. Absence is the exception in every corpus shape
+/// this is for, so the set is long runs of present rows, and run containers are what makes the file
+/// small rather than 125 MB per 10⁹ rows.
+pub fn write_render_presence(
+    segment_dir: &Path,
+    column: &str,
+    mut present: croaring::Bitmap,
+    row_count: u32,
+) -> Result<Option<std::path::PathBuf>> {
+    present.run_optimize();
+    let Some(presence) = RenderPresence::from_present_rows(present, row_count) else {
+        return Ok(None);
+    };
+    let bytes = presence
+        .serialise()
+        .expect("a bitmap with an absence in it serialises");
+    let path = render_presence_path(segment_dir, column);
+    let dir = path.parent().expect("the path names a directory");
+    fs::create_dir_all(dir).map_err(|source| StoreError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    fs::write(&path, bytes).map_err(|source| StoreError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(Some(path))
+}
+
 /// A raw little-endian `u32` array, no header — the `ext-locator.u32` shape (contracts §2.4 r6),
 /// here over one segment's entity range rather than the whole entity space.
 pub(crate) fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
@@ -335,4 +421,118 @@ pub fn digest_of(path: &Path) -> Result<FileDigest> {
         let _ = write!(hex, "{byte:02x}");
     }
     Ok(FileDigest { size, sha256: hex })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::read::ColumnsRef;
+
+    const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
+
+    fn quantisation() -> Quantisation {
+        Quantisation {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        }
+    }
+
+    fn row(entity: u64, x: f32, score: ScalarValue) -> FlushRow {
+        FlushRow {
+            entity_id: EntityId::new(entity),
+            external_id: None,
+            x,
+            y: 0.0,
+            scalars: vec![score],
+        }
+    }
+
+    /// Flush `rows` under a `score: i32` schema, and hand back the output and the segment
+    /// directory. The rows are laid out along x alone, so the Morton order this sorts into is the
+    /// x order and a fixture can predict which row each entity lands at.
+    fn flush(dir: &Path, rows: Vec<FlushRow>) -> (FlushOutput, std::path::PathBuf) {
+        let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
+        let schema = [("score".to_string(), ScalarType::I32)];
+        let out = write_flush_segment(
+            dir,
+            "p",
+            "s",
+            FlushInput {
+                seg_id: "seg-1",
+                rows,
+                quantisation: quantisation(),
+                identity_key: &key,
+                shard_id: 0,
+                scalar_schema: &schema,
+                row_base: 0,
+            },
+        )
+        .expect("flush");
+        (out, dir.join("partitions/p/slices/s/segments/seg-1"))
+    }
+
+    /// **The bitmap is in row space, and the fixture is arranged so entity space would be wrong.**
+    /// Entity 1 is the one with no score and it sorts to *row 0*, so a bitmap that recorded
+    /// entities would call row 1 absent — the same class of error as carrying one across a merge
+    /// unpermuted, and in the same fail-open direction for every other row.
+    #[test]
+    fn a_flushed_segment_records_its_absences_against_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (out, seg_dir) = flush(
+            dir.path(),
+            vec![
+                row(0, 0.9, ScalarValue::I32(7)),
+                row(1, 0.1, ScalarValue::Null),
+                row(2, 0.5, ScalarValue::I32(9)),
+            ],
+        );
+
+        assert!(
+            out.files
+                .contains_key("partitions/p/slices/s/segments/seg-1/presence/score.roaring"),
+            "the manifest must name the bitmap, or a missing one reads as 'every row present' \
+             instead of refusing"
+        );
+
+        let columns = ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns");
+        let presence = columns.presence("score");
+        assert!(
+            !presence.contains(0),
+            "entity 1 has no score and sorts first"
+        );
+        assert!(presence.contains(1) && presence.contains(2));
+
+        // The column itself is unchanged and still non-nullable: the absent row holds the type's
+        // zero, which is exactly the value the bitmap is needed to disambiguate.
+        let crate::read::ScalarSlice::I32(scores) = columns.scalar("score").expect("score column")
+        else {
+            panic!("score is declared i32");
+        };
+        assert_eq!(scores, [0, 9, 7]);
+    }
+
+    /// No absence, no file — and a reader must not be able to tell that from a bitmap with every
+    /// bit set, because the common column pays for neither.
+    #[test]
+    fn a_flush_with_no_absence_writes_no_bitmap_and_still_reads_as_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (out, seg_dir) = flush(
+            dir.path(),
+            vec![
+                row(0, 0.9, ScalarValue::I32(7)),
+                row(1, 0.1, ScalarValue::I32(8)),
+            ],
+        );
+
+        assert!(!seg_dir.join(RENDER_PRESENCE_DIR).exists());
+        assert!(!out
+            .files
+            .keys()
+            .any(|rel| rel.contains(RENDER_PRESENCE_DIR)));
+
+        let columns = ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns");
+        assert!((0..2).all(|row| columns.presence("score").contains(row)));
+    }
 }
