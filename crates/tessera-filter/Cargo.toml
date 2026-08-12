@@ -27,6 +27,10 @@ memmap2 = { workspace = true }
 # rather than admitting a new one; writing the search by hand was measured *slower* than the scalar
 # loop it replaces (probes/2026-08-08-filter-layout, arm 12).
 memchr = "2"
+# The record blob's blocks are whole-row zstd frames (records-and-search §3): drill-down is one
+# block read and one decompress, and the fail-closed reader checks the decompressed length
+# against the directory's claim.
+zstd = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

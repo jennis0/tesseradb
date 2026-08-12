@@ -72,6 +72,8 @@
 //! built one over the same live entities are the same bytes — and it is why one crate holds both
 //! producers' emit rather than each holding its own.
 
+mod record;
+
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -81,6 +83,8 @@ use tessera_authz::KeyedPostingsSpool;
 use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
+
+pub use record::RecordBlobWriter;
 
 /// The vocabulary's reserved *absent* code: never drawn, never bound to a key, and carried by
 /// exactly the entities that carry no value.
