@@ -1,4 +1,4 @@
-# Epic 1 measured: the blob's row compresses better than assumed, and the row route costs four to six times what the probe said
+# Epic 1 measured: the blob's row compresses better than assumed, and the row route costs roughly five times what the probe said
 
 **Date:** 2026-08-12 · **Status:** Evidence, not normative · **Machine:** WSL2 on Linux 6.18,
 AMD Ryzen 9 5900X (Zen 3, 12 cores, 32 MiB L3), 47 GB RAM · **Harness:**
@@ -20,12 +20,13 @@ writer at **2.54×** — the mixed row compresses **18% better than the column i
 to match** (*measured*). Interleaving costs less than the shared context between neighbouring rows
 buys. §3's sentence can be re-marked from assumed to measured, in the direction it hoped for.
 
-**2. The built row route costs 2.5–3.0 ns per viewport row, not 0.48–0.73.** §6.2 quotes the
+**2. The built row route costs 2.5–3.4 ns per viewport row, not 0.48–0.73.** §6.2 quotes the
 probe's constants and warns they describe the approach rather than shipped code (review N4). The
-warning was right and the gap is **4–6×** (*measured*, single-threaded, three corpus scales). What
-the probe got right is the *shape*: the constant is flat at 2.5–3.0 ns across 2.4M, 25M and 10⁸
-items and across viewport sizes from 3×10⁵ to the whole slice, so "invariant in corpus size, mask
-shape and coverage" survives intact. Only the magnitude moves.
+warning was right: the gap is **3.4–7.1× depending which ends of the two ranges are compared,
+~4.8× at the midpoints** (*measured*, single-threaded, three corpus scales). What the probe got
+right is the *shape*: the constant is flat across 2.4M, 25M and 10⁸ items and across viewport
+sizes from 3×10⁵ rows to the whole slice, so "invariant in corpus size, mask shape and coverage"
+survives intact. Only the magnitude moves.
 
 **3. The coarse-zoom cell at 10⁸ costs 280–299 ms single-threaded, above the 42–260 ms §6.2
 quotes** (*measured*) — and **33–38 ms under the sweep's real parallelism** on 12 cores
@@ -57,7 +58,7 @@ The design file is frozen to this track; these are the re-markings it owes.
 | §3 | "a shared-context row of mixed fields is *assumed* to compress at least as well, not measured" | **measured**: 3.00× mixed against a 2.54× title control, both through the shipped writer |
 | §3 | "169 µs for a random single-value read" | **253–265 µs measured** through the built reader; the 169 µs is the probe's, not this format's |
 | §3 | the N7 arithmetic's implied ~4.0 B addressing | **4.13 B/entity measured**, shape-independent |
-| §6.2 | "The probe measured 0.48–0.73 ns per viewport row" | keep as the probe's; add **2.5–3.0 ns measured on the built route**, invariance confirmed |
+| §6.2 | "The probe measured 0.48–0.73 ns per viewport row" | keep as the probe's; add **2.5–3.4 ns measured on the built route**, invariance confirmed |
 | §6.2 | "7–1,269× over the entity route at 10⁸" | **refuted for a category**: 0.63–2.58× measured at 10⁸ on a 343,391-row viewport, and the entity route is 100–450× faster in the coarse cell. The engine answers an indexed category from postings, not the scan the probe timed |
 | §6.2 | "measured 42–260 ms at 10⁸ single-threaded … modelled 0.4–2.6 s at 10⁹" | **280–299 ms measured at 10⁸**; **2.80–2.99 s modelled at 10⁹** serial, **0.33–0.39 s modelled** at 12 cores |
 | §6.4 | "any viewport-bounded filter … ≲ 1–33 ms *(probe-measured / modelled)*" | the row-space half holds: **0.89–1.05 ms measured** for a 343,391-row viewport at 10⁸, corpus-size invariant |
@@ -142,32 +143,34 @@ Single-threaded, `archive` (`u8` codes) and `primary_category` (`u16`), two valu
 values. §6.2 quotes 0.48–0.73 from the probe.*
 
 **The invariance claim survives and the constant does not.** Across a 41× range of corpus size and
-a 300× range of viewport size the built route sits at **2.5–3.3 ns per row** — flat, as the probe
-said it would be, and 4–6× above what the probe said it would be. §6.2 already warned that the
+a 300× range of viewport size the built route sits at **2.5–3.4 ns per row** — flat, as the probe
+said it would be, and several times above what the probe said it would be. §6.2 already warned that the
 built version pays "the segment boundary and the `ScalarSlice` match" on top; the measured
 surcharge is larger than that phrasing suggests, and the natural reading — a small constant
 addition — is wrong.
 
 Two effects worth naming because they are invisible in a per-row figure:
 
-- **A fixed floor: 64–78 µs serial, 380 µs parallel.** At a 3,504-row viewport the per-row figure
-  is 18–22 ns serial and 109 ns at 12 threads — bitmap setup and, in the parallel case, rayon
-  fan-out, amortised over too few rows. **Up to roughly 10⁵ rows in the domain the parallel path is
-  slower than the serial one** (0.495 ms against 0.423 ms at 1.4×10⁵ rows). The engine's
-  `SERIAL_FALLBACK_MAX_ROWS` guards the tile sweep on exactly this argument; `scan_rows` splits
-  unconditionally through `domain_chunks`, and the small-viewport cell is where that costs
+- **A fixed floor: 64–78 µs serial, 260–400 µs parallel.** At a 3,504-row viewport the per-row
+  figure is 18–22 ns serial and 74–114 ns at 12 threads — bitmap setup and, in the parallel case,
+  rayon fan-out, amortised over too few rows. **Up to roughly 10⁵ rows in the domain the parallel
+  path is slower than the serial one** (0.42–0.86 ms against 0.40–0.42 ms at 1.4×10⁵ rows). The
+  engine's `SERIAL_FALLBACK_MAX_ROWS` guards the tile sweep on exactly this argument; `scan_rows`
+  splits unconditionally through `domain_chunks`, and the small-viewport cell is where that costs
   something. It is a fraction of a millisecond and well inside §6.4's viewport row, so this is an
   observation rather than a defect — but a per-keystroke filter over a small viewport is the shape
   it touches.
-- **The code width does not matter much.** `u16` is consistently 3–8% dearer than `u8`, not 2×.
-  The scan is not bandwidth-bound at these widths on this machine.
+- **⊘ The code width makes no measurable difference and no direction is claimed.** `u8` and `u16`
+  land within a few percent of each other and the sign is not consistent: at 10⁸ the `u16` column
+  is 1.4% dearer on the shared value, at 25M and 2.4M it is 1–8% *cheaper*. The scan is not
+  bandwidth-bound at one and two bytes on this machine; that says nothing about eight.
 
 **A caveat that applies to every constant in this memo.**
 [`2026-08-11-scan-constant-sensitivity`](2026-08-11-scan-constant-sensitivity.md) established that
 this repo's scan constants are bimodal in instruction-address alignment — a 64–68% swing between
 two discrete values, driven by where the linker put the hot loop, with no source change. The
 workspace sets no alignment flag, so **these figures are one draw from that distribution and the
-draw is not known to be the good one.** They should be read as "2.5–3.0 ns at this link", and a
+draw is not known to be the good one.** They should be read as "2.5–3.4 ns at this link", and a
 figure re-measured after an unrelated commit that differs by up to two thirds is that effect, not a
 regression.
 
@@ -262,7 +265,8 @@ reason the viewport cell is smaller — postings, not a scan.
 
 **None of this touches §6.2's store-once decision, and it must not be read as doing so.** That
 decision is about a rendered **number or datetime**, which has no postings and no entity-space copy
-at all, so the row scan is the only route it has and its coarse cell costs what §3 above measures.
+at all, so the row scan is the only route it has and its coarse cell costs what section 3 above
+measures.
 The comparison here is only available *because* a category is §4.2's exemption and keeps an
 entity-space structure. What the measurement does say is that where both exist, §6.2's stated
 advantage is the wrong size and, in the coarse cell, the wrong sign.
@@ -291,8 +295,8 @@ real arXiv value on an entity that is a transform of the paper it came from.
 
 **What that licenses and what it does not.** It licenses a *timing* fixture: byte width, code
 distribution, match rate and the result bitmap's structure are the real corpus's. It does **not**
-license any storage, vocabulary or skew claim — the distinct-value count is fixed at 176 however
-far this scales — and nothing in this memo reads one off it. The one visible respect in which it is
+license any storage, vocabulary or skew claim — the distinct-value counts stay the real corpus's 38
+and 176 however far this scales — and nothing in this memo reads one off it. The one visible respect in which it is
 not a larger corpus: each replica's rows land in Morton order under its own transform, so the code
 sequence along row space is a shuffled interleaving rather than concatenated copies. That is the
 property the scan sees, which is why rows are derived from the real geometry rather than
@@ -301,9 +305,12 @@ concatenated.
 Builds: 5.3 s at 2.4M, 74 s at 25M, 4m36 at 10⁸ (render-only). Both-placement at 10⁸ is 2 GB
 larger and slower, the entity-space postings being the difference.
 
-**⊘ Nothing here was measured at 10⁹.** A 10⁹ attributed bundle is buildable on this machine —
-the points file takes ~30 min to generate at this rate and the render-only 10⁹ geometry build was
-10m25 in `probes/2026-07-31-1e9-rebuild/`, so call it under two hours with ~50 GB of the 96 GB free
-— and it was not built. The three scales measured establish the constant's flatness over 41×, which
-is what the extrapolation rests on; a 10⁹ run would replace one modelled row with a measured one
-and is the natural next arm if the coarse cell's budget is contested.
+**⊘ Nothing here was measured at 10⁹, and this is what it would take.** The points file: the 10⁸
+one took 3 minutes and 2.3 GB, and a 10⁹ one keeps every row of the geometry rather than a tenth,
+so 20–40 minutes and ~23 GB. The bundle: `probes/2026-07-31-1e9-rebuild/` recorded 10m25 for the
+attribute-free 10⁹ build at 47 GB, and this schema adds 14.88 GiB of hot column — call it 30–45
+minutes and ~62 GB. Free space is the binding constraint at 54 GB after these three fixtures, so
+it means clearing them first, not adding to them. Under two hours of wall clock, and it was not
+spent. The three scales measured establish the constant's flatness over 41×, which is what the
+extrapolation rests on; a 10⁹ run would replace one modelled row with a measured one, and is the
+arm to run if the coarse cell's budget is contested.
