@@ -180,6 +180,12 @@ async fn meta(
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
                 "category": category,
+                // The column's compiled placement (records §3): `render` — a slot in every row of
+                // the hot column; `index` — an entity-space search structure. Neither set means
+                // blob-resident: stored, returned at drill-down, not filterable — derived from
+                // the two flags exactly as the manifest derives it, never a third flag.
+                "render": s.render,
+                "index": s.index,
             })
         }).collect::<Vec<_>>(),
         // Reference Sheet R5: **which columns a client may filter on, and with which operators**
@@ -199,7 +205,13 @@ async fn meta(
         //
         // The combinators (`all_of`, `any_of`) are not published per column — they compose
         // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
-        "filter_operands": meta.declared_scalars.iter().filter(|d| d.index).map(|d| {
+        //
+        // **The predicate is the engine's** (`filter::is_filterable`, decision 0068): `index`
+        // columns, plus every rendered category — the render-only ones answered over the
+        // request's own rows. The viewport parse gates on the same function, so the surface a
+        // client is published here cannot differ from the one its requests are held to. A
+        // rendered number stays off this list until 0064's render half lands.
+        "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
             let family = family_of(d);
             serde_json::json!({
                 "column": d.name,
@@ -597,10 +609,13 @@ fn run_viewport_stream(
         None => None,
         Some(value) => {
             let meta = state.engine.meta();
+            // The same predicate `/v1/meta`'s operand list publishes — the engine's
+            // `filter::is_filterable` — so a column a client was told about parses and a column
+            // it was not stays the unknown-column 422.
             let filterable: std::collections::HashMap<&str, tessera_engine::filter::Family> = meta
                 .declared_scalars
                 .iter()
-                .filter(|d| d.index)
+                .filter(|d| tessera_engine::filter::is_filterable(d))
                 .map(|d| (d.name.as_str(), family_of(d)))
                 .collect();
             let vocab_of: std::collections::HashMap<&str, &str> = meta
@@ -1063,7 +1078,12 @@ struct ItemReq {
 
 #[derive(Debug, Serialize)]
 struct ItemResp {
-    scalars: Vec<serde_json::Value>,
+    /// The full record, by declared column name (records §3): render fields, indexed and
+    /// category fields — a category as its vocabulary **key** — and blob-resident fields alike.
+    /// An absent field is absent from the object, never `null`: the engine already omits it, and
+    /// a `null` would invent a distinction between "no value" and "value of null" that no home
+    /// stores.
+    fields: serde_json::Map<String, serde_json::Value>,
     /// Base64, present only when the item has a caller-supplied external id. This is the only
     /// place a caller external id appears on the viewer plane — the conformance byte-scanner's
     /// viewer-plane sweep must be scoped to exclude this endpoint's response.
@@ -1119,23 +1139,23 @@ fn run_item(
         Ok(Some(item)) => item,
     };
 
-    let scalars = item
-        .scalars
+    let fields = item
+        .fields
         .into_iter()
         // Every width lands on a JSON number; the drill-down response is a presentation of the
         // value, not of its storage width, and a client reading `severity: 3` should not have to
         // know the column is a `u8`. The width is a residency decision (per-point-attributes
         // §3.6), and `/v1/meta` publishes it for a client that does care.
-        .map(|s| {
+        .map(|f| {
             macro_rules! arms {
                 ($($v:ident),* $(,)?) => {
-                    match s {
+                    match f.value {
                         $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
                         tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
                     }
                 };
             }
-            scalar_families!(arms)
+            (f.name, scalar_families!(arms))
         })
         .collect();
 
@@ -1144,7 +1164,7 @@ fn run_item(
         .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
 
     Ok(ItemResp {
-        scalars,
+        fields,
         external_id,
     })
 }

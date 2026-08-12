@@ -593,6 +593,14 @@ pub struct Engine {
     /// that observable.
     pub(crate) filter_crossings_projected: AtomicU64,
     pub(crate) filter_crossings_per_tile: AtomicU64,
+    /// Filtered viewports whose tree evaluated (wholly or partly) in **row space** — decision
+    /// 0068's route, taken when a leaf's column affords only that route or when
+    /// `rows_in_ranges ≤ |M_auth|` prefers it. Unconditional for the reason the two crossing
+    /// counters are: the route rule is the calibrated claim, and this is the observable that
+    /// catches it being wrong in a deployment no bench reproduces. The two crossing counters
+    /// still count the one crossing such a request makes for its entity-space sub-trees; a
+    /// pure-row tree crosses nothing and moves this counter alone.
+    pub(crate) filter_row_routed: AtomicU64,
     /// Requests served from a one-generation-stale entry — the steady-state observable behind
     /// decision 0044's stale-serve. A deployment where this rises and
     /// [`Self::full_projection_builds`] does not is one where the refresh is keeping up.
@@ -884,6 +892,14 @@ impl Engine {
                 .get(&partition)
                 .map(|p| p.manifest.attr_extents.clone())
                 .unwrap_or_default();
+            // The record blob rides the same open (records §3, §7): the base the schema owes plus
+            // every extent the side-manifest names — always the full shape, even while no flush
+            // writes one, so a restart composes whatever was published.
+            let record_extents = bundle
+                .partitions
+                .get(&partition)
+                .map(|p| p.manifest.record_extents.clone())
+                .unwrap_or_default();
             Arc::new(
                 crate::filter::FilterColumns::open(
                     &prefix_dir,
@@ -891,6 +907,7 @@ impl Engine {
                     &bundle.manifest.declared_scalars,
                     &bundle.manifest.vocabularies,
                     &extents,
+                    &record_extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
                     // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
@@ -952,6 +969,7 @@ impl Engine {
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             filter_crossings_projected: AtomicU64::new(0),
             filter_crossings_per_tile: AtomicU64::new(0),
+            filter_row_routed: AtomicU64::new(0),
             stale_serves: AtomicU64::new(0),
             refreshes: Arc::new(AtomicU64::new(0)),
             refresh_in_flight: Arc::clone(&refresh_in_flight),
@@ -1100,6 +1118,13 @@ impl Engine {
             self.filter_crossings_projected.load(Ordering::Relaxed),
             self.filter_crossings_per_tile.load(Ordering::Relaxed),
         )
+    }
+
+    /// Filtered viewports that evaluated in row space (decision 0068) — see
+    /// [`Self::filter_row_routed`]'s doc. Disjoint from neither crossing counter: a mixed tree
+    /// counts here *and* in whichever crossing its entity sub-trees took.
+    pub fn filter_row_routes(&self) -> u64 {
+        self.filter_row_routed.load(Ordering::Relaxed)
     }
 
     #[cfg(feature = "bench-timing")]
@@ -2260,6 +2285,9 @@ pub(crate) fn open_rotation(
             &bundle.manifest.declared_scalars,
             &bundle.manifest.vocabularies,
             &partition.manifest.attr_extents,
+            // The record blob rotates with the prefix for the reason the value columns do: the
+            // fold rewrites it, and the superseded prefix's files are pre-blanking.
+            &partition.manifest.record_extents,
             true,
         )
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
