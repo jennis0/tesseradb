@@ -81,6 +81,7 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{
     AttrExtent, DeclaredScalar, FileDigest, ManifestVocabulary, RecordExtent, SegmentDescriptor,
 };
+use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::{
     fold_external_id_runs, fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
 };
@@ -966,6 +967,15 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             written.push((format!("{segment_rel}/{name}"), path));
         }
         base_segment_bytes = base_segment_bytes.max(slice_bytes);
+        // The render columns' presence bitmaps beside the new segment (decision 0064), named by
+        // the pass that decided which columns still have an absence after the drops. Not counted
+        // into `slice_bytes`, which is the two mapped files step 3's headroom check is about.
+        for column in &out.presence_columns {
+            written.push((
+                format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
+                tessera_store::render_presence::render_presence_path(&segment_dir, column),
+            ));
+        }
         written.push((permutation_rel, permutation_path));
         written.push((row_entity_rel, row_entity_path));
 

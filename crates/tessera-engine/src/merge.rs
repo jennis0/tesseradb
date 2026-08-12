@@ -37,6 +37,7 @@
 use tessera_store::manifest::SegmentDescriptor;
 use tessera_store::merge::{execute_merge, MergeInput, MergePolicy, MergeSpec};
 use tessera_store::read::SegmentData;
+use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_types::IdentityKey;
 
 use crate::Generation;
@@ -295,20 +296,31 @@ pub(crate) fn rebase_into(
         .locator_extents
         .splice(locators, [completed.output.locator_extent.clone()]);
 
-    // The four row-space files the merged segment replaces. `delta.arrow` is **not** among them —
-    // see this function's doc.
+    // The four row-space files the merged segment replaces, and any presence bitmaps beside them
+    // (decision 0064) — the merged segment carries its own, permuted. `delta.arrow` is **not**
+    // among them — see this function's doc.
+    //
+    // The bitmaps go by prefix rather than by name because which columns have one is a property of
+    // the consumed segments' *contents*, not of the schema: a column with no absence in a given
+    // segment has no file there. A name left behind here is a manifest naming a file the reclaim
+    // has removed, which refuses at the next open.
     for seg_id in &consumed {
+        let seg_rel = format!(
+            "partitions/{}/slices/{}/segments/{seg_id}",
+            plan.partition, plan.slice
+        );
         for name in [
             "morton.u32",
             "columns.arrow",
             "external-ids.arrow",
             "ext-locator.u32",
         ] {
-            manifest.files.remove(&format!(
-                "partitions/{}/slices/{}/segments/{seg_id}/{name}",
-                plan.partition, plan.slice
-            ));
+            manifest.files.remove(&format!("{seg_rel}/{name}"));
         }
+        let presence_prefix = format!("{seg_rel}/{RENDER_PRESENCE_DIR}/");
+        manifest
+            .files
+            .retain(|rel, _| !rel.starts_with(&presence_prefix));
     }
     manifest.files.extend(
         completed
