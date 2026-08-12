@@ -120,7 +120,7 @@ fn blob_schema() -> Schema {
         ty,
         vocabulary: None,
         vocabulary_kind: None,
-        filter: false,
+        index: false,
         render: false,
     };
     Schema {
@@ -133,7 +133,7 @@ fn blob_schema() -> Schema {
                 ty: ScalarType::I64,
                 vocabulary: None,
                 vocabulary_kind: None,
-                filter: false,
+                index: false,
                 render: true,
             },
         ],
@@ -148,7 +148,7 @@ fn no_blob_schema() -> Schema {
     for attribute in &mut schema.attributes {
         match attribute.ty {
             // A string may be filter-only, never rendered.
-            ScalarType::Utf8 => attribute.filter = true,
+            ScalarType::Utf8 => attribute.index = true,
             _ => attribute.render = true,
         }
     }

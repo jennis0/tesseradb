@@ -865,7 +865,7 @@ enum BatchValues {
     U64(Vec<u64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
-    /// A per-item string, for a `filter`-only `utf8` column.
+    /// A per-item string, for an `index`-only `utf8` column.
     ///
     /// **Not a category**, and the distinction is the data model rather than the encoding: a
     /// category's value is a vocabulary entry with an identity, a pinned code and a lifecycle,
@@ -980,9 +980,9 @@ impl BatchColumn {
                     return Err(mismatch());
                 })
             }
-            // Reached only by a `filter`-only column: `render` on `utf8` is still refused at parse
-            // (§4.3 — a non-fixed-width type in the hot column), but a filter column lives in
-            // entity space and costs the hot column nothing.
+            // Reached only by an `index`-only column: `render` on `utf8` is still refused at
+            // parse (§4.3 — a non-fixed-width type in the hot column), but an indexed column
+            // lives in entity space and costs the hot column nothing.
             ScalarType::Utf8 => BatchValues::Text(
                 any.downcast_ref::<arrow::array::StringArray>()
                     .ok_or_else(mismatch)?

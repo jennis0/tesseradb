@@ -1540,11 +1540,15 @@ pub(crate) fn write_record_blob(
     schema: &crate::schema::Schema,
     by_entity: &[Vec<ScalarValue>],
 ) -> Result<Vec<PathBuf>> {
+    // A category is never blob-resident, whatever its flags say (records §4.2): its
+    // entity-space code column and derived postings are the constant floor the vocabulary
+    // machinery runs on, so a blob row would be a second copy of a value that home already
+    // answers.
     let blob_columns: Vec<usize> = schema
         .attributes
         .iter()
         .enumerate()
-        .filter(|(_, a)| !a.filter && !a.render)
+        .filter(|(_, a)| !a.index && !a.render && a.vocabulary.is_none())
         .map(|(i, _)| i)
         .collect();
     if blob_columns.is_empty() {
@@ -2338,6 +2342,69 @@ fn refine_group(
 mod tests {
     use super::*;
     use tessera_types::IdentityKey;
+
+    /// A category is never blob-resident, whatever its flags say (records §4.2): its
+    /// entity-space structures are the constant floor the vocabulary machinery runs on, so the
+    /// blob stage must not give it a second copy. A neither-flag category beside a genuinely
+    /// blob-resident column leaves exactly one field in the blob row; alone, it writes nothing.
+    #[test]
+    fn a_neither_flag_category_is_not_blob_resident() {
+        let category = crate::schema::Attribute {
+            name: "department".to_string(),
+            ty: ScalarType::U16,
+            vocabulary: Some("departments".to_string()),
+            vocabulary_kind: Some(crate::schema::VocabularyKind::Declared),
+            index: false,
+            render: false,
+        };
+        let note = crate::schema::Attribute {
+            name: "note".to_string(),
+            ty: ScalarType::Utf8,
+            vocabulary: None,
+            vocabulary_kind: None,
+            index: false,
+            render: false,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = crate::schema::Schema {
+            attributes: vec![category.clone(), note],
+            vocabularies: Default::default(),
+        };
+        // One entity; values are per column, in declaration order.
+        let by_entity = vec![
+            vec![ScalarValue::U16(7)],
+            vec![ScalarValue::Utf8("kept".to_string())],
+        ];
+        let written =
+            write_record_blob(dir.path(), &schema, &by_entity).expect("blob stage writes");
+        assert!(!written.is_empty());
+        let blob = tessera_filter::RecordBlob::open_dir(
+            &dir.path().join("attrs/record"),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("open");
+        let fields = blob
+            .fields_of(0)
+            .expect("read")
+            .expect("entity 0 has a row");
+        assert_eq!(
+            fields.len(),
+            1,
+            "only the utf8 column is blob-resident; the category's home is entity space"
+        );
+        assert_eq!(fields[0].tag, 1, "the surviving field is `note`, tag 1");
+
+        // Alone, the category leaves the stage with nothing to write at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = crate::schema::Schema {
+            attributes: vec![category],
+            vocabularies: Default::default(),
+        };
+        let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
+            .expect("blob stage accepts");
+        assert!(written.is_empty(), "no blob-resident column, no files");
+    }
 
     /// **The band count must not be observable in the artefact.** A band boundary is a place the
     /// scatter restarts and the ascending-key check spans, so a column emitted in one band and the
