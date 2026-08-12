@@ -72,6 +72,40 @@
 //! no row, the entity-space verbs under-report until its flush, and under-reporting narrows `M_sel`
 //! and is safe under **I12**. It is a bounded lag measured in one flush interval, not a coverage
 //! cliff that never closes, which is what the refusal this composition replaced was answering.
+//! The row-space route below under-reports the same entities for the same reason — a buffered
+//! entity has no row for the hot column to hold — so the two routes cannot disagree about them.
+//!
+//! # The row-space operand (decision 0068), and how this module routes a tree
+//!
+//! A column with `render = true` is filterable **over the request's own rows**, against the hot
+//! column in `columns.arrow` — categories only until decision 0064's render half lands, because
+//! the hot column stores an absent number as the type's zero while a category's code 0 is a real
+//! absent sentinel (records §6.2). Such a leaf produces no entity-space bitmap at all; it is
+//! evaluated in `viewport.rs` over the request's merged tile ranges, and the answer is exact only
+//! over that domain (`FilterRows::Viewport`).
+//!
+//! [`FilterColumns::evaluate_routed`] is the seam. It routes each leaf by the column's
+//! [`Placement`] — entity space, row space, or both — and where a column affords both, by the
+//! caller's route preference, which `viewport.rs` derives from 0068's rule:
+//! **row space while `rows_in_ranges ≤ |M_auth|`, entity space past it** — both quantities the
+//! caller could compute, never a statistic about the principal's data (§8.2). A tree whose every
+//! leaf routes entity-space evaluates here exactly as [`FilterColumns::evaluate`] always has; a
+//! tree with any row-space leaf comes back as a [`RowExpr`]: its maximal entity-space sub-trees
+//! already evaluated to bitmaps **under the composed candidate**, its row-space leaves left for
+//! the per-tile evaluation, to be crossed once and combined in row space (0062's tree, one
+//! crossing per request — placement memo §2.2).
+//!
+//! **The candidate is the composed verdict — the fragment with the overlay applied — never the
+//! raw fragment, and for the row-space half that is a property of consumption, stated here
+//! bindingly.** Suppressions touch no artefact (write-path §5.4, Rule S), so the hot column still
+//! holds a suppressed entity's row and value, and a row-space leaf tests it like any other row.
+//! What keeps it out of every viewport, count and record is that a row-space result enters the
+//! request **only** through `EffectiveMask::with_filter`, whose every consumer intersects it with
+//! the composed mask — the filter is applied last, by intersection, on top of
+//! `base ∖ minus ∪ plus` (`compose.rs`) — and the entity-space sub-trees are evaluated under
+//! [`candidate`], which subtracts the overlay before any scan runs. A route evaluated under
+//! anything less would silently resurrect a suppressed entity (records §6, review N2);
+//! `tests/filtering.rs`'s suppression differential is the proof.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -79,7 +113,9 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
-use tessera_filter::{resolve_union, ColumnPostings, ValueColumn};
+use tessera_filter::{
+    resolve_union, Codes, ColumnPostings, RecordExtentPaths, RecordStack, RecordValue, ValueColumn,
+};
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
 /// dependency on the filter crate — `check-layers.sh` denies `tessera-server` that edge, to keep the
@@ -294,7 +330,8 @@ impl FilterExpr {
     }
 }
 
-/// One bundle's filter columns, keyed by declared column name.
+/// One bundle's filter columns, keyed by declared column name — plus the record-blob stack,
+/// which shares this type's lifecycle rather than its name.
 ///
 /// Opened once per generation, not per request.
 ///
@@ -304,9 +341,76 @@ impl FilterExpr {
 /// gates on [`Layers::filterable`] rather than on presence, so such a column is refused exactly as
 /// an undeclared one is: an *undeclared* column is a caller error, where an unresolvable *value* is
 /// an empty operand (`filter-surface.md` §2.1).
-#[derive(Debug, Default)]
+///
+/// **Why the record blob rides here.** The stack (records §3) is not a filter column — no query
+/// ever reads it (records §3's rule: a column the scan reads is never compressed; the blob is
+/// never read by a query) — but it is opened from the same manifests, at the same two sites, and
+/// it belongs to the published prefix exactly as the value columns do: carried forward by every
+/// flush successor, replaced whole at a fold's prefix rotation. Housing it here gives it that
+/// lifecycle without a second prefix-tracking mechanism to keep correct; the alternative was a
+/// parallel field threaded through every generation constructor for a reader only drill-down
+/// takes.
 pub struct FilterColumns {
     columns: BTreeMap<String, Layers>,
+    /// The evaluation space(s) each filterable column affords — including a rendered category
+    /// with no entity-space layers at all, which [`FilterColumns::columns`] cannot represent.
+    placements: BTreeMap<String, Placement>,
+    /// The record blob: the build's base (present iff the compiled schema has a blob-resident
+    /// column) plus every flush extent the manifest names. Empty — zero layers — when neither
+    /// exists, which answers `fields_of` with an ordinary absence.
+    records: Arc<RecordStack>,
+}
+
+// Hand-written because `RecordStack` carries no `Debug` of its own (it is a stack of mapped
+// artefacts); the columns and placements are the parts worth printing.
+impl std::fmt::Debug for FilterColumns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilterColumns")
+            .field("columns", &self.columns)
+            .field("placements", &self.placements)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for FilterColumns {
+    fn default() -> Self {
+        FilterColumns {
+            columns: BTreeMap::new(),
+            placements: BTreeMap::new(),
+            records: Arc::new(empty_record_stack()),
+        }
+    }
+}
+
+/// A stack of zero layers — what a schema with no blob-resident column and no extents owns.
+/// Infallible: `RecordStack::open` touches no file when given nothing to open.
+fn empty_record_stack() -> RecordStack {
+    RecordStack::open(None, &[], tessera_filter::Access::Read)
+        .expect("a record stack over no layers opens without IO")
+}
+
+/// The evaluation space(s) one filterable column affords (decision 0068; records §6.2).
+///
+/// Derived at open from the compiled declaration alone — never from a statistic, never per
+/// principal (§8.2): `entity` where the column has an entity-space value column it may answer a
+/// filter from (`index = true`, or a rendered category whose vocabulary floor stores one —
+/// `listing = "per_viewer"`); `row` where `render = true` put it in the hot column and the family
+/// can express absence there (categories only until 0064's render half lands — the schema refuses
+/// the number/datetime combinations, and this map simply never sees them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub entity: bool,
+    pub row: bool,
+}
+
+/// Is this column filterable at all under decision 0068 — `index = true`, or a rendered category?
+///
+/// **The server's `/v1/meta` operand list and its parse gate call this**, so the surface a client
+/// is published cannot drift from the one the engine routes. A rendered number is deliberately
+/// not here: it stays unfilterable until 0064's render half lands, refused at the schema parse
+/// with that reason (records §6.2, decision 0013).
+pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+    scalar.index || (scalar.render && scalar.vocabulary.is_some())
 }
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
@@ -380,6 +484,78 @@ pub struct CoalescedWindow {
     /// The coalesced extent's values path.
     pub values_rel: String,
     pub values: Arc<ValueColumn>,
+}
+
+/// A filter expression routed for one request (decision 0068) — see
+/// [`FilterColumns::evaluate_routed`].
+#[derive(Debug)]
+pub enum RoutedFilter {
+    /// Every leaf routed entity space: the operand as §8.2 always had it, evaluated under the
+    /// composed candidate, awaiting the existing crossing.
+    Entity(Bitmap),
+    /// At least one leaf routes row space. The entity-space sub-trees are already verdicts; the
+    /// rest is evaluated over the request's own rows and combined in row space (`viewport.rs`).
+    Row(RowExpr),
+}
+
+/// A filter tree ready for row-space evaluation: entity-space sub-trees collapsed to their
+/// verdicts, row-space leaves awaiting the hot column.
+///
+/// The [`RowExpr::Entity`] verdicts are crossed into row space **once per request**, jointly, by
+/// the measured crossing rule — 0062's one-crossing composition, upheld by the evaluator rather
+/// than by each leaf crossing for itself.
+#[derive(Debug)]
+pub enum RowExpr {
+    /// An entity-space sub-tree's verdict, evaluated under the composed candidate.
+    Entity(Bitmap),
+    /// A render-column leaf, to be tested against the hot column over the crossing domain.
+    Leaf {
+        column: String,
+        operand: FilterOperand,
+    },
+    /// Intersection in row space.
+    AllOf(Vec<RowExpr>),
+    /// Union in row space. Empty matches nothing, exactly as [`FilterExpr::AnyOf`] does.
+    AnyOf(Vec<RowExpr>),
+    /// `present ∖ matched` in row space, presence being a non-sentinel code in the hot column —
+    /// the same positive predicate [`FilterExpr::NoneOf`] is in entity space, with the same
+    /// failure sign: a row that cannot be read matches nothing, and under-reporting narrows.
+    NoneOf { column: String, kids: Vec<RowExpr> },
+}
+
+impl RowExpr {
+    /// Every entity-space verdict in this tree, in a fixed pre-order — the joint crossing walks
+    /// this exact order, so the evaluator can pair images back up positionally.
+    pub fn entity_verdicts(&self) -> Vec<&Bitmap> {
+        let mut out = Vec::new();
+        self.collect_verdicts(&mut out);
+        out
+    }
+
+    fn collect_verdicts<'a>(&'a self, out: &mut Vec<&'a Bitmap>) {
+        match self {
+            RowExpr::Entity(bitmap) => out.push(bitmap),
+            RowExpr::Leaf { .. } => {}
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) => {
+                for kid in kids {
+                    kid.collect_verdicts(out);
+                }
+            }
+            RowExpr::NoneOf { kids, .. } => {
+                for kid in kids {
+                    kid.collect_verdicts(out);
+                }
+            }
+        }
+    }
+}
+
+/// The space a sub-tree evaluates in — [`FilterColumns::space_of`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Space {
+    Entity,
+    Row,
+    Mixed,
 }
 
 /// Why a filter could not be answered.
@@ -523,6 +699,16 @@ fn request_access(mmap: bool) -> tessera_filter::Access {
     }
 }
 
+/// A record-blob open failure, in the `io::Result` this opener speaks. Fail-closed either way:
+/// a missing, short or malformed layer refuses the whole open (records §3), never "those
+/// entities have no record".
+fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
+    match e {
+        tessera_filter::RecordError::Io(io) => io,
+        malformed => std::io::Error::new(std::io::ErrorKind::InvalidData, malformed.to_string()),
+    }
+}
+
 impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
     /// side-manifest names.
@@ -553,14 +739,27 @@ impl FilterColumns {
         declared: &[tessera_store::manifest::DeclaredScalar],
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
+        record_extents: &[tessera_store::manifest::RecordExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
         let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
-        for scalar in declared
-            .iter()
-            .filter(|d| owes_value_column(d, vocabularies))
-        {
+        let mut placements = BTreeMap::new();
+        for scalar in declared {
+            // The route affordances, from the compiled declaration alone (decision 0068). A
+            // rendered category always affords the row route; the entity route needs an
+            // entity-space value column AND a licence to answer a filter from it — `index`, or
+            // 0068's "render implies filterable" over the per-viewer vocabulary floor. A
+            // `per_viewer` column with neither flag keeps its value column for membership and
+            // stays unfilterable, exactly as before.
+            let row = scalar.render && scalar.vocabulary.is_some();
+            let entity = owes_value_column(scalar, vocabularies) && (scalar.index || row);
+            if row || entity {
+                placements.insert(scalar.name.clone(), Placement { entity, row });
+            }
+            if !owes_value_column(scalar, vocabularies) {
+                continue;
+            }
             let dir = partition_dir.join("attrs").join(&scalar.name);
             let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
             let covered = base.present();
@@ -587,13 +786,39 @@ impl FilterColumns {
                         values: base,
                     }],
                     covered,
-                    filterable: scalar.index,
+                    filterable: entity,
                     postings,
                     route,
                 },
             );
         }
-        let mut open = FilterColumns { columns };
+        // The record blob's base is owed exactly when the compiled schema has a blob-resident
+        // column — neither flag, no vocabulary (records §3; a category is never blob-resident,
+        // §4.2). Derived from the schema rather than probed for on disk, so a missing base is a
+        // refusal at open, never "those entities have no record".
+        let blob_resident = declared
+            .iter()
+            .any(|d| !d.render && !d.index && d.vocabulary.is_none());
+        let record_dir = partition_dir.join("attrs").join("record");
+        let extent_paths: Vec<RecordExtentPaths> = record_extents
+            .iter()
+            .map(|e| RecordExtentPaths {
+                blocks: prefix_dir.join(&e.blocks),
+                hasrow: prefix_dir.join(&e.hasrow),
+                directory: prefix_dir.join(&e.directory),
+            })
+            .collect();
+        let records = RecordStack::open(
+            blob_resident.then_some(record_dir.as_path()),
+            &extent_paths,
+            request_access(mmap),
+        )
+        .map_err(record_open_error)?;
+        let mut open = FilterColumns {
+            columns,
+            placements,
+            records: Arc::new(records),
+        };
         for extent in extents {
             let column = tessera_filter::open_extent(
                 &prefix_dir.join(&extent.values),
@@ -603,6 +828,66 @@ impl FilterColumns {
             open.compose(&extent.column, &extent.values, Arc::new(column))?;
         }
         Ok(open)
+    }
+
+    /// The record-blob stack this prefix serves drill-down from — see this type's doc for why it
+    /// lives here. Empty (zero layers) when the schema has no blob-resident column and no flush
+    /// has published an extent.
+    pub fn records(&self) -> &RecordStack {
+        &self.records
+    }
+
+    /// The route affordances of one filterable column, or `None` where the column is not
+    /// filterable at all — the same distinction [`FilterColumns::resolve`] refuses on.
+    pub fn placement(&self, column: &str) -> Option<Placement> {
+        self.placements.get(column).copied()
+    }
+
+    /// The entity-space value `column` stores for `entity`, at its storage type, or `None` where
+    /// no layer holds one — drill-down's entity-space home (records §3).
+    ///
+    /// **Every column with a value column answers, filterable or not**: a `per_viewer` category
+    /// with neither flag still stores its codes here, and the caller has already established the
+    /// *item* visible, which is exactly the membership condition §3.3 derives value visibility
+    /// from — a visible entity carrying the value is the witness that offers it.
+    ///
+    /// The slot arithmetic is the presence-rank rule of `filter-index.md` §2.1, computed through
+    /// the column's own public surface: the count of present entities strictly below this one is
+    /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
+    /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
+    pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
+        let layers = self.columns.get(column)?;
+        let probe = Bitmap::of(&[entity]);
+        for layer in &layers.layers {
+            let values = &layer.values;
+            if values.present_in(&probe).is_empty() {
+                continue;
+            }
+            // The layers are disjoint in entity space (I9, checked at compose), so the first
+            // layer holding the entity is the only one.
+            let read = match values.codes() {
+                Codes::Text { .. } => RecordValue::Utf8(values.text_of(entity)?.to_string()),
+                codes => {
+                    let slot =
+                        values.present_in(&Bitmap::from_range(0..entity)).cardinality() as usize;
+                    match codes {
+                        Codes::U8(v) => RecordValue::U8(v[slot]),
+                        Codes::U16(v) => RecordValue::U16(v[slot]),
+                        Codes::U32(v) => RecordValue::U32(v[slot]),
+                        Codes::U64(v) => RecordValue::U64(v[slot]),
+                        Codes::I8(v) => RecordValue::I8(v[slot]),
+                        Codes::I16(v) => RecordValue::I16(v[slot]),
+                        Codes::I32(v) => RecordValue::I32(v[slot]),
+                        Codes::I64(v) => RecordValue::I64(v[slot]),
+                        Codes::F32(v) => RecordValue::F32(v[slot]),
+                        Codes::F64(v) => RecordValue::F64(v[slot]),
+                        Codes::Text { .. } => unreachable!("matched above"),
+                    }
+                }
+            };
+            return Some(read);
+        }
+        None
     }
 
     /// Add one flush's extent to a column, refusing an entity two layers both claim.
@@ -658,6 +943,8 @@ impl FilterColumns {
     ) -> std::io::Result<FilterColumns> {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            records: Arc::clone(&self.records),
         };
         for (column, values_rel, extent) in extents {
             next.compose(column, values_rel, Arc::clone(extent))?;
@@ -684,6 +971,8 @@ impl FilterColumns {
     pub fn with_coalesced(&self, windows: &[CoalescedWindow]) -> std::io::Result<FilterColumns> {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            records: Arc::clone(&self.records),
         };
         for window in windows {
             let Some(layers) = next.columns.get_mut(&window.column) else {
@@ -888,6 +1177,135 @@ impl FilterColumns {
         }
         expr.check_negations()?;
         self.eval(expr, candidate)
+    }
+
+    /// Evaluate a filter expression's entity-space part and route the rest — the seam decision
+    /// 0068 admits (this module's header carries the full argument).
+    ///
+    /// `prefer_row` decides a both-routes column's leaf: the caller derives it from 0068's rule
+    /// (`rows_in_ranges ≤ |M_auth|`), which is a per-request quantity, so it arrives as an
+    /// argument rather than being stored at open — unlike [`Route`], which must not vary per
+    /// request because the postings' work is a function of the value named. This preference
+    /// carries no such channel: both routes' work is a function of the request's shape and the
+    /// mask, never of the value (placement memo §2).
+    ///
+    /// A tree with no row-space leaf returns [`RoutedFilter::Entity`], evaluated exactly as
+    /// [`FilterColumns::evaluate`] would have. Otherwise every maximal entity-space sub-tree is
+    /// evaluated **here, under `candidate`** — the composed verdict — and the returned
+    /// [`RowExpr`] awaits the one crossing and the row-space leaves, which need the request's
+    /// tile ranges and so live in `viewport.rs`.
+    pub fn evaluate_routed(
+        &self,
+        expr: &FilterExpr,
+        candidate: &Bitmap,
+        prefer_row: bool,
+    ) -> Result<RoutedFilter, FilterError> {
+        let depth = expr.depth();
+        if depth > MAX_FILTER_DEPTH {
+            return Err(FilterError::TooDeep {
+                depth,
+                max: MAX_FILTER_DEPTH,
+            });
+        }
+        expr.check_negations()?;
+        if self.space_of(expr, prefer_row)? == Space::Entity {
+            return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
+        }
+        Ok(RoutedFilter::Row(self.route(expr, candidate, prefer_row)?))
+    }
+
+    /// Which space `expr` evaluates in, given each leaf's placement and the request's preference.
+    ///
+    /// `Entity` means the whole sub-tree can be answered by the existing entity-space evaluation;
+    /// anything else means at least one leaf must be tested against the hot column. A `none_of`
+    /// takes its single column's space whole — `check_negations` has already established there is
+    /// exactly one — because its presence half and its matched half must be computed in the same
+    /// space or the subtraction would mix domains.
+    /// One column's routed space — **the single transcription of the leaf-routing rule**, called
+    /// for a leaf and for a `none_of`'s one column alike, so the two cannot drift.
+    fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
+        let placement = self
+            .placements
+            .get(column)
+            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        Ok(match (placement.entity, placement.row) {
+            (true, false) => Space::Entity,
+            (false, true) => Space::Row,
+            // Both routes: 0068's rule, carried in by the caller.
+            (true, true) if prefer_row => Space::Row,
+            (true, true) => Space::Entity,
+            // Never inserted — `open` only stores a placement with at least one space.
+            (false, false) => unreachable!("a placement affords at least one space"),
+        })
+    }
+
+    fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
+        match expr {
+            FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),
+            FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
+                let mut all_entity = true;
+                for kid in kids {
+                    if self.space_of(kid, prefer_row)? != Space::Entity {
+                        all_entity = false;
+                    }
+                }
+                // An empty combinator is pure entity space: its identity value needs no hot
+                // column (`AllOf([])` is the candidate, `AnyOf([])` is empty).
+                Ok(if all_entity { Space::Entity } else { Space::Mixed })
+            }
+            FilterExpr::NoneOf(kids) => {
+                let column = kids
+                    .iter()
+                    .flat_map(|kid| kid.columns())
+                    .next()
+                    .expect("check_negations admits exactly one column");
+                self.leaf_space(column, prefer_row)
+            }
+        }
+    }
+
+    /// Build the routed tree: entity-pure sub-trees evaluated to verdicts under `candidate`,
+    /// row-space leaves carried through for the per-tile evaluation.
+    fn route(
+        &self,
+        expr: &FilterExpr,
+        candidate: &Bitmap,
+        prefer_row: bool,
+    ) -> Result<RowExpr, FilterError> {
+        if self.space_of(expr, prefer_row)? == Space::Entity {
+            return Ok(RowExpr::Entity(self.eval(expr, candidate)?));
+        }
+        match expr {
+            FilterExpr::Leaf { column, operand } => Ok(RowExpr::Leaf {
+                column: column.clone(),
+                operand: operand.clone(),
+            }),
+            FilterExpr::AllOf(kids) => Ok(RowExpr::AllOf(
+                kids.iter()
+                    .map(|kid| self.route(kid, candidate, prefer_row))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            FilterExpr::AnyOf(kids) => Ok(RowExpr::AnyOf(
+                kids.iter()
+                    .map(|kid| self.route(kid, candidate, prefer_row))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            FilterExpr::NoneOf(kids) => {
+                let column = kids
+                    .iter()
+                    .flat_map(|kid| kid.columns())
+                    .next()
+                    .expect("check_negations admits exactly one column")
+                    .to_string();
+                Ok(RowExpr::NoneOf {
+                    column,
+                    kids: kids
+                        .iter()
+                        .map(|kid| self.route(kid, candidate, prefer_row))
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            }
+        }
     }
 
     /// The entities of `candidate` that carry a value in `column` — the presence half of a

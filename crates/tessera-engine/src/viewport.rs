@@ -635,12 +635,28 @@ impl ViewportSink for CollectSink {
     }
 }
 
-/// `POST /v1/items/{handle}`'s payload (R5): a visible item's scalars plus its caller-supplied
-/// external id, if it has one.
+/// `POST /v1/items/{handle}`'s payload (R5): a visible item's full record — every declared field
+/// that carries a value, by **declared name** — plus its caller-supplied external id, if it has
+/// one.
+///
+/// Names, not tags, and nothing else (I10): a blob field's tag is a declaration position and an
+/// index internal, resolved to the declared name engine-side; no tag, no entity id and no blob
+/// addressing detail crosses the trust boundary. A category field carries its vocabulary **key**,
+/// never its code-as-value ambiguity — the code is what the hot path ships, and the drill-down is
+/// precisely the surface that resolves it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemOut {
-    pub scalars: Vec<ScalarOut>,
+    /// Present fields only, in declaration order — an absent field is absent, not null, which is
+    /// the same statement the record blob makes byte-wise (records §3).
+    pub fields: Vec<ItemField>,
     pub external_id: Option<Vec<u8>>,
+}
+
+/// One declared field of a drill-down record: the column's declared name and its value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemField {
+    pub name: String,
+    pub value: ScalarOut,
 }
 
 /// `GET /v1/meta`'s payload (R5) — the bundle-level facts a viewer client needs before it can
@@ -799,16 +815,31 @@ impl Engine {
 
         // Visible. Now — and only now — find the row, so the cost below is never reachable by
         // an identifier the principal may not see.
-        // **Render columns only.** `declared_scalars` is the compiled schema and includes
-        // `filter`-only columns, which are entity-space and absent from `columns.arrow` by design;
-        // taking the full list here would publish a column of nulls under a name a client can see
-        // and would make the two read paths disagree with the writer about the tail's shape.
-        let declared_scalars: Vec<_> = generation
-            .bundle
-            .manifest
-            .render_scalars()
-            .cloned()
-            .collect();
+        //
+        // **The record is assembled from its three homes** (records §3): render fields from the
+        // row's scalar tail, indexed and category fields from their entity-space structures — a
+        // category's code resolved to its vocabulary key — and everything else from one record
+        // blob read. Field identity is the declared *name*, resolved engine-side from the blob's
+        // positional tag; no tag, no entity id and no blob internal reaches the wire (I10).
+        //
+        // **Every read below sits strictly after the visibility verdict, so C4 stays closed by
+        // construction, not by measure.** The verdict above is the same three constant-time
+        // entity-space probes for an identifier that names nothing and one that names an
+        // invisible item; the row lookup, the entity-space value reads, the blob block read and
+        // the sidecar read are all reachable only for an item already established visible —
+        // exactly the position the external-id sidecar has always occupied. The blob's block
+        // decompression is therefore not a probe-able cost: no attacker-drivable path reaches it
+        // for an item the principal cannot see (X1's surface, bounded the same way the sidecar's
+        // is).
+        let manifest = &generation.bundle.manifest;
+        // **Render columns only in the row read.** The compiled schema includes entity-space and
+        // blob-resident columns, which are absent from `columns.arrow` by design; those are
+        // homes 2 and 3 below, never a column of nulls under a name a client can see.
+        let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
+        // The allocator caps entity ids at `u32::MAX` (I9), and inversion produced this one from
+        // a 32-bit half; checked rather than cast so a violated invariant fails loudly.
+        let entity_raw =
+            u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
         for partition in generation.bundle.partitions.values() {
             for (slice, slice_data) in &partition.slices {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
@@ -827,12 +858,79 @@ impl Engine {
                 else {
                     continue;
                 };
-                // One row, so this resolves for one row — the same `resolve_scalars` the
-                // viewport gather uses, so the two read paths cannot disagree about what a
-                // stored type decodes to.
-                let resolved = resolve_scalars(segment, &declared_scalars);
+
+                // One value slot per declared column, filled home by home; a column no home
+                // holds a value in stays `None` and is omitted — absence is absence.
+                let mut values: Vec<Option<ScalarOut>> =
+                    vec![None; manifest.declared_scalars.len()];
+
+                // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
+                // two read paths cannot disagree about what a stored type decodes to.
+                let resolved = resolve_scalars(segment, &render_scalars);
+                let local = (row.raw() - row_base) as usize;
+                for (slot, declared_index) in manifest.render_indices().enumerate() {
+                    let Some(slice) = &resolved[slot] else {
+                        continue;
+                    };
+                    let d = &manifest.declared_scalars[declared_index];
+                    values[declared_index] =
+                        row_field_out(slice, local, d, &generation.vocabularies);
+                }
+
+                // Home 2: entity space — every non-rendered column with a value column (indexed
+                // columns, and the per-viewer vocabulary floor), at drill-down cadence.
+                for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
+                    if d.render || values[declared_index].is_some() {
+                        continue;
+                    }
+                    if let Some(stored) =
+                        generation.filter_columns.stored_value(&d.name, entity_raw)
+                    {
+                        values[declared_index] =
+                            stored_field_out(stored, d, &generation.vocabularies);
+                    }
+                }
+
+                // Home 3: the record blob — one block read, strictly after the verdict (see this
+                // method's doc). Fail-closed: a malformed row, a tag past the schema or an
+                // addressing defect refuses the request rather than serving a neighbour's field
+                // under this item's identity (records §3, review B6).
+                if let Some(blob_fields) = generation
+                    .filter_columns
+                    .records()
+                    .fields_of(entity_raw)
+                    .map_err(|e| EngineError::Malformed(e.to_string()))?
+                {
+                    for field in blob_fields {
+                        let declared_index = field.tag as usize;
+                        let Some(d) = manifest.declared_scalars.get(declared_index) else {
+                            return Err(EngineError::Malformed(format!(
+                                "a record-blob row carries field tag {} where the schema \
+                                 declares {} columns; the blob and the manifest disagree",
+                                field.tag,
+                                manifest.declared_scalars.len()
+                            )));
+                        };
+                        if values[declared_index].is_none() {
+                            values[declared_index] =
+                                stored_field_out(field.value, d, &generation.vocabularies);
+                        }
+                    }
+                }
+
+                let fields = manifest
+                    .declared_scalars
+                    .iter()
+                    .zip(values)
+                    .filter_map(|(d, value)| {
+                        value.map(|value| ItemField {
+                            name: d.name.clone(),
+                            value,
+                        })
+                    })
+                    .collect();
                 return Ok(Some(ItemOut {
-                    scalars: row_scalars(row.raw() - row_base, &resolved),
+                    fields,
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
                     // Against the generation this request loaded, never a second `load()`: the
@@ -847,6 +945,103 @@ impl Engine {
         // `Ok(None)`, same 404 — it has no geometry to return.
         Ok(None)
     }
+}
+
+/// One render column's drill-down value, read from the row: a category's code resolved to its
+/// key — code 0, the absent sentinel, resolving to absence — and every other family as stored.
+///
+/// A rendered *number*'s absence is still stored as the type's zero (`or_render_placeholder`;
+/// decision 0064's render half open), so a numeric zero here may be a real zero or an absence —
+/// the row cannot say which, and this reports the stored value rather than inventing a rule. The
+/// entity-space and blob homes do not share the ambiguity.
+fn row_field_out(
+    slice: &ScalarSlice<'_>,
+    idx: usize,
+    d: &DeclaredScalar,
+    vocabularies: &Vocabularies,
+) -> Option<ScalarOut> {
+    if d.vocabulary.is_some() {
+        let code = match slice {
+            ScalarSlice::U8(s) => s[idx] as u32,
+            ScalarSlice::U16(s) => s[idx] as u32,
+            ScalarSlice::U32(s) => s[idx],
+            // A category is one of the three widths; anything else is a malformed tail the
+            // gather refuses on its own path. Absence is the honest answer here.
+            _ => return None,
+        };
+        return category_key_out(code, d, vocabularies);
+    }
+    // Generated for the flat members; `Bool` and `Utf8` read through their arrays because
+    // neither is stored as a flat slice of itself.
+    macro_rules! out {
+        ($(($v:ident, $t:ty)),* $(,)?) => {
+            match slice {
+                $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
+                ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
+                ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
+            }
+        };
+    }
+    Some(flat_families!(out))
+}
+
+/// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
+/// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
+/// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit.
+fn stored_field_out(
+    value: tessera_filter::RecordValue,
+    d: &DeclaredScalar,
+    vocabularies: &Vocabularies,
+) -> Option<ScalarOut> {
+    use tessera_filter::RecordValue as RV;
+    if d.vocabulary.is_some() {
+        let code = match value {
+            RV::U8(c) => c as u32,
+            RV::U16(c) => c as u32,
+            RV::U32(c) => c,
+            _ => return None,
+        };
+        return category_key_out(code, d, vocabularies);
+    }
+    Some(match (d.arrow_type, value) {
+        (ScalarType::Bool, RV::U8(x)) => ScalarOut::Bool(x != 0),
+        (ScalarType::Bool, RV::Bool(b)) => ScalarOut::Bool(b),
+        (ScalarType::TimestampUs, RV::I64(x)) | (ScalarType::TimestampUs, RV::TimestampUs(x)) => {
+            ScalarOut::TimestampUs(x)
+        }
+        (_, RV::U8(x)) => ScalarOut::U8(x),
+        (_, RV::U16(x)) => ScalarOut::U16(x),
+        (_, RV::U32(x)) => ScalarOut::U32(x),
+        (_, RV::U64(x)) => ScalarOut::U64(x),
+        (_, RV::I8(x)) => ScalarOut::I8(x),
+        (_, RV::I16(x)) => ScalarOut::I16(x),
+        (_, RV::I32(x)) => ScalarOut::I32(x),
+        (_, RV::I64(x)) => ScalarOut::I64(x),
+        (_, RV::F32(x)) => ScalarOut::F32(x),
+        (_, RV::F64(x)) => ScalarOut::F64(x),
+        (_, RV::Bool(b)) => ScalarOut::Bool(b),
+        (_, RV::TimestampUs(x)) => ScalarOut::TimestampUs(x),
+        (_, RV::Utf8(s)) => ScalarOut::Utf8(s),
+        // ⊘ Lists land with epic 3's multi surface; no writer produces one today, and a reader
+        // that met one would be looking at a future format — absence, not a guess.
+        (_, RV::List(_)) => return None,
+    })
+}
+
+/// A category code's drill-down value: its vocabulary **key**. Code 0 — the reserved absent
+/// sentinel — is absence, and a code no binding explains is omitted rather than served raw,
+/// the same rule `/v1/categories` applies to an unresolvable code.
+fn category_key_out(
+    code: u32,
+    d: &DeclaredScalar,
+    vocabularies: &Vocabularies,
+) -> Option<ScalarOut> {
+    if code == 0 {
+        return None;
+    }
+    let vocabulary = vocabularies.get(d.vocabulary.as_deref()?)?;
+    let (key, _) = vocabulary.bindings().find(|&(_, c)| c == code)?;
+    Some(ScalarOut::Utf8(key.to_string()))
 }
 
 /// D-C: `Err(EngineError::Cancelled)` if `cancel` has been flipped, `Ok(())` otherwise (including
@@ -1245,53 +1440,11 @@ impl Engine {
         );
         probe.lap(|t| &mut t.compose_ns);
 
-        // **Above composition, and only ever narrowing.** The operand is resolved in entity space
-        // under the composed candidate — so the result already excludes suppressed and
-        // deleted-but-unfolded entities. What it is *not* yet is a row-space set; that crossing is
-        // deferred to `cross_filter_into_row_space` below, which needs the request's tile ranges to
-        // choose its route and so cannot run until they are resolved.
-        let filter_entities = match &req.filter {
-            None => None,
-            Some(expr) => {
-                // **The fragment is brought forward, not read off the session.** A session's own
-                // fragment is fixed at authorise, and composition treats entities below the live
-                // watermark as fragment-resident — so composing against the stale one silently
-                // omits every entity flushed since, and a filtered viewport under a long-lived
-                // session under-reports. Narrowing, and safe under **I12**, which is exactly what
-                // makes it the dangerous kind: the answer is indistinguishable from a correct one.
-                // `/v1/categories` takes the same care for the same reason.
-                //
-                // This costs nothing here: `session_geometry` above has already resolved the same
-                // fragment on this request, so this is the identity short-circuit or a cache hit.
-                let fragment = self.fragment_for(session, &generation)?;
-                let candidate = crate::filter::candidate(
-                    &fragment,
-                    &session.satisfied,
-                    &generation.overlay,
-                    &generation.buffer,
-                );
-                Some(
-                    generation
-                        .filter_columns
-                        .evaluate(expr, &candidate)
-                        .map_err(|e| {
-                            // Caller's fault or the deployment's — `FilterError` decides, at the
-                            // variants, because that is where the argument for each one lives.
-                            let detail = e.to_string();
-                            if e.is_callers_fault() {
-                                EngineError::FilterMalformed(detail)
-                            } else {
-                                EngineError::FilterRefused(detail)
-                            }
-                        })?,
-                )
-            }
-        };
-        probe.lap(|t| &mut t.filter_eval_ns);
-        probe.count(
-            |t| &mut t.filter_matched,
-            filter_entities.as_ref().map_or(0, |e| e.cardinality()),
-        );
+        // The filter is NOT evaluated here. Its route — entity space, row space, or a mixed tree
+        // of both (decision 0068) — turns on the request's own `rows_in_ranges` and on θ's
+        // unfiltered anchor, neither resolved yet, so evaluation sits below the tile-range sweep
+        // beside the crossing it feeds. Everything between here and there is deliberately blind
+        // to the filter.
 
         let q = &generation.bundle.manifest.quantisation;
         let extent = Bounds {
@@ -1492,28 +1645,83 @@ impl Engine {
         probe.count(|t| &mut t.rows_in_ranges, rows_in_ranges);
         let total_rows_in_ranges: u64 = rows_in_ranges + underlay_cells_demanded;
 
-        // The filter's entity-space result meets the mask here, and this is the one place in the
-        // request that crosses from entity space into row space by a route that is *chosen* rather
-        // than fixed. It sits below the tile sweep because the cheap route needs `ranges`: it works
-        // by testing the viewport's own rows, so it cannot run until the viewport's rows are known.
+        // The filter, evaluated here — after the tile ranges, before the sweep. This placement is
+        // load-bearing three ways. The route rule needs both its operands in hand: 0068 routes a
+        // both-routes column row-space while `rows_in_ranges ≤ |M_auth|` — the request's own span
+        // against the principal's own composed total, both quantities the caller could compute,
+        // never a statistic about another principal's data (§8.2). The row-space leaves need the
+        // request's merged tile ranges, which is what they are evaluated over. And everything
+        // above this line is deliberately blind to the filter — `visible_total()` is θ's anchor
+        // and stays unfiltered under **I12**, and `rows_in_ranges` is C4's leak-register numerator
+        // and stays mask-free (§14.2). Both are already computed.
         //
-        // Everything above this line is deliberately blind to the filter — `visible_total()` is
-        // θ's anchor and stays unfiltered under **I12**, and `rows_in_ranges` is C4's leak-register
-        // numerator and stays mask-free (§14.2). Both are already computed.
-        let mask = match &filter_entities {
+        // **The fragment is brought forward, not read off the session.** A session's own fragment
+        // is fixed at authorise, and composition treats entities below the live watermark as
+        // fragment-resident — so composing against the stale one silently omits every entity
+        // flushed since, and a filtered viewport under a long-lived session under-reports.
+        // Narrowing, and safe under **I12**, which is exactly what makes it the dangerous kind:
+        // the answer is indistinguishable from a correct one. `/v1/categories` takes the same care
+        // for the same reason. It costs nothing here: `session_geometry` above already resolved
+        // the same fragment on this request, so this is the identity short-circuit or a cache hit.
+        let mask = match &req.filter {
             None => mask,
-            Some(entities) => {
-                let rows = self.cross_filter_into_row_space(
-                    &slice_data.row_space,
-                    entities,
-                    &ranges,
-                    &segments,
-                    rows_in_ranges,
+            Some(expr) => {
+                check_cancelled(&cancel)?;
+                let fragment = self.fragment_for(session, &generation)?;
+                let candidate = crate::filter::candidate(
+                    &fragment,
+                    &session.satisfied,
+                    &generation.overlay,
+                    &generation.buffer,
                 );
+                let routed = generation
+                    .filter_columns
+                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total)
+                    .map_err(|e| {
+                        // Caller's fault or the deployment's — `FilterError` decides, at the
+                        // variants, because that is where the argument for each one lives.
+                        let detail = e.to_string();
+                        if e.is_callers_fault() {
+                            EngineError::FilterMalformed(detail)
+                        } else {
+                            EngineError::FilterRefused(detail)
+                        }
+                    })?;
+                probe.lap(|t| &mut t.filter_eval_ns);
+                // One crossing per request, whichever shape came back (0062's tree; 0068). The
+                // row of `filter_matched` reports what the route produced: matched entities on
+                // the entity route, matched rows-in-domain on the row route.
+                let rows = match routed {
+                    crate::filter::RoutedFilter::Entity(entities) => {
+                        probe.count(|t| &mut t.filter_matched, entities.cardinality());
+                        self.cross_filter_into_row_space(
+                            &slice_data.row_space,
+                            &entities,
+                            &ranges,
+                            &segments,
+                            rows_in_ranges,
+                        )
+                    }
+                    crate::filter::RoutedFilter::Row(tree) => {
+                        let row_bases: Vec<u32> =
+                            segments.iter().map(|&(_, base)| base).collect();
+                        let domain = crossing_domain(&ranges, &row_bases);
+                        let rows = self.evaluate_row_route(
+                            &tree,
+                            &slice_data.row_space,
+                            &segments,
+                            &domain,
+                            rows_in_ranges,
+                        )?;
+                        self.filter_row_routed.fetch_add(1, Ordering::Relaxed);
+                        probe.count(|t| &mut t.filter_matched, rows.cardinality());
+                        FilterRows::Viewport { rows, domain }
+                    }
+                };
+                probe.lap(|t| &mut t.filter_cross_ns);
                 mask.with_filter(rows)
             }
         };
-        probe.lap(|t| &mut t.filter_cross_ns);
 
         // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
@@ -1731,6 +1939,258 @@ impl Engine {
             .fetch_add(1, Ordering::Relaxed);
         FilterRows::Complete(row_space.project(entities))
     }
+
+    /// Evaluate a routed filter tree with row-space leaves over the request's own rows — the
+    /// render-column route (decision 0068, records §6.2), exact over `domain` and silent outside
+    /// it.
+    ///
+    /// **The leaves read the hot column and nothing else.** A leaf is the dense variant the
+    /// placement memo prefers for its channel argument: every row of the domain is read whatever
+    /// the principal may see, so the work is a function of the request's ranges and the column
+    /// alone — never of the mask and never of the value sought. Code 0 is the vocabulary's real
+    /// absent sentinel and matches **nothing**: not a value list containing it (an unresolvable
+    /// key parses to 0 precisely so it matches no row), and not a `none_of`'s presence half.
+    /// This is the row-path statement of the rule the entity path keeps via its presence bitmap —
+    /// the 2026-08-11 absent-as-zero defect must not return by this route.
+    ///
+    /// **The composed verdict is the candidate, by construction** (records §6, review N2): the
+    /// bitmap returned here still contains suppressed rows — the hot column holds them, Rule S
+    /// says it must — and it narrows the request only through `EffectiveMask::with_filter`, whose
+    /// every consumer intersects it with the composed mask last. The entity-space verdicts inside
+    /// `tree` were evaluated under the composed candidate before they got here. The suppression
+    /// differential in `tests/filtering.rs` pins both halves.
+    ///
+    /// **One crossing per request** (0062's composition; placement memo §2.2): every
+    /// entity-space verdict in the tree is crossed in a single joint walk — or a projection per
+    /// verdict when the measured rule says the result side is cheaper — and the tree then
+    /// combines entirely in row space. Evaluation runs on the engine's one shared pool, split
+    /// over the domain exactly as the per-tile crossing splits, which is the "existing
+    /// parallelism" records §6.2 prices the coarse-zoom cell against.
+    fn evaluate_row_route(
+        &self,
+        tree: &crate::filter::RowExpr,
+        row_space: &tessera_store::permutation::RowSpace,
+        segments: &[(&SegmentData, u32)],
+        domain: &[Range<u32>],
+        rows_in_ranges: u64,
+    ) -> Result<croaring::Bitmap> {
+        // The one crossing: every entity-space verdict's row image, computed together. The route
+        // between the two crossing shapes is the measured rule the single-operand path uses,
+        // summed over the verdicts because that is what the projection would cost.
+        let verdicts = tree.entity_verdicts();
+        let images: Vec<croaring::Bitmap> = if verdicts.is_empty() {
+            Vec::new()
+        } else {
+            let total_matched: u64 = verdicts.iter().map(|v| v.cardinality()).sum();
+            let per_tile_looks_cheaper =
+                total_matched > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
+            let walked = (per_tile_looks_cheaper && row_space.can_invert())
+                .then(|| {
+                    self.pool.install(|| {
+                        per_tile_crossing_multi(row_space, &verdicts, domain, rows_in_ranges)
+                    })
+                })
+                .flatten();
+            match walked {
+                Some(images) => {
+                    self.filter_crossings_per_tile.fetch_add(1, Ordering::Relaxed);
+                    images
+                }
+                None => {
+                    // Projection crosses each verdict whole; clamped to the domain so the
+                    // combined answer never claims a row outside what `FilterRows::Viewport`
+                    // says was tested.
+                    self.filter_crossings_projected
+                        .fetch_add(1, Ordering::Relaxed);
+                    let mut domain_rows = croaring::Bitmap::new();
+                    for range in domain {
+                        domain_rows.add_range(range.clone());
+                    }
+                    verdicts
+                        .iter()
+                        .map(|v| row_space.project(v).and(&domain_rows))
+                        .collect()
+                }
+            }
+        };
+        let mut next_image = 0usize;
+        self.pool
+            .install(|| eval_row_expr(tree, &images, &mut next_image, segments, domain))
+    }
+}
+
+/// Evaluate one routed node over `domain`, in row space. `images` are the pre-crossed row images
+/// of the tree's entity-space verdicts, consumed in the same pre-order
+/// [`crate::filter::RowExpr::entity_verdicts`] collects them — `next_image` is that cursor.
+fn eval_row_expr(
+    expr: &crate::filter::RowExpr,
+    images: &[croaring::Bitmap],
+    next_image: &mut usize,
+    segments: &[(&SegmentData, u32)],
+    domain: &[Range<u32>],
+) -> Result<croaring::Bitmap> {
+    use crate::filter::RowExpr;
+    match expr {
+        RowExpr::Entity(_) => {
+            let image = images[*next_image].clone();
+            *next_image += 1;
+            Ok(image)
+        }
+        RowExpr::Leaf { column, operand } => {
+            // The operand's codes. A category leaf carries `Equals`/`In` — the family check at
+            // the parse guarantees it — so any other shape is the second line of defence the
+            // entity scan also keeps: it matches nothing rather than panicking or comparing a
+            // string to a code.
+            let codes: Vec<u32> = match operand {
+                crate::filter::FilterOperand::Equals(v) => vec![v.raw()],
+                crate::filter::FilterOperand::In(vs) => vs.iter().map(|v| v.raw()).collect(),
+                _ => Vec::new(),
+            };
+            scan_rows(segments, domain, column, RowPredicate::CodeIn(&codes))
+        }
+        RowExpr::AllOf(kids) => {
+            let mut out: Option<croaring::Bitmap> = None;
+            for kid in kids {
+                let kid_rows = eval_row_expr(kid, images, next_image, segments, domain)?;
+                out = Some(match out {
+                    None => kid_rows,
+                    Some(mut acc) => {
+                        acc.and_inplace(&kid_rows);
+                        acc
+                    }
+                });
+            }
+            // Unreachable empty: an empty `all_of` is entity-pure and never routes here.
+            Ok(out.unwrap_or_default())
+        }
+        RowExpr::AnyOf(kids) => {
+            let mut out = croaring::Bitmap::new();
+            for kid in kids {
+                out |= eval_row_expr(kid, images, next_image, segments, domain)?;
+            }
+            Ok(out)
+        }
+        RowExpr::NoneOf { column, kids } => {
+            // `present ∖ matched` — the positive predicate, in row space: presence is a
+            // non-sentinel code in the hot column, so an absent item matches no negation either,
+            // and a row that cannot be read under-reports rather than widening (I12's sign,
+            // exactly as the entity path argues it).
+            let mut out = scan_rows(segments, domain, column, RowPredicate::Present)?;
+            for kid in kids {
+                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain)?);
+                if out.is_empty() {
+                    break;
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// A row-space leaf's test against one hot-column code.
+enum RowPredicate<'a> {
+    /// The code is non-sentinel and in this set. An empty set matches nothing.
+    CodeIn(&'a [u32]),
+    /// The code is non-sentinel — the presence half of a negation.
+    Present,
+}
+
+impl RowPredicate<'_> {
+    #[inline]
+    fn matches(&self, code: u32) -> bool {
+        // Code 0 first, unconditionally: the absent sentinel matches neither a value list —
+        // even one that (via an unresolvable key) *names* 0 — nor presence.
+        if code == 0 {
+            return false;
+        }
+        match self {
+            RowPredicate::CodeIn(codes) => codes.contains(&code),
+            RowPredicate::Present => true,
+        }
+    }
+}
+
+/// One render column's typed slice per segment — resolved once per leaf evaluation, exactly as
+/// the gather resolves per segment rather than per row.
+enum CodeSlice<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+    U32(&'a [u32]),
+}
+
+impl CodeSlice<'_> {
+    #[inline]
+    fn code_at(&self, idx: usize) -> u32 {
+        match self {
+            CodeSlice::U8(v) => v[idx] as u32,
+            CodeSlice::U16(v) => v[idx] as u32,
+            CodeSlice::U32(v) => v[idx],
+        }
+    }
+}
+
+/// Test every row of `domain` against `column`'s hot values — the render-column scan, parallel
+/// over the domain on the caller's installed pool, chunked exactly as the per-tile crossing is.
+///
+/// A segment that does not hold the column at a category width is a **malformed bundle**, refused
+/// like the gather's equivalent: serving it as "matches nothing" would be an answer about values
+/// that were never read.
+fn scan_rows(
+    segments: &[(&SegmentData, u32)],
+    domain: &[Range<u32>],
+    column: &str,
+    predicate: RowPredicate<'_>,
+) -> Result<croaring::Bitmap> {
+    // Per-segment slices, resolved once. `segments` is ascending by `row_base`
+    // (`segments_with_row_bases` sorts), which the per-row resolution below relies on.
+    let slices: Vec<(u32, CodeSlice<'_>)> = segments
+        .iter()
+        .map(|&(segment, row_base)| {
+            let slice = match segment.columns.scalar(column) {
+                Some(ScalarSlice::U8(s)) => CodeSlice::U8(s),
+                Some(ScalarSlice::U16(s)) => CodeSlice::U16(s),
+                Some(ScalarSlice::U32(s)) => CodeSlice::U32(s),
+                _ => {
+                    return Err(EngineError::Malformed(format!(
+                        "a segment of this slice has no rendered category column '{column}' at a \
+                         code width, which the routed filter requires; the manifest and the \
+                         segment disagree about the tail"
+                    )))
+                }
+            };
+            Ok((row_base, slice))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let chunks = domain_chunks(domain, domain.iter().map(|r| r.len() as u64).sum());
+    let parts: Vec<croaring::Bitmap> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut rows = croaring::Bitmap::new();
+            let mut buf: Vec<u32> = Vec::with_capacity(1024);
+            // The segment owning `chunk.start`, advanced as the walk crosses a boundary — the
+            // domain's ranges never span rows outside a segment, but a *merged* range can span
+            // two adjacent segments.
+            let mut seg = slices.partition_point(|&(base, _)| base <= chunk.start) - 1;
+            for row in chunk.clone() {
+                while seg + 1 < slices.len() && slices[seg + 1].0 <= row {
+                    seg += 1;
+                }
+                let (base, slice) = &slices[seg];
+                if predicate.matches(slice.code_at((row - base) as usize)) {
+                    buf.push(row);
+                    if buf.len() == 1024 {
+                        rows.add_many(&buf);
+                        buf.clear();
+                    }
+                }
+            }
+            rows.add_many(&buf);
+            rows
+        })
+        .collect();
+    let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
+    Ok(croaring::Bitmap::fast_or(&refs))
 }
 
 /// How many times larger than the viewport a filter result must be before the per-tile crossing is
@@ -1798,45 +2258,83 @@ fn per_tile_crossing(
     domain: &[Range<u32>],
     rows_in_ranges: u64,
 ) -> Option<croaring::Bitmap> {
+    per_tile_crossing_multi(row_space, &[entities], domain, rows_in_ranges)
+        .map(|mut images| images.pop().expect("one set in, one image out"))
+}
+
+/// [`per_tile_crossing`] over several entity sets at once — **one walk, one `entity_of` per row**,
+/// however many entity-space verdicts a mixed tree carries. This is what keeps 0062's
+/// one-crossing rule true for the row route: the expensive half of a crossing is the inversion,
+/// and each additional set costs one bitmap probe per row on top of it, not a second walk.
+///
+/// Returns one row image per input set, positionally. `None` where the row space declined to
+/// invert a row — the caller falls back to projection, same as the single-set form.
+fn per_tile_crossing_multi(
+    row_space: &tessera_store::permutation::RowSpace,
+    entity_sets: &[&croaring::Bitmap],
+    domain: &[Range<u32>],
+    rows_in_ranges: u64,
+) -> Option<Vec<croaring::Bitmap>> {
+    let chunks = domain_chunks(domain, rows_in_ranges);
+
+    let parts: Option<Vec<Vec<croaring::Bitmap>>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            // Rows accumulate ascending into a small buffer per set and enter the bitmap in
+            // batches: `add_many` on a sorted run appends to the container being built, where a
+            // per-row `add` re-locates it every time.
+            let mut rows: Vec<croaring::Bitmap> =
+                entity_sets.iter().map(|_| croaring::Bitmap::new()).collect();
+            let mut bufs: Vec<Vec<u32>> = entity_sets
+                .iter()
+                .map(|_| Vec::with_capacity(1024))
+                .collect();
+            for row in chunk.clone() {
+                let entity = row_space.entity_of(RowId::new(row))?;
+                let raw = entity.raw() as u32;
+                for (i, set) in entity_sets.iter().enumerate() {
+                    if set.contains(raw) {
+                        bufs[i].push(row);
+                        if bufs[i].len() == 1024 {
+                            rows[i].add_many(&bufs[i]);
+                            bufs[i].clear();
+                        }
+                    }
+                }
+            }
+            for (image, buf) in rows.iter_mut().zip(&bufs) {
+                image.add_many(buf);
+            }
+            Some(rows)
+        })
+        .collect();
+
+    let parts = parts?;
+    let images = (0..entity_sets.len())
+        .map(|i| {
+            let refs: Vec<&croaring::Bitmap> = parts.iter().map(|p| &p[i]).collect();
+            croaring::Bitmap::fast_or(&refs)
+        })
+        .collect();
+    Some(images)
+}
+
+/// Cut `domain` into parallel chunks by row count — shared by the crossing walk and the
+/// render-column scan, so the two fan out identically. Chunks are cut by row count rather than by
+/// range, so neither a viewport of one huge range nor one of a thousand slivers defeats the split.
+fn domain_chunks(domain: &[Range<u32>], rows_in_ranges: u64) -> Vec<Range<u32>> {
     let threads = rayon::current_num_threads().max(1) as u64;
     let target = (rows_in_ranges / (threads * 8))
         .max(CROSSING_CHUNK_MIN_ROWS as u64)
         .min(u32::MAX as u64) as u32;
-    let chunks: Vec<Range<u32>> = domain
+    domain
         .iter()
         .flat_map(|range| {
             (range.start..range.end)
                 .step_by(target as usize)
                 .map(move |start| start..range.end.min(start.saturating_add(target)))
         })
-        .collect();
-
-    let parts: Option<Vec<croaring::Bitmap>> = chunks
-        .par_iter()
-        .map(|chunk| {
-            // Rows accumulate ascending into a small buffer and enter the bitmap in batches:
-            // `add_many` on a sorted run appends to the container being built, where a per-row
-            // `add` re-locates it every time.
-            let mut rows = croaring::Bitmap::new();
-            let mut buf: Vec<u32> = Vec::with_capacity(1024);
-            for row in chunk.clone() {
-                let entity = row_space.entity_of(RowId::new(row))?;
-                if entities.contains(entity.raw() as u32) {
-                    buf.push(row);
-                    if buf.len() == 1024 {
-                        rows.add_many(&buf);
-                        buf.clear();
-                    }
-                }
-            }
-            rows.add_many(&buf);
-            Some(rows)
-        })
-        .collect();
-
-    let parts = parts?;
-    let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
-    Some(croaring::Bitmap::fast_or(&refs))
+        .collect()
 }
 
 /// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
@@ -2461,35 +2959,6 @@ fn gather_tile_columns(
         codes,
         scalars,
     })
-}
-
-/// One row's scalars, row-major — `POST /v1/items`' shape, which is a single item by nature.
-///
-/// Kept beside [`gather_tile_columns`] rather than merged with it: the drill-down wants one row's
-/// values as a list, and the viewport wants every row's values as columns. Both decode a
-/// [`ScalarSlice`] into the same thirteen families, and both generate that decode from
-/// [`flat_families!`], so the two cannot drift on what a stored type means.
-fn row_scalars(row: u32, scalars_of: &ResolvedScalars<'_>) -> Vec<ScalarOut> {
-    let idx = row as usize;
-    let mut scalars = Vec::with_capacity(scalars_of.len());
-    // `flatten` skips the columns this segment does not hold, exactly as the per-row
-    // `cols.scalar(..)` lookup used to.
-    for value in scalars_of.iter().flatten() {
-        // Generated for the flat members; `Bool` and `Utf8` read through their arrays
-        // because neither is stored as a flat slice of itself.
-        macro_rules! out {
-            ($(($v:ident, $t:ty)),* $(,)?) => {
-                match value {
-                    $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
-                    ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
-                    ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
-                }
-            };
-        }
-        scalars.push(flat_families!(out));
-    }
-
-    scalars
 }
 
 #[cfg(test)]
