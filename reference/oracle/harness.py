@@ -123,6 +123,26 @@ def ensure_cli_built() -> None:
 
 
 
+def run_build(args: list[str]) -> subprocess.CompletedProcess:
+    """Run `tessera build` and hand back the completed process, refusal or not.
+
+    The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
+    them a failed build is a broken harness. The schema-refusal catalogue is the opposite test:
+    the refusal *is* the subject (records §2; decision 0013's naming discipline), so the caller
+    asserts on the exit status and the message rather than having them converted into a
+    `CalledProcessError`. Output is captured — stderr is where the CLI reports a refusal — and
+    text-decoded so a test can grep it for the reason the message must name.
+    """
+    ensure_cli_built()
+    return subprocess.run(
+        [str(CLI_BIN), "build", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def open_bundle_with_source(
     bundle_root: Path, points: Path | str, limit: int | None = None
 ) -> "object":
