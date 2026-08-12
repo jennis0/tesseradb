@@ -2858,6 +2858,26 @@ pub(crate) fn filter_schema_of(
         .collect()
 }
 
+/// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
+/// also its field tag (records §3). The predicate is the build's blob stage's
+/// (`tessera-build`'s `write_record_blob`): neither indexed nor rendered, and never a category,
+/// whose entity-space structures are the vocabulary machinery's floor (records §4.2).
+pub(crate) fn record_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Vec<crate::flush::RecordColumnSpec> {
+    manifest
+        .declared_scalars
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| !d.index && !d.render && d.vocabulary.is_none())
+        .map(|(index, d)| crate::flush::RecordColumnSpec {
+            index,
+            name: d.name.clone(),
+            ty: d.arrow_type,
+        })
+        .collect()
+}
+
 /// A vocabulary code, at its column's declared width. Mirrors `tessera-server`'s own `category_code`
 /// helper of the same shape, which cannot be reused here: that one lives on the other side of the
 /// ingest boundary and returns an `ApiError`, where a mint failure here is `Executor`-internal and
@@ -4524,6 +4544,12 @@ impl Executor {
                     .iter()
                     .any(|extent| extent.values == consumed.values)
             })
+            || !plan.record_extents.iter().all(|consumed| {
+                live_manifest
+                    .record_extents
+                    .iter()
+                    .any(|extent| extent.blocks == consumed.blocks)
+            })
         {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
@@ -4573,6 +4599,22 @@ impl Executor {
             .attr_extents
             .iter()
             .filter(|extent| !consumed_attrs.contains(extent.values.as_str()))
+            .cloned()
+            .collect();
+        // The record-blob extents take the attribute extents' shape exactly: the fold consumed
+        // every one its snapshot named and folded the rows into the new base blob; what is carried
+        // is the flight's — a flush publishing during the fold appended entities the new base does
+        // not hold, and dropping its entry would answer their drill-downs "no record" with no
+        // symptom. Identified by the blocks path, `seg_id`-derived and never reused.
+        let consumed_records: FxHashSet<&str> = plan
+            .record_extents
+            .iter()
+            .map(|extent| extent.blocks.as_str())
+            .collect();
+        let carried_records: Vec<tessera_store::manifest::RecordExtent> = live_manifest
+            .record_extents
+            .iter()
+            .filter(|extent| !consumed_records.contains(extent.blocks.as_str()))
             .cloned()
             .collect();
 
@@ -4701,7 +4743,7 @@ impl Executor {
             // wrong answer with no symptom, and strictly worse than a refusal to open. The two
             // halves are written here, in one manifest write.
             attr_extents: carried_attrs.clone(),
-            record_extents: Vec::new(),
+            record_extents: carried_records.clone(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -4783,6 +4825,14 @@ impl Executor {
         for extent in &carried_attrs {
             carried_rels.insert(extent.values.clone());
             carried_rels.insert(extent.presence.clone());
+        }
+        // All three files of every carried record extent: the blocks and both addressing files,
+        // any of whose absence is a refusal to open rather than "those entities have no record"
+        // (records §7).
+        for extent in &carried_records {
+            carried_rels.insert(extent.blocks.clone());
+            carried_rels.insert(extent.hasrow.clone());
+            carried_rels.insert(extent.directory.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {
@@ -5402,6 +5452,7 @@ impl Executor {
         let manifest = &generation.bundle.manifest;
         let scalar_schema = scalar_schema_of(manifest);
         let filter_schema = filter_schema_of(manifest);
+        let record_schema = record_schema_of(manifest);
         let render_indices: Vec<usize> = manifest.render_indices().collect();
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
@@ -5492,6 +5543,7 @@ impl Executor {
                     scalar_schema: scalar_schema.clone(),
                     render_indices: render_indices.clone(),
                     filter_schema: filter_schema.clone(),
+                    record_schema: record_schema.clone(),
                     dict: Arc::clone(&generation.dict),
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
@@ -7163,6 +7215,11 @@ impl Executor {
                         offsets: None,
                     }),
             );
+        // The record-blob extent, under the same two-obligation rule: the three files are already
+        // in `files`, and this entry is what makes them reachable — a record stack opens exactly
+        // what `record_extents` names, so bytes this list omits answer no drill-down and bytes it
+        // names but that are absent refuse the open (records §7's fail-closed rule).
+        manifest.record_extents.extend(completed.record_extent);
         write_deny_state(&mut manifest, &live.overlay);
         write_vocabulary_extensions(
             &mut manifest,

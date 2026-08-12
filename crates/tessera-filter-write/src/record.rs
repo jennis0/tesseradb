@@ -6,6 +6,31 @@
 //! [`tessera_filter::encode_row`] rather than encoding anything itself, so the layout stays one
 //! module's fact.
 //!
+//! # The blob's lifecycle merges, and the two removal rules
+//!
+//! [`coalesce_record_extents`] and [`fold_record_blob`] are the value-column pair's counterparts
+//! (`coalesce_attr_extents`, `fold_value_column`): the same linear merge under the same
+//! non-interleaving guard, streaming rows through [`RecordBlobWriter`] — which is what repacks
+//! small blocks toward the 256 KiB target as a side effect of re-blocking, rather than as a pass
+//! of its own. Each input layer streams through [`tessera_filter::RecordBlob::for_each_row`],
+//! whose walk *is* the addressing self-check, so a defective input refuses the pass instead of
+//! being laundered into a clean-looking output.
+//!
+//! Write-path §5.4's two removal rules are the sharp edge, and the signatures are shaped so
+//! conflating them is unspellable here exactly as they are for the value column: the coalesce has
+//! **no tombstone parameter** — a suppressed *or deleted-but-unfolded* entity's row rides through
+//! byte-preserved, because a suppression touches no blob byte ever (Rule S) and a deletion's
+//! removal belongs to the fold alone (Rule F). The fold takes `D₀` and blanks by *remove, emit no
+//! bytes*: a blanked entity leaves the has-row bitmap and contributes nothing to any block, so its
+//! prose is physically absent from the folded artefact — the retention asymmetry (records §7) that
+//! is the whole reason the blob lives under `attrs/` and folds with everything else rather than in
+//! a store the fold does not touch.
+//!
+//! The fold's output is byte-identical to a fresh build's over the surviving entities: both
+//! producers stream rows in entity order through this one writer at the same target, the row
+//! encoding is deterministic, and the has-row bitmap is canonicalised at finish. That equality is
+//! asserted by test rather than assumed.
+//!
 //! Rows arrive in **strictly ascending entity order** — the order the has-row rank addresses them
 //! back in — and are cut into blocks against the caller's uncompressed target: a block seals when
 //! the next row would pass it, so a row larger than the target gets an oversized block of its own
@@ -28,7 +53,7 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{encode_row, RecordField};
+use tessera_filter::{encode_row, RecordBlob, RecordError, RecordField};
 
 /// zstd's default level — the operating point the string-storage probe measured its block ratios
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
@@ -220,6 +245,448 @@ impl RecordBlobWriter {
     }
 }
 
+/// A window of record-blob extents merged into one, for the entity-space coalesce (records §7:
+/// the record axis beside the attribute axis, merging by concatenation in ascending entity
+/// order).
+///
+/// **A coalesce retires nothing**, so there is no tombstone parameter to pass and no way to spell
+/// one: a suppressed or deleted-but-unfolded entity's row rides through untouched, because a
+/// suppression never touches the blob (Rule S) and removal is the fold's (Rule F, write-path
+/// §5.4). What is written is the same `(entity, row)` relation the inputs carried between them,
+/// re-blocked against `target` — which is where small flush blocks repack toward the 256 KiB
+/// point, as a streaming rewrite holding one uncompressed block at a time.
+pub fn coalesce_record_extents(
+    inputs: &[&RecordBlob],
+    blocks_path: &Path,
+    hasrow_path: &Path,
+    directory_path: &Path,
+    target: usize,
+) -> io::Result<()> {
+    if inputs.len() < 2 {
+        return Err(invalid(format!(
+            "the record-blob coalesce was given {} extents; it collapses a window of extents \
+             into one and there is nothing to collapse below two",
+            inputs.len()
+        )));
+    }
+    write_merged_rows(
+        inputs,
+        &Bitmap::new(),
+        blocks_path,
+        hasrow_path,
+        directory_path,
+        target,
+        "the record-blob coalesce",
+    )
+}
+
+/// The blob's layers merged into one base with `tombstones`' rows blanked — the fold's record
+/// pass, and **the only route by which a deletion removes blob bytes** (Rule F, write-path §5.4).
+///
+/// Blanking is *remove, emit no bytes*: a blanked entity leaves the has-row bitmap and
+/// contributes nothing to any block, so its row is physically absent from the folded artefact
+/// rather than overwritten — the retention asymmetry records §7 states. `layers` is the base blob
+/// followed by every extent the fold consumes, in any order; the merge sorts them by their own
+/// entity ranges and refuses an interleaving, exactly as the attribute pass does.
+pub fn fold_record_blob(
+    layers: &[&RecordBlob],
+    tombstones: &Bitmap,
+    blocks_path: &Path,
+    hasrow_path: &Path,
+    directory_path: &Path,
+    target: usize,
+) -> io::Result<()> {
+    if layers.is_empty() {
+        return Err(invalid(
+            "the fold's record pass was given no layers; a schema with a blob-resident column \
+             always has at least the base blob",
+        ));
+    }
+    write_merged_rows(
+        layers,
+        tombstones,
+        blocks_path,
+        hasrow_path,
+        directory_path,
+        target,
+        "the fold's record pass",
+    )
+}
+
+/// Stream the layers' rows into one blob in entity order, skipping `tombstones`.
+///
+/// The order and the two refusals are [`crate::ordered_disjoint`]'s — the same guard the value
+/// columns merge under, over the layers' has-row bitmaps. Each layer then streams through
+/// [`RecordBlob::for_each_row`], whose walk revalidates the input's addressing as the rows are
+/// read; [`RecordBlobWriter::push_row`]'s strictly-ascending check stands behind the guard as the
+/// second line.
+fn write_merged_rows(
+    layers: &[&RecordBlob],
+    tombstones: &Bitmap,
+    blocks_path: &Path,
+    hasrow_path: &Path,
+    directory_path: &Path,
+    target: usize,
+    pass: &str,
+) -> io::Result<()> {
+    let present: Vec<(usize, Bitmap)> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, layer)| (i, layer.hasrow().clone()))
+        .collect();
+    let (order, _) = crate::ordered_disjoint(present, pass)?;
+    let mut writer = RecordBlobWriter::create(blocks_path, hasrow_path, directory_path, target)?;
+    for (layer, _) in &order {
+        layers[*layer]
+            .for_each_row(&mut |entity, fields| {
+                if tombstones.contains(entity) {
+                    // Rule F's remove-emit-no-bytes: the row leaves the artefact by never being
+                    // written, not by being overwritten.
+                    return Ok(());
+                }
+                writer.push_row(entity, &fields).map_err(RecordError::from)
+            })
+            .map_err(io::Error::from)?;
+    }
+    writer.finish()
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_filter::{Access, RecordValue, RECORD_BLOCK_TARGET};
+
+    /// One layer's three paths under `dir`, tagged so a test can hold several.
+    fn paths_of(dir: &Path, tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        (
+            dir.join(format!("{tag}.blocks.bin")),
+            dir.join(format!("{tag}.hasrow.roaring")),
+            dir.join(format!("{tag}.directory.arrow")),
+        )
+    }
+
+    /// Write one layer of `(entity, note)` rows at `target` and open it back. Each row carries a
+    /// utf8 field and an i64, so a row is self-describing in more than one kind.
+    fn layer_at(dir: &Path, tag: &str, target: usize, rows: &[(u32, &str)]) -> RecordBlob {
+        let (blocks, hasrow, directory) = paths_of(dir, tag);
+        let mut writer =
+            RecordBlobWriter::create(&blocks, &hasrow, &directory, target).expect("create");
+        for (entity, note) in rows {
+            writer
+                .push_row(
+                    *entity,
+                    &[
+                        RecordField {
+                            tag: 0,
+                            value: RecordValue::Utf8((*note).to_string()),
+                        },
+                        RecordField {
+                            tag: 1,
+                            value: RecordValue::I64(i64::from(*entity) * 7),
+                        },
+                    ],
+                )
+                .expect("push");
+        }
+        writer.finish().expect("finish");
+        RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open")
+    }
+
+    fn coalesce_to(
+        dir: &Path,
+        tag: &str,
+        inputs: &[&RecordBlob],
+        target: usize,
+    ) -> io::Result<RecordBlob> {
+        let (blocks, hasrow, directory) = paths_of(dir, tag);
+        coalesce_record_extents(inputs, &blocks, &hasrow, &directory, target)?;
+        Ok(RecordBlob::open(
+            &blocks,
+            &hasrow,
+            &directory,
+            Access::Read,
+        )?)
+    }
+
+    /// Every `(entity, fields)` pair a blob holds, in order.
+    fn rows_of(blob: &RecordBlob) -> Vec<(u32, Vec<RecordField>)> {
+        let mut out = Vec::new();
+        blob.for_each_row(&mut |entity, fields| {
+            out.push((entity, fields));
+            Ok(())
+        })
+        .expect("the walk");
+        out
+    }
+
+    /// **A coalesced extent answers exactly as the uncoalesced layers do** — the differential the
+    /// axis's content-preserving claim rests on — and a coalesced extent coalesces again, which is
+    /// the recursion the manifest's window-in-place splice relies on.
+    #[test]
+    fn a_coalesced_extent_carries_its_inputs_rows_and_coalesces_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extents: Vec<RecordBlob> = [100u32, 200, 300, 400]
+            .iter()
+            .map(|base| {
+                let rows: Vec<(u32, String)> = (0..3)
+                    .map(|k| (base + k * 2, format!("value-{}", base + k * 2)))
+                    .collect();
+                let rows: Vec<(u32, &str)> = rows.iter().map(|(e, s)| (*e, s.as_str())).collect();
+                layer_at(
+                    dir.path(),
+                    &format!("in-{base}"),
+                    RECORD_BLOCK_TARGET,
+                    &rows,
+                )
+            })
+            .collect();
+        let refs: Vec<&RecordBlob> = extents.iter().collect();
+
+        let first =
+            coalesce_to(dir.path(), "first", &refs[..2], RECORD_BLOCK_TARGET).expect("coalesce");
+        let second =
+            coalesce_to(dir.path(), "second", &refs[2..], RECORD_BLOCK_TARGET).expect("coalesce");
+        let again = coalesce_to(dir.path(), "again", &[&first, &second], RECORD_BLOCK_TARGET)
+            .expect("the recursion");
+        again.self_check().expect("the recursion's addressing");
+
+        let mut expected = Vec::new();
+        for extent in &extents {
+            expected.extend(rows_of(extent));
+        }
+        assert_eq!(
+            rows_of(&again),
+            expected,
+            "the union of the layers, in entity order"
+        );
+        for (entity, fields) in &expected {
+            assert_eq!(
+                again.fields_of(*entity).expect("read").as_deref(),
+                Some(fields.as_slice()),
+                "entity {entity} answers differently through the coalesced extent"
+            );
+        }
+    }
+
+    /// **The repack is real**: inputs cut into many tiny blocks re-block toward the target — one
+    /// block out, here — with every row surviving the block-boundary crossings intact.
+    #[test]
+    fn small_blocks_repack_toward_the_target_and_every_row_survives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A ~40-byte row against a 64-byte target: every input block holds one row.
+        let rows_a: Vec<(u32, String)> = (0..20u32)
+            .map(|e| (e, format!("padding-padding-{e:04}")))
+            .collect();
+        let rows_b: Vec<(u32, String)> = (100..120u32)
+            .map(|e| (e, format!("padding-padding-{e:04}")))
+            .collect();
+        let as_refs = |rows: &[(u32, String)]| -> Vec<(u32, String)> { rows.to_vec() };
+        let a_rows = as_refs(&rows_a);
+        let a_refs: Vec<(u32, &str)> = a_rows.iter().map(|(e, s)| (*e, s.as_str())).collect();
+        let b_rows = as_refs(&rows_b);
+        let b_refs: Vec<(u32, &str)> = b_rows.iter().map(|(e, s)| (*e, s.as_str())).collect();
+        let a = layer_at(dir.path(), "a", 64, &a_refs);
+        let b = layer_at(dir.path(), "b", 64, &b_refs);
+        assert!(
+            a.block_count() >= 10,
+            "the fixture must be fragmented: {}",
+            a.block_count()
+        );
+
+        let out = coalesce_to(dir.path(), "out", &[&a, &b], RECORD_BLOCK_TARGET).expect("coalesce");
+        out.self_check().expect("addressing");
+        assert_eq!(
+            out.block_count(),
+            1,
+            "forty tiny rows repack into one target-sized block"
+        );
+        assert_eq!(out.rows(), 40);
+        for (entity, fields) in rows_of(&a).into_iter().chain(rows_of(&b)) {
+            assert_eq!(out.fields_of(entity).expect("read"), Some(fields));
+        }
+    }
+
+    /// **An oversize row survives the repack in an oversized block of its own** — the target is a
+    /// target, not a cap (records §3) — and its neighbours still pack normally around it.
+    #[test]
+    fn an_oversize_row_survives_the_repack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let big = "x".repeat(4096);
+        let rows: Vec<(u32, &str)> = vec![(1, "small"), (2, &big), (3, "also-small")];
+        let a = layer_at(dir.path(), "a", 512, &rows);
+        let b = layer_at(dir.path(), "b", 512, &[(10, "after")]);
+
+        let out = coalesce_to(dir.path(), "out", &[&a, &b], 512).expect("coalesce");
+        out.self_check().expect("addressing");
+        let fields = out.fields_of(2).expect("read").expect("the oversize row");
+        assert_eq!(fields[0].value, RecordValue::Utf8(big));
+        for entity in [1u32, 3, 10] {
+            assert!(
+                out.fields_of(entity).expect("read").is_some(),
+                "entity {entity}"
+            );
+        }
+    }
+
+    /// **A coalesce retires nothing, and there is no way to spell one that does**: a
+    /// deleted-but-unfolded entity is in the overlay, not in any artefact, and its row rides
+    /// through byte-preserved. A pass that blanked here would be a third retirement route — how
+    /// Rule S and Rule F get conflated (write-path §5.4).
+    #[test]
+    fn a_coalesce_carries_every_row_through_including_a_deleted_but_unfolded_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = layer_at(
+            dir.path(),
+            "a",
+            RECORD_BLOCK_TARGET,
+            &[(100, "kept"), (101, "kept-too")],
+        );
+        // Entity 200 is deleted-but-unfolded — a fact the overlay holds and no artefact may act on.
+        let b = layer_at(
+            dir.path(),
+            "b",
+            RECORD_BLOCK_TARGET,
+            &[(200, "deleted-payload"), (201, "kept")],
+        );
+        let out =
+            coalesce_to(dir.path(), "kept", &[&a, &b], RECORD_BLOCK_TARGET).expect("coalesce");
+        assert_eq!(
+            out.fields_of(200)
+                .expect("read")
+                .expect("the row rides through")[0]
+                .value,
+            RecordValue::Utf8("deleted-payload".to_string()),
+        );
+        assert_eq!(out.rows(), 4);
+    }
+
+    /// **The fold's output is byte-identical to a fresh build's over the survivors** — all three
+    /// files — because both stream rows in entity order through the one writer at one target and
+    /// the writer canonicalises its bitmap. The equality the module doc claims, held by test.
+    #[test]
+    fn a_folded_blob_is_the_bytes_a_single_build_would_have_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = layer_at(
+            dir.path(),
+            "base",
+            RECORD_BLOCK_TARGET,
+            &[(0, "zero"), (1, "one"), (2, "two")],
+        );
+        let ext = layer_at(
+            dir.path(),
+            "ext",
+            RECORD_BLOCK_TARGET,
+            &[(10, "ten"), (11, "eleven")],
+        );
+        let mut tombstones = Bitmap::new();
+        tombstones.add(1);
+        tombstones.add(10);
+
+        let (blocks, hasrow, directory) = paths_of(dir.path(), "folded");
+        fold_record_blob(
+            &[&base, &ext],
+            &tombstones,
+            &blocks,
+            &hasrow,
+            &directory,
+            RECORD_BLOCK_TARGET,
+        )
+        .expect("the fold");
+        let _ = layer_at(
+            dir.path(),
+            "fresh",
+            RECORD_BLOCK_TARGET,
+            &[(0, "zero"), (2, "two"), (11, "eleven")],
+        );
+        let (f_blocks, f_hasrow, f_directory) = paths_of(dir.path(), "fresh");
+        for (folded, fresh) in [
+            (&blocks, &f_blocks),
+            (&hasrow, &f_hasrow),
+            (&directory, &f_directory),
+        ] {
+            assert_eq!(
+                std::fs::read(folded).expect("folded"),
+                std::fs::read(fresh).expect("fresh"),
+                "{} differs from a fresh build's",
+                folded.display()
+            );
+        }
+    }
+
+    /// **Blanking is remove-emit-no-bytes, asserted on the artefact bytes**: the blanked row's
+    /// value is absent from the folded blocks once decompressed, its entity is out of has-row, and
+    /// the survivors still answer. Rule F's whole retention claim, at the file.
+    #[test]
+    fn a_blanked_rows_bytes_are_not_in_the_folded_blob() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = layer_at(
+            dir.path(),
+            "base",
+            RECORD_BLOCK_TARGET,
+            &[(0, "alpha"), (1, "the-deleted-prose"), (2, "charlie")],
+        );
+        let mut tombstones = Bitmap::new();
+        tombstones.add(1);
+        let (blocks, hasrow, directory) = paths_of(dir.path(), "folded");
+        fold_record_blob(
+            &[&base],
+            &tombstones,
+            &blocks,
+            &hasrow,
+            &directory,
+            RECORD_BLOCK_TARGET,
+        )
+        .expect("the fold");
+
+        // `blocks.bin` is concatenated zstd frames; decoding them all gives every byte the folded
+        // artefact can ever serve.
+        let raw = std::fs::read(&blocks).expect("blocks");
+        let decompressed = zstd::stream::decode_all(raw.as_slice()).expect("frames decode");
+        let holds = |needle: &[u8]| decompressed.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !holds(b"the-deleted-prose"),
+            "the blanked row's bytes are still in the folded artefact"
+        );
+        for kept in [&b"alpha"[..], &b"charlie"[..]] {
+            assert!(holds(kept), "a survivor's bytes are gone");
+        }
+        let folded = RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open");
+        assert!(!folded.has_row(1), "the blanked entity is out of has-row");
+        assert!(folded.fields_of(1).expect("read").is_none());
+        assert!(folded.fields_of(0).expect("read").is_some());
+    }
+
+    /// The two refusals are this merge's own, exactly as they are the value columns': an overlap
+    /// or an interleaving would pair rows with the wrong ranks with no later symptom, and a single
+    /// input is not a window.
+    #[test]
+    fn overlapping_or_interleaved_layers_are_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = layer_at(
+            dir.path(),
+            "a",
+            RECORD_BLOCK_TARGET,
+            &[(1, "one"), (3, "three")],
+        );
+        let clash = layer_at(dir.path(), "clash", RECORD_BLOCK_TARGET, &[(3, "again")]);
+        let err = coalesce_to(dir.path(), "c1", &[&a, &clash], RECORD_BLOCK_TARGET)
+            .expect_err("an overlap is refused");
+        assert!(err.to_string().contains("twice"), "{err}");
+
+        let interleaved = layer_at(
+            dir.path(),
+            "b",
+            RECORD_BLOCK_TARGET,
+            &[(0, "zero"), (2, "two")],
+        );
+        let err = coalesce_to(dir.path(), "c2", &[&a, &interleaved], RECORD_BLOCK_TARGET)
+            .expect_err("interleaving is refused");
+        assert!(err.to_string().contains("interleaved"), "{err}");
+
+        assert!(coalesce_to(dir.path(), "c3", &[&a], RECORD_BLOCK_TARGET).is_err());
+    }
 }

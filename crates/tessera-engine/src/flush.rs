@@ -46,7 +46,7 @@ use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{BufferedItem, Overlay};
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_store::manifest::{DictExtent, FileDigest, Quantisation};
+use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::{write_flush_segment, FlushInput, FlushRow};
@@ -185,6 +185,10 @@ pub(crate) struct FlushContext {
     /// is the *render* tail the segment writer takes, this one is entity-space and never reaches a
     /// row (per-point-attributes §3.9).
     pub(crate) filter_schema: Vec<FilterColumnSpec>,
+    /// The blob-resident columns — neither indexed nor rendered, and never a category
+    /// (records §4.2) — and where each one's value sits in a buffered row's positional scalar
+    /// list. The third home's schema, beside the other two's.
+    pub(crate) record_schema: Vec<RecordColumnSpec>,
     /// The dictionary the plan's terms were resolved against, and the one promotion extends.
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every **extension** term id this plan's items carry (§3.2).
@@ -240,6 +244,14 @@ pub(crate) struct CompletedFlush {
     /// (`filter-index.md` §2.1). Their digests are already in `files`, and each is opened on the
     /// pool so that publication composes a pointer rather than doing file IO on the executor.
     pub(crate) filter_extents: Vec<FlushedExtent>,
+    /// This flush's record-blob extent — the flushed entities' blob rows in their own blocks,
+    /// has-row bitmap and directory (records §7) — or `None` where the schema declares no
+    /// blob-resident column, in which case the file set owes nothing (the set stays a function of
+    /// the schema, index §2.5's property). The three files' digests are already in `files`;
+    /// publication pushes this entry onto the manifest's `record_extents` and nothing more —
+    /// unlike a filter extent, no live reader composes it, because drill-down opens the stack
+    /// from the manifest.
+    pub(crate) record_extent: Option<RecordExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
@@ -390,6 +402,17 @@ pub(crate) fn execute_flush(
         }
     }
 
+    // ---- the record-blob extent (records §7) ------------------------------------------------
+    let record_extent = write_record_extent(&plan, &ctx)?;
+    if let Some(extent) = &record_extent {
+        for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+            files.insert(
+                rel.clone(),
+                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+            );
+        }
+    }
+
     let seg_dir = segment_dir(&ctx);
     let segment = SegmentData {
         seg_id: ctx.seg_id.clone(),
@@ -413,6 +436,7 @@ pub(crate) fn execute_flush(
         locator_extent: out.locator_extent,
         dict_extent,
         filter_extents,
+        record_extent,
         files,
         tier,
         tier_path: tier_rel,
@@ -633,8 +657,12 @@ fn write_filter_extents(
                     ))
                 })
         };
-        let values = tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
-            .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        let values = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Mapped,
+        )
+        .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
         out.push(FlushedExtent {
             column: spec.name.clone(),
             values_rel: rel(&values_path)?,
@@ -788,6 +816,162 @@ fn extent_values(
         ScalarType::Utf8 => unreachable!("utf8 is handled above"),
     };
     Ok((codes, presence))
+}
+
+/// One blob-resident column, and where its value sits in a buffered row's positional scalar list.
+///
+/// The index is positional against `MANIFEST.declared_scalars` — [`FilterColumnSpec`]'s contract,
+/// for its reason — and it is also the row's **field tag**: the blob's format tags a field by the
+/// column's position in the declaration (records §3), which is the same identity the build's blob
+/// stage writes, so a flushed row and a built one carry one tag for one column.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordColumnSpec {
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) ty: ScalarType,
+}
+
+/// Write this flush's record-blob extent — the flushed entities' blob rows, in their own blocks,
+/// has-row bitmap and directory under `attrs/record/extents/` — or nothing where the schema
+/// declares no blob-resident column (records §7).
+///
+/// **Written whenever the schema owes it, even if no flushed entity carries a blob value**: an
+/// empty extent is a valid blob (zero blocks, zero rows) and costs a few hundred bytes, and the
+/// file set stays a function of the schema rather than of the data — `write_filter_extents`'
+/// property, kept here for the same operator-predictability reason.
+///
+/// **A deleted entity is already gone from the plan**, so its row is never written — which keeps
+/// Rule F the only route by which a deletion touches the blob, exactly as it keeps it the only
+/// route for the value columns. A suppressed entity's row **is** written: the blob must hold what
+/// a later unsuppress reveals, and Rule S forbids this pass any opinion about it.
+///
+/// The extent is reopened before it is named, so a writer defect refuses the flush here rather
+/// than publishing a manifest whose extent the fail-closed reader then refuses on every
+/// drill-down.
+fn write_record_extent(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<Option<RecordExtent>, FlushFailed> {
+    if ctx.record_schema.is_empty() {
+        return Ok(None);
+    }
+    let extents_rel = format!("partitions/{}/attrs/record/extents", ctx.partition);
+    let extents_dir = ctx.prefix_dir.join(&extents_rel);
+    std::fs::create_dir_all(&extents_dir)
+        .map_err(|e| FlushFailed(format!("record extent dir: {e}")))?;
+    let extent = RecordExtent {
+        blocks: format!("{extents_rel}/{}.blocks.bin", ctx.seg_id),
+        hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
+        directory: format!("{extents_rel}/{}.directory.arrow", ctx.seg_id),
+    };
+    let blocks_path = ctx.prefix_dir.join(&extent.blocks);
+    let hasrow_path = ctx.prefix_dir.join(&extent.hasrow);
+    let directory_path = ctx.prefix_dir.join(&extent.directory);
+    let mut writer = tessera_filter_write::RecordBlobWriter::create(
+        &blocks_path,
+        &hasrow_path,
+        &directory_path,
+        tessera_filter::RECORD_BLOCK_TARGET,
+    )
+    .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+
+    let mut fields: Vec<tessera_filter::RecordField> = Vec::with_capacity(ctx.record_schema.len());
+    for (entity, item) in &plan.items {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            FlushFailed(format!(
+                "entity {} does not fit the u32 entity space (I9's ceiling)",
+                entity.raw()
+            ))
+        })?;
+        fields.clear();
+        for spec in &ctx.record_schema {
+            let value = item.scalars.get(spec.index).ok_or_else(|| {
+                FlushFailed(format!(
+                    "a buffered row carries {} scalars, but column '{}' is declared at position {}",
+                    item.scalars.len(),
+                    spec.name,
+                    spec.index
+                ))
+            })?;
+            let Some(value) = record_value_of(value, spec)? else {
+                continue;
+            };
+            let tag = u16::try_from(spec.index).map_err(|_| {
+                FlushFailed(format!(
+                    "column '{}' is declared at position {}, past the u16 field-tag space",
+                    spec.name, spec.index
+                ))
+            })?;
+            fields.push(tessera_filter::RecordField { tag, value });
+        }
+        if fields.is_empty() {
+            // An entity with no blob-resident value has no row and no has-row bit (records §3).
+            continue;
+        }
+        writer
+            .push_row(entity, &fields)
+            .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+    tessera_filter::RecordBlob::open(
+        &blocks_path,
+        &hasrow_path,
+        &directory_path,
+        tessera_filter::Access::Mapped,
+    )
+    .map_err(|e| FlushFailed(format!("record extent does not reopen: {e}")))?;
+    Ok(Some(extent))
+}
+
+/// One buffered value as the blob row carries it, or `None` where the entity carries nothing in
+/// this column — `WalScalar::Null` being the one spelling of absence every non-category family
+/// has (a category is never blob-resident, so its reserved code needs no arm here).
+///
+/// **The declared type is checked, not assumed.** The ingest plane validated the batch against
+/// the declaration, so a mismatch here is a defect on the write path — and storing a value this
+/// code mis-transcribed would serve it at every later drill-down, so it fails the flush exactly
+/// as `extent_values`' `wrong` does.
+fn record_value_of(
+    value: &WalScalar,
+    spec: &RecordColumnSpec,
+) -> Result<Option<tessera_filter::RecordValue>, FlushFailed> {
+    use tessera_filter::RecordValue;
+    let wrong = || {
+        FlushFailed(format!(
+            "column '{}' is declared {:?} but a buffered row carries {value:?}",
+            spec.name, spec.ty
+        ))
+    };
+    macro_rules! expect {
+        ($variant:ident) => {
+            match value {
+                WalScalar::$variant(x) => RecordValue::$variant(*x),
+                WalScalar::Null => return Ok(None),
+                _ => return Err(wrong()),
+            }
+        };
+    }
+    Ok(Some(match spec.ty {
+        ScalarType::Bool => expect!(Bool),
+        ScalarType::U8 => expect!(U8),
+        ScalarType::U16 => expect!(U16),
+        ScalarType::U32 => expect!(U32),
+        ScalarType::U64 => expect!(U64),
+        ScalarType::I8 => expect!(I8),
+        ScalarType::I16 => expect!(I16),
+        ScalarType::I32 => expect!(I32),
+        ScalarType::I64 => expect!(I64),
+        ScalarType::F32 => expect!(F32),
+        ScalarType::F64 => expect!(F64),
+        ScalarType::TimestampUs => expect!(TimestampUs),
+        ScalarType::Utf8 => match value {
+            WalScalar::Utf8(text) => RecordValue::Utf8(text.clone()),
+            WalScalar::Null => return Ok(None),
+            _ => return Err(wrong()),
+        },
+    }))
 }
 
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it
