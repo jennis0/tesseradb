@@ -1,0 +1,16 @@
+reading /home/joe/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json ...
+read 2400000 records in 64.8 s (snapshot order = submission order = entity order)
+
+block target 256 KiB (RECORD_BLOCK_TARGET), zstd level as shipped, 2400000 entities
+
+shape                rows    src B/e framed B/e   blocks fmt ratio src ratio  B/e all    us/read
+title             2400000      75.56      90.56      830      2.54      2.12    39.78      270.1
+  title: blocks 85546439 B, hasrow 527 B, directory 9928674 B, 2000 of 2000 reads hit a row
+mixed             2400000     244.02     314.87     2885      3.00      2.33   109.00      235.8
+  mixed: blocks 251600720 B, hasrow 527 B, directory 9995810 B, 2000 of 2000 reads hit a row
+mixed-abstract    2400000    1262.46    1340.31    12306      2.74      2.58   492.73      265.7
+  mixed-abstract: blocks 1172251588 B, hasrow 527 B, directory 10303458 B, 2000 of 2000 reads hit a row
+
+fmt ratio = framed row bytes / blocks.bin — the figure comparable to the string-storage
+probe's 2.44x. src ratio = source value bytes / blocks.bin, framing counted as a cost.
+B/e all = (blocks + hasrow + directory) / entities: what the corpus pays.

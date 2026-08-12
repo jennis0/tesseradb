@@ -1,0 +1,60 @@
+# `schema-render.toml` with `index = true` added to every column: the "affords both routes" case.
+#
+# Its only purpose is to make 0068's route rule observable. A render-only category has one
+# placement, so `evaluate_routed` can only answer it in row space and the entity route cannot be
+# timed against it on the same request. With both flags set, `prefer_row` — the engine's
+# `rows_in_ranges <= |M_auth|` — decides, and the two routes become comparable on one fixture.
+#
+# The 2.4M arXiv fixture's render columns, on the epic-1 schema surface.
+#
+# `data/scaled/attrs/schema.toml` predates the surface records §2 settled — it still writes
+# `used_for = ["render"]`, which the current parser refuses — so this is the same five columns
+# restated as the placement booleans. Nothing else differs: same source file, same vocabulary
+# bindings, same widths, same codes.
+#
+# `archive` (u8, ~20 keys) and `primary_category` (u16, ~176 keys) are what the row-space filter
+# route scans: `scan_rows` requires a rendered *category* column at a code width, and the two
+# widths let a per-row constant be attributed to the width rather than averaged over it.
+#
+# Build with:
+#   tessera build --points data/scaled/attrs/points.parquet \
+#                 --pairs  data/scaled/pairs/categories-subclass.pairs.parquet \
+#                 --schema probes/2026-08-12-epic1-measurements/schema-render.toml \
+#                 --values archive=data/scaled/attrs/archive.parquet \
+#                 --values primary_category=data/scaled/attrs/primary_category.parquet \
+#                 --extent 0,65536,0,65536 --slice s0 --limit 2422486
+
+[[attribute]]
+name       = "archive"
+type       = "category"
+width      = "u8"
+render     = true
+index      = true
+vocabulary = "declared"
+values_key = "archive"
+listing    = "public"
+
+[[attribute]]
+name       = "primary_category"
+type       = "category"
+width      = "u16"
+render     = true
+index      = true
+vocabulary = "declared"
+values_key = "primary_category"
+listing    = "public"
+
+[[attribute]]
+name   = "author_count"
+type   = "u8"
+render = true
+
+[[attribute]]
+name   = "submitted_at"
+type   = "i64"
+render = true
+
+[[attribute]]
+name   = "recency"
+type   = "f32"
+render = true

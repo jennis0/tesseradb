@@ -28,6 +28,13 @@ tessera-lifecycle = { path = "../tessera-lifecycle" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-build = { path = "../tessera-build" }
 tessera-server = { path = "../tessera-server" }
+# `record_blob_ratio` writes and reads the record blob through its own shipped writer and reader
+# rather than a transcription of the format — which is the whole point of measuring the *built*
+# ratio rather than re-measuring the probe. `check-layers.sh`'s deny list forbids
+# `tessera-filter -> tessera-store`, `-> tessera-spatial` and `tessera-filter -> tessera-filter-write`;
+# nothing there constrains this crate, which already sits above every other.
+tessera-filter = { path = "../tessera-filter" }
+tessera-filter-write = { path = "../tessera-filter-write" }
 
 croaring = { workspace = true }
 # Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
