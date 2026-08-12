@@ -113,3 +113,26 @@ paths = [
   "reference/*",
   "conformance/*",
 ]
+
+# Wave 3 — the epic's tail, dispatched after wave 2 merged (controller, 2026-08-12).
+# `docs` owns the amendment slice records §13 enumerates: the corpus documents that describe the
+# declaration surface and now contradict the landed one. The three normative designs stay frozen
+# above — an amendment to those is the owner's, through the design process, not a track's.
+[track.docs]
+paths = [
+  "docs/design/per-point-attributes.md",
+  "docs/design/filter-index.md",
+  "docs/design/filter-surface.md",
+  "docs/design/contracts.md",
+  "docs/design/README.md",
+  "docs/roadmap.md",
+]
+
+# `bench` owns the measurement arms and the memo they produce. It writes no engine code: a
+# measurement task that edits what it measures has stopped being one.
+[track.bench]
+paths = [
+  "crates/tessera-bench/*",
+  "docs/evidence/memos/*",
+  "probes/*",
+]
