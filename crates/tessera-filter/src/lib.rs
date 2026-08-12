@@ -46,6 +46,7 @@ mod column;
 mod extent;
 mod pack;
 mod record;
+mod record_stack;
 mod values;
 mod values_writer;
 
@@ -55,5 +56,6 @@ pub use record::{
     encode_row, RecordBlob, RecordError, RecordField, RecordValue, RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
+pub use record_stack::{RecordExtentPaths, RecordStack};
 pub use values::{Access, Codes, Endpoint, Scalar, ValueColumn, PRESENCE_FILE, VALUES_FILE};
 pub use values_writer::{write_value_column, ColumnKind, ValueColumnWriter};

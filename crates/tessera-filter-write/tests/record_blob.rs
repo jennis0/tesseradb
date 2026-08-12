@@ -377,3 +377,65 @@ fn a_missing_file_refuses_at_open() {
     std::fs::remove_file(&p.directory).expect("remove");
     assert!(open(&p).is_err());
 }
+
+/// The layered stack answers from whichever layer holds the entity, and disjointness (I9) is
+/// what the construction rests on: a base and two extents with interleaved entity ranges each
+/// answer their own rows, an entity in no layer is an ordinary absence, and a corrupt extent
+/// refuses the whole stack rather than downgrading to the layers that opened.
+#[test]
+fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
+    use tessera_filter::{RecordExtentPaths, RecordStack};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Base: ranks 0..8 (entities 3,10,17,...). Extents: two flushes over higher entities that
+    // interleave with each other but never with the base or one another.
+    let base = dir.path().join("base");
+    std::fs::create_dir_all(&base).expect("mkdir");
+    write_fixture(&base, 8, 90);
+
+    let write_extent = |name: &str, entities: &[u32]| -> RecordExtentPaths {
+        let d = dir.path().join(name);
+        std::fs::create_dir_all(&d).expect("mkdir");
+        let p = paths(&d);
+        let mut writer =
+            RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, 90).expect("create");
+        for &e in entities {
+            writer.push_row(e, &fields_for(e)).expect("push");
+        }
+        writer.finish().expect("finish");
+        RecordExtentPaths {
+            blocks: p.blocks,
+            hasrow: p.hasrow,
+            directory: p.directory,
+        }
+    };
+    let extent_a = write_extent("flush-a", &[1_000, 1_004, 1_010]);
+    let extent_b = write_extent("flush-b", &[1_001, 1_002, 1_020]);
+
+    let stack = RecordStack::open(
+        Some(&base),
+        &[extent_a.clone(), extent_b],
+        Access::Mapped,
+    )
+    .expect("open the stack");
+
+    for entity in [3u32, 52, 1_000, 1_010, 1_001, 1_020] {
+        let fields = stack
+            .fields_of(entity)
+            .expect("read")
+            .unwrap_or_else(|| panic!("entity {entity} has a row in exactly one layer"));
+        assert_eq!(fields, fields_for(entity), "entity {entity}");
+    }
+    assert_eq!(
+        stack.fields_of(999).expect("read"),
+        None,
+        "an entity in no layer is an ordinary absence"
+    );
+    stack.self_check().expect("every layer self-checks");
+
+    // A corrupt layer refuses the stack at open — fail-closed, never a downgrade.
+    let bytes = std::fs::read(&extent_a.blocks).expect("read blocks");
+    std::fs::write(&extent_a.blocks, &bytes[..bytes.len() - 1]).expect("truncate");
+    let refused = RecordStack::open(Some(&base), &[extent_a], Access::Mapped);
+    assert!(refused.is_err(), "a truncated extent refuses the whole stack");
+}
