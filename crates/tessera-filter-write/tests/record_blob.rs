@@ -117,7 +117,7 @@ fn an_oversize_row_gets_a_block_of_its_own() {
     };
     writer.push_row(1, &fields_for(1)).expect("a small row");
     writer
-        .push_row(2, &[huge.clone()])
+        .push_row(2, std::slice::from_ref(&huge))
         .expect("the oversize row");
     writer
         .push_row(3, &fields_for(3))

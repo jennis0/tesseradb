@@ -1567,6 +1567,9 @@ pub(crate) fn write_record_blob(
 
     let n = by_entity.first().map_or(0, Vec::len);
     let mut fields: Vec<RecordField> = Vec::with_capacity(blob_columns.len());
+    // A range loop on purpose: each entity gathers across *several* parallel columns, which is
+    // not the single-slice shape `needless_range_loop`'s rewrite fits.
+    #[allow(clippy::needless_range_loop)]
     for entity in 0..n {
         fields.clear();
         for &column in &blob_columns {

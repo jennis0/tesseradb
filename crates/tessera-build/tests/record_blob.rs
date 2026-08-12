@@ -35,18 +35,18 @@ const N: u64 = 40;
 /// value and must survive as one.
 fn note_of(e: u64) -> Option<String> {
     match e {
-        e if e % 5 == 0 => None,
+        e if e.is_multiple_of(5) => None,
         3 => Some(String::new()),
         e => Some(format!("note-{e}")),
     }
 }
 
 fn score_of(e: u64) -> Option<f64> {
-    (e % 7 != 0).then_some(e as f64 * 0.5 + 0.25)
+    (!e.is_multiple_of(7)).then_some(e as f64 * 0.5 + 0.25)
 }
 
 fn count_of(e: u64) -> Option<i64> {
-    (e % 3 != 0).then_some((e * 11) as i64)
+    (!e.is_multiple_of(3)).then_some((e * 11) as i64)
 }
 
 /// A render-only column, present so the test can assert a rendered column contributes nothing to
