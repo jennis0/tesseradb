@@ -10,6 +10,16 @@ AMD Ryzen 9 5900X (Zen 3, 12 cores, 32 MiB L3), 47 GB RAM · **Harness:**
 and one is measured only part of the way; every figure below is marked, and the part that is not
 measured is named rather than filled in.
 
+> **Superseded in part, same day — the row route's constant.** Result 2 below measured the route
+> as it stood; the cause of its 4.8× gap turned out to be per-row type dispatch in `scan_rows`,
+> and hoisting that out of the row loop moved the constant to **0.22–0.45 ns per row** (a 6.5–10.9×
+> A/B, in
+> [`probes/2026-08-12-epic1-measurements/results.md`](../../../probes/2026-08-12-epic1-measurements/results.md)'s
+> follow-up section). Results 2 and 3's *figures* are therefore the pre-optimisation code's; their
+> *findings* — the invariance, the fixed floor, the width-insensitivity that identified the cause,
+> and result 4's refutation of the probe's ratio — all stand. Nothing below is edited; this note
+> says which numbers the shipped code has since moved past.
+
 ## Results
 
 **1. The blob's mixed-row compression: the assumption holds, with margin.** §3 marks the mixed-row

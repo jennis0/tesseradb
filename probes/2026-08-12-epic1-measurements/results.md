@@ -72,3 +72,42 @@ entity-space index as well.
   flag is set in the workspace, so every constant here is one draw.
 - **The coalesce and fold rewrite rates** (records §11 item 7), and **list timing on real skew**
   (item 6's fourth residual). Untouched.
+
+---
+
+## Follow-up, same day: hoisting the dispatch out of the row loop
+
+The campaign above found the built route 4.8× above the probe and named no cause. The cause was
+`scan_rows`' inner loop, which resolved the segment, matched the `CodeSlice` width and matched the
+`RowPredicate` **per row** — roughly four branches and two bounds checks per row, none hoistable,
+and no vectorisable compare anywhere in it. The tell was in this campaign's own data: the constant
+was *insensitive to the code width*, which a loop bound by moving one or two bytes per row could
+not be.
+
+Deciding the width and the predicate once per contiguous run inside one segment, leaving a
+monomorphic compare over a slice (`scan_run`/`run_matching`):
+
+| shape, single-threaded | before | after | ratio |
+|---|---|---|---|
+| 343,391-row viewport, 10⁸ | 2.462 ns/row (0.845 ms) | 0.376 ns/row (0.129 ms) | **6.5×** |
+| whole slice, 10⁸, selective | 2.390 ns/row (238.95 ms) | 0.220 ns/row (22.02 ms) | **10.9×** |
+| whole slice, 10⁸, broad | 2.532 ns/row (253.15 ms) | 0.299 ns/row (29.87 ms) | **8.5×** |
+| whole slice, 10⁸, 12 threads | 33–38 ms | **3.6–4.7 ms** | ~8× |
+
+*A/B in one session on one binary pair, `git stash` between them, same fixtures, `--repeat 3`.
+Raw: `run-row-route-100000000-hoisted.txt`, and `-2422486-`/`-25000000-` for the other scales.*
+
+**The constant is now 0.22–0.45 ns per row across 2.4M, 25M and 10⁸** — at or below the standalone
+probe's own 0.48–0.73, which is what the diagnosis predicted: the probe measured a monomorphic
+compare and the engine had been running a polymorphic one. The invariance in corpus and viewport
+size is unchanged.
+
+Two consequences worth stating. The **coarse-zoom whole-slice cell now costs 22–30 ms
+single-threaded at 10⁸** against 239–299 ms before, so it is inside the 100 ms interaction target
+*without* the tile sweep's parallelism rather than only with it. And the **fixed floor is
+unchanged** — a 3,504-row viewport still measures 15.6 ns/row, bitmap setup amortised over too few
+rows — so the small-viewport observation in this campaign's §2 stands as written.
+
+Not measured here: whether the compare vectorises (the diagnosis says the loop can now be
+vectorised; whether LLVM does it under a data-dependent push is unchecked), and the `i64` case,
+which no column reaches until 0064's render half lands.

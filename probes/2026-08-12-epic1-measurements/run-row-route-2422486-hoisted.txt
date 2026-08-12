@@ -1,0 +1,49 @@
+fixture /tmp/tessera-bench/fixtures/2422486/attrs-subclass — 2422486 items, slice s0, 176 terms, 12 cores
+
+== viewport: the built route's per-row cost ==
+column                thr         rows    matched    sel %    cross ms      ns/row   total ms
+archive=acc-phys        1         3504          0    0.000       0.054      15.551      0.078
+archive=acc-phys        1       139920          0    0.000       0.088       0.630      0.387
+archive=acc-phys        1      1068439         44    0.004       0.322       0.302      3.383
+archive=acc-phys        1      2422486         45    0.002       0.638       0.263      8.196
+archive=hep-lat         1         3504          0    0.000       0.056      15.902      0.086
+archive=hep-lat         1       139920         40    0.029       0.091       0.649      0.409
+archive=hep-lat         1      1068439       3108    0.291       0.348       0.326      3.270
+archive=hep-lat         1      2422486      17852    0.737       0.803       0.332      9.831
+primary_category=acc-phys      1         3504          0    0.000       0.055      15.760      0.078
+primary_category=acc-phys      1       139920          0    0.000       0.087       0.621      0.380
+primary_category=acc-phys      1      1068439         44    0.004       0.373       0.349      3.105
+primary_category=acc-phys      1      2422486         45    0.002       0.685       0.283      8.257
+primary_category=math.CT      1         3504          1    0.029       0.054      15.339      0.078
+primary_category=math.CT      1       139920         25    0.018       0.092       0.656      0.433
+primary_category=math.CT      1      1068439        191    0.018       0.324       0.303      3.338
+primary_category=math.CT      1      2422486       3949    0.163       0.721       0.298      8.898
+archive=acc-phys       12         3504          0    0.000       0.325      92.771      0.353
+archive=acc-phys       12       139920          0    0.000       0.676       4.834      0.981
+archive=acc-phys       12      1068439         44    0.004       0.646       0.605      3.510
+archive=acc-phys       12      2422486         45    0.002       0.497       0.205      3.304
+archive=hep-lat        12         3504          0    0.000       0.312      89.105      0.339
+archive=hep-lat        12       139920         40    0.029       0.928       6.634      1.243
+archive=hep-lat        12      1068439       3108    0.291       0.513       0.480      3.592
+archive=hep-lat        12      2422486      17852    0.737       0.737       0.304      4.175
+primary_category=acc-phys     12         3504          0    0.000       0.307      87.590      0.334
+primary_category=acc-phys     12       139920          0    0.000       0.385       2.754      0.704
+primary_category=acc-phys     12      1068439         44    0.004       0.636       0.595      3.667
+primary_category=acc-phys     12      2422486         45    0.002       0.459       0.189      3.320
+primary_category=math.CT     12         3504          1    0.029       0.321      91.576      0.353
+primary_category=math.CT     12       139920         25    0.018       0.344       2.460      0.665
+primary_category=math.CT     12      1068439        191    0.018       0.493       0.461      3.320
+primary_category=math.CT     12      2422486       3949    0.163       0.596       0.246      3.602
+
+== coarse: zoom 0, the whole extent — the domain is the slice ==
+column                thr         rows    matched    cross ms      ns/row   total ms
+archive=acc-phys        1      2422486         45       0.616       0.254      0.708
+archive=hep-lat         1      2422486      17852       0.768       0.317      1.058
+primary_category=acc-phys      1      2422486         45       0.699       0.289      0.760
+primary_category=math.CT      1      2422486       3949       0.634       0.262      0.723
+archive=acc-phys       12      2422486         45       0.590       0.243      0.641
+archive=hep-lat        12      2422486      17852       0.566       0.233      0.720
+primary_category=acc-phys     12      2422486         45       0.376       0.155      0.429
+primary_category=math.CT     12      2422486       3949       0.493       0.204      0.598
+
+(no --both fixture given; the entity/row comparison is skipped)

@@ -2095,21 +2095,6 @@ enum RowPredicate<'a> {
     Present,
 }
 
-impl RowPredicate<'_> {
-    #[inline]
-    fn matches(&self, code: u32) -> bool {
-        // Code 0 first, unconditionally: the absent sentinel matches neither a value list —
-        // even one that (via an unresolvable key) *names* 0 — nor presence.
-        if code == 0 {
-            return false;
-        }
-        match self {
-            RowPredicate::CodeIn(codes) => codes.contains(&code),
-            RowPredicate::Present => true,
-        }
-    }
-}
-
 /// One render column's typed slice per segment — resolved once per leaf evaluation, exactly as
 /// the gather resolves per segment rather than per row.
 enum CodeSlice<'a> {
@@ -2118,13 +2103,96 @@ enum CodeSlice<'a> {
     U32(&'a [u32]),
 }
 
-impl CodeSlice<'_> {
-    #[inline]
-    fn code_at(&self, idx: usize) -> u32 {
-        match self {
-            CodeSlice::U8(v) => v[idx] as u32,
-            CodeSlice::U16(v) => v[idx] as u32,
-            CodeSlice::U32(v) => v[idx],
+/// One contiguous run of rows inside one segment, tested against the predicate.
+///
+/// **The dispatch is hoisted out of the row loop, and that is the whole point of this function.**
+/// The obvious shape — resolve the segment, match the code width and match the predicate for each
+/// row in turn — costs about four branches and two bounds checks per row, none of them hoistable,
+/// and it measured 2.5–3.4 ns per row against the 0.48–0.73 ns a flat compare reaches
+/// (`docs/evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md` §2). The tell in
+/// that data is that the constant was **insensitive to the code width**: a loop bound by moving
+/// one or two bytes per row would not be, so the loop was bound by its own branching. Deciding the
+/// width and the predicate once per run leaves a monomorphic compare over a slice, which is the
+/// loop the probe measured.
+///
+/// The absent sentinel keeps its rule at every instantiation: code 0 matches nothing — not a value
+/// list that names it, not the presence half of a negation — because the hot column stores absence
+/// as 0 and a scan that let it match would resurrect every valueless row (the 2026-08-11 defect).
+/// `run_matching` never sees it: each caller below excludes it before the loop, which is the same
+/// statement made where it cannot cost a comparison per row.
+#[inline]
+fn scan_run(
+    slice: &CodeSlice<'_>,
+    base: u32,
+    run: Range<u32>,
+    predicate: &RowPredicate<'_>,
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+) {
+    let lo = (run.start - base) as usize;
+    let hi = (run.end - base) as usize;
+    match predicate {
+        // The common shape by far — `eq`, and `in` over a single surviving code. One comparison
+        // per row against a constant.
+        RowPredicate::CodeIn(codes) if codes.len() == 1 => {
+            let needle = codes[0];
+            if needle == 0 {
+                return; // The sentinel names no row; the whole run is a non-match.
+            }
+            match slice {
+                // A needle outside the column's code space matches no row, and the width test
+                // happens once per run rather than once per comparison.
+                CodeSlice::U8(v) => {
+                    if let Ok(n) = u8::try_from(needle) {
+                        run_matching(&v[lo..hi], run.start, rows, buf, |c| *c == n);
+                    }
+                }
+                CodeSlice::U16(v) => {
+                    if let Ok(n) = u16::try_from(needle) {
+                        run_matching(&v[lo..hi], run.start, rows, buf, |c| *c == n);
+                    }
+                }
+                CodeSlice::U32(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c == needle),
+            }
+        }
+        RowPredicate::CodeIn(codes) => match slice {
+            CodeSlice::U8(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| {
+                *c != 0 && codes.contains(&u32::from(*c))
+            }),
+            CodeSlice::U16(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| {
+                *c != 0 && codes.contains(&u32::from(*c))
+            }),
+            CodeSlice::U32(v) => {
+                run_matching(&v[lo..hi], run.start, rows, buf, |c| {
+                    *c != 0 && codes.contains(c)
+                })
+            }
+        },
+        RowPredicate::Present => match slice {
+            CodeSlice::U8(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c != 0),
+            CodeSlice::U16(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c != 0),
+            CodeSlice::U32(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c != 0),
+        },
+    }
+}
+
+/// The monomorphic inner loop every [`scan_run`] arm resolves to: one slice, one test, one
+/// buffered flush. Generic over the code type so each width compiles to its own loop.
+#[inline]
+fn run_matching<T: Copy>(
+    values: &[T],
+    first_row: u32,
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+    matches: impl Fn(&T) -> bool,
+) {
+    for (offset, code) in values.iter().enumerate() {
+        if matches(code) {
+            buf.push(first_row + offset as u32);
+            if buf.len() == 1024 {
+                rows.add_many(buf);
+                buf.clear();
+            }
         }
     }
 }
@@ -2172,18 +2240,18 @@ fn scan_rows(
             // domain's ranges never span rows outside a segment, but a *merged* range can span
             // two adjacent segments.
             let mut seg = slices.partition_point(|&(base, _)| base <= chunk.start) - 1;
-            for row in chunk.clone() {
+            let mut row = chunk.start;
+            while row < chunk.end {
                 while seg + 1 < slices.len() && slices[seg + 1].0 <= row {
                     seg += 1;
                 }
+                // The run this segment owns: to the next segment's base, or the chunk's end.
+                let seg_end = slices
+                    .get(seg + 1)
+                    .map_or(chunk.end, |&(next_base, _)| next_base.min(chunk.end));
                 let (base, slice) = &slices[seg];
-                if predicate.matches(slice.code_at((row - base) as usize)) {
-                    buf.push(row);
-                    if buf.len() == 1024 {
-                        rows.add_many(&buf);
-                        buf.clear();
-                    }
-                }
+                scan_run(slice, *base, row..seg_end, &predicate, &mut rows, &mut buf);
+                row = seg_end;
             }
             rows.add_many(&buf);
             rows

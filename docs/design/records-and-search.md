@@ -609,18 +609,30 @@ index §5.
 A column with `render = true` is filterable **over the request's own rows**, against the
 hot column in `columns.arrow`, producing `FilterRows::Viewport { rows, domain }` — a type that
 exists, is consumed by `EffectiveMask::with_filter`, and is exact over its domain (placement §2).
-**The built route costs 2.5–3.4 ns per viewport row** — invariant in corpus size, mask shape and
+**The built route costs 0.22–0.45 ns per viewport row** — invariant in corpus size, mask shape and
 coverage across 2.4M, 25M and 10⁸, and across viewports from 3×10⁵ rows to a whole slice
-([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), *measured*). The probe's 0.48–0.73 ns described the approach rather than shipped code
-(review N4) and was optimistic by ~4.8×; its *invariance* claim is confirmed, which is the half
-the design rests on. A 343,391-row viewport at 10⁸ costs 0.89–1.05 ms.
+([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md); *measured*). A 343,391-row viewport at 10⁸ costs 0.13–0.16 ms.
+
+**That constant is the loop's shape, not the column's, and it was found by measuring.** As first
+built the scan resolved the segment and matched both the code width and the predicate *per row*,
+which measured 2.5–3.4 ns — 4.8× the standalone probe's 0.48–0.73 and, tellingly, **insensitive to
+the code width**, which a loop bound by moving one or two bytes per row could not be. Deciding the
+width and the predicate once per contiguous run leaves a monomorphic compare over a slice and
+recovers 6.5–10.9×. The lesson generalises past this route: in a per-row loop over the hot column,
+an enum matched inside the loop costs more than the comparison it guards.
+
+A **fixed floor of tens of microseconds** survives the change — bitmap setup, and rayon fan-out on
+the parallel path — so below roughly 10⁵ rows in the domain the per-row figure rises and the
+parallel path is slower than the serial one. It is a fraction of a millisecond and inside §6.4's
+budget, but it is the shape a per-keystroke filter over a small viewport takes.
 
 **The probe's 7–1,269× advantage over the entity route is refuted for a category, and the reason
 matters more than the number.** The probe timed the entity side as a per-entity value-column
 scan; the built engine answers an indexed category from its **derived postings** (0063) in 15–26 µs
 at 10⁸, which no scan can approach. Paired per value at a viewport the row route measures
-0.63–2.58× the entity route's cost — winning on broad predicates, losing on selective ones — and
-in the coarse-zoom cell the entity route is **100–450× faster** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), *measured*). So the row
+0.09–0.27× the entity route's cost once the loop above is hoisted — it now wins at every viewport
+shape measured — while **in the coarse-zoom cell the entity route is still 8–45× faster**
+([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md); *measured*). So the row
 route's justification is **not** speed against an indexed column: it is that a rendered column is
 filterable *at all* with no entity-space copy, and that it needs nothing on the write side,
 because flush, merge and the fold already carry the scalar tail. Where a column affords both
@@ -630,10 +642,11 @@ than the probe's — see the note at its statement.
 **No entity-space copy is stored for a rendered number or datetime.** This is the store-once rule,
 scoped by §4.2's category exemption to the families it can safely reach (review B1): the hot
 column serves the viewport route above, and the coarse-zoom cell — where the view is the corpus
-and the row-space route degenerates to a whole-slice scan — is served by that scan, **measured 280–299 ms at 10⁸
-single-threaded and 33–38 ms on twelve cores** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)) — above the 42–260 ms the probe projected —
-and **modelled 2.80–2.99 s serial / 0.33–0.39 s parallel at 10⁹** on a constant flat within 10%
-from 25M to 10⁸, running inside the tile sweep's existing
+and the row-space route degenerates to a whole-slice scan — is served by that scan, **measured 22–30 ms at 10⁸
+single-threaded and 3.6–4.7 ms on twelve cores** ([the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md)) — inside the 100 ms interaction target
+without the sweep's parallelism rather than only with it — and **modelled 0.22–0.30 s serial /
+36–47 ms parallel at 10⁹** on a constant flat within 10% from 25M to 10⁸, running inside the tile
+sweep's existing
 parallelism. That is over the 100 ms target and inside the O(1 s) budget only with the parallelism
 the sweep already has; the alternative is a second copy of every rendered column, and placement
 §1's coarse-zoom result shows *neither* route dominating that cell. A future non-viewport filter
@@ -652,16 +665,18 @@ The route rule between the two, where a column affords both: **row space while
 `rows_in_ranges ≤ |M_auth|`, entity space past it** — both quantities the caller could compute,
 the same class of rule as surface §4's crossover (placement §3).
 
-**The rule was calibrated against the probe's constants, and those are refuted** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)): where the
-entity side is a category's derived postings the row route wins only on broad predicates, and a
-rule keyed on the request's row span cannot see selectivity, which is what the comparison turns
-on. The rule is therefore known to choose the slower route for a selective predicate over a
-column affording both, at a cost bounded by the viewport's own row span — sub-millisecond at the
-viewport shapes measured, which is why this is a calibration question and not a defect. **The
-rule stands as ruled** (0068) until the owner rules on the recalibration §11 item 6's remaining
-arm measures ([#100](https://github.com/jennis0/tessera-index/issues/100)); a column with *only*
-the row route — a rendered column with no entity-space copy, which is the case the operand exists
-for — is unaffected either way, having no alternative to choose.
+**Measurement supports the rule's shape, having first appeared to undermine it** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), and the
+campaign's follow-up). Against a category's derived postings the row route measures 0.09–0.27× the
+entity route's cost at every viewport shape measured, and 8–45× *worse* in the coarse-zoom cell —
+so row space at a viewport and entity space past it is the right direction, which is what the rule
+says. What the rule cannot see is selectivity, and the crossover it draws with the request's row
+span is not the one the costs actually cross at; the residual error is bounded by the viewport's
+own row span and measures tens of microseconds at the shapes tested. That is a calibration
+question, and it is
+[#100](https://github.com/jennis0/tessera-index/issues/100)'s — noting that a selectivity-aware
+rule would have to read a statistic about the principal's data, which §8.2 forbids a route rule to
+do. A column with *only* the row route — a rendered column with no entity-space copy, which is the
+case the operand exists for — is unaffected either way, having no alternative to choose.
 
 ### 6.3 The aggregate surface, and the row-bounded string route
 
