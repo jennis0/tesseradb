@@ -32,6 +32,10 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
+# The record blob's block compression (records-and-search §3). The same libzstd the parquet
+# feature above already links, taken directly for the whole-block frames the blob reads and
+# writes.
+zstd = "0.13"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 postcard = { version = "1", features = ["use-std"] }

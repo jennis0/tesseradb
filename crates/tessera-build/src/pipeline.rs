@@ -127,7 +127,11 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use tessera_authz::encode_posting;
-use tessera_filter::{Codes, ColumnKind, ValueColumnWriter};
+use tessera_filter::{
+    Codes, ColumnKind, RecordField, RecordValue, ValueColumnWriter, RECORD_BLOCKS_FILE,
+    RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
+};
+use tessera_filter_write::RecordBlobWriter;
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
@@ -1195,6 +1199,10 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
     let filter_paths = write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
+    // The record blob rides the same stage boundary, for the same two reasons: entity ids are
+    // final (I9) and the attribute values are in hand. Its files join the manifest digest at
+    // step 11 with everything else.
+    let record_paths = write_record_blob(&partition_dir, &args.schema, &attributes_by_entity)?;
     timer.end(BuildStage::FilterPostings, n);
 
     // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
@@ -1313,6 +1321,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         morton_path,
     ];
     other_paths.extend(filter_paths);
+    other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
     let report = write_manifests(
@@ -1502,6 +1511,133 @@ fn write_filter_postings_banded(
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// Write the record blob — `attrs/record/{blocks.bin,hasrow.roaring,directory.arrow}` — for every
+/// declared column that is neither indexed nor rendered, and return the paths so the manifest
+/// digests them like every base artefact (records §3, §7).
+///
+/// **The blob is the third home**: a column with neither flag has no entity-space structure and no
+/// slot in the hot column, so these files are the only place its values exist. When the schema
+/// declares no such column the stage writes nothing and the open demands nothing — the file set
+/// stays a function of the schema. (On this branch the schema *parse* still refuses a
+/// neither-column; the declaration surface that admits one lands with the `used_for` migration in
+/// this same epic, so the case is reachable programmatically and, after integration, from TOML.)
+///
+/// **Absence is per family, exactly as the value column spells it** (`write_column_values`): a
+/// category's absence is the reserved code 0, everything else's is `ScalarValue::Null`. An entity
+/// absent from every blob column gets no row and no has-row bit. The stage is otherwise
+/// family-agnostic — a blob row is bytes, whatever family supplied them — which is what makes the
+/// keyword epic's storage swap a tag rename plus rebuild rather than a format change. Whether a
+/// vocabulary-controlled category may be blob-resident at all is store-once's open ruling; this
+/// stage writes what the compiled placement says and takes no view.
+///
+/// The field tag is the column's position among `declared_scalars` — the same positional identity
+/// the hot column's tail and the ingest row vector already rely on — so drill-down resolves it
+/// against the manifest without any name table in the artefact.
+pub(crate) fn write_record_blob(
+    partition_dir: &Path,
+    schema: &crate::schema::Schema,
+    by_entity: &[Vec<ScalarValue>],
+) -> Result<Vec<PathBuf>> {
+    let blob_columns: Vec<usize> = schema
+        .attributes
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| !a.filter && !a.render)
+        .map(|(i, _)| i)
+        .collect();
+    if blob_columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `record` is reserved as a column name at parse (records §7, review N10), so this directory
+    // cannot collide with a declared column's.
+    let record_dir = partition_dir.join("attrs").join("record");
+    std::fs::create_dir_all(&record_dir).map_err(|e| BuildError::io(&record_dir, e))?;
+    let blocks_path = record_dir.join(RECORD_BLOCKS_FILE);
+    let hasrow_path = record_dir.join(RECORD_HASROW_FILE);
+    let directory_path = record_dir.join(RECORD_DIRECTORY_FILE);
+    let mut writer = RecordBlobWriter::create(
+        &blocks_path,
+        &hasrow_path,
+        &directory_path,
+        RECORD_BLOCK_TARGET,
+    )
+    .map_err(|e| BuildError::io(&blocks_path, e))?;
+
+    let n = by_entity.first().map_or(0, Vec::len);
+    let mut fields: Vec<RecordField> = Vec::with_capacity(blob_columns.len());
+    // A range loop on purpose: each entity gathers across *several* parallel columns, which is
+    // not the single-slice shape `needless_range_loop`'s rewrite fits.
+    #[allow(clippy::needless_range_loop)]
+    for entity in 0..n {
+        fields.clear();
+        for &column in &blob_columns {
+            let attribute = &schema.attributes[column];
+            let Some(value) = record_value_of(&by_entity[column][entity], attribute)? else {
+                continue;
+            };
+            let tag = u16::try_from(column).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "attribute '{}' is declared at position {column}, past the u16 field-tag \
+                     space",
+                    attribute.name
+                ))
+            })?;
+            fields.push(RecordField { tag, value });
+        }
+        if fields.is_empty() {
+            continue;
+        }
+        writer
+            .push_row(entity as u32, &fields)
+            .map_err(|e| BuildError::io(&blocks_path, e))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| BuildError::io(&blocks_path, e))?;
+    for path in [&blocks_path, &hasrow_path, &directory_path] {
+        fsync_file(path)?;
+    }
+    Ok(vec![blocks_path, hasrow_path, directory_path])
+}
+
+/// One staged value as the blob row carries it, or `None` where the entity carries nothing in
+/// this column — the per-family absence rule `write_record_blob`'s doc states.
+fn record_value_of(
+    value: &ScalarValue,
+    attribute: &crate::schema::Attribute,
+) -> Result<Option<RecordValue>> {
+    if attribute.vocabulary.is_some() {
+        let code = category_code(value, &attribute.name)?;
+        if code == tessera_store::vocabulary::ABSENT_CODE {
+            return Ok(None);
+        }
+        // The code at the declared width — the value the entity-space column would have stored,
+        // resolved to its key at drill-down through the manifest's vocabulary, never in the
+        // artefact.
+        return Ok(Some(match attribute.ty {
+            ScalarType::U8 => RecordValue::U8(code as u8),
+            ScalarType::U16 => RecordValue::U16(code as u16),
+            _ => RecordValue::U32(code),
+        }));
+    }
+    Ok(match value {
+        ScalarValue::Null => None,
+        ScalarValue::Bool(v) => Some(RecordValue::Bool(*v)),
+        ScalarValue::U8(v) => Some(RecordValue::U8(*v)),
+        ScalarValue::U16(v) => Some(RecordValue::U16(*v)),
+        ScalarValue::U32(v) => Some(RecordValue::U32(*v)),
+        ScalarValue::U64(v) => Some(RecordValue::U64(*v)),
+        ScalarValue::I8(v) => Some(RecordValue::I8(*v)),
+        ScalarValue::I16(v) => Some(RecordValue::I16(*v)),
+        ScalarValue::I32(v) => Some(RecordValue::I32(*v)),
+        ScalarValue::I64(v) => Some(RecordValue::I64(*v)),
+        ScalarValue::F32(v) => Some(RecordValue::F32(*v)),
+        ScalarValue::F64(v) => Some(RecordValue::F64(*v)),
+        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(*v)),
+        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v.clone())),
+    })
 }
 
 /// The staged attribute values of one category column, as the shared postings emit reads them.
