@@ -78,11 +78,17 @@
 //! # The row-space operand (decision 0068), and how this module routes a tree
 //!
 //! A column with `render = true` is filterable **over the request's own rows**, against the hot
-//! column in `columns.arrow` — categories only until decision 0064's render half lands, because
-//! the hot column stores an absent number as the type's zero while a category's code 0 is a real
-//! absent sentinel (records §6.2). Such a leaf produces no entity-space bitmap at all; it is
-//! evaluated in `viewport.rs` over the request's merged tile ranges, and the answer is exact only
-//! over that domain (`FilterRows::Viewport`).
+//! column in `columns.arrow`. Such a leaf produces no entity-space bitmap at all; it is evaluated
+//! in `viewport.rs` over the request's merged tile ranges, and the answer is exact only over that
+//! domain (`FilterRows::Viewport`).
+//!
+//! **Two families reach that route and they say "no value" differently.** A category reserves code
+//! 0 out of its vocabulary, so the hot column itself carries the absence. A number, a datetime and
+//! a bool have no spare value — the hot column is non-nullable and an absent one is written as the
+//! type's zero, which is an ordinary value — so their absence is decision 0064's presence bitmap
+//! beside the column, read by the scan and never inferred from the stored bytes. Which rule
+//! applies is the column's [`Placement::family`], carried into the routed tree rather than guessed
+//! from the width, because a rendered `u8` category and a rendered `u8` number are the same bytes.
 //!
 //! [`FilterColumns::evaluate_routed`] is the seam. It routes each leaf by the column's
 //! [`Placement`] — entity space, row space, or both — and where a column affords both, by the
@@ -149,6 +155,20 @@ pub enum Family {
 }
 
 impl Family {
+    /// One column's family, from its declaration — **the single derivation**, used by the engine's
+    /// routing, by `/v1/meta`'s operand list and by the request parser alike, so the operators a
+    /// client is published cannot differ from the ones its requests are held to, and neither can
+    /// differ from the predicate the scan applies.
+    pub fn of(scalar: &tessera_store::manifest::DeclaredScalar) -> Family {
+        if scalar.vocabulary.is_some() {
+            Family::Category
+        } else if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Utf8 {
+            Family::Text
+        } else {
+            Family::Numeric
+        }
+    }
+
     /// The operator names this family accepts, in the order `/v1/meta` publishes them.
     pub fn operands(self) -> &'static [&'static str] {
         match self {
@@ -389,28 +409,36 @@ fn empty_record_stack() -> RecordStack {
         .expect("a record stack over no layers opens without IO")
 }
 
-/// The evaluation space(s) one filterable column affords (decision 0068; records §6.2).
+/// The evaluation space(s) one filterable column affords, and the family whose rules its values
+/// are read by (decision 0068; records §6.2).
 ///
 /// Derived at open from the compiled declaration alone — never from a statistic, never per
 /// principal (§8.2): `entity` where the column has an entity-space value column it may answer a
 /// filter from (`index = true`, or a rendered category whose vocabulary floor stores one —
-/// `listing = "per_viewer"`); `row` where `render = true` put it in the hot column and the family
-/// can express absence there (categories only until 0064's render half lands — the schema refuses
-/// the number/datetime combinations, and this map simply never sees them).
+/// `listing = "per_viewer"`); `row` where `render = true` put it in the hot column, which is every
+/// rendered column, `utf8` being refused from the hot column at the schema.
+///
+/// **The family travels with the placement because the row route cannot infer it from the
+/// stored width.** A rendered `u8` category and a rendered `u8` number are the same slice of
+/// bytes, and their absence rules are opposite: the category's is code 0, the number's is the
+/// presence bitmap beside the column (decision 0064), where 0 is an ordinary value. A scan that
+/// guessed would resurrect every valueless row of one or drop every genuine zero of the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement {
     pub entity: bool,
     pub row: bool,
+    pub family: Family,
 }
 
-/// Is this column filterable at all under decision 0068 — `index = true`, or a rendered category?
+/// Is this column filterable at all under decision 0068 — `index = true`, or rendered?
 ///
 /// **The server's `/v1/meta` operand list and its parse gate call this**, so the surface a client
-/// is published cannot drift from the one the engine routes. A rendered number is deliberately
-/// not here: it stays unfilterable until 0064's render half lands, refused at the schema parse
-/// with that reason (records §6.2, decision 0013).
+/// is published cannot drift from the one the engine routes. A rendered `utf8` column is excluded
+/// rather than assumed away: the schema refuses `render` on `utf8` because the hot column is
+/// fixed-width, so the combination reaches no manifest — and a predicate that relied on that
+/// instead of stating it would publish a byte predicate over a column the row scan cannot read.
 pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
-    scalar.index || (scalar.render && scalar.vocabulary.is_some())
+    scalar.index || (scalar.render && Family::of(scalar) != Family::Text)
 }
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
@@ -509,18 +537,30 @@ pub enum RowExpr {
     /// An entity-space sub-tree's verdict, evaluated under the composed candidate.
     Entity(Bitmap),
     /// A render-column leaf, to be tested against the hot column over the crossing domain.
+    ///
+    /// The **family is carried** rather than inferred from the operand or the stored width: see
+    /// [`Placement`] for why a scan that guessed reads one family's absence as the other's value.
     Leaf {
         column: String,
+        family: Family,
         operand: FilterOperand,
     },
     /// Intersection in row space.
     AllOf(Vec<RowExpr>),
     /// Union in row space. Empty matches nothing, exactly as [`FilterExpr::AnyOf`] does.
     AnyOf(Vec<RowExpr>),
-    /// `present ∖ matched` in row space, presence being a non-sentinel code in the hot column —
-    /// the same positive predicate [`FilterExpr::NoneOf`] is in entity space, with the same
-    /// failure sign: a row that cannot be read matches nothing, and under-reporting narrows.
-    NoneOf { column: String, kids: Vec<RowExpr> },
+    /// `present ∖ matched` in row space — the same positive predicate [`FilterExpr::NoneOf`] is in
+    /// entity space, with the same failure sign: a row that cannot be read matches nothing, and
+    /// under-reporting narrows.
+    ///
+    /// Presence is the family's own statement of it, which is why the family is carried here as
+    /// well as on a leaf: a non-sentinel code for a category, the presence bitmap beside the
+    /// column for a number (decision 0064).
+    NoneOf {
+        column: String,
+        family: Family,
+        kids: Vec<RowExpr>,
+    },
 }
 
 impl RowExpr {
@@ -747,15 +787,24 @@ impl FilterColumns {
         let mut placements = BTreeMap::new();
         for scalar in declared {
             // The route affordances, from the compiled declaration alone (decision 0068). A
-            // rendered category always affords the row route; the entity route needs an
+            // rendered column always affords the row route — its values are in the hot column,
+            // and both families that reach it can express absence there. The entity route needs an
             // entity-space value column AND a licence to answer a filter from it — `index`, or
             // 0068's "render implies filterable" over the per-viewer vocabulary floor. A
             // `per_viewer` column with neither flag keeps its value column for membership and
             // stays unfilterable, exactly as before.
-            let row = scalar.render && scalar.vocabulary.is_some();
+            let family = Family::of(scalar);
+            let row = scalar.render && family != Family::Text;
             let entity = owes_value_column(scalar, vocabularies) && (scalar.index || row);
             if row || entity {
-                placements.insert(scalar.name.clone(), Placement { entity, row });
+                placements.insert(
+                    scalar.name.clone(),
+                    Placement {
+                        entity,
+                        row,
+                        family,
+                    },
+                );
             }
             if !owes_value_column(scalar, vocabularies) {
                 continue;
@@ -868,8 +917,9 @@ impl FilterColumns {
             let read = match values.codes() {
                 Codes::Text { .. } => RecordValue::Utf8(values.text_of(entity)?.to_string()),
                 codes => {
-                    let slot =
-                        values.present_in(&Bitmap::from_range(0..entity)).cardinality() as usize;
+                    let slot = values
+                        .present_in(&Bitmap::from_range(0..entity))
+                        .cardinality() as usize;
                     match codes {
                         Codes::U8(v) => RecordValue::U8(v[slot]),
                         Codes::U16(v) => RecordValue::U16(v[slot]),
@@ -1224,10 +1274,7 @@ impl FilterColumns {
     /// One column's routed space — **the single transcription of the leaf-routing rule**, called
     /// for a leaf and for a `none_of`'s one column alike, so the two cannot drift.
     fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
-        let placement = self
-            .placements
-            .get(column)
-            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        let placement = self.placement_of(column)?;
         Ok(match (placement.entity, placement.row) {
             (true, false) => Space::Entity,
             (false, true) => Space::Row,
@@ -1237,6 +1284,15 @@ impl FilterColumns {
             // Never inserted — `open` only stores a placement with at least one space.
             (false, false) => unreachable!("a placement affords at least one space"),
         })
+    }
+
+    /// One filterable column's placement, refused exactly as [`FilterColumns::resolve`] refuses an
+    /// undeclared one.
+    fn placement_of(&self, column: &str) -> Result<Placement, FilterError> {
+        self.placements
+            .get(column)
+            .copied()
+            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))
     }
 
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
@@ -1251,7 +1307,11 @@ impl FilterColumns {
                 }
                 // An empty combinator is pure entity space: its identity value needs no hot
                 // column (`AllOf([])` is the candidate, `AnyOf([])` is empty).
-                Ok(if all_entity { Space::Entity } else { Space::Mixed })
+                Ok(if all_entity {
+                    Space::Entity
+                } else {
+                    Space::Mixed
+                })
             }
             FilterExpr::NoneOf(kids) => {
                 let column = kids
@@ -1278,6 +1338,7 @@ impl FilterColumns {
         match expr {
             FilterExpr::Leaf { column, operand } => Ok(RowExpr::Leaf {
                 column: column.clone(),
+                family: self.placement_of(column)?.family,
                 operand: operand.clone(),
             }),
             FilterExpr::AllOf(kids) => Ok(RowExpr::AllOf(
@@ -1297,8 +1358,10 @@ impl FilterColumns {
                     .next()
                     .expect("check_negations admits exactly one column")
                     .to_string();
+                let family = self.placement_of(&column)?.family;
                 Ok(RowExpr::NoneOf {
                     column,
+                    family,
                     kids: kids
                         .iter()
                         .map(|kid| self.route(kid, candidate, prefer_row))
