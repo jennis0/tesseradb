@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 
 use tessera_authz::{write_postings, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
-use tessera_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
+use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
@@ -540,24 +540,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // `scalar_schema_of`'s filtered list. Done after the filter emit above, which needs every
     // declared column including the `index`-only ones.
     //
-    // **Unconditional, where it used to be skipped when every column rendered.** It also
-    // substitutes the render placeholder for an absent value: `columns.arrow` is non-nullable
-    // (contracts R4), and a `ScalarValue::Null` reaching its writer is a typed error rather than a
-    // drawn point. See `ScalarValue::or_render_placeholder` for what is lost and why decision 0064
-    // defers recovering it.
+    // **Unconditional, where it used to be skipped when every column rendered.**
     {
-        let render: Vec<(bool, ScalarType)> = args
-            .schema
-            .attributes
-            .iter()
-            .map(|a| (a.render, a.ty))
-            .collect();
+        let render: Vec<bool> = args.schema.attributes.iter().map(|a| a.render).collect();
         for item in &mut tiler_items {
-            let mut kept = Vec::with_capacity(render.iter().filter(|(k, _)| *k).count());
+            let mut kept = Vec::with_capacity(render.iter().filter(|k| **k).count());
             for (i, v) in item.scalars.iter().enumerate() {
-                let (keep, ty) = render[i];
-                if keep {
-                    kept.push(v.or_render_placeholder(ty));
+                if render[i] {
+                    kept.push(v.clone());
                 }
             }
             item.scalars = kept;
@@ -565,6 +555,32 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
     let scalar_schema = scalar_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
+
+    // The render columns' presence, after the sort because the bitmap is over **rows**, and before
+    // the substitution below because that is what erases the distinction: `columns.arrow` is
+    // non-nullable (contracts R4), so an absent value is written as the type's zero and this is
+    // what says that zero means nothing (decision 0064).
+    let mut presence_paths: Vec<PathBuf> = Vec::new();
+    for (column, (name, _)) in scalar_schema.iter().enumerate() {
+        let rows = pipeline::render_presence_of(tiler_items.iter().map(|i| &i.scalars[column]));
+        let Some(rows) = rows else { continue };
+        if let Some(path) =
+            tessera_store::flush::write_render_presence(&segment_dir, name, rows, n as u32)
+                .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?
+        {
+            presence_paths.push(path);
+        }
+    }
+    // A `ScalarValue::Null` reaching the segment writer is a typed error rather than a drawn
+    // point, so the placeholder goes in last — see `ScalarValue::or_render_placeholder`.
+    for item in &mut tiler_items {
+        for (value, (_, ty)) in item.scalars.iter_mut().zip(&scalar_schema) {
+            if matches!(value, ScalarValue::Null) {
+                *value = value.or_render_placeholder(*ty);
+            }
+        }
+    }
+
     write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema)
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     fsync_file(&segment_dir.join("columns.arrow"))?;
@@ -594,6 +610,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         segment_dir.join("columns.arrow"),
         segment_dir.join("morton.u32"),
     ]);
+    other_paths.extend(presence_paths);
     other_paths.extend(filter_paths);
     write_manifests(
         args,
