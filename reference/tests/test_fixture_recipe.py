@@ -53,6 +53,12 @@ def _stamped(bundle_root: Path, recipe: dict) -> None:
         ("N_ITEMS", 1234),
         ("_LAYOUT", [("only", 10)]),
         ("POINTS_NAME", "other.parquet"),
+        ("SHELF_ABSENT_STRIDE", 1),
+        ("NOTE_ABSENT_STRIDE", 1),
+        ("NOTE_OVERSIZE_ID", 2),
+        ("NOTE_EMPTY_ID", 2),
+        ("PAGES_ABSENT_STRIDE", 1),
+        ("PAGES_ZERO_STRIDE", 1),
     ],
 )
 def test_every_input_the_catalogue_is_a_function_of_changes_its_recipe(

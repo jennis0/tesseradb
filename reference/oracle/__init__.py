@@ -14,7 +14,9 @@ change to it can break.
 
 **Definitional — pure, no I/O beyond reading a bundle, no server.** ``viewport`` (§7.2 written as
 a definition), ``mask`` (I1's composition), ``filters`` (decision 0062's tree as a per-entity
-walk), ``morton``, ``identity``, ``bundle``, ``wire``. These
+walk), ``morton``, ``identity``, ``bundle``, ``wire``, ``record_blob`` (the blob's addressing
+walk — structure only, never values; its module doc states the records §3/B7 licence it holds
+to). These
 are the second implementation of record. They are held to being *obviously the spec*: literal
 constructions, no cleverness, and a documented pin to the design revision they were checked
 against. A differential is only as good as these are independent, so a change here that imports an

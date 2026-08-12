@@ -574,6 +574,13 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
             pa.field("title", pa.utf8()),
+            # The render-only category (a key, like the others) and the blob-resident pair,
+            # declared by the catalogue since 2026-08-12 and therefore required here too. Inert
+            # for the same reason — and for the blob pair doubly so: the flush-side blob extent
+            # is unbuilt (records §7 ⊘), so these values reach the WAL and no artefact yet.
+            pa.field("shelf", pa.utf8()),
+            pa.field("note", pa.utf8()),
+            pa.field("pages", pa.uint32()),
         ]
     )
     batch = pa.record_batch(
@@ -586,6 +593,9 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.array(["alpha"] * rows, pa.utf8()),
             pa.array(["red"] * rows, pa.utf8()),
             pa.array([f"ingested-{i}" for i in range(rows)], pa.utf8()),
+            pa.array(["north"] * rows, pa.utf8()),
+            pa.array([f"ingested-note-{i}" for i in range(rows)], pa.utf8()),
+            pa.array([100 + i for i in range(rows)], pa.uint32()),
         ],
         schema=schema,
     )
