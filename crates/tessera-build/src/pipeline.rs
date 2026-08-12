@@ -1540,15 +1540,20 @@ pub(crate) fn write_record_blob(
     schema: &crate::schema::Schema,
     by_entity: &[Vec<ScalarValue>],
 ) -> Result<Vec<PathBuf>> {
-    // A category is never blob-resident, whatever its flags say (records §4.2): its
-    // entity-space code column and derived postings are the constant floor the vocabulary
-    // machinery runs on, so a blob row would be a second copy of a value that home already
-    // answers.
+    // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
+    // Records §4.2 exempts categories from the blob because their entity-space structures are the
+    // vocabulary machinery's constant floor, but that floor is `postings_are_owed`, which holds
+    // for an *indexed* or `per_viewer` category and not for a `public` one. A `public` category
+    // declared with neither flag therefore has no hot column, no value column and no postings, so
+    // excluding every category here stored its values nowhere at all and refused nothing —
+    // silent loss of a field the caller declared. Asking the same question the entity-space pass
+    // asks is what keeps the two exhaustive between them: a field is in exactly one home, and
+    // records §3's rule that every declared field answers `entity → value` holds by construction.
     let blob_columns: Vec<usize> = schema
         .attributes
         .iter()
         .enumerate()
-        .filter(|(_, a)| !a.index && !a.render && a.vocabulary.is_none())
+        .filter(|(_, a)| !a.render && !postings_are_owed(schema, a))
         .map(|(i, _)| i)
         .collect();
     if blob_columns.is_empty() {
@@ -2343,12 +2348,19 @@ mod tests {
     use super::*;
     use tessera_types::IdentityKey;
 
-    /// A category is never blob-resident, whatever its flags say (records §4.2): its
-    /// entity-space structures are the constant floor the vocabulary machinery runs on, so the
-    /// blob stage must not give it a second copy. A neither-flag category beside a genuinely
-    /// blob-resident column leaves exactly one field in the blob row; alone, it writes nothing.
+    /// **Every declared field lands in exactly one home, and the two placement passes must agree
+    /// on which** (records §3). The blob takes a field the entity-space pass declines, so the
+    /// question both ask is `postings_are_owed`: a `per_viewer` category keeps its entity-space
+    /// floor and gets no blob row, while a `public` category with neither flag — which that pass
+    /// declines, having no `index` and no per-viewer listing — must land here rather than
+    /// nowhere.
+    ///
+    /// The `public` half is a regression test. Excluding every category from the blob reads as
+    /// records §4.2's rule and is not: §4.2's premise is the entity-space floor, and a `public`
+    /// category with no `index` has none. The field was stored in no home at all, and nothing
+    /// refused the declaration — the caller declared a column and the corpus silently dropped it.
     #[test]
-    fn a_neither_flag_category_is_not_blob_resident() {
+    fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
         let category = crate::schema::Attribute {
             name: "department".to_string(),
             ty: ScalarType::U16,
@@ -2366,10 +2378,27 @@ mod tests {
             render: false,
         };
 
+        // A `per_viewer` listing is what gives a category its entity-space floor.
+        let per_viewer = |listing| {
+            let mut v = std::collections::HashMap::new();
+            v.insert(
+                "departments".to_string(),
+                crate::schema::Vocabulary {
+                    name: "departments".to_string(),
+                    kind: crate::schema::VocabularyKind::Declared,
+                    listing,
+                    codes: Default::default(),
+                    labels: Default::default(),
+                    reserved: Vec::new(),
+                },
+            );
+            v
+        };
+
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = crate::schema::Schema {
-            attributes: vec![category.clone(), note],
-            vocabularies: Default::default(),
+            attributes: vec![category.clone(), note.clone()],
+            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
@@ -2395,15 +2424,43 @@ mod tests {
         );
         assert_eq!(fields[0].tag, 1, "the surviving field is `note`, tag 1");
 
-        // Alone, the category leaves the stage with nothing to write at all.
+        // Alone, the `per_viewer` category leaves the stage with nothing to write at all.
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = crate::schema::Schema {
-            attributes: vec![category],
-            vocabularies: Default::default(),
+            attributes: vec![category.clone()],
+            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
         };
         let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
             .expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
+
+        // But the same category under a `public` listing owes no value column and no postings, so
+        // the blob is its only home and must take it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = crate::schema::Schema {
+            attributes: vec![category],
+            vocabularies: per_viewer(crate::schema::Listing::Public),
+        };
+        let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
+            .expect("blob stage writes");
+        assert!(
+            !written.is_empty(),
+            "a public category with neither flag has no entity-space home; without a blob row \
+             its values are stored nowhere at all"
+        );
+        let blob = tessera_filter::RecordBlob::open_dir(
+            &dir.path().join("attrs/record"),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("open");
+        assert_eq!(
+            blob.fields_of(0).expect("read").expect("entity 0 has a row"),
+            vec![tessera_filter::RecordField {
+                tag: 0,
+                value: tessera_filter::RecordValue::U16(7),
+            }],
+            "the public category's value is the blob row"
+        );
     }
 
     /// **The band count must not be observable in the artefact.** A band boundary is a place the
