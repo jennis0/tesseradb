@@ -18,6 +18,13 @@
 //! What is **not** covered here, stated so its absence is not read as coverage: nothing asserts a
 //! category *key* survives ingest, because ingest carries codes rather than keys (see
 //! `an_ingested_row_carries_the_declared_tail_through_a_flush`).
+//!
+//! The file's second half is the same claim for the **third home**: a blob-resident column's
+//! values survive every producer of the record blob — build, flush, coalesce and fold — read back
+//! at the artefact level through `RecordStack`, which is how drill-down will read them. The
+//! sharpest cases are write-path §5.4's two removal rules, asserted on the files: a suppression
+//! (and an accepted-but-unfolded deletion) changes not one blob byte, and the fold that executes
+//! a deletion leaves the row byte-absent.
 
 mod common;
 
@@ -36,7 +43,7 @@ use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::WalScalar;
+use tessera_lifecycle::wal::{ChangeOp, WalScalar};
 use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 
 /// The fixture's schema: a `u8` category, a plain `i64` and a plain `f32`.
@@ -739,4 +746,474 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
         (2u8, 1_900_000_000_000_000i64, 99.5f32),
         "the flushed row's tail is what was ingested"
     );
+}
+
+// =============================================================================================
+// The third home: the record blob through flush, coalesce and fold (records §3, §7)
+// =============================================================================================
+
+/// The record fixture's schema: a rendered `u8` category plus two **blob-resident** columns — a
+/// `utf8` note and an `i64` revision, neither indexed nor rendered, whose only home is the record
+/// blob. Two widths in the blob for the same reason the hot tail's fixture has three: a tag slip
+/// must be a type mismatch, not a plausible value.
+const RECORD_SCHEMA_TOML: &str = r#"
+[[attribute]]
+name       = "band"
+type       = "category"
+width      = "u8"
+render     = true
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  low = 1
+  mid = 2
+  high = 3
+
+[[attribute]]
+name = "note"
+type = "utf8"
+
+[[attribute]]
+name = "revision"
+type = "i64"
+"#;
+
+fn note_of(source: u64) -> String {
+    format!("note-{source:05}")
+}
+
+fn revision_of(source: u64) -> i64 {
+    40_000 + source as i64
+}
+
+/// The blob row the fixture's generation functions predict for `source`: `note` is declared at
+/// position 1 and `revision` at position 2, and the field tag **is** the declared position
+/// (records §3) — the same identity the build's blob stage and the flush's extent writer share.
+fn record_fields_of(source: u64) -> Vec<tessera_filter::RecordField> {
+    vec![
+        tessera_filter::RecordField {
+            tag: 1,
+            value: tessera_filter::RecordValue::Utf8(note_of(source)),
+        },
+        tessera_filter::RecordField {
+            tag: 2,
+            value: tessera_filter::RecordValue::I64(revision_of(source)),
+        },
+    ]
+}
+
+fn write_points_with_record_columns(path: &Path, n: u64) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("band", DataType::Utf8, false),
+        Field::new("note", DataType::Utf8, false),
+        Field::new("revision", DataType::Int64, false),
+    ]));
+    let ids: Vec<u64> = (0..n).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids.clone())),
+            Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 37) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 53) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| band_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| note_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(arrow::array::Int64Array::from(
+                ids.iter().map(|e| revision_of(*e)).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
+    let points = tmp.join("points.parquet");
+    let pairs = tmp.join("pairs.parquet");
+    write_points_with_record_columns(&points, n);
+    write_pairs_n(&pairs, n);
+    let schema_path = tmp.join("schema.toml");
+    std::fs::write(&schema_path, RECORD_SCHEMA_TOML).unwrap();
+    let args = BuildArgs {
+        points,
+        pairs,
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
+            .expect("the record fixture schema parses"),
+    };
+    build(&args).expect("a build with blob-resident columns succeeds");
+}
+
+/// The prefix `CURRENT` names — read rather than assumed, because a fold publishes into a new one.
+fn current_prefix(root: &Path) -> String {
+    let current: tessera_store::manifest::CurrentPointer =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
+            .expect("CURRENT parses");
+    current.prefix
+}
+
+/// The partition's side-manifest, as the serving path holds it.
+fn side_manifest(root: &Path) -> tessera_store::manifest::SegmentsManifest {
+    let bundle = open_bundle(root).expect("the bundle opens");
+    bundle.partitions["default"].manifest.clone()
+}
+
+/// The record stack exactly as drill-down will open it: the base blob under `attrs/record` plus
+/// every extent the manifest's `record_extents` names, oldest first.
+fn record_stack(root: &Path) -> tessera_filter::RecordStack {
+    let prefix_dir = root.join(current_prefix(root));
+    let manifest = side_manifest(root);
+    let base = prefix_dir.join("partitions/default/attrs/record");
+    let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+        .record_extents
+        .iter()
+        .map(|e| tessera_filter::RecordExtentPaths {
+            blocks: prefix_dir.join(&e.blocks),
+            hasrow: prefix_dir.join(&e.hasrow),
+            directory: prefix_dir.join(&e.directory),
+        })
+        .collect();
+    tessera_filter::RecordStack::open(Some(&base), &extents, tessera_filter::Access::Read)
+        .expect("the stack opens fail-closed over every layer the manifest names")
+}
+
+/// One ingest row for the record fixture: `band` code, blob-resident `note` and `revision`.
+fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
+    UnallocatedRow {
+        external_id: Some(external.as_bytes().to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![
+            WalScalar::U8(2),
+            WalScalar::Utf8(note.to_string()),
+            WalScalar::I64(revision),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    }
+}
+
+/// **A flush's record extent round-trips through the stack**, beside the build's base: the
+/// manifest names one `RecordExtent` whose three files are digested, and `RecordStack` answers a
+/// built entity from the base and the flushed entity from the extent — the same read drill-down
+/// performs.
+#[test]
+fn a_flushed_record_extent_round_trips_through_the_stack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_record_fixture(&root, tmp.path(), 512);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    // The base first: every built entity's blob row is the generation functions' values, joined
+    // source → entity through the sidecar exactly as the hot-tail cases join.
+    let entity_of_source = source_to_new_map(&root, "v00000");
+    let stack = record_stack(&root);
+    for source in [0u64, 1, 255, 511] {
+        let entity = u32::try_from(entity_of_source[&source]).unwrap();
+        assert_eq!(
+            stack.fields_of(entity).expect("a clean read"),
+            Some(record_fields_of(source)),
+            "source {source}'s built blob row"
+        );
+    }
+
+    let entity = engine
+        .accept_ingest(
+            vec![record_row(&engine, "flushed-1", "the-flushed-note", 77)],
+            "batch-record-1".to_string(),
+            [0u8; 32],
+        )
+        .expect("an ingest carrying blob-resident values is accepted")[0];
+    flush(&engine);
+    drop(engine);
+
+    let manifest = side_manifest(&root);
+    assert_eq!(manifest.record_extents.len(), 1, "one extent per flush");
+    let extent = &manifest.record_extents[0];
+    for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+        assert!(
+            manifest.files.contains_key(rel),
+            "an extent file the manifest names but does not digest: {rel}"
+        );
+    }
+
+    let stack = record_stack(&root);
+    let entity = u32::try_from(entity.raw()).unwrap();
+    assert_eq!(
+        stack.fields_of(entity).expect("a clean read"),
+        Some(vec![
+            tessera_filter::RecordField {
+                tag: 1,
+                value: tessera_filter::RecordValue::Utf8("the-flushed-note".to_string()),
+            },
+            tessera_filter::RecordField {
+                tag: 2,
+                value: tessera_filter::RecordValue::I64(77),
+            },
+        ]),
+        "the flushed row's blob values are what was ingested"
+    );
+    // And the base still answers through the same stack — the layered read, not one layer's.
+    let built = u32::try_from(entity_of_source[&0]).unwrap();
+    assert_eq!(
+        stack.fields_of(built).expect("read"),
+        Some(record_fields_of(0))
+    );
+    stack.self_check().expect("every layer's addressing");
+}
+
+/// **Rule S and Rule F, at the blob's bytes** (write-path §5.4). A suppression — and an accepted
+/// deletion, and an unrelated flush — changes not one byte of a published record extent; the
+/// compaction fold is the only operation that removes a deleted row, and what it publishes holds
+/// the suppressed row intact while the deleted one is **byte-absent**.
+///
+/// Byte-absence is asserted by exhaustive walk rather than by decompression in this test: rows
+/// tile their blocks exactly (`for_each_row` refuses anything else), so once every decoded row is
+/// a surviving entity's expected fields, every block byte is accounted for and none of them is
+/// the deleted row's. The unit half (`tessera-filter-write`'s
+/// `a_blanked_rows_bytes_are_not_in_the_folded_blob`) additionally greps the decompressed frames.
+#[test]
+fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_record_fixture(&root, tmp.path(), 64);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    let entities = engine
+        .accept_ingest(
+            vec![
+                record_row(&engine, "s", "the-suppressed-prose", 1),
+                record_row(&engine, "d", "the-deleted-prose", 2),
+                record_row(&engine, "c", "the-kept-prose", 3),
+            ],
+            "batch-deny".to_string(),
+            [1u8; 32],
+        )
+        .expect("accepted");
+    flush(&engine);
+
+    let manifest = side_manifest(&root);
+    assert_eq!(manifest.record_extents.len(), 1);
+    let prefix_dir = root.join(current_prefix(&root));
+    let extent = manifest.record_extents[0].clone();
+    let extent_files = || -> Vec<Vec<u8>> {
+        [&extent.blocks, &extent.hasrow, &extent.directory]
+            .iter()
+            .map(|rel| std::fs::read(prefix_dir.join(rel)).expect("an extent file"))
+            .collect()
+    };
+    let before = extent_files();
+
+    // Rule S: the suppression is in force the moment it is accepted, and it touches no artefact.
+    engine
+        .accept_change(entities[0], ChangeOp::Suppress)
+        .expect("suppressed");
+    assert_eq!(before, extent_files(), "a suppression changed a blob byte");
+    // Rule F's first half: an accepted deletion stands in the overlay and touches no artefact
+    // either — its removal belongs to the fold alone.
+    engine
+        .accept_change(entities[1], ChangeOp::Delete)
+        .expect("deleted");
+    assert_eq!(
+        before,
+        extent_files(),
+        "an accepted deletion changed a blob byte"
+    );
+    // An unrelated publication leaves the extent alone too: a flush appends its own layer.
+    engine
+        .accept_ingest(
+            vec![record_row(&engine, "later", "a-later-note", 4)],
+            "batch-later".to_string(),
+            [2u8; 32],
+        )
+        .expect("accepted");
+    flush(&engine);
+    assert_eq!(
+        before,
+        extent_files(),
+        "another flush changed the first extent's bytes"
+    );
+
+    // Rule F's second half: the fold executes the deletion — and nothing else.
+    fold(&engine);
+    drop(engine);
+
+    let manifest = side_manifest(&root);
+    assert!(
+        manifest.record_extents.is_empty(),
+        "the fold consumed every record extent into the new base: {:?}",
+        manifest.record_extents
+    );
+    let stack = record_stack(&root);
+    let suppressed = u32::try_from(entities[0].raw()).unwrap();
+    let deleted = u32::try_from(entities[1].raw()).unwrap();
+    let kept = u32::try_from(entities[2].raw()).unwrap();
+    assert_eq!(
+        stack.fields_of(suppressed).expect("read"),
+        Some(vec![
+            tessera_filter::RecordField {
+                tag: 1,
+                value: tessera_filter::RecordValue::Utf8("the-suppressed-prose".to_string()),
+            },
+            tessera_filter::RecordField {
+                tag: 2,
+                value: tessera_filter::RecordValue::I64(1),
+            },
+        ]),
+        "the suppressed row folds through intact — a later unsuppress reveals exactly this"
+    );
+    assert!(
+        !stack.has_row(deleted),
+        "the deleted entity is out of has-row"
+    );
+    assert_eq!(stack.fields_of(deleted).expect("a clean read"), None);
+    assert!(stack.fields_of(kept).expect("read").is_some());
+
+    // The exhaustive walk over the folded base: every row is a surviving entity's, so the deleted
+    // row's bytes are in no block (see this test's doc for why the walk is the byte argument).
+    let base = tessera_filter::RecordBlob::open_dir(
+        &root
+            .join(current_prefix(&root))
+            .join("partitions/default/attrs/record"),
+        tessera_filter::Access::Read,
+    )
+    .expect("the folded base opens");
+    let mut saw_deleted = false;
+    base.for_each_row(&mut |entity, fields| {
+        assert_ne!(
+            entity, deleted,
+            "the deleted entity has a row in the folded blob"
+        );
+        if fields
+            .iter()
+            .any(|f| f.value == tessera_filter::RecordValue::Utf8("the-deleted-prose".to_string()))
+        {
+            saw_deleted = true;
+        }
+        Ok(())
+    })
+    .expect("the folded blob walks clean");
+    assert!(!saw_deleted, "the deleted prose survives in some other row");
+}
+
+/// **The record axis coalesces**: a window of flush extents collapses to one manifest entry whose
+/// answers are the layers' own — the differential — while a coalesce retires nothing and moves no
+/// geometry.
+#[test]
+fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_record_fixture(&root, tmp.path(), 64);
+    let engine = engine_over(
+        tmp.path(),
+        &root,
+        EngineConfig {
+            // Long, so every flush is one this test asked for — `tests/coalesce.rs`'s posture.
+            flush_max_age_secs: 3600,
+            ..config()
+        },
+    );
+    engine.set_merge_for_test(false);
+
+    // The policy's width: eight extents select a window.
+    let mut ingested = Vec::new();
+    for i in 0..8u64 {
+        let entity = engine
+            .accept_ingest(
+                vec![record_row(
+                    &engine,
+                    &format!("co-{i}"),
+                    &format!("coalesced-note-{i}"),
+                    i as i64,
+                )],
+                format!("batch-co-{i}"),
+                [i as u8; 32],
+            )
+            .expect("accepted")[0];
+        ingested.push((entity, format!("coalesced-note-{i}"), i as i64));
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while engine.write_executor_stats().flushes == flushes {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flush never published"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    assert_eq!(
+        side_manifest(&root).record_extents.len(),
+        8,
+        "one record extent per flush before the coalesce"
+    );
+
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().coalesces == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the coalesce never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    drop(engine);
+
+    let manifest = side_manifest(&root);
+    assert_eq!(
+        manifest.record_extents.len(),
+        1,
+        "eight extents became one: {:?}",
+        manifest.record_extents
+    );
+    let stack = record_stack(&root);
+    for (entity, note, revision) in &ingested {
+        let entity = u32::try_from(entity.raw()).unwrap();
+        assert_eq!(
+            stack.fields_of(entity).expect("read"),
+            Some(vec![
+                tessera_filter::RecordField {
+                    tag: 1,
+                    value: tessera_filter::RecordValue::Utf8(note.clone()),
+                },
+                tessera_filter::RecordField {
+                    tag: 2,
+                    value: tessera_filter::RecordValue::I64(*revision),
+                },
+            ]),
+            "entity {entity} answers differently through the coalesced extent"
+        );
+    }
+    stack
+        .self_check()
+        .expect("the coalesced extent's addressing");
 }

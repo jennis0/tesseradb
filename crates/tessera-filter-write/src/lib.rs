@@ -84,7 +84,7 @@ use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
 
-pub use record::RecordBlobWriter;
+pub use record::{coalesce_record_extents, fold_record_blob, RecordBlobWriter};
 
 /// The vocabulary's reserved *absent* code: never drawn, never bound to a key, and carried by
 /// exactly the entities that carry no value.
@@ -250,11 +250,26 @@ fn merge_order(
              base"
         )));
     }
-    let mut present: Vec<(usize, Bitmap)> = layers
+    let present: Vec<(usize, Bitmap)> = layers
         .iter()
         .enumerate()
         .map(|(i, layer)| (i, layer.present()))
         .collect();
+    let (present, union) = ordered_disjoint(present, pass)?;
+    Ok((present, union.andnot(tombstones)))
+}
+
+/// The two refusals both merge axes rest on — value columns and the record blob alike — over the
+/// layers' entity sets alone: no layer claims an entity another holds, and the layers do not
+/// interleave, so the concatenation in sorted order is a linear merge. Returns the non-empty
+/// layers in merge order and the union of every layer's entities.
+///
+/// Shared rather than restated because neither refusal has a symptom if one copy drifts: values
+/// (or rows) would be paired with the wrong entities from the first violation onwards.
+pub(crate) fn ordered_disjoint(
+    mut present: Vec<(usize, Bitmap)>,
+    pass: &str,
+) -> io::Result<(Vec<(usize, Bitmap)>, Bitmap)> {
     let mut union = Bitmap::new();
     let mut sum = 0u64;
     for (_, p) in &present {
@@ -284,7 +299,7 @@ fn merge_order(
             )));
         }
     }
-    Ok((present, union.andnot(tombstones)))
+    Ok((present, union))
 }
 
 /// Stream the ordered layers into one column, skipping `tombstones`.

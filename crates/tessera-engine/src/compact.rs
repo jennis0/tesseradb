@@ -79,7 +79,7 @@ use croaring::Bitmap;
 use tessera_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{
-    AttrExtent, DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor,
+    AttrExtent, DeclaredScalar, FileDigest, ManifestVocabulary, RecordExtent, SegmentDescriptor,
 };
 use tessera_store::{
     fold_external_id_runs, fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
@@ -477,6 +477,10 @@ pub(crate) struct FoldPlan {
     /// the fold can afford, and makes the folded state a function of deletion history rather than
     /// of the schema.
     pub(crate) attr_extents: Vec<AttrExtent>,
+    /// Every record-blob extent the side-manifest named at the snapshot — **all** consumed and
+    /// folded into the new base blob, under [`FoldPlan::attr_extents`]'s all-or-nothing argument:
+    /// the folded state is a function of the schema, never of deletion history.
+    pub(crate) record_extents: Vec<RecordExtent>,
     /// `D₀` — the plan's tombstone clone. Handed to passes 1–3 whole; never [`executed`].
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity **with a row anywhere in this partition** at the snapshot — the
@@ -743,6 +747,7 @@ pub(crate) fn plan_fold(
             .map(|extent| extent.path.clone())
             .collect(),
         attr_extents: manifest.attr_extents.clone(),
+        record_extents: manifest.record_extents.clone(),
         tombstones,
         entity_bound,
         dict_len,
@@ -1184,6 +1189,94 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
         attr_written += file_len(&postings_path);
         written.push((postings_rel, postings_path));
+    }
+
+    // ---- pass 4a, continued — the record blob --------------------------------------------------
+    //
+    // records §7: the blob is rewritten without the blanked entities' rows, base plus every
+    // snapshot extent streamed in entity order into one new base — *remove, emit no bytes*, so a
+    // deleted entity's prose is physically absent from the folded artefact. That retention
+    // asymmetry is why the blob lives under `attrs/` and folds with everything else rather than
+    // in a store the fold does not touch. **Rule F only**: the set blanked here is exactly `D₀`,
+    // the same set every other pass took, and a suppression is not in it — a suppressed entity's
+    // row streams through byte-preserved like any survivor's.
+    //
+    // The blob exists iff the schema declares a blob-resident column — the build's own predicate
+    // (`write_record_blob`), so base presence is a function of the schema exactly as the column
+    // artefacts' is. The mismatch arms are unreachable by construction and refuse loudly rather
+    // than silently dropping extents' bytes.
+    let blob_resident = ctx
+        .declared_scalars
+        .iter()
+        .any(|d| !d.index && !d.render && d.vocabulary.is_none());
+    if !blob_resident && !plan.record_extents.is_empty() {
+        return Err(FoldFailed(
+            "pass 4a (record blob): the manifest names record extents but the schema declares no \
+             blob-resident column; folding would drop their bytes silently, so it is refused"
+                .to_string(),
+        ));
+    }
+    if blob_resident {
+        let record_rel = format!("partitions/{}/attrs/record", plan.partition);
+        let from_dir = ctx.from_prefix_dir.join(&record_rel);
+        let to_dir = ctx.to_prefix_dir.join(&record_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (record blob)", &e))?;
+
+        // The fold's own mappings, advised sequential like the value columns above (decision
+        // 0052): each layer streams exactly once, block by block.
+        let base = tessera_filter::RecordBlob::open_dir(
+            &from_dir,
+            tessera_filter::Access::MappedSequential,
+        )
+        .map_err(|e| failed("pass 4a (record blob: the base)", &e))?;
+        for name in [
+            tessera_filter::RECORD_BLOCKS_FILE,
+            tessera_filter::RECORD_HASROW_FILE,
+            tessera_filter::RECORD_DIRECTORY_FILE,
+        ] {
+            attr_read += file_len(&from_dir.join(name));
+        }
+        let mut extents = Vec::with_capacity(plan.record_extents.len());
+        for extent in &plan.record_extents {
+            extents.push(
+                tessera_filter::RecordBlob::open(
+                    &ctx.from_prefix_dir.join(&extent.blocks),
+                    &ctx.from_prefix_dir.join(&extent.hasrow),
+                    &ctx.from_prefix_dir.join(&extent.directory),
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (record blob: an extent)", &e))?,
+            );
+            for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+                attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+            }
+        }
+        let layers: Vec<&tessera_filter::RecordBlob> =
+            std::iter::once(&base).chain(extents.iter()).collect();
+
+        let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
+        let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
+        let directory_rel = format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE);
+        let blocks_path = ctx.to_prefix_dir.join(&blocks_rel);
+        let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
+        let directory_path = ctx.to_prefix_dir.join(&directory_rel);
+        tessera_filter_write::fold_record_blob(
+            &layers,
+            &plan.tombstones,
+            &blocks_path,
+            &hasrow_path,
+            &directory_path,
+            tessera_filter::RECORD_BLOCK_TARGET,
+        )
+        .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
+        for (rel, path) in [
+            (blocks_rel, blocks_path),
+            (hasrow_rel, hasrow_path),
+            (directory_rel, directory_path),
+        ] {
+            attr_written += file_len(&path);
+            written.push((rel, path));
+        }
     }
 
     record("4a attributes", &mut cost, &mut mark);

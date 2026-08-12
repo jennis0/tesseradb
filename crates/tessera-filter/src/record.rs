@@ -711,12 +711,20 @@ impl RecordBlob {
         Ok(Some(fields))
     }
 
-    /// The addressing self-consistency check the conformance suite calls (records §3, §10): every
-    /// block decompresses to its claimed length, every row decodes inside its bounds, rows tile
-    /// each block exactly, and the discriminants agree rank-for-rank with the has-row bitmap.
-    /// The fixture-input relation cannot see any of this — it is the one artefact-level check the
-    /// blob adds (review B7).
-    pub fn self_check(&self) -> Result<(), RecordError> {
+    /// Every row in has-row (= entity) order, decompressing each block once — the read the
+    /// lifecycle's two producers stream a whole layer through (records §7: the coalesce's
+    /// repacking concatenation and the fold's blanking rewrite both re-emit what this yields).
+    ///
+    /// **The walk is the self-check**, deliberately: everything [`Self::self_check`] verifies —
+    /// blocks decompressing to their claimed lengths, rows tiling each block exactly, the
+    /// discriminants agreeing rank-for-rank with the has-row bitmap — is verified here as the rows
+    /// stream, and `self_check` *is* this walk with an empty visitor. A producer that re-emitted
+    /// rows through a laxer path would launder an addressing defect into a clean-looking output
+    /// artefact, which is exactly the class records §3 makes a refusal.
+    pub fn for_each_row(
+        &self,
+        f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
         let mut entities = self.hasrow.iter();
         for block in 0..self.block_count() {
             let bytes = self.block_bytes(block)?;
@@ -734,8 +742,9 @@ impl RecordBlob {
                 let entity = entities.next().ok_or_else(|| {
                     malformed("the directory addresses more rows than the has-row bitmap holds")
                 })?;
-                let (_, end) = decode_row(&bytes, offset, entity)?;
+                let (fields, end) = decode_row(&bytes, offset, entity)?;
                 cursor = end;
+                f(entity, fields)?;
             }
             if cursor != bytes.len() {
                 return Err(malformed(format!(
@@ -751,6 +760,22 @@ impl RecordBlob {
             ));
         }
         Ok(())
+    }
+
+    /// The has-row bitmap — the entity set this layer holds a row for. Borrowed by the lifecycle
+    /// producers, whose merge-order and duplicate refusals are set operations over the layers'
+    /// bitmaps before any row is read.
+    pub fn hasrow(&self) -> &Bitmap {
+        &self.hasrow
+    }
+
+    /// The addressing self-consistency check the conformance suite calls (records §3, §10): every
+    /// block decompresses to its claimed length, every row decodes inside its bounds, rows tile
+    /// each block exactly, and the discriminants agree rank-for-rank with the has-row bitmap.
+    /// The fixture-input relation cannot see any of this — it is the one artefact-level check the
+    /// blob adds (review B7).
+    pub fn self_check(&self) -> Result<(), RecordError> {
+        self.for_each_row(&mut |_, _| Ok(()))
     }
 }
 
@@ -773,6 +798,12 @@ fn read_buffer(path: &Path, access: Access) -> Result<Buffer, RecordError> {
     // captured as the buffer's `Allocation` — the mapping is valid for `len` bytes for its whole
     // lifetime, and `memmap2::Mmap` never returns a null base pointer.
     let mapping = unsafe { memmap2::Mmap::map(&file) }?;
+    if access == Access::MappedSequential {
+        // A hint, and a failure to give it is not a failure to open (decision 0052) — the same
+        // posture as `values.rs`'s mapping: the fold streams a layer exactly once and wants the
+        // drop-behind, and a kernel that declines leaves a correct mapping behind.
+        let _ = mapping.advise(memmap2::Advice::Sequential);
+    }
     let len = mapping.len();
     let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
     let ptr = std::ptr::NonNull::new(arc.as_ptr() as *mut u8)

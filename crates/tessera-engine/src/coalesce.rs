@@ -39,6 +39,12 @@
 //!   because that is the identity the format carries — an `AttrExtent` records no flush, and
 //!   filter-index §2.5 forbids recovering one from the path — and because it is what keeps one
 //!   heavy text column from stalling every other column's axis.
+//! - **Record-blob extents** take the attribute axis's argument for the one pseudo-column
+//!   `record` (records §7): the layers are disjoint in entity space and probed by has-row, so
+//!   their division into files is immaterial, and what must not change is the set of
+//!   `(entity, row)` pairs — which [`tessera_filter_write::coalesce_record_extents`] preserves
+//!   exactly while re-blocking small flush blocks toward the format's 256 KiB target. It retires
+//!   nothing, spellably: the merge has no tombstone parameter (Rule S / Rule F, write-path §5.4).
 //!
 //! ## What it must never take
 //!
@@ -60,7 +66,7 @@ use std::sync::Arc;
 use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
 use tessera_store::coalesce_external_id_runs;
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, FileDigest, LocatorExtent, SegmentsManifest,
+    AttrExtent, DictExtent, FileDigest, LocatorExtent, RecordExtent, SegmentsManifest,
 };
 use tessera_store::merge::size_tier;
 
@@ -123,6 +129,10 @@ pub(crate) struct CoalescePlan {
     /// belongs to the flush, where an operator predicts what ingest produces, not to a maintenance
     /// pass that fires where the policy says there is work.
     pub(crate) attrs: Vec<AttrWindow>,
+    /// Consumed `record_extents` entries — one contiguous window, the record blob being a single
+    /// pseudo-column (`record`) on the attribute axis's policy (records §7). Empty if the axis
+    /// did not qualify.
+    pub(crate) records: Vec<RecordExtent>,
 }
 
 /// One column's contiguous window of its own `attr_extents` subsequence.
@@ -138,6 +148,7 @@ impl CoalescePlan {
             && self.runs.is_empty()
             && self.dicts.is_empty()
             && self.attrs.is_empty()
+            && self.records.is_empty()
     }
 }
 
@@ -261,6 +272,31 @@ pub(crate) fn plan_coalesce(
         }
     }
 
+    // ---- record-blob extents: the fifth axis, one pseudo-column on the attribute policy -------
+    //
+    // records §7: the same per-column selection, `record_extents` already being a single column's
+    // own subsequence. No build guard, for the attribute axis's reason — a built bundle's list is
+    // empty, the base blob living in `MANIFEST.files` — and the same cap-narrowing, so a blob
+    // window that outgrows the input cap stalls itself and nothing else.
+    {
+        let size = |extent: &RecordExtent| {
+            Some(size_of(&extent.blocks) + size_of(&extent.hasrow) + size_of(&extent.directory))
+        };
+        let uncapped = CoalescePolicy {
+            max_input_bytes: u64::MAX,
+            ..policy
+        };
+        let selected = select_window(&manifest.record_extents, policy.width, uncapped, size)
+            .and_then(|_| {
+                (2..=policy.width)
+                    .rev()
+                    .find_map(|width| select_window(&manifest.record_extents, width, policy, size))
+            });
+        if let Some(window) = selected {
+            plan.records = manifest.record_extents[window].to_vec();
+        }
+    }
+
     (!plan.is_empty()).then_some(plan)
 }
 
@@ -329,6 +365,12 @@ pub(crate) struct CompletedCoalesce {
     /// pointer push on the executor and cannot fail on IO after the manifest edit, which is
     /// `crate::flush::FlushedExtent`'s precedent.
     pub(crate) attrs: Vec<CoalescedAttr>,
+    /// The record window collapsed into one extent, or `None` if the axis did not run. The entry
+    /// only, not a reader: no live state composes record extents — drill-down opens the stack
+    /// from the manifest — so publication is purely the manifest edit `rebase_into` performs.
+    /// The extent was reopened on the pool before completion, so the entry names files the
+    /// fail-closed reader has already accepted.
+    pub(crate) record: Option<RecordExtent>,
     /// Every file this pass wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: BTreeMap<String, FileDigest>,
 }
@@ -472,8 +514,12 @@ pub(crate) fn execute_coalesce(
         files.insert(presence_rel.clone(), digest_of(&presence_path)?);
         // Reopened here, on the pool, so the executor's publication is a pointer push — the same
         // reason a flush opens its extents on the pool.
-        let values = tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
-            .map_err(|e| CoalesceFailed(format!("coalesced attr extent: {e}")))?;
+        let values = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Mapped,
+        )
+        .map_err(|e| CoalesceFailed(format!("coalesced attr extent: {e}")))?;
         attrs.push(CoalescedAttr {
             extent: AttrExtent {
                 column: window.column.clone(),
@@ -487,6 +533,67 @@ pub(crate) fn execute_coalesce(
         });
     }
 
+    // ---- record-blob extents: the window merged by concatenation, repacked (records §7) --------
+    //
+    // Placement under the pass's own never-reused directory, exactly as the attribute windows
+    // above; `attrs/record` inside it mirrors the base blob's home so the tree reads the same at
+    // every level. The merge streams each input's rows once through the format's one writer,
+    // re-blocking toward the 256 KiB target — the repack — and retires nothing: there is no
+    // tombstone parameter to pass (Rule S/Rule F, write-path §5.4).
+    let record = if plan.records.is_empty() {
+        None
+    } else {
+        let record_rel = format!("{}/attrs/record", ctx.out_rel);
+        let record_dir = ctx.prefix_dir.join(&record_rel);
+        std::fs::create_dir_all(&record_dir)
+            .map_err(|e| CoalesceFailed(format!("coalesce dir for the record blob: {e}")))?;
+        let inputs: Vec<tessera_filter::RecordBlob> = plan
+            .records
+            .iter()
+            .map(|extent| {
+                tessera_filter::RecordBlob::open(
+                    &ctx.prefix_dir.join(&extent.blocks),
+                    &ctx.prefix_dir.join(&extent.hasrow),
+                    &ctx.prefix_dir.join(&extent.directory),
+                    tessera_filter::Access::Mapped,
+                )
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|e| CoalesceFailed(format!("record extent: {e}")))?;
+        let refs: Vec<&tessera_filter::RecordBlob> = inputs.iter().collect();
+
+        let extent = RecordExtent {
+            blocks: format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE),
+            hasrow: format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE),
+            directory: format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE),
+        };
+        let blocks_path = ctx.prefix_dir.join(&extent.blocks);
+        let hasrow_path = ctx.prefix_dir.join(&extent.hasrow);
+        let directory_path = ctx.prefix_dir.join(&extent.directory);
+        tessera_filter_write::coalesce_record_extents(
+            &refs,
+            &blocks_path,
+            &hasrow_path,
+            &directory_path,
+            tessera_filter::RECORD_BLOCK_TARGET,
+        )
+        .map_err(|e| CoalesceFailed(format!("record coalesce: {e}")))?;
+        for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+            files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(rel))?);
+        }
+        // Reopened before the manifest can name it, the flush's posture: a merge defect refuses
+        // the pass here rather than publishing an extent the fail-closed reader refuses on every
+        // later drill-down.
+        tessera_filter::RecordBlob::open(
+            &blocks_path,
+            &hasrow_path,
+            &directory_path,
+            tessera_filter::Access::Mapped,
+        )
+        .map_err(|e| CoalesceFailed(format!("the coalesced record extent does not reopen: {e}")))?;
+        Some(extent)
+    };
+
     Ok(CompletedCoalesce {
         plan,
         prefix: ctx.prefix,
@@ -494,6 +601,7 @@ pub(crate) fn execute_coalesce(
         run,
         dict,
         attrs,
+        record,
         files,
     })
 }
@@ -559,11 +667,24 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         attr_positions.push(subsequence[at].to_vec());
     }
 
+    // The record window: one contiguous run of `record_extents`, keyed by the blocks path — the
+    // same never-reused identity the attribute windows key on.
+    let record_paths: Vec<String> = plan.records.iter().map(|e| e.blocks.clone()).collect();
+    let records = match window_of(&manifest.record_extents, &record_paths, |e| &e.blocks) {
+        Some(at) => at,
+        None => return false,
+    };
+
     let attr_paths: Vec<String> = plan
         .attrs
         .iter()
         .flat_map(|w| w.extents.iter())
         .flat_map(|e| [e.values.clone(), e.presence.clone()])
+        .collect();
+    let record_files: Vec<String> = plan
+        .records
+        .iter()
+        .flat_map(|e| [e.blocks.clone(), e.hasrow.clone(), e.directory.clone()])
         .collect();
     for rel in plan
         .tiers
@@ -572,6 +693,7 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         .chain(&locator_paths)
         .chain(&dict_paths)
         .chain(&attr_paths)
+        .chain(&record_files)
     {
         manifest.files.remove(rel);
     }
@@ -591,6 +713,12 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
     }
     if let Some(extent) = &completed.dict {
         manifest.dict_extents.splice(dicts, [extent.clone()]);
+    }
+    if let Some(extent) = &completed.record {
+        // The window's position, like every axis: nothing reads `record_extents` by position —
+        // the layers are disjoint (I9) — but a manifest whose bytes depend on when a pass ran is
+        // a bundle identity that does.
+        manifest.record_extents.splice(records, [extent.clone()]);
     }
     if !completed.attrs.is_empty() {
         // **Both obligations in one manifest write, and doing one is worse than doing neither**
@@ -887,6 +1015,7 @@ mod tests {
                 records: 3,
             }),
             attrs,
+            record: None,
             files: [("c/delta.arrow".to_string(), digest(3072))]
                 .into_iter()
                 .collect(),
@@ -1011,6 +1140,7 @@ mod tests {
             run: None,
             dict: None,
             attrs,
+            record: None,
             files,
             plan,
             prefix: "v00000".to_string(),
@@ -1065,6 +1195,7 @@ mod tests {
             run: None,
             dict: None,
             attrs,
+            record: None,
             files: BTreeMap::new(),
             plan,
             prefix: "v00000".to_string(),
@@ -1084,6 +1215,89 @@ mod tests {
         assert!(!rebase_into(&mut manifest, &completed));
     }
 
+    /// **The record axis selects a window of `record_extents` and replaces it in place, in both
+    /// halves of the manifest** — the entry list and the files map. The same silent-failure shape
+    /// as the attribute axis: a bundle that lost the window's entry while keeping its bytes (or
+    /// the reverse) opens cleanly and answers drill-downs short, with no symptom.
+    #[test]
+    fn the_record_axis_selects_a_window_and_replaces_it_in_both_manifest_halves() {
+        let (mut manifest, build_files) = manifest_with(4);
+        for i in 0..4 {
+            let dir = "partitions/p0/attrs/record/extents";
+            let extent = RecordExtent {
+                blocks: format!("{dir}/flush-{i}-1.blocks.bin"),
+                hasrow: format!("{dir}/flush-{i}-1.hasrow.roaring"),
+                directory: format!("{dir}/flush-{i}-1.directory.arrow"),
+            };
+            manifest.files.insert(extent.blocks.clone(), digest(1024));
+            manifest.files.insert(extent.hasrow.clone(), digest(64));
+            manifest.files.insert(extent.directory.clone(), digest(128));
+            manifest.record_extents.push(extent);
+        }
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert_eq!(plan.records.len(), 3, "the policy's width");
+        let consumed: Vec<String> = plan
+            .records
+            .iter()
+            .flat_map(|e| [e.blocks.clone(), e.hasrow.clone(), e.directory.clone()])
+            .collect();
+
+        let coalesced = RecordExtent {
+            blocks: "c/attrs/record/blocks.bin".to_string(),
+            hasrow: "c/attrs/record/hasrow.roaring".to_string(),
+            directory: "c/attrs/record/directory.arrow".to_string(),
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let attrs = completed_attrs(&plan, "c");
+        let files: BTreeMap<String, FileDigest> = [
+            (coalesced.blocks.clone(), digest(3072)),
+            (coalesced.hasrow.clone(), digest(96)),
+            (coalesced.directory.clone(), digest(256)),
+        ]
+        .into_iter()
+        .collect();
+        let completed = CompletedCoalesce {
+            tier: Some(tier_at(dir.path())),
+            run: None,
+            dict: None,
+            attrs,
+            record: Some(coalesced.clone()),
+            files,
+            plan,
+            prefix: "v00000".to_string(),
+        };
+        assert!(rebase_into(&mut manifest, &completed));
+
+        assert_eq!(
+            manifest.record_extents.len(),
+            2,
+            "3 extents became 1, 1 untouched: {:?}",
+            manifest.record_extents
+        );
+        assert_eq!(
+            manifest.record_extents[0].blocks, coalesced.blocks,
+            "the coalesced extent takes the window's position"
+        );
+        for rel in &consumed {
+            assert!(
+                !manifest.files.contains_key(rel),
+                "a consumed extent file is still digested: {rel}"
+            );
+        }
+        for rel in [&coalesced.blocks, &coalesced.hasrow, &coalesced.directory] {
+            assert!(
+                manifest.files.contains_key(rel),
+                "the coalesced extent's bytes are named in `record_extents` but not digested: {rel}"
+            );
+        }
+
+        // And a window a fold (or another pass) has since consumed no longer rebases.
+        let gone = completed.plan.records[1].blocks.clone();
+        manifest.record_extents.retain(|e| e.blocks != gone);
+        let mut manifest = manifest;
+        assert!(!rebase_into(&mut manifest, &completed));
+    }
+
     /// A plan whose window is gone no longer rebases, and the publication is discarded rather than
     /// forced — its files orphans nothing references, every consumed entry still standing.
     #[test]
@@ -1097,6 +1311,7 @@ mod tests {
             run: None,
             dict: None,
             attrs,
+            record: None,
             files: BTreeMap::new(),
             plan,
             prefix: "v00000".to_string(),
