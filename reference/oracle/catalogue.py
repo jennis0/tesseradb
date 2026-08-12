@@ -150,6 +150,20 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # period (`(source_id // 5) % 3`), decorrelated from the term blocks, the department cycle's 6 and
 # the title cycle's 12; `void` is declared and planted nowhere, which is the routed reading of an
 # absent keyed record.
+#
+# **`shelf` is the render-only category** (records §2/§3): `render = true`, no `index`, so its
+# codes ride the hot column and today it publishes no filter operand. It exists for the row-space
+# route (records §6.2, decision 0068): when that lands, `render = true` implies filterable and
+# `/v1/meta` widens — [`filter_operands_expected`] is the one place that widening is recorded.
+# `public`, so the routed reading stays clear of the vocabulary-control ruling a `per_viewer`
+# rendered category waits on; a fifth period (`(source_id // 7) % 3`), decorrelated like the rest.
+#
+# **`note` and `pages` are blob-resident** — neither key set, so their values live only in the
+# record blob, `attrs/record/` (records §3): a utf8 and a numeric, exercising mixed row content.
+# Their planting carries the blob's adversarial shapes: an empty string (a value, not an absence),
+# a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
+# block target (an oversized block of its own — records §3's "target, not a cap"), and entities
+# absent from both (absent from has-row entirely).
 SCHEMA_TOML = """\
 [[attribute]]
 name     = "fx_key"
@@ -188,6 +202,26 @@ listing    = "public"
 name     = "title"
 type     = "utf8"
 index    = true
+
+[[attribute]]
+name       = "shelf"
+type       = "category"
+width      = "u8"
+render     = true
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  north = 51
+  south = 52
+  east  = 53
+
+[[attribute]]
+name     = "note"
+type     = "utf8"
+
+[[attribute]]
+name     = "pages"
+type     = "u32"
 """
 
 # The declaration's own key→code pinning, transcribed for the filter oracle. The oracle resolves
@@ -212,18 +246,43 @@ ARCHIVE_CODES: dict[str, int] = {
     "void": 44,
 }
 
+# The render-only category's pinning — its own code space, like the other two. Not a filter
+# oracle input today (no operand exists to resolve); it becomes one when the row-space route
+# lands (records §6.2) and the filter differential gains a `shelf` column.
+SHELF_CODES: dict[str, int] = {
+    "north": 51,
+    "south": 52,
+    "east": 53,
+}
+
 # The one entity carrying `solo` — a single-member value, inside `cross_lo` so the crossover
 # principals can see it. Chosen not to collide with the absence rule below.
 DEPARTMENT_SOLO_ID = 69_000
 
-# Absence strides. Both columns leave a value off a thin, deterministic scattering of entities so
-# presence is partial — the ordinary case filter-index §2.1 designs for — and an entity with no
-# value must match no predicate. Distinct primes, and distinct from every other period in this
-# corpus (the term blocks, the department cycle's 6, the title cycle's 12), so absence correlates
-# with nothing.
+# Absence strides. Every planted column leaves its value off a thin, deterministic scattering of
+# entities so presence is partial — the ordinary case filter-index §2.1 designs for — and an
+# entity with no value must match no predicate (for a blob column: contributes nothing to the
+# row). Distinct primes, and distinct from every other period in this corpus (the term blocks,
+# the department cycle's 6, the title cycle's 12), so absence correlates with nothing. The blob
+# pair's product, 113 × 127 = 14,351, is what makes whole entities absent from the has-row
+# bitmap: its ten multiples under `N_ITEMS` carry no blob-resident value at all.
 DEPARTMENT_ABSENT_STRIDE = 101
 TITLE_ABSENT_STRIDE = 103
 ARCHIVE_ABSENT_STRIDE = 107
+SHELF_ABSENT_STRIDE = 109
+NOTE_ABSENT_STRIDE = 113
+PAGES_ABSENT_STRIDE = 127
+
+# `pages` is planted as a *present zero* on this stride (after the absence rule): the blob must
+# keep "carries the value 0" and "carries no value" distinct, absence being absence from the row.
+PAGES_ZERO_STRIDE = 17
+
+# Two designated `note` entities, both inside `cross_lo` (so the crossover principals can reach
+# them at drill-down) and off every stride above. The oversize row is larger than the 256 KiB
+# block target, so the build must give it an oversized block of its own (records §3 — the target
+# is a target, not a cap); the empty string is a value and must survive as one.
+NOTE_OVERSIZE_ID = 65_700
+NOTE_EMPTY_ID = 65_701
 
 
 def department_of(source_id: int) -> str | None:
@@ -262,6 +321,99 @@ def title_of(source_id: int) -> str | None:
     if source_id % TITLE_ABSENT_STRIDE == 0:
         return None
     return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{source_id}"
+
+
+def shelf_of(source_id: int) -> str | None:
+    """`shelf` as planted — the render-only category. Same contract as [`department_of`]: what
+    the entity was *given*, upstream of the code the build stored in the hot column."""
+    if source_id % SHELF_ABSENT_STRIDE == 0:
+        return None
+    return ("north", "south", "east")[(source_id // 7) % 3]
+
+
+# The blob-resident string's cycling stems — a period of 33 (stride 11 × 3 ledgers), decorrelated
+# from every other cycle here. The appended source id makes every full note unique, so the future
+# drill-down differential compares a value only its entity can carry.
+_NOTE_LEDGERS = ("acquisitions", "loans", "conservation")
+
+
+def note_of(source_id: int) -> str | None:
+    """`note` as planted — blob-resident, so nothing serves it before the drill-down assembly
+    lands; the build stores it in `attrs/record/` now. Same contract as [`department_of`]."""
+    if source_id % NOTE_ABSENT_STRIDE == 0:
+        return None
+    if source_id == NOTE_OVERSIZE_ID:
+        # > 256 KiB uncompressed, a pure function of the id range: the one row the block target
+        # cannot hold, which must become an oversized block of its own rather than split.
+        return "".join(f"{i:08x}" for i in range(40_000))
+    if source_id == NOTE_EMPTY_ID:
+        return ""
+    return f"{_NOTE_LEDGERS[(source_id // 11) % 3]} ledger, accession {source_id}"
+
+
+def pages_of(source_id: int) -> int | None:
+    """`pages` as planted — the blob-resident numeric. Same contract as [`department_of`]; the
+    zero stride plants a *present* zero, which the blob must keep distinct from absence."""
+    if source_id % PAGES_ABSENT_STRIDE == 0:
+        return None
+    if source_id % PAGES_ZERO_STRIDE == 0:
+        return 0
+    return (source_id * 37 + 11) % 4999
+
+
+def blob_entities_expected() -> set[int]:
+    """The entities the record blob's has-row bitmap must contain, from the generation functions
+    alone: everyone with at least one blob-resident value. This is the fixture-input half of the
+    blob's one licensed artefact check (records §3, review B7) — the *addressing* is what the
+    artefact walk verifies; *which entities have a row* is the fixture's own fact."""
+    return {
+        e for e in range(N_ITEMS) if note_of(e) is not None or pages_of(e) is not None
+    }
+
+
+def record_of(source_id: int, fx: list[int]) -> dict[str, object]:
+    """Every declared column's planted value for one entity — the record, as the fixture defines
+    it, across all three homes (records §3): hot column (`fx_key`, `shelf`), entity space
+    (`department`, `archive`, `title`), record blob (`note`, `pages`).
+
+    This is the oracle's side of the record-always-exists differential (records §10): when
+    drill-down assembles the record from its three homes, `/v1/items/{tessera_id}` must return
+    exactly these values for every visible entity. Absent values are omitted, not `None`-valued —
+    absence is absence from the record, exactly as it is absence from the blob row.
+
+    `fx` is [`fx_keys`]'s list, passed in because recomputing 150,000 seeded draws per entity
+    would make a whole-corpus sweep quadratic; the caller computes it once.
+    """
+    values: dict[str, object] = {
+        "fx_key": fx[source_id],
+        "shelf": shelf_of(source_id),
+        "department": department_of(source_id),
+        "archive": archive_of(source_id),
+        "title": title_of(source_id),
+        "note": note_of(source_id),
+        "pages": pages_of(source_id),
+    }
+    return {name: value for name, value in values.items() if value is not None}
+
+
+def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
+    """What `/v1/meta` must publish as `filter_operands`: column → (family, operator set),
+    exactly — no more and no fewer. The meta conformance test asserts equality against this
+    function alone, so the operand surface is recorded in **one place**.
+
+    What the exactness pins today: the blob-resident columns (`note`, `pages`) publish no
+    operand — records §3 gives them no query surface — and the render-only category (`shelf`)
+    is absent until the row-space route lands.
+
+    **The row-space widening lands here** (records §6.2, decision 0068): when `render = true`
+    implies filterable, add `"shelf": ("category", frozenset({"eq", "in"}))` below. That line is
+    the whole conformance-side update for `/v1/meta`.
+    """
+    return {
+        "department": ("category", frozenset({"eq", "in"})),
+        "archive": ("category", frozenset({"eq", "in"})),
+        "title": ("string", frozenset({"eq", "in", "prefix", "contains"})),
+    }
 
 # The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
 # `Bundle.extent` uses for the same four numbers (`(x_min, x_max, y_min, y_max)`). Writing the
@@ -656,6 +808,12 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 ),
                 "archive": pa.array([archive_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 "title": pa.array([title_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # The render-only category arrives as its key, like the other two categories.
+                "shelf": pa.array([shelf_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # The blob-resident pair. A null is the absent value — for these, absence from
+                # the record blob's row and (jointly) from its has-row bitmap.
+                "note": pa.array([note_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                "pages": pa.array([pages_of(i) for i in range(N_ITEMS)], type=pa.uint32()),
             }
         ),
         points_path,
@@ -719,6 +877,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
+        # 6: the corpus gained the render-only category (`shelf`) and the blob-resident pair
+        #    (`note`, `pages`) for the record-blob conformance capability (2026-08-12).
         # 5: the corpus gained a `public` category, `archive`, so the differential covers the
         # postings route decision 0063 opened as well as the scan (2026-08-10).
         # 4: the corpus gained the two filter columns (`department`, `title`) and their planting
@@ -727,7 +887,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
         # version moves with them.
         # 3: the bundle gained a declared `fx_key` column (2026-08-07).
-        "recipe_version": 5,
+        "recipe_version": 6,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -748,6 +908,20 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
             "title_absent_stride": TITLE_ABSENT_STRIDE,
             "title_stems": list(_TITLE_STEMS),
             "archive_absent_stride": ARCHIVE_ABSENT_STRIDE,
+        },
+        # The render-only category's and the blob pair's planting rules — same reasoning as
+        # `filter_columns`: everything the generation functions are a function of that the
+        # schema text does not carry.
+        "render_category": {
+            "shelf_absent_stride": SHELF_ABSENT_STRIDE,
+        },
+        "record_columns": {
+            "note_absent_stride": NOTE_ABSENT_STRIDE,
+            "note_ledgers": list(_NOTE_LEDGERS),
+            "note_oversize_id": NOTE_OVERSIZE_ID,
+            "note_empty_id": NOTE_EMPTY_ID,
+            "pages_absent_stride": PAGES_ABSENT_STRIDE,
+            "pages_zero_stride": PAGES_ZERO_STRIDE,
         },
         # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
         # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt
