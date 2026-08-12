@@ -1294,7 +1294,6 @@ mod tests {
         // And a window a fold (or another pass) has since consumed no longer rebases.
         let gone = completed.plan.records[1].blocks.clone();
         manifest.record_extents.retain(|e| e.blocks != gone);
-        let mut manifest = manifest;
         assert!(!rebase_into(&mut manifest, &completed));
     }
 

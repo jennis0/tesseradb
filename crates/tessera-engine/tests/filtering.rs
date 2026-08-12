@@ -290,6 +290,7 @@ fn fixture() -> Fixture {
         &opened.manifest.vocabularies,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
+        &opened.partitions[&phash].manifest.record_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
         true,
@@ -1078,6 +1079,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &opened.manifest.declared_scalars,
             &opened.manifest.vocabularies,
             extents,
+            &[],
             true,
         )
     };
@@ -1333,6 +1335,13 @@ fn a_filtered_viewport_serves_only_matching_marks() {
 ///
 /// The window is chosen to sit past `PER_TILE_CROSSING_RATIO`, and the route counters assert it
 /// landed there rather than leaving the test to pass on the route it was meant to exercise.
+///
+/// **The predicate is on `score`, an entity-only column, and that is load-bearing.** This test
+/// drove `department` until decision 0068 admitted the row-space operand: a rendered category
+/// affords the row route, and for a window this narrow the route rule chooses it — so the
+/// request stopped crossing at all and the counters went to zero. The crossing is still the
+/// only route an entity-only column has, and that is what this test exists to cover; the row
+/// route has its own tests below.
 #[test]
 fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let fx = fixture();
@@ -1341,18 +1350,20 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
-    // Every department: 48 of the 60 items, against a window holding ~11 rows. Broad enough to
-    // clear the ratio, and still a genuine narrowing — the every-fifth item carries no department.
-    let any_department = FilterExpr::AnyOf(
-        ["eng", "sales", "legal"]
-            .iter()
-            .map(|d| {
-                leaf(
-                    "department",
-                    FilterOperand::Equals(AttrLocalId::new(fx.codes[*d])),
-                )
-            })
-            .collect(),
+    // `score_of(e) = (7e) % 100`, so this range holds most of the 60 items against a window of
+    // ~11 rows: broad enough to clear the ratio, and still a genuine narrowing.
+    let any_department = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(80),
+                inclusive: false,
+            }),
+        },
     );
     let narrow = [0.0, 0.0, 400.0, 400.0];
     let zoom = 8;
@@ -2081,6 +2092,7 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &fx.declared,
         &fx.vocabularies,
         &fx.extents,
+        &[],
         true,
     )
 }
@@ -3447,4 +3459,257 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         .resolve("title", &FilterOperand::TextEquals("t-201".into()), &cand)
         .expect("answers");
     assert_eq!(answer.iter().collect::<Vec<_>>(), vec![201]);
+}
+
+// =================================================================================================
+// The row-space route (decision 0068): suppression, route agreement, and θ's anchor
+// =================================================================================================
+
+/// **A suppressed entity is gone from every answer a render-column filter gives** — the mark, the
+/// count and the record alike.
+///
+/// This is the differential `Engine::evaluate_row_route`'s module doc names, and it pins the half
+/// of the route that is easiest to get wrong and impossible to see. The row bitmap the route
+/// returns *still contains the suppressed row*: the hot column holds its value and Rule S says no
+/// filter artefact may ever be touched by a suppression, so the value is there to be matched. What
+/// removes the entity is that the bitmap narrows the request only through `EffectiveMask`, whose
+/// consumers intersect the composed mask — fragment minus overlay — last. A route that took the
+/// raw fragment as its candidate, or that let the row bitmap stand as the answer, would resurrect
+/// every suppressed item that happens to match the predicate, and would do so while every count
+/// stayed self-consistent.
+///
+/// The unsuppress at the end is what distinguishes "hidden" from "never matched": the entity comes
+/// back through the same filter, so its value was in the column throughout.
+#[test]
+fn a_suppressed_entity_is_absent_from_a_render_column_filters_marks_counts_and_record() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-row-suppress");
+    let wal = fx._dir.path().join("wal-row-suppress");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Source 1 carries "sales"; the predicate is its own department, so the entity matches the
+    // filter and only the suppression can remove it.
+    let source = 1u64;
+    let department = department_of(source).expect("source 1 carries a department");
+    let entity = fx.entity_of[&source];
+    let id = engine
+        .tessera_id_of(tessera_types::EntityId::new(entity))
+        .expect("identity is computable");
+    let raw = id.raw();
+    let predicate = leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes[department])),
+    );
+
+    let filtered = |engine: &tessera_engine::Engine, session: &tessera_engine::Session| {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate.clone()),
+            )
+            .expect("the filtered viewport answers")
+    };
+
+    let before = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> = before.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.contains(&raw),
+        "the fixture is degenerate: the entity must match the filter before it is suppressed"
+    );
+    let matched = |out: &tessera_engine::ViewportOut| -> u64 {
+        out.tiles.iter().map(|t| t.matched).sum()
+    };
+    let matched_before = matched(&before);
+
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(entity),
+            tessera_lifecycle::wal::ChangeOp::Suppress,
+        )
+        .expect("a suppression is accepted");
+
+    // A session authorised before the suppression must not still see it: the mask composes
+    // against the live overlay, not the one that existed at authorise.
+    let after = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> = after.points.tessera_ids.iter().copied().collect();
+    assert!(
+        !drawn.contains(&raw),
+        "a suppressed entity was drawn as a mark by a render-column filter"
+    );
+    assert_eq!(
+        matched(&after),
+        matched_before - 1,
+        "the filtered count still counts the suppressed entity"
+    );
+    assert!(
+        engine
+            .item(&session, id, None)
+            .expect("the drill-down succeeds")
+            .is_none(),
+        "a suppressed entity still answers drill-down"
+    );
+
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(entity),
+            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+        )
+        .expect("an unsuppress is accepted");
+    let restored = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> =
+        restored.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.contains(&raw),
+        "the unsuppress must reveal the entity through the same filter — proving its value was in \
+         the column throughout, hidden rather than erased (Rule S)"
+    );
+}
+
+/// **Both routes answer the same question over the same window**, which is the whole licence for
+/// admitting a second operand kind (decision 0068): a row-space result is exact over the request's
+/// domain, so the route may be chosen on cost alone.
+///
+/// The route rule is `rows_in_ranges ≤ |M_auth|`, so what selects the route is the request's row
+/// span against the principal's own visible total — the same predicate, the same mask, once
+/// through each route, must draw the same marks over the same domain. The counters assert each
+/// request landed on the route it was meant to exercise rather than leaving the equality to hold
+/// trivially because both took the same one.
+///
+/// **The mask is a subset credential, and that is what makes the pair reachable.** Under full
+/// coverage the whole extent's row span *equals* the visible total, so the rule's `≤` chooses row
+/// space for every window and the entity route is unreachable from this fixture. A principal who
+/// sees part of the corpus has a visible total below the full extent's row span, which is the
+/// ordinary shape the rule was written for.
+#[test]
+fn the_row_route_and_the_entity_route_agree_over_the_domain() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-route-agree");
+    let wal = fx._dir.path().join("wal-route-agree");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    let predicate = FilterExpr::AnyOf(
+        ["eng", "sales"]
+            .iter()
+            .map(|d| {
+                leaf(
+                    "department",
+                    FilterOperand::Equals(AttrLocalId::new(fx.codes[*d])),
+                )
+            })
+            .collect(),
+    );
+    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+
+    // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let before = engine.filter_row_routes();
+    let narrow_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        1,
+        "the narrow request was supposed to take the row route; the window or the rule moved"
+    );
+
+    // The same window, unfiltered, gives the domain the comparison is made over.
+    let narrow_all = ids(&engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("the narrow window answers unfiltered"));
+
+    // The whole extent: rows in range now exceed the principal's total, so the entity route runs.
+    let before = engine.filter_row_routes();
+    let full_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate),
+        )
+        .expect("the full extent answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        0,
+        "the full-extent request was supposed to take the entity route"
+    );
+
+    let (row_marks, entity_marks) = (ids(&narrow_filtered), ids(&full_filtered));
+    assert_eq!(
+        row_marks,
+        entity_marks
+            .intersection(&narrow_all)
+            .copied()
+            .collect::<std::collections::BTreeSet<u64>>(),
+        "the row route's marks differ from the entity route's over the same domain"
+    );
+    assert!(
+        !row_marks.is_empty() && row_marks.len() < narrow_all.len(),
+        "non-degenerate in both directions: the window holds matches, and the filter removed some"
+    );
+}
+
+/// **A filter narrows the selection and never moves θ** (I3/I12): the label frontier anchors on the
+/// unfiltered composed mask, so the same viewport answers the same θ filtered or not.
+///
+/// This is the invariant a row-space route is most likely to break by accident, because the route
+/// is evaluated inside the same sweep that computes the anchor — and an anchor taken after the
+/// filter would let a caller move the frontier by narrowing, which is a disclosure rather than a
+/// view. The unfiltered total is asserted alongside it: it is `visible_total()`, computed above the
+/// filter and deliberately blind to it.
+#[test]
+fn a_render_column_filter_narrows_the_selection_without_moving_the_anchor() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-anchor");
+    let wal = fx._dir.path().join("wal-anchor");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let unfiltered = engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("unfiltered");
+    let before = engine.filter_row_routes();
+    let filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, narrow, 10_000).filter(leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            )),
+        )
+        .expect("filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        1,
+        "this test is only meaningful if the row route ran"
+    );
+
+    // `TileCount::visible` is the anchor's own input — the composed mask's count for the tile,
+    // computed above the filter — while `matched` is what the filter narrowed to. The first must
+    // be identical across the pair; the second must not be.
+    let anchor = |out: &tessera_engine::ViewportOut| -> Vec<(u64, u64)> {
+        out.tiles.iter().map(|t| (t.tile, t.visible)).collect()
+    };
+    let (visible, visible_unfiltered) = (anchor(&filtered), anchor(&unfiltered));
+    assert_eq!(
+        visible, visible_unfiltered,
+        "the filter moved the anchor: θ anchors on the unfiltered composed mask (I3/I12)"
+    );
+    let matched: u64 = filtered.tiles.iter().map(|t| t.matched).sum();
+    let visible_total: u64 = filtered.tiles.iter().map(|t| t.visible).sum();
+    assert!(
+        matched < visible_total,
+        "the filter must actually have narrowed the matched set beneath the anchor"
+    );
+    let drawn: std::collections::BTreeSet<u64> = filtered.points.tessera_ids.iter().copied().collect();
+    let all: std::collections::BTreeSet<u64> = unfiltered.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.is_subset(&all) && drawn.len() < all.len(),
+        "a filter may only narrow (I12), and this one must actually have narrowed"
+    );
 }

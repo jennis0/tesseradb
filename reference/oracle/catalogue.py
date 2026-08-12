@@ -316,11 +316,25 @@ def archive_of(source_id: int) -> str | None:
 _TITLE_STEMS = ("smith", "smithy", "jones", "smythe")
 
 
+# **The offset every planted value applies before writing an id into free text**, and it is not
+# decoration. `test_byte_scan` reads every maximal run of ASCII decimal digits out of a
+# `/v1/items` body and fails if one equals a real entity id — the I10 check that no identifier
+# crosses the trust boundary. A bare source id in planted prose collides with that by
+# construction, because source ids and entity ids share the range `[0, N_ITEMS)`; the scan then
+# reports the fixture quoting itself as a leak. Offsetting past `N_ITEMS` keeps every value unique
+# and legible while putting its number outside the id space the scan searches, and because the
+# scan's runs are maximal no shorter id matches inside the longer one either.
+#
+# This became visible only when drill-down began returning every declared field (records §3): the
+# planted `title` had embedded its id since the column was added, and nothing had served it.
+PLANTED_ID_BASE = 1_000_000
+
+
 def title_of(source_id: int) -> str | None:
     """`title` as planted — see [`department_of`]."""
     if source_id % TITLE_ABSENT_STRIDE == 0:
         return None
-    return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{source_id}"
+    return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{PLANTED_ID_BASE + source_id}"
 
 
 def shelf_of(source_id: int) -> str | None:
@@ -348,7 +362,10 @@ def note_of(source_id: int) -> str | None:
         return "".join(f"{i:08x}" for i in range(40_000))
     if source_id == NOTE_EMPTY_ID:
         return ""
-    return f"{_NOTE_LEDGERS[(source_id // 11) % 3]} ledger, accession {source_id}"
+    return (
+        f"{_NOTE_LEDGERS[(source_id // 11) % 3]} ledger, "
+        f"accession {PLANTED_ID_BASE + source_id}"
+    )
 
 
 def pages_of(source_id: int) -> int | None:
@@ -401,17 +418,16 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
     exactly — no more and no fewer. The meta conformance test asserts equality against this
     function alone, so the operand surface is recorded in **one place**.
 
-    What the exactness pins today: the blob-resident columns (`note`, `pages`) publish no
-    operand — records §3 gives them no query surface — and the render-only category (`shelf`)
-    is absent until the row-space route lands.
-
-    **The row-space widening lands here** (records §6.2, decision 0068): when `render = true`
-    implies filterable, add `"shelf": ("category", frozenset({"eq", "in"}))` below. That line is
-    the whole conformance-side update for `/v1/meta`.
+    What the exactness pins: the blob-resident columns (`note`, `pages`) publish no operand —
+    records §3 gives them no query surface — while the render-only category (`shelf`) publishes
+    one, because decision 0068 makes `render = true` imply filterable and the row-space route
+    answers it over the request's own rows. A category's operand set is the same either way:
+    routing is a property of the deployment's declaration, never of the query surface.
     """
     return {
         "department": ("category", frozenset({"eq", "in"})),
         "archive": ("category", frozenset({"eq", "in"})),
+        "shelf": ("category", frozenset({"eq", "in"})),
         "title": ("string", frozenset({"eq", "in", "prefix", "contains"})),
     }
 
@@ -877,6 +893,9 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
+        # 8: every planted value that writes an id into free text (`note`, `title`) offsets it by
+        #    `PLANTED_ID_BASE`, so the byte scan stops reading the fixture quoting itself as a
+        #    leak once drill-down serves those fields (2026-08-12).
         # 6: the corpus gained the render-only category (`shelf`) and the blob-resident pair
         #    (`note`, `pages`) for the record-blob conformance capability (2026-08-12).
         # 5: the corpus gained a `public` category, `archive`, so the differential covers the
@@ -887,7 +906,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
         # version moves with them.
         # 3: the bundle gained a declared `fx_key` column (2026-08-07).
-        "recipe_version": 6,
+        "recipe_version": 8,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -920,6 +939,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
             "note_ledgers": list(_NOTE_LEDGERS),
             "note_oversize_id": NOTE_OVERSIZE_ID,
             "note_empty_id": NOTE_EMPTY_ID,
+            "planted_id_base": PLANTED_ID_BASE,
             "pages_absent_stride": PAGES_ABSENT_STRIDE,
             "pages_zero_stride": PAGES_ZERO_STRIDE,
         },
