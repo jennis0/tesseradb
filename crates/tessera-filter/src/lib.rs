@@ -43,6 +43,7 @@
 //! members — leak-register row C11, reachable by ordinary operation (filter-index §2.2).
 
 mod column;
+mod dict;
 mod extent;
 mod pack;
 mod record;
@@ -51,6 +52,10 @@ mod values;
 mod values_writer;
 
 pub use column::{resolve_union, ColumnPostings};
+pub use dict::{
+    write_sorted_dict, DictError, DictStats, SortedDict, SortedDictWriter,
+    DEFAULT_RESTART_INTERVAL, DICT_FILE, DICT_FORMAT_VERSION,
+};
 pub use extent::{extent_paths, open_extent, write_extent, EXTENTS_DIR};
 pub use record::{
     encode_row, RecordBlob, RecordError, RecordField, RecordValue, RECORD_BLOCKS_FILE,
