@@ -275,3 +275,11 @@ paths = [
   "docs/design/performance-suite.md",
   "docs/design/README.md",
 ]
+
+# The all-homes deletion test (owner ask, 2026-08-13). A NEW file only, deliberately: the
+# retirement track owns the existing engine tests and is running, and a new file cannot conflict
+# with its edits.
+[track.deltest]
+paths = [
+  "crates/tessera-engine/tests/deletion_reaches_every_home.rs",
+]
