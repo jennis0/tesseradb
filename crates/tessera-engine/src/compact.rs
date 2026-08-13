@@ -1276,7 +1276,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     let blob_resident = ctx
         .declared_scalars
         .iter()
-        .any(|d| !d.index && !d.render && d.vocabulary.is_none());
+        .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
     if !blob_resident && !plan.record_extents.is_empty() {
         return Err(FoldFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \

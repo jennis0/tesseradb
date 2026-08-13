@@ -27,8 +27,14 @@ pub struct RecordExtentPaths {
 }
 
 /// The base blob (if the build wrote one) and every flush extent, opened together.
+///
+/// **Layers are `Arc` so a live generation can be extended without reopening the base.** A flush
+/// publishes one more extent; reopening the whole stack for it would remap a base that at 10⁹ is
+/// the largest artefact in the bundle, and the successor generation shares every layer the
+/// predecessor already had. Disjointness by I9 is what makes appending sound: an entity id is
+/// never reused, so no two layers hold the same row and the search order below is a formality.
 pub struct RecordStack {
-    layers: Vec<RecordBlob>,
+    layers: Vec<std::sync::Arc<RecordBlob>>,
 }
 
 impl RecordStack {
@@ -44,15 +50,42 @@ impl RecordStack {
     ) -> Result<Self, RecordError> {
         let mut layers = Vec::with_capacity(extents.len() + 1);
         if let Some(dir) = base {
-            layers.push(RecordBlob::open_dir(dir, access)?);
+            layers.push(std::sync::Arc::new(RecordBlob::open_dir(dir, access)?));
         }
         for extent in extents {
-            layers.push(RecordBlob::open(
+            layers.push(std::sync::Arc::new(RecordBlob::open(
                 &extent.blocks,
                 &extent.hasrow,
                 &extent.directory,
                 access,
-            )?);
+            )?));
+        }
+        Ok(Self { layers })
+    }
+
+    /// This stack with `extents` appended — the successor generation's, after a flush.
+    ///
+    /// **A published record extent that no live stack holds answers no drill-down.** The manifest
+    /// entry makes the bytes reachable to a *reopen*; the running process serves from the stack it
+    /// opened, so a flush that only writes the manifest leaves every entity it flushed with its
+    /// blob-resident fields missing — silently, since an entity in no layer is the ordinary
+    /// `Ok(None)` — until the next fold or restart. This is the record blob's counterpart to
+    /// composing a filter extent onto the live columns, and it is owed at the same moment.
+    ///
+    /// The existing layers are shared, not reopened.
+    pub fn with_extents(
+        &self,
+        extents: &[RecordExtentPaths],
+        access: Access,
+    ) -> Result<Self, RecordError> {
+        let mut layers = self.layers.clone();
+        for extent in extents {
+            layers.push(std::sync::Arc::new(RecordBlob::open(
+                &extent.blocks,
+                &extent.hasrow,
+                &extent.directory,
+                access,
+            )?));
         }
         Ok(Self { layers })
     }

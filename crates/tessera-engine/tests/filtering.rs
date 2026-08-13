@@ -1165,7 +1165,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             "attrs/title/extents/overlapping.arrow".to_string(),
             overlapping,
             Some(dict),
-        )])
+        )], &[])
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
@@ -1179,7 +1179,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             "attrs/no_such_column/extents/stray.arrow".to_string(),
             stray,
             Some(stray_dict),
-        )])
+        )], &[])
         .is_err());
 }
 
@@ -3545,7 +3545,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
                 extent(&[200, 201]),
                 None,
             ),
-        ])
+        ], &[])
         .expect("two extents above the build's high-water compose");
 
     let window =

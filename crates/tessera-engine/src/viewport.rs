@@ -2083,9 +2083,21 @@ fn eval_row_expr(
             // that cannot be read under-reports rather than widening (I12's sign, exactly as the
             // entity path argues it).
             let mut out = scan_rows(segments, domain, column, RowPredicate::present_in(*family))?;
-            for kid in kids {
+            for (i, kid) in kids.iter().enumerate() {
                 out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain)?);
                 if out.is_empty() {
+                    // Nothing below can widen an empty difference, so the remaining kids are not
+                    // evaluated — **but `images` is positional and their verdicts are still in
+                    // it**. `entity_verdicts` collects every `Entity` node in the tree whether or
+                    // not evaluation reaches it, so leaving the cursor here would hand the next
+                    // `Entity` anywhere in the tree someone else's image: a filter that silently
+                    // answers with a different clause's verdict, or with the candidate itself.
+                    // Reachable — a kid is normally a row leaf on this one column, but an empty
+                    // combinator is entity-pure by construction and `check_negations` admits it,
+                    // since it contributes no column to the one-column rule.
+                    for skipped in &kids[i + 1..] {
+                        *next_image += skipped.entity_verdicts().len();
+                    }
                     break;
                 }
             }
@@ -3763,6 +3775,67 @@ mod tests {
             !projected.andnot(&domain_rows).is_empty(),
             "the fixture is degenerate: every matching row is inside the domain, so the two routes \
              would agree even if the domain were ignored"
+        );
+    }
+
+    /// **A short-circuited `none_of` must still consume its skipped kids' images.**
+    ///
+    /// `images` is positional: `RowExpr::entity_verdicts` collects every `Entity` node in the tree
+    /// whether or not evaluation reaches it, and [`eval_row_expr`] walks the same pre-order with a
+    /// cursor. `NoneOf` stops early once its difference is empty — nothing below can widen it —
+    /// and leaving the cursor there hands the *next* `Entity` anywhere in the tree someone else's
+    /// image. The tree below is the reachable shape: an empty combinator is entity-pure by
+    /// construction, so `route` emits `RowExpr::Entity(candidate)` for it, and `check_negations`
+    /// admits it inside a `none_of` because it contributes no column to the one-column rule.
+    ///
+    /// Without the cursor advance the union below answers with the **candidate** — a filter that
+    /// silently matches every visible row — instead of with the second clause's verdict.
+    #[test]
+    fn a_short_circuited_negation_still_consumes_its_skipped_images() {
+        use crate::filter::{Family, FilterOperand, RowExpr};
+
+        let skipped_image = croaring::Bitmap::from_iter(0u32..1_000);
+        let wanted_image = croaring::Bitmap::from_iter([7u32, 11, 13]);
+        let images = vec![skipped_image.clone(), wanted_image.clone()];
+
+        let tree = RowExpr::AnyOf(vec![
+            RowExpr::NoneOf {
+                column: "band".to_string(),
+                family: Family::Category,
+                // The leaf is evaluated and empties the difference; the `Entity` after it is
+                // skipped, and its image is the first in `images`.
+                kids: vec![
+                    RowExpr::Leaf {
+                        column: "band".to_string(),
+                        family: Family::Category,
+                        operand: FilterOperand::Equals(tessera_types::AttrLocalId::new(1)),
+                    },
+                    RowExpr::Entity(croaring::Bitmap::new()),
+                ],
+            },
+            RowExpr::Entity(croaring::Bitmap::new()),
+        ]);
+        assert_eq!(
+            tree.entity_verdicts().len(),
+            images.len(),
+            "the fixture must hand one image per Entity node, as the caller does"
+        );
+
+        // An empty domain, so every row scan is empty and the negation short-circuits on its
+        // first kid — which is what makes the skipped `Entity` the one under test. The images are
+        // already crossed against the domain by the caller, so they are unaffected.
+        let mut next_image = 0usize;
+        let out = eval_row_expr(&tree, &images, &mut next_image, &[], &[])
+            .expect("an empty domain scans cleanly");
+
+        assert_eq!(
+            out, wanted_image,
+            "the union answered with the skipped kid's image instead of the second clause's"
+        );
+        assert_eq!(
+            next_image,
+            images.len(),
+            "every image must be consumed, or a later Entity reads the wrong one"
         );
     }
 

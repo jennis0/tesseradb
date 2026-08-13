@@ -467,6 +467,10 @@ pub struct FilterColumns {
     /// The evaluation space(s) each filterable column affords — including a rendered category
     /// with no entity-space layers at all, which [`FilterColumns::columns`] cannot represent.
     placements: BTreeMap<String, Placement>,
+    /// The access mode this generation was opened with, so a successor composing a flush's
+    /// extents opens them the same way. A generation that mapped its columns and read its
+    /// successor's would be two cost models in one bundle.
+    access: tessera_filter::Access,
     /// The record blob: the build's base (present iff the compiled schema has a blob-resident
     /// column) plus every flush extent the manifest names. Empty — zero layers — when neither
     /// exists, which answers `fields_of` with an ordinary absence.
@@ -489,6 +493,7 @@ impl Default for FilterColumns {
         FilterColumns {
             columns: BTreeMap::new(),
             placements: BTreeMap::new(),
+            access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
         }
     }
@@ -841,6 +846,28 @@ pub(crate) fn owes_value_column(
     scalar.index || listing_of(scalar, vocabularies) == Some(Listing::PerViewer)
 }
 
+/// Does this column's value live in the record blob? **A field is blob-resident exactly when it has
+/// no other home** (records §3, and §4.2's owner ruling of 2026-08-12) — no hot column, and no
+/// entity-space structure.
+///
+/// **Categories are not exempt, and reading the exemption as the family's is the bug this function
+/// exists to prevent.** §4.2's floor belongs to a category's *readers* — `/v1/categories` and the
+/// `per_viewer` gate — not to the family: the entity-space structures are granted to an `index`ed
+/// or `per_viewer` category, so a **`public` category declared with neither flag has no reader and
+/// no floor**. Excluding every category here leaves that shape with nowhere to store a value, which
+/// no declaration refuses: the build writes the field, the flush drops it, and drill-down shows it
+/// for built items and omits it for ingested ones.
+///
+/// `tessera_build::pipeline::postings_are_owed` is this predicate's other half, over the build's
+/// own schema types, and the two must agree. They differ only in the type they read, and a build
+/// that placed a field differently from the engine would write bytes the fold cannot find.
+pub(crate) fn blob_resident(
+    scalar: &tessera_store::manifest::DeclaredScalar,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> bool {
+    !scalar.render && !owes_value_column(scalar, vocabularies)
+}
+
 /// Does the build write derived postings for this column? Only a category earns them — a string's
 /// values carry no identity a posting could be keyed by, and a numeric's are near-unique
 /// (`filter-index.md` §2.3).
@@ -985,12 +1012,10 @@ impl FilterColumns {
             );
         }
         // The record blob's base is owed exactly when the compiled schema has a blob-resident
-        // column — neither flag, no vocabulary (records §3; a category is never blob-resident,
-        // §4.2). Derived from the schema rather than probed for on disk, so a missing base is a
-        // refusal at open, never "those entities have no record".
-        let blob_resident = declared
-            .iter()
-            .any(|d| !d.render && !d.index && d.vocabulary.is_none());
+        // column — one with no other home ([`blob_resident`], records §3). Derived from the schema
+        // rather than probed for on disk, so a missing base is a refusal at open, never "those
+        // entities have no record".
+        let blob_resident = declared.iter().any(|d| blob_resident(d, vocabularies));
         let record_dir = partition_dir.join("attrs").join("record");
         let extent_paths: Vec<RecordExtentPaths> = record_extents
             .iter()
@@ -1009,6 +1034,7 @@ impl FilterColumns {
         let mut open = FilterColumns {
             columns,
             placements,
+            access: request_access(mmap),
             records: Arc::new(records),
         };
         for extent in extents {
@@ -1180,18 +1206,34 @@ impl FilterColumns {
     /// extent is `(column, values path, opened column)`, the path being what the manifest names it
     /// by and what a later coalesce replaces it by.
     ///
-    /// ⊘ **A keyword column's extent cannot be published through this and is refused.** The tuple
-    /// carries no dictionary, and a keyword layer without its own is meaningless — see
-    /// [`FilterColumns::compose`]. Publishing a keyword flush therefore needs a shape that carries
-    /// the dictionary the flush minted alongside the values it numbers; until it exists, the
-    /// refusal is what keeps a live generation from serving ordinals nothing can decode. Reopening
-    /// the generation from the manifest is unaffected, [`FilterColumns::open`] taking each extent's
-    /// dictionary from `AttrExtent::dict`.
-    pub fn with_extents(&self, extents: &[PublishedExtent]) -> std::io::Result<FilterColumns> {
+    /// A keyword column's extent carries the dictionary the flush minted beside the values it
+    /// numbers, so the pair composes as one — see [`FilterColumns::compose`], which refuses either
+    /// half without the other. Reopening the generation from the manifest reaches the same state,
+    /// [`FilterColumns::open`] taking each extent's dictionary from `AttrExtent::dict`.
+    pub fn with_extents(
+        &self,
+        extents: &[PublishedExtent],
+        records: &[RecordExtentPaths],
+    ) -> std::io::Result<FilterColumns> {
+        // The record blob's extent composes here for the same reason a filter extent does: the
+        // manifest entry makes the bytes reachable to a *reopen*, and this process serves from the
+        // stack it holds. A flush that published one and did not compose it would leave every
+        // entity it flushed with its blob-resident fields silently absent from drill-down until the
+        // next fold — an entity in no layer being the ordinary `Ok(None)`.
+        let records = if records.is_empty() {
+            Arc::clone(&self.records)
+        } else {
+            Arc::new(
+                self.records
+                    .with_extents(records, self.access)
+                    .map_err(record_open_error)?,
+            )
+        };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
-            records: Arc::clone(&self.records),
+            access: self.access,
+            records,
         };
         for (column, values_rel, extent, dict) in extents {
             next.compose(column, values_rel, Arc::clone(extent), dict.clone())?;
@@ -1225,6 +1267,7 @@ impl FilterColumns {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
+            access: self.access,
             records: Arc::clone(&self.records),
         };
         for window in windows {
@@ -2320,6 +2363,7 @@ mod keyword_tests {
         FilterColumns {
             columns,
             placements,
+            access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
         }
     }

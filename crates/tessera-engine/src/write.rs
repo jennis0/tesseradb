@@ -2860,9 +2860,13 @@ pub(crate) fn filter_schema_of(
 }
 
 /// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
-/// also its field tag (records §3). The predicate is the build's blob stage's
-/// (`tessera-build`'s `write_record_blob`): neither indexed nor rendered, and never a category,
-/// whose entity-space structures are the vocabulary machinery's floor (records §4.2).
+/// also its field tag (records §3).
+///
+/// **The predicate must be the build's**, [`crate::filter::blob_resident`], because this is the
+/// third placement pass and the three have to partition the same schema the same way. A flush that
+/// placed a field differently from the build would drop an ingested value the build stores: the
+/// buffered scalar is read by exactly three consumers — the render indices, the filter schema and
+/// this one — and a column no consumer claims is acknowledged and then lost.
 pub(crate) fn record_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<crate::flush::RecordColumnSpec> {
@@ -2870,7 +2874,7 @@ pub(crate) fn record_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
-        .filter(|(_, d)| !d.index && !d.render && d.vocabulary.is_none())
+        .filter(|(_, d)| crate::filter::blob_resident(d, &manifest.vocabularies))
         .map(|(index, d)| crate::flush::RecordColumnSpec {
             index,
             name: d.name.clone(),
@@ -7199,7 +7203,19 @@ impl Executor {
                 )
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_extents(&extents) {
+        // The record extent composes onto the live stack here, not only into the manifest: a
+        // published extent that no live stack holds answers no drill-down until the next fold.
+        let record_dir = self.bundle_root.join(&completed.prefix);
+        let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
+            .record_extent
+            .iter()
+            .map(|e| tessera_filter::RecordExtentPaths {
+                blocks: record_dir.join(&e.blocks),
+                hasrow: record_dir.join(&e.hasrow),
+                directory: record_dir.join(&e.directory),
+            })
+            .collect();
+        let filter_columns = match live.filter_columns.with_extents(&extents, &record_paths) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);

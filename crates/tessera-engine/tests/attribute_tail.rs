@@ -776,6 +776,20 @@ type = "keyword"
 [[attribute]]
 name = "revision"
 type = "i64"
+
+# **A `public` category with neither flag.** §4.2's entity-space floor belongs to a category's
+# *readers* — `/v1/categories` and the `per_viewer` gate — so this shape has no reader, no floor,
+# and no home but the blob. Declared last so the existing field tags do not move.
+[[attribute]]
+name       = "tier"
+type       = "category"
+width      = "u8"
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  bronze = 1
+  silver = 2
+  gold   = 3
 "#;
 
 fn note_of(source: u64) -> String {
@@ -784,6 +798,18 @@ fn note_of(source: u64) -> String {
 
 fn revision_of(source: u64) -> i64 {
     40_000 + source as i64
+}
+
+fn tier_of(entity: u64) -> &'static str {
+    match entity % 3 {
+        0 => "bronze",
+        1 => "silver",
+        _ => "gold",
+    }
+}
+
+fn tier_code_of(entity: u64) -> u8 {
+    (entity % 3) as u8 + 1
 }
 
 /// The blob row the fixture's generation functions predict for `source`: `note` is declared at
@@ -799,6 +825,10 @@ fn record_fields_of(source: u64) -> Vec<tessera_filter::RecordField> {
             tag: 2,
             value: tessera_filter::RecordValue::I64(revision_of(source)),
         },
+        tessera_filter::RecordField {
+            tag: 3,
+            value: tessera_filter::RecordValue::U8(tier_code_of(source)),
+        },
     ]
 }
 
@@ -810,6 +840,7 @@ fn write_points_with_record_columns(path: &Path, n: u64) {
         Field::new("band", DataType::Utf8, false),
         Field::new("note", DataType::Utf8, false),
         Field::new("revision", DataType::Int64, false),
+        Field::new("tier", DataType::Utf8, false),
     ]));
     let ids: Vec<u64> = (0..n).collect();
     let batch = RecordBatch::try_new(
@@ -834,6 +865,9 @@ fn write_points_with_record_columns(path: &Path, n: u64) {
             )),
             Arc::new(arrow::array::Int64Array::from(
                 ids.iter().map(|e| revision_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| tier_of(*e)).collect::<Vec<_>>(),
             )),
         ],
     )
@@ -917,6 +951,7 @@ fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> Una
             WalScalar::U8(2),
             WalScalar::Utf8(note.to_string()),
             WalScalar::I64(revision),
+            WalScalar::U8(3),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
     }
@@ -954,6 +989,29 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
         )
         .expect("an ingest carrying blob-resident values is accepted")[0];
     flush(&engine);
+
+    // **Before the engine is dropped**: a published record extent that no *live* stack holds
+    // answers no drill-down. The manifest entry below makes the bytes reachable to a reopen; this
+    // assertion is the other half, and reading only the reopened stack is what let the flush
+    // publish an extent it never composed — every entity flushed since process start showing its
+    // blob-resident fields as absent, silently, until the next fold.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let flushed_id = engine.tessera_id_of(entity).unwrap();
+    let served = engine
+        .item(&session, flushed_id, None)
+        .expect("drill-down on a flushed entity")
+        .expect("the flushed entity is visible");
+    let note = served
+        .fields
+        .iter()
+        .find(|f| f.name == "note")
+        .unwrap_or_else(|| panic!("the flushed item carries no `note` field: {:?}", served.fields));
+    assert_eq!(
+        note.value,
+        tessera_engine::ScalarOut::Utf8("the-flushed-note".to_string()),
+        "the live generation serves the flushed blob row"
+    );
+
     drop(engine);
 
     let manifest = side_manifest(&root);
@@ -978,6 +1036,12 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
             tessera_filter::RecordField {
                 tag: 2,
                 value: tessera_filter::RecordValue::I64(77),
+            },
+            // The `public` category with neither flag: no hot column, no entity-space structure,
+            // so the blob is its only home and the flush owes it exactly as the build does.
+            tessera_filter::RecordField {
+                tag: 3,
+                value: tessera_filter::RecordValue::U8(3),
             },
         ]),
         "the flushed row's blob values are what was ingested"
@@ -1087,6 +1151,10 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
             tessera_filter::RecordField {
                 tag: 2,
                 value: tessera_filter::RecordValue::I64(1),
+            },
+            tessera_filter::RecordField {
+                tag: 3,
+                value: tessera_filter::RecordValue::U8(3),
             },
         ]),
         "the suppressed row folds through intact — a later unsuppress reveals exactly this"
@@ -1208,6 +1276,10 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
                 tessera_filter::RecordField {
                     tag: 2,
                     value: tessera_filter::RecordValue::I64(*revision),
+                },
+                tessera_filter::RecordField {
+                    tag: 3,
+                    value: tessera_filter::RecordValue::U8(3),
                 },
             ]),
             "entity {entity} answers differently through the coalesced extent"
