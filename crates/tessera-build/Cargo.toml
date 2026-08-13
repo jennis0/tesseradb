@@ -33,6 +33,11 @@ toml = "0.8"
 chrono = { workspace = true }
 
 [dev-dependencies]
+# The read route, for the text index's end-to-end test only: a build crate that depended on the
+# engine in anger would invert the layer graph, which `check-layers.sh` denies. A dev-dependency is
+# the same shape the engine's own tests use to reach the build.
+tessera-engine = { path = "../tessera-engine" }
+croaring = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 

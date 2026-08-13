@@ -192,6 +192,55 @@ fn parse_operand(
         (Family::Keyword, "contains") => {
             Ok(FilterOperand::TextContains(text_value(column, op, value)?))
         }
+        // **`match` carries the query text, not tokens.** The engine analyses it with the column's
+        // own analyser, taken from the identity the manifest recorded when the index was built, so
+        // the query and the index cannot be segmented by different pipelines (decision 0070). A
+        // parser that tokenised here would be a second place that choice lives.
+        //
+        // The scalar form is plain `match`: every token must appear. The object form names
+        // `minimum_should_match` beside the query — Elasticsearch's own key, semantics intact.
+        (Family::Text, "match") => {
+            if let Some(query) = value.as_str() {
+                return Ok(FilterOperand::Match {
+                    query: query.to_string(),
+                    minimum: None,
+                });
+            }
+            let obj = value.as_object().ok_or_else(|| {
+                bad(format!(
+                    "column '{column}': `match` takes a string, or an object with `query` and \
+                     optionally `minimum_should_match`"
+                ))
+            })?;
+            let query = obj
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad(format!("column '{column}': `match` needs a `query` string")))?
+                .to_string();
+            let minimum = match obj.get("minimum_should_match") {
+                None => None,
+                Some(v) => {
+                    let n = v.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                        bad(format!(
+                            "column '{column}': `minimum_should_match` is a positive whole number \
+                             of tokens"
+                        ))
+                    })?;
+                    Some(u32::try_from(n).map_err(|_| {
+                        bad(format!("column '{column}': `minimum_should_match` is too large"))
+                    })?)
+                }
+            };
+            for key in obj.keys() {
+                if key != "query" && key != "minimum_should_match" {
+                    return Err(bad(format!(
+                        "column '{column}': `match` takes `query` and `minimum_should_match`, not \
+                         '{key}'"
+                    )));
+                }
+            }
+            Ok(FilterOperand::Match { query, minimum })
+        }
         (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value)?)),
         (Family::Numeric, "in") => {
             let arr = value

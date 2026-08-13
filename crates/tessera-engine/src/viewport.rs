@@ -2138,10 +2138,10 @@ impl RowPredicate<'_> {
         match family {
             Family::Category => RowPredicate::CodePresent,
             Family::Numeric => RowPredicate::ValuePresent,
-            // A string column is never row-placed — `render` on a `keyword` is refused at the
-            // schema, the hot column being fixed-width — and an empty code set is the fail-closed
-            // reading if one ever arrived.
-            Family::Keyword => RowPredicate::CodeIn(&[]),
+            // A string column is never row-placed, and text is not even entity-space: `render` is
+            // refused on both at the schema. An empty code set is the fail-closed reading if one
+            // ever arrived.
+            Family::Keyword | Family::Text => RowPredicate::CodeIn(&[]),
         }
     }
 

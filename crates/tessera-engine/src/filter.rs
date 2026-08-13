@@ -198,6 +198,14 @@ pub enum Family {
     /// is a scan like everything else: no level tree, no bit slicing, no zone map
     /// (`filter-index.md` §3).
     Numeric,
+    /// Values are prose, matched by what they say (records §4.4): `match` and its m-of-n form,
+    /// answered from per-token postings rather than from a scan.
+    ///
+    /// **The only family with no value column at all.** Its terms are postings over a token
+    /// dictionary and its prose is a record-blob row, so there is nothing per entity to scan — the
+    /// reason this family reaches neither the hot column nor the entity-space scan, and the reason
+    /// its layers carry a dictionary and postings where every other family's carry values.
+    Text,
 }
 
 impl Family {
@@ -220,6 +228,9 @@ impl Family {
         if is_numeric(scalar.arrow_type) {
             return Family::Numeric;
         }
+        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+            return Family::Text;
+        }
         Family::Keyword
     }
 
@@ -229,6 +240,9 @@ impl Family {
             Family::Category => &["eq", "in"],
             Family::Keyword => &["eq", "in", "prefix", "contains"],
             Family::Numeric => &["eq", "in", "range"],
+            // ⊘ `phrase` is #118's and is absent until it is built — publishing an operator the
+            // parse gate would refuse is the drift this list exists to prevent.
+            Family::Text => &["match"],
         }
     }
 
@@ -240,6 +254,7 @@ impl Family {
             Family::Category => "category",
             Family::Keyword => "keyword",
             Family::Numeric => "numeric",
+            Family::Text => "text",
         }
     }
 
@@ -253,7 +268,9 @@ impl Family {
     pub fn reaches_hot_column(self) -> bool {
         match self {
             Family::Category | Family::Numeric => true,
-            Family::Keyword => false,
+            // Neither is a fixed-width slot: a keyword's value is its bytes and a text column's
+            // value is not per entity at all.
+            Family::Keyword | Family::Text => false,
         }
     }
 }
@@ -306,6 +323,24 @@ pub enum FilterOperand {
     /// Stored value contains this. Needs no trigram index: the value column *is* the verification
     /// route a trigram superset would have had to be checked against.
     TextContains(String),
+    /// **`match`, and its m-of-n form in one operand** (records §4.4). `tokens` are the analyser's
+    /// output over what the caller typed — analysed by the *column's* analyser, so the query and
+    /// the index agree on segmentation — and `minimum` is how many must appear.
+    ///
+    /// Plain `match` is `minimum == tokens.len()`; `minimum_should_match` names a smaller number.
+    /// One operand rather than two because they are one evaluation with a different threshold, and
+    /// two would let the counting union and the intersection drift apart.
+    ///
+    /// **Duplicates collapse and order is dropped** when the query is analysed: a repeated token
+    /// says nothing a set does not, and letting it raise the denominator would make `match` of
+    /// `"the the"` stricter than `match` of `"the"` over the same field.
+    ///
+    /// **The query is carried unanalysed and the engine analyses it**, with the column's *own*
+    /// analyser, taken from the identity the manifest recorded when the index was built. That is
+    /// the whole correctness property of this operand: a query segmented by one pipeline against an
+    /// index segmented by another matches on precisely the strings where they differ, with no error
+    /// anywhere. Analysing at the wire would put the choice in a second place, free to drift.
+    Match { query: String, minimum: Option<u32> },
     /// Numeric equality.
     NumEquals(Scalar),
     /// Numeric set membership.
@@ -578,6 +613,15 @@ struct Layers {
     /// from these on a `per_viewer` column that the *filter* route deliberately does not use them
     /// for.
     postings: Option<Arc<ColumnPostings>>,
+    /// The analyser this column was **indexed** with, resolved from the manifest's recorded
+    /// identity rather than from a default. A query is analysed with it, which is what makes the
+    /// two token streams the same one.
+    analyser: Option<Arc<tessera_analyse::Analyser>>,
+    /// A `text` column's token dictionary, held here rather than on a [`Layer`] because this family
+    /// has no layers: its terms are postings and its prose is a blob row, so there is no value
+    /// column for a layer to hold. ⊘ Per-extent token dictionaries arrive with the text flush
+    /// (#116); until then a text column's index is the base build's alone.
+    text_dict: Option<Arc<SortedDict>>,
     route: Route,
     /// The family whose rules this column's values are read by — carried so a layer's storage can
     /// be checked against its declaration rather than inferred from it. A `keyword` column's layers
@@ -960,7 +1004,13 @@ impl FilterColumns {
             // stays unfilterable, exactly as before.
             let family = Family::of(scalar);
             let row = scalar.render && family.reaches_hot_column();
-            let entity = owes_value_column(scalar, vocabularies) && (scalar.index || row);
+            // Text is entity-space filterable without a value column: its `match` is answered from
+            // postings, which is the one route in this system that reads no per-entity slot.
+            let entity = if family == Family::Text {
+                scalar.index
+            } else {
+                owes_value_column(scalar, vocabularies) && (scalar.index || row)
+            };
             if row || entity {
                 placements.insert(
                     scalar.name.clone(),
@@ -970,6 +1020,67 @@ impl FilterColumns {
                         family,
                     },
                 );
+            }
+            // **Text opens before the value-column gate, because it owes none.** Its entity-space
+            // artefacts are a token dictionary and postings over it; the prose is a blob row. Both
+            // are opened on the declaration rather than probed for, the same rule every other open
+            // here keeps: a column the manifest says is indexed and whose index is absent is a
+            // bundle that is not what its manifest says, and reading that as "no entity matches"
+            // would answer a `match` wrongly while looking right.
+            if family == Family::Text {
+                if !scalar.index {
+                    continue;
+                }
+                let dir = partition_dir.join("attrs").join(&scalar.name);
+                let text_dict = Arc::new(SortedDict::open_dir(&dir, request_access(mmap))?);
+                // Positional, not keyed: a token ordinal is a dense position in this dictionary,
+                // where a category's code is a scattered vocabulary entry (§2.5).
+                let postings =
+                    Arc::new(ColumnPostings::open(&dir.join("postings.arrow"), mmap)?);
+                // **The analyser that indexed it, not the default.** A bundle records the identity
+                // its build resolved; opening with anything else would answer `match` against a
+                // token stream the index was not built from.
+                let identity = scalar.analyser.as_deref().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "column '{}' is text but the manifest records no analyser identity — \
+                             the build is what resolves one, so this bundle is not what its \
+                             manifest says",
+                            scalar.name
+                        ),
+                    )
+                })?;
+                let analyser = tessera_analyse::analyser(
+                    identity.split('/').next().unwrap_or_default(),
+                )
+                .filter(|a| a.identity() == identity)
+                .map(Arc::new)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "column '{}' was indexed by analyser '{identity}', which this binary \
+                             does not carry. Its terms cannot be reproduced, so every `match` over \
+                             it would answer from a different segmentation",
+                            scalar.name
+                        ),
+                    )
+                })?;
+                columns.insert(
+                    scalar.name.clone(),
+                    Layers {
+                        layers: Vec::new(),
+                        covered: Bitmap::new(),
+                        filterable: true,
+                        postings: Some(postings),
+                        analyser: Some(analyser),
+                        text_dict: Some(text_dict),
+                        route: Route::Postings,
+                        family,
+                    },
+                );
+                continue;
             }
             if !owes_value_column(scalar, vocabularies) {
                 continue;
@@ -1012,6 +1123,8 @@ impl FilterColumns {
                     covered,
                     filterable: entity,
                     postings,
+                    analyser: None,
+                    text_dict: None,
                     route,
                     family,
                 },
@@ -1383,6 +1496,39 @@ impl FilterColumns {
             .get(name)
             .filter(|layers| layers.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(name.to_string()))?;
+
+        // **Text answers from postings and nothing else**, because it has nothing else: no value
+        // column, no layers, and ⊘ no flush extent until #116 — so a `match` sees the base build's
+        // terms and a batch ingested since lags until the fold. That staleness is stated at the
+        // flush's own exclusion; here it means the postings are the whole answer rather than the
+        // base's half of one.
+        if column.family == Family::Text {
+            let (Some(postings), Some(dict), Some(analyser)) = (
+                column.postings.as_ref(),
+                column.text_dict.as_ref(),
+                column.analyser.as_ref(),
+            ) else {
+                // Unreachable: `open` inserts a text column only with both, and refuses if either
+                // is absent. Empty is the fail-safe reading — it narrows.
+                return Ok(Bitmap::new());
+            };
+            // An operator outside this family is refused at the parse gate, which asks
+            // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
+            // line of defence and the direction that narrows.
+            let FilterOperand::Match { query, minimum } = operand else {
+                return Ok(Bitmap::new());
+            };
+            let mut tokens = analyser.tokens(query);
+            tokens.sort();
+            tokens.dedup();
+            let minimum = minimum.unwrap_or(tokens.len() as u32);
+            return text_match(dict, postings, &tokens, minimum, candidate).map_err(|e| {
+                FilterError::PostingsUnreadable {
+                    column: name.to_string(),
+                    detail: e.to_string(),
+                }
+            });
+        }
 
         // **The routed pair, and the split between them is the whole of decision 0063.** The base
         // build's answer comes from the postings; every extent layer is scanned, because no flush
@@ -1841,6 +1987,10 @@ fn keyword_ordinals(
     operand: &FilterOperand,
 ) -> Result<OrdinalPredicate, DictError> {
     Ok(match operand {
+        // `match` is the text family's and reaches no keyword layer: the parse gate refuses an
+        // operator outside a column's family, so this is the second line of defence and the
+        // sentinel — which scans and matches nothing — is the fail-closed reading.
+        FilterOperand::Match { .. } => OrdinalPredicate::Eq(NO_SUCH_ORDINAL),
         FilterOperand::TextEquals(needle) => {
             OrdinalPredicate::Eq(dict.resolve(needle)?.unwrap_or(NO_SUCH_ORDINAL))
         }
@@ -1894,6 +2044,70 @@ fn scan_ordinals(values: &ValueColumn, predicate: &OrdinalPredicate, candidate: 
             }),
         ),
     }
+}
+
+/// `match` over one text column: intersect the tokens' postings inside the candidate, or count
+/// them where fewer than all are required.
+///
+/// **The candidate is applied first and to every posting**, so no bitmap this function builds ever
+/// holds an entity outside `M_sel` — the tokens' corpus-wide postings are read but nothing derived
+/// from them is returned unmasked, which is I2 held by construction rather than by a final
+/// intersection that could be forgotten.
+///
+/// **An unresolved token contributes an empty posting rather than short-circuiting.** Under plain
+/// `match` that yields the empty set either way; under m-of-n it must still consume its place in
+/// the count, or `match` of three tokens with `minimum = 2` would silently become a two-token
+/// question when one of them is absent from the corpus. Decision 0067 accepts the timing this
+/// leaves — a term's existence and coarse carrier count are observable in a postings route, for
+/// text and keyword alike — and Appendix C carries the row.
+fn text_match(
+    dict: &SortedDict,
+    postings: &ColumnPostings,
+    tokens: &[String],
+    minimum: u32,
+    candidate: &Bitmap,
+) -> std::io::Result<Bitmap> {
+    if tokens.is_empty() || minimum == 0 {
+        // No token can be satisfied by no evidence: an empty `match` matches nothing rather than
+        // everything, which is the same reading `any_of([])` takes.
+        return Ok(Bitmap::new());
+    }
+    let mut per_token: Vec<Bitmap> = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let entities = match dict
+            .resolve(token)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?
+        {
+            Some(ordinal) => postings.entities(AttrLocalId::new(ordinal))?,
+            None => Bitmap::new(),
+        };
+        per_token.push(entities.and(candidate));
+    }
+
+    // Plain `match` is the intersection, which is the common case and the cheap one: a
+    // `and_inplace` per token, narrowing as it goes.
+    if minimum as usize >= tokens.len() {
+        let mut out = per_token.swap_remove(0);
+        for rest in &per_token {
+            out.and_inplace(rest);
+        }
+        return Ok(out);
+    }
+
+    // m-of-n: how many of the tokens each candidate entity carries. Counted over the union rather
+    // than over the candidate, so the work is the postings' size and not the mask's.
+    let mut union = Bitmap::new();
+    for token in &per_token {
+        union |= token;
+    }
+    let mut out = Bitmap::new();
+    for entity in union.iter() {
+        let hits = per_token.iter().filter(|t| t.contains(entity)).count();
+        if hits as u32 >= minimum {
+            out.add(entity);
+        }
+    }
+    Ok(out)
 }
 
 /// One operand against one keyword layer: resolve in that layer's dictionary, then scan its
@@ -2249,7 +2463,10 @@ fn scan(values: &ValueColumn, operand: &FilterOperand, candidate: &Bitmap) -> Bi
         FilterOperand::TextEquals(_)
         | FilterOperand::TextIn(_)
         | FilterOperand::TextPrefix(_)
-        | FilterOperand::TextContains(_) => Bitmap::new(),
+        | FilterOperand::TextContains(_)
+        // `match` never reaches a value column: the text family has none, and the parse gate
+        // refuses the operator elsewhere. Empty is the same fail-safe reading the string arms take.
+        | FilterOperand::Match { .. } => Bitmap::new(),
         FilterOperand::NumEquals(n) => values.scan_num_eq(candidate, *n),
         FilterOperand::NumIn(ns) => values.scan_num_in(candidate, ns),
         FilterOperand::Range { lo, hi } => values.scan_range(candidate, *lo, *hi),
@@ -2360,6 +2577,8 @@ mod keyword_tests {
                 covered,
                 filterable: true,
                 postings: None,
+                analyser: None,
+                text_dict: None,
                 route: Route::Scan,
                 family: Family::Keyword,
             },

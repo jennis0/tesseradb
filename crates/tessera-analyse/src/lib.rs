@@ -105,9 +105,19 @@ pub struct Analyser {
     // The compiled-data constructors hand back `'static` borrows of data baked into the binary, so
     // these are handles rather than owned tables — the cost this type exists to amortise is the
     // segmenter's deserialisation, not an allocation.
+    // The three are not `Clone` — icu4x's borrowed handles are not — so a holder that must clone
+    // itself, as a live generation's columns do per publication, holds this behind an `Arc`.
     nfkc: ComposingNormalizerBorrowed<'static>,
     case: CaseMapperBorrowed<'static>,
     words: WordSegmenterBorrowed<'static>,
+}
+
+impl std::fmt::Debug for Analyser {
+    /// Named rather than structural: the three stages have no useful `Debug` of their own, and the
+    /// identity is the thing a reader of a `FilterColumns` dump actually wants.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Analyser({})", self.identity())
+    }
 }
 
 impl Default for Analyser {

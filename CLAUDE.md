@@ -45,7 +45,7 @@ broken by a plausible-looking change:
 
 - **I2** — every aggregate must be computable from inside `M_auth` alone. A quantity derived from
   the full dataset and then *gated* is a disclosure, not a filtered view. Accepted exceptions are
-  enumerated in Appendix C (C1–C24); anything not in that table is a bug.
+  enumerated in Appendix C (C1–C25); anything not in that table is a bug.
 - **I7** — sampling happens after masking. Direct evaluation is the **only** selection route: the
   candidate-list alternative was declined ([decision 0008](docs/decisions/0008-candidate-list-route-declined.md))
   and `check-layers.sh` fails if its marker is removed. Deleting the direct path "to simplify"

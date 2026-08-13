@@ -26,6 +26,10 @@ tessera-lifecycle = { path = "../tessera-lifecycle" }
 # The filter artefact's reader. Entity-space only — it never sees a `RowId`, which is what
 # `check-layers.sh` pins by denying it `tessera-store` and `tessera-spatial`.
 tessera-filter = { path = "../tessera-filter" }
+# **The analyser a text column was indexed with**, resolved from the manifest's recorded identity so
+# a query is segmented by the same pipeline as the index (decision 0070). Analysing at the wire
+# instead would put that choice in a second place, free to drift from the artefact.
+tessera-analyse = { path = "../tessera-analyse" }
 tessera-filter-write = { path = "../tessera-filter-write" }
 tessera-plugin = { path = "../tessera-plugin" }
 croaring = { workspace = true }

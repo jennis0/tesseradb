@@ -544,10 +544,20 @@ re-derives independently; here independence lives in the vectors, not a second i
 tokeniser's version is part of the manifest; changing it is a rebuild, exactly as changing a
 category width is.
 
-**Operators: `match`, and its m-of-n form.** `match` is *every named token appears in the field*,
-evaluated as an intersection of per-token postings inside the candidate; `minimum_should_match`
-(ES's own name, semantics intact) relaxes it to *at least m of n*, evaluated as a counting union —
-no statistics, no new storage. Over a multi-valued field (§5) `match` is **field-scoped, not
+**Operators: `match`, and its m-of-n form.** Built. `match` is *every named token appears in the
+field*, evaluated as an intersection of per-token postings inside the candidate;
+`minimum_should_match` (ES's own name, semantics intact) relaxes it to *at least m of n*, evaluated
+as a counting union — no statistics, no new storage. **The wire carries the query text, not
+tokens**, and the engine analyses it with the column's *own* analyser, resolved from the identity
+the manifest recorded when the index was built: a query segmented by one pipeline against an index
+segmented by another matches on precisely the strings where they differ, with no error anywhere,
+and analysing at the wire would put that choice in a second place free to drift. The candidate is
+applied **per token as each posting is read** rather than once at the end, so nothing derived from a
+corpus-wide set is ever held unmasked (I2), and an unresolved token contributes an empty posting
+rather than short-circuiting — under m-of-n it must still consume its place in the count, or
+`match` of three tokens with `minimum = 2` would silently become a two-token question. The timing
+that leaves is decision 0067's accepted channel and Appendix C's **C25**, which lands with this
+route as that ruling required. Over a multi-valued field (§5) `match` is **field-scoped, not
 element-scoped**: tokens may match in different elements; element-scoped conjunction is a
 positions question and arrives with §4.5's payload sidecar or not at all. `any_of` of single-token
 matches gives disjunction through the existing tree (0062).

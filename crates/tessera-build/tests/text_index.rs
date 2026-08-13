@@ -313,3 +313,122 @@ fn the_manifest_records_the_analyser_identity_per_column() {
         "and the type it was declared as"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The read route
+// ---------------------------------------------------------------------------------------------
+
+/// `match` is *every named token appears in the field*, and `minimum_should_match` relaxes it to
+/// at least m of n — both answered from the postings, both intersected with the candidate.
+#[test]
+fn match_and_minimum_should_match_answer_from_the_index() {
+    use tessera_engine::filter::FilterOperand;
+
+    let dir = build_with(text_schema(true));
+    let out = dir.path().join("bundle");
+    let columns = open_columns(&out);
+    let source_of = source_to_entity(&out);
+    let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
+
+    // A helper predicting the answer from the fixture's own values, which is the oracle's relation:
+    // what the corpus was *given*, upstream of what the build stored.
+    let expected = |predicate: &dyn Fn(&[String]) -> bool| -> Vec<u32> {
+        let analyser = tessera_analyse::Analyser::new();
+        let mut out: Vec<u32> = (0..N)
+            .filter(|&e| predicate(&analyser.tokens(&prose_of(e))))
+            .map(|e| source_of[&e])
+            .collect();
+        out.sort_unstable();
+        out
+    };
+    let got = |operand: FilterOperand| -> Vec<u32> {
+        let mut v: Vec<u32> = columns
+            .resolve("abstract", &operand, &all)
+            .expect("a declared text column resolves")
+            .iter()
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let m = |query: &str, minimum: Option<u32>| FilterOperand::Match {
+        query: query.to_string(),
+        minimum,
+    };
+
+    // Every token must appear, and they may appear in any order.
+    assert_eq!(
+        got(m("quick fox", None)),
+        expected(&|t| t.iter().any(|x| x == "quick") && t.iter().any(|x| x == "fox")),
+        "match is a conjunction"
+    );
+    assert_eq!(got(m("fox quick", None)), got(m("quick fox", None)), "order is not a term");
+
+    // A token no document carries makes the conjunction empty — and does not make it *everything*,
+    // which is what a short circuit that skipped an unresolved token would produce.
+    assert!(got(m("quick zzzznope", None)).is_empty());
+
+    // m-of-n counts, and the unresolved token still consumes its place in the count.
+    assert_eq!(
+        got(m("quick brown", Some(1))),
+        expected(&|t| t.iter().any(|x| x == "quick") || t.iter().any(|x| x == "brown")),
+        "one of two is the union"
+    );
+    assert_eq!(
+        got(m("quick brown zzzznope", Some(2))),
+        expected(&|t| {
+            [ "quick", "brown" ].iter().filter(|w| t.iter().any(|x| &x == w)).count() >= 2
+        }),
+        "an absent token keeps its place in the denominator"
+    );
+
+    // The query is analysed by the column's analyser, so a fullwidth or uppercase query finds the
+    // same documents a plain one does — the property that a wire-side tokeniser would put at risk.
+    assert_eq!(got(m("QUICK", None)), got(m("quick", None)));
+    assert_eq!(got(m("日本語", None)), expected(&|t| t.iter().any(|x| x == "日本語")));
+    assert!(!got(m("日本語", None)).is_empty(), "the CJK term is findable");
+}
+
+/// **The candidate bounds the answer.** Postings are corpus-wide; nothing derived from them may
+/// name an entity outside `M_sel` (I2), and the intersection happens per token rather than once at
+/// the end, where it could be forgotten.
+#[test]
+fn match_never_answers_outside_the_candidate() {
+    use tessera_engine::filter::FilterOperand;
+
+    let dir = build_with(text_schema(true));
+    let out = dir.path().join("bundle");
+    let columns = open_columns(&out);
+    let source_of = source_to_entity(&out);
+
+    let everything = FilterOperand::Match {
+        query: "quick".to_string(),
+        minimum: None,
+    };
+    let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
+    let wide = columns.resolve("abstract", &everything, &all).unwrap();
+    assert!(wide.cardinality() > 2, "the fixture must have something to narrow");
+
+    // Two entities only, one of which carries the term.
+    let narrow_mask: croaring::Bitmap = [source_of[&0], source_of[&3]].into_iter().collect();
+    let narrow = columns.resolve("abstract", &everything, &narrow_mask).unwrap();
+    assert!(
+        narrow.andnot(&narrow_mask).is_empty(),
+        "the answer named an entity the candidate did not"
+    );
+    assert_eq!(narrow.cardinality(), 1, "source 0 carries `quick`, source 3 does not");
+}
+
+fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
+    let bundle = open_bundle(out).unwrap();
+    let phash = bundle.partitions.keys().next().unwrap().clone();
+    tessera_engine::filter::FilterColumns::open(
+        &out.join(current_prefix(out)),
+        &phash,
+        &bundle.manifest.declared_scalars,
+        &bundle.manifest.vocabularies,
+        &[],
+        &[],
+        false,
+    )
+    .expect("the text column opens")
+}
