@@ -170,3 +170,12 @@ paths = [
   "crates/tessera-engine/tests/filtering.rs",
   "crates/tessera-server/tests/*",
 ]
+
+# Epic 2 (#85), the keyword family — dispatched 2026-08-13. `dict` builds the seam every other
+# track consumes: the front-coded dictionary's format, writer and reader.
+[track.dict]
+paths = [
+  "crates/tessera-filter/src/dict.rs",
+  "crates/tessera-filter/src/lib.rs",
+  "crates/tessera-filter/tests/*",
+]
