@@ -140,9 +140,8 @@ pub struct Attribute {
     /// Whether this column carries an entity-space filter index (records §3; `filter-index.md`
     /// §2). The compiled form reaches the reader as `MANIFEST.declared_scalars[..].index`.
     ///
-    /// Checked at parse: refused on a rendered number or datetime until decision 0064's render
-    /// half lands, because store-once would serve that filter from a hot column that cannot
-    /// express absence.
+    /// Free of [`Attribute::render`]: a column may declare both, and the two homes then answer the
+    /// same predicate over different spaces, which is what lets 0068 route on cost.
     pub index: bool,
     /// Whether this column occupies a slot in every row of `columns.arrow`.
     ///
@@ -236,8 +235,7 @@ impl Schema {
     /// Parse `path`, with `values` binding each `values_key` to a file (§4.4).
     ///
     /// **⊘ Specified, not implemented**, refused at parse rather than accepted and ignored:
-    /// `multi = true` (records §5 — the list addressing lands in its own epic, records §13), and
-    /// `index` on a rendered number or datetime (decision 0064's render half).
+    /// `multi = true` (records §5 — the list addressing lands in its own epic, records §13).
     ///
     /// **`vocabulary = "discovered"` is built** (§3.4, §5): an attribute may declare it, and the
     /// batch build mints a code for every key its value set (if any) does not already pin, through
@@ -396,25 +394,6 @@ impl Schema {
                              column). A per-row string is the vocabulary stored once per row; \
                              declare a category, whose row cost is its width. `index = true` is \
                              available and costs the hot column nothing",
-                            decl.name
-                        )));
-                    }
-                    // Store-once (records §6.2): a rendered number or datetime keeps no
-                    // entity-space copy, so its filter would read the hot column — which stores
-                    // an absent value as zero, the exact defect decision 0064's presence bitmap
-                    // removed from entity space. Refused until 0064's render half lands rather
-                    // than served wrongly: an item with no value would match every range
-                    // containing zero. `utf8` cannot reach here rendered, so this is precisely
-                    // the number-and-datetime rule records §2 states.
-                    if decl.render && decl.index {
-                        return Err(schema_error(format!(
-                            "attribute '{}': `index` on a rendered `{other}` is refused until \
-                             decision 0064's render half lands (records §6.2). Store-once \
-                             serves that filter from the hot column, which stores an absent \
-                             value as zero, so an item with no value would match every range \
-                             containing zero. `index = true` alone filters now — the \
-                             entity-space column carries presence — and `render = true` alone \
-                             draws now",
                             decl.name
                         )));
                     }
@@ -1046,11 +1025,15 @@ index = true
         }
     }
 
-    /// Store-once: `index` on a rendered number or datetime is refused until decision 0064's
-    /// render half lands, and the refusal names that decision rather than "unsupported"
-    /// (decision 0013). The message must say what serves instead — index alone or render alone.
+    /// A number, a datetime and a bool may be rendered **and** indexed — the two homes of one
+    /// column, which is what gives decision 0068 two routes to choose between on cost.
+    ///
+    /// This combination was refused while 0064's render half was unbuilt, because the row route
+    /// would have read absence out of a hot column that stores it as the type's zero. The presence
+    /// bitmap beside the column is what removes that, and the row scan honours it
+    /// (`viewport.rs`'s `an_absent_number_matches_no_range_not_even_one_containing_zero`).
     #[test]
-    fn index_on_a_rendered_number_is_refused_naming_0064() {
+    fn a_number_may_be_rendered_and_indexed_at_once() {
         for ty in ["bool", "i32", "f64", "timestamp_us"] {
             let text = format!(
                 r#"
@@ -1061,10 +1044,10 @@ render = true
 index = true
 "#
             );
-            let message = err(&text);
-            assert!(message.contains("0064"), "{ty}: {message}");
-            assert!(message.contains("zero"), "{ty}: {message}");
-            assert!(message.contains("`index = true` alone"), "{ty}: {message}");
+            let schema =
+                parse_str(&text).unwrap_or_else(|e| panic!("{ty} must render and filter: {e}"));
+            assert!(schema.attributes[0].index, "{ty}");
+            assert!(schema.attributes[0].render, "{ty}");
         }
     }
 

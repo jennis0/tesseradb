@@ -64,6 +64,7 @@ use tessera_types::{EntityId, GenerationStamp, RowId, TesseraId, API_VERSION};
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, RowProjection};
+use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
@@ -1703,8 +1704,7 @@ impl Engine {
                         )
                     }
                     crate::filter::RoutedFilter::Row(tree) => {
-                        let row_bases: Vec<u32> =
-                            segments.iter().map(|&(_, base)| base).collect();
+                        let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                         let domain = crossing_domain(&ranges, &row_bases);
                         let rows = self.evaluate_row_route(
                             &tree,
@@ -1827,11 +1827,8 @@ impl Engine {
         // The first flush: every count, before any point (`streamed-serving.md` §2 — the number
         // channel is exact from the first paint). `None`, not an empty slice, when the underlay
         // was not requested: the wire's frame-presence rule needs the distinction.
-        sink.counts(
-            &tile_counts,
-            underlay_offset.map(|_| sub_cells.as_slice()),
-        )
-        .map_err(|SinkClosed| EngineError::Cancelled)?;
+        sink.counts(&tile_counts, underlay_offset.map(|_| sub_cells.as_slice()))
+            .map_err(|SinkClosed| EngineError::Cancelled)?;
         probe.skip();
 
         // The emit pass: gather and hand off, serial, in response order (this module's doc says
@@ -1877,11 +1874,13 @@ impl Engine {
             if buf_bytes >= flush_bytes.min(MAX_POINTS_FRAME_BYTES) && !buf.is_empty() {
                 let chunk = std::mem::replace(&mut buf, seed());
                 buf_bytes = 0;
-                sink.points(chunk).map_err(|SinkClosed| EngineError::Cancelled)?;
+                sink.points(chunk)
+                    .map_err(|SinkClosed| EngineError::Cancelled)?;
             }
         }
         if !buf.is_empty() {
-            sink.points(buf).map_err(|SinkClosed| EngineError::Cancelled)?;
+            sink.points(buf)
+                .map_err(|SinkClosed| EngineError::Cancelled)?;
         }
 
         // `total_ns` (stamped by `finish`) is this call's wall clock, which under streaming
@@ -1931,7 +1930,8 @@ impl Engine {
                 .pool
                 .install(|| per_tile_crossing(row_space, entities, &domain, rows_in_ranges))
             {
-                self.filter_crossings_per_tile.fetch_add(1, Ordering::Relaxed);
+                self.filter_crossings_per_tile
+                    .fetch_add(1, Ordering::Relaxed);
                 return FilterRows::Viewport { rows, domain };
             }
         }
@@ -1993,7 +1993,8 @@ impl Engine {
                 .flatten();
             match walked {
                 Some(images) => {
-                    self.filter_crossings_per_tile.fetch_add(1, Ordering::Relaxed);
+                    self.filter_crossings_per_tile
+                        .fetch_add(1, Ordering::Relaxed);
                     images
                 }
                 None => {
@@ -2036,17 +2037,13 @@ fn eval_row_expr(
             *next_image += 1;
             Ok(image)
         }
-        RowExpr::Leaf { column, operand } => {
-            // The operand's codes. A category leaf carries `Equals`/`In` — the family check at
-            // the parse guarantees it — so any other shape is the second line of defence the
-            // entity scan also keeps: it matches nothing rather than panicking or comparing a
-            // string to a code.
-            let codes: Vec<u32> = match operand {
-                crate::filter::FilterOperand::Equals(v) => vec![v.raw()],
-                crate::filter::FilterOperand::In(vs) => vs.iter().map(|v| v.raw()).collect(),
-                _ => Vec::new(),
-            };
-            scan_rows(segments, domain, column, RowPredicate::CodeIn(&codes))
+        RowExpr::Leaf {
+            column,
+            family,
+            operand,
+        } => {
+            let values = LeafValues::of(*family, operand);
+            scan_rows(segments, domain, column, values.predicate())
         }
         RowExpr::AllOf(kids) => {
             let mut out: Option<croaring::Bitmap> = None;
@@ -2070,12 +2067,17 @@ fn eval_row_expr(
             }
             Ok(out)
         }
-        RowExpr::NoneOf { column, kids } => {
-            // `present ∖ matched` — the positive predicate, in row space: presence is a
-            // non-sentinel code in the hot column, so an absent item matches no negation either,
-            // and a row that cannot be read under-reports rather than widening (I12's sign,
-            // exactly as the entity path argues it).
-            let mut out = scan_rows(segments, domain, column, RowPredicate::Present)?;
+        RowExpr::NoneOf {
+            column,
+            family,
+            kids,
+        } => {
+            // `present ∖ matched` — the positive predicate, in row space, presence being whatever
+            // this column's family stores it as: a non-sentinel code for a category, the presence
+            // bitmap for every other. Either way an absent item matches no negation, and a row
+            // that cannot be read under-reports rather than widening (I12's sign, exactly as the
+            // entity path argues it).
+            let mut out = scan_rows(segments, domain, column, RowPredicate::present_in(*family))?;
             for kid in kids {
                 out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain)?);
                 if out.is_empty() {
@@ -2087,97 +2089,419 @@ fn eval_row_expr(
     }
 }
 
-/// A row-space leaf's test against one hot-column code.
+/// A row-space leaf's test against one row of the hot column.
+///
+/// **Absence is a per-family rule, and it is carried here rather than inferred.** A category's
+/// absence is its vocabulary's reserved code 0, held in the column itself. Every other family's is
+/// decision 0064's presence bitmap beside the column: the hot column is non-nullable, so an absent
+/// number is written as the type's zero, which is an ordinary value — and a range containing zero
+/// would otherwise match every row that has no value at all (the 2026-08-11 defect, on this route).
 enum RowPredicate<'a> {
-    /// The code is non-sentinel and in this set. An empty set matches nothing.
+    /// A category's code is non-sentinel and in this set. An empty set matches nothing.
     CodeIn(&'a [u32]),
-    /// The code is non-sentinel — the presence half of a negation.
-    Present,
+    /// A category's code is non-sentinel — the presence half of a negation over one.
+    CodePresent,
+    /// A number's value equals one of these. An empty set matches nothing.
+    NumberIn(&'a [Scalar]),
+    /// A number's value lies between these bounds. Either may be absent, which is an open side,
+    /// and each carries its own inclusivity — [`crate::filter::FilterOperand::Range`]'s semantics,
+    /// which the entity route reads the same bounds by.
+    Range {
+        lo: Option<Endpoint>,
+        hi: Option<Endpoint>,
+    },
+    /// The row carries a value, whatever it is — the presence half of a negation over a column
+    /// whose absence lives in the bitmap, where the stored bytes say nothing at all.
+    ValuePresent,
+}
+
+impl RowPredicate<'_> {
+    /// The presence half of a negation over a column of this family.
+    fn present_in(family: Family) -> RowPredicate<'static> {
+        match family {
+            Family::Category => RowPredicate::CodePresent,
+            Family::Numeric => RowPredicate::ValuePresent,
+            // A text column is never row-placed — `render` on `utf8` is refused at the schema,
+            // the hot column being fixed-width — and an empty code set is the fail-closed reading
+            // if one ever arrived.
+            Family::Text => RowPredicate::CodeIn(&[]),
+        }
+    }
+
+    /// Does this family read absence from the presence bitmap? A category does not: its absence is
+    /// a code in the column, and it has no bitmap by construction (`render_presence`'s module doc).
+    fn reads_presence(&self) -> bool {
+        match self {
+            RowPredicate::CodeIn(_) | RowPredicate::CodePresent => false,
+            RowPredicate::NumberIn(_) | RowPredicate::Range { .. } | RowPredicate::ValuePresent => {
+                true
+            }
+        }
+    }
+}
+
+/// One row-space leaf's comparands, owned for as long as the scan borrows them.
+///
+/// A family/operand pair the parse would have refused becomes an empty set, which matches nothing:
+/// the second line of defence the entity-space scan keeps for the same reason (`filter.rs`'s
+/// `codes_of`), never a panic and never a number compared against a code.
+enum LeafValues {
+    Codes(Vec<u32>),
+    Numbers(Vec<Scalar>),
+    Range {
+        lo: Option<Endpoint>,
+        hi: Option<Endpoint>,
+    },
+}
+
+impl LeafValues {
+    fn of(family: Family, operand: &FilterOperand) -> LeafValues {
+        match (family, operand) {
+            (Family::Category, FilterOperand::Equals(v)) => LeafValues::Codes(vec![v.raw()]),
+            (Family::Category, FilterOperand::In(vs)) => {
+                LeafValues::Codes(vs.iter().map(|v| v.raw()).collect())
+            }
+            (Family::Numeric, FilterOperand::NumEquals(n)) => LeafValues::Numbers(vec![*n]),
+            (Family::Numeric, FilterOperand::NumIn(ns)) => LeafValues::Numbers(ns.clone()),
+            (Family::Numeric, FilterOperand::Range { lo, hi }) => {
+                LeafValues::Range { lo: *lo, hi: *hi }
+            }
+            _ => LeafValues::Codes(Vec::new()),
+        }
+    }
+
+    fn predicate(&self) -> RowPredicate<'_> {
+        match self {
+            LeafValues::Codes(codes) => RowPredicate::CodeIn(codes),
+            LeafValues::Numbers(numbers) => RowPredicate::NumberIn(numbers),
+            LeafValues::Range { lo, hi } => RowPredicate::Range { lo: *lo, hi: *hi },
+        }
+    }
 }
 
 /// One render column's typed slice per segment — resolved once per leaf evaluation, exactly as
 /// the gather resolves per segment rather than per row.
-enum CodeSlice<'a> {
+///
+/// Every declarable type but `utf8`, which the schema refuses from the hot column outright. A
+/// category is one of the three unsigned widths; the rest are a number, a datetime or a bool.
+enum HotSlice<'a> {
+    Bool(&'a arrow::array::BooleanArray),
     U8(&'a [u8]),
     U16(&'a [u16]),
     U32(&'a [u32]),
+    U64(&'a [u64]),
+    I8(&'a [i8]),
+    I16(&'a [i16]),
+    I32(&'a [i32]),
+    I64(&'a [i64]),
+    F32(&'a [f32]),
+    F64(&'a [f64]),
+    /// Microseconds since the epoch — an `i64`, compared as one, exactly as the entity route
+    /// compares it.
+    TimestampUs(&'a [i64]),
 }
 
-/// One contiguous run of rows inside one segment, tested against the predicate.
+/// One contiguous run of rows inside one segment: the rows that match the predicate **and** carry
+/// a value.
+///
+/// **The presence bitmap is intersected once per run, outside the row loop.** `present` is this
+/// segment's presence for the column, already shifted into slice row space by
+/// [`scan_rows`], and `None` means every row carries a value — the representation an absent file
+/// has, so the common column costs neither bytes nor an intersection. Testing presence per row
+/// instead would put a bitmap lookup inside the loop the hoist below exists to keep flat.
+#[inline]
+fn scan_run(
+    slice: &HotSlice<'_>,
+    base: u32,
+    run: Range<u32>,
+    predicate: &RowPredicate<'_>,
+    present: Option<&croaring::Bitmap>,
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+) {
+    match present {
+        None => match_run(slice, base, run, predicate, rows, buf),
+        Some(present) => {
+            let mut matched = croaring::Bitmap::new();
+            match_run(slice, base, run, predicate, &mut matched, buf);
+            matched.and_inplace(present);
+            rows.or_inplace(&matched);
+        }
+    }
+}
+
+/// One contiguous run of rows, tested against the predicate alone — presence is [`scan_run`]'s.
 ///
 /// **The dispatch is hoisted out of the row loop, and that is the whole point of this function.**
-/// The obvious shape — resolve the segment, match the code width and match the predicate for each
-/// row in turn — costs about four branches and two bounds checks per row, none of them hoistable,
-/// and it measured 2.5–3.4 ns per row against the 0.48–0.73 ns a flat compare reaches
+/// The obvious shape — resolve the segment, match the stored width and match the predicate for
+/// each row in turn — costs about four branches and two bounds checks per row, none of them
+/// hoistable, and it measured 2.5–3.4 ns per row against the 0.48–0.73 ns a flat compare reaches
 /// (`docs/evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md` §2). The tell in
 /// that data is that the constant was **insensitive to the code width**: a loop bound by moving
 /// one or two bytes per row would not be, so the loop was bound by its own branching. Deciding the
 /// width and the predicate once per run leaves a monomorphic compare over a slice, which is the
-/// loop the probe measured.
+/// loop the probe measured — and a range's bounds are narrowed to the column's own type in the
+/// same hoist, so no comparison widens a value.
 ///
-/// The absent sentinel keeps its rule at every instantiation: code 0 matches nothing — not a value
-/// list that names it, not the presence half of a negation — because the hot column stores absence
-/// as 0 and a scan that let it match would resurrect every valueless row (the 2026-08-11 defect).
-/// `run_matching` never sees it: each caller below excludes it before the loop, which is the same
-/// statement made where it cannot cost a comparison per row.
-#[inline]
-fn scan_run(
-    slice: &CodeSlice<'_>,
+/// A category's absent sentinel keeps its rule at every instantiation: code 0 matches nothing —
+/// not a value list that names it, not the presence half of a negation. `run_matching` never sees
+/// it: each caller below excludes it before the loop, which is the same statement made where it
+/// cannot cost a comparison per row.
+///
+/// `buf` is empty on entry and on return. It is a parameter so its allocation is reused across the
+/// runs of a chunk, never to carry rows between them: a run's matches must be complete before
+/// [`scan_run`] intersects them with presence.
+fn match_run(
+    slice: &HotSlice<'_>,
     base: u32,
     run: Range<u32>,
     predicate: &RowPredicate<'_>,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
-    let lo = (run.start - base) as usize;
-    let hi = (run.end - base) as usize;
+    let span = (run.start - base) as usize..(run.end - base) as usize;
     match predicate {
-        // The common shape by far — `eq`, and `in` over a single surviving code. One comparison
-        // per row against a constant.
-        RowPredicate::CodeIn(codes) if codes.len() == 1 => {
-            let needle = codes[0];
-            if needle == 0 {
-                return; // The sentinel names no row; the whole run is a non-match.
-            }
-            match slice {
-                // A needle outside the column's code space matches no row, and the width test
-                // happens once per run rather than once per comparison.
-                CodeSlice::U8(v) => {
-                    if let Ok(n) = u8::try_from(needle) {
-                        run_matching(&v[lo..hi], run.start, rows, buf, |c| *c == n);
-                    }
-                }
-                CodeSlice::U16(v) => {
-                    if let Ok(n) = u16::try_from(needle) {
-                        run_matching(&v[lo..hi], run.start, rows, buf, |c| *c == n);
-                    }
-                }
-                CodeSlice::U32(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c == needle),
-            }
+        RowPredicate::CodeIn(codes) => code_run(slice, span, run.start, codes, rows, buf),
+        RowPredicate::CodePresent => code_present_run(slice, span, run.start, rows, buf),
+        RowPredicate::NumberIn(needles) => number_run(slice, span, run.start, needles, rows, buf),
+        RowPredicate::Range { lo, hi } => range_run(slice, span, run.start, *lo, *hi, rows, buf),
+        // No value is consulted: for this family the column says nothing about absence, so every
+        // row of the run is present unless the bitmap [`scan_run`] intersects says otherwise.
+        RowPredicate::ValuePresent => {
+            rows.add_range(run);
+            return;
         }
-        RowPredicate::CodeIn(codes) => match slice {
-            CodeSlice::U8(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| {
-                *c != 0 && codes.contains(&u32::from(*c))
-            }),
-            CodeSlice::U16(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| {
-                *c != 0 && codes.contains(&u32::from(*c))
-            }),
-            CodeSlice::U32(v) => {
-                run_matching(&v[lo..hi], run.start, rows, buf, |c| {
-                    *c != 0 && codes.contains(c)
-                })
+    }
+    rows.add_many(buf);
+    buf.clear();
+}
+
+/// A category's codes. Any slice that is not one of the three code widths matches nothing: a
+/// category is stored at one of them, so anything else is a tail that disagrees with the
+/// declaration, and comparing a float to a code would be worse than answering short.
+#[inline]
+fn code_run(
+    slice: &HotSlice<'_>,
+    span: Range<usize>,
+    first_row: u32,
+    codes: &[u32],
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+) {
+    // The common shape by far — `eq`, and `in` over a single surviving code. One comparison per
+    // row against a constant.
+    if codes.len() == 1 {
+        let needle = codes[0];
+        if needle == 0 {
+            return; // The sentinel names no row; the whole run is a non-match.
+        }
+        match slice {
+            // A needle outside the column's code space matches no row, and the width test happens
+            // once per run rather than once per comparison.
+            HotSlice::U8(v) => {
+                if let Ok(n) = u8::try_from(needle) {
+                    run_matching(&v[span], first_row, rows, buf, |c| *c == n);
+                }
             }
-        },
-        RowPredicate::Present => match slice {
-            CodeSlice::U8(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c != 0),
-            CodeSlice::U16(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c != 0),
-            CodeSlice::U32(v) => run_matching(&v[lo..hi], run.start, rows, buf, |c| *c != 0),
-        },
+            HotSlice::U16(v) => {
+                if let Ok(n) = u16::try_from(needle) {
+                    run_matching(&v[span], first_row, rows, buf, |c| *c == n);
+                }
+            }
+            HotSlice::U32(v) => run_matching(&v[span], first_row, rows, buf, |c| *c == needle),
+            _ => {}
+        }
+        return;
+    }
+    match slice {
+        HotSlice::U8(v) => run_matching(&v[span], first_row, rows, buf, |c| {
+            *c != 0 && codes.contains(&u32::from(*c))
+        }),
+        HotSlice::U16(v) => run_matching(&v[span], first_row, rows, buf, |c| {
+            *c != 0 && codes.contains(&u32::from(*c))
+        }),
+        HotSlice::U32(v) => run_matching(&v[span], first_row, rows, buf, |c| {
+            *c != 0 && codes.contains(c)
+        }),
+        _ => {}
     }
 }
 
-/// The monomorphic inner loop every [`scan_run`] arm resolves to: one slice, one test, one
-/// buffered flush. Generic over the code type so each width compiles to its own loop.
+/// A category carries a value: a non-sentinel code.
+#[inline]
+fn code_present_run(
+    slice: &HotSlice<'_>,
+    span: Range<usize>,
+    first_row: u32,
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+) {
+    match slice {
+        HotSlice::U8(v) => run_matching(&v[span], first_row, rows, buf, |c| *c != 0),
+        HotSlice::U16(v) => run_matching(&v[span], first_row, rows, buf, |c| *c != 0),
+        HotSlice::U32(v) => run_matching(&v[span], first_row, rows, buf, |c| *c != 0),
+        _ => {}
+    }
+}
+
+/// A number's value lies within the bounds — the row-space transcription of
+/// `ValueColumn::scan_range`, and it must stay one.
+///
+/// **A deliberate second copy of the narrowing, across a crate boundary.** `tessera-filter`'s is
+/// private to the entity-space column, and the two routes must agree exactly over the domain or
+/// 0068's licence to choose a route on cost alone fails. The rules copied here are the ones that
+/// are wrong in silence if they drift: an exclusive integer bound is folded by one step; a
+/// fractional bound rounds *into* the constraint (`> 3.2` and `>= 3.2` both admit 4); a NaN bound
+/// satisfies nothing; a bound past the type's floor or ceiling is no constraint or no match rather
+/// than a wrapped comparison. `the_row_route_and_the_entity_route_agree_over_the_domain` is what
+/// holds the copies together, over a numeric predicate as well as a category one.
+#[inline]
+fn range_run(
+    slice: &HotSlice<'_>,
+    span: Range<usize>,
+    first_row: u32,
+    lo: Option<Endpoint>,
+    hi: Option<Endpoint>,
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+) {
+    macro_rules! int_range {
+        ($v:expr, $t:ty) => {{
+            let lo_b = match narrow_lo::<$t>(lo) {
+                Narrowed::Unsatisfiable => return,
+                Narrowed::Unbounded => None,
+                Narrowed::At(x) => Some(x),
+            };
+            let hi_b = match narrow_hi::<$t>(hi) {
+                Narrowed::Unsatisfiable => return,
+                Narrowed::Unbounded => None,
+                Narrowed::At(x) => Some(x),
+            };
+            run_matching($v, first_row, rows, buf, move |x| {
+                lo_b.is_none_or(|b| *x >= b) && hi_b.is_none_or(|b| *x <= b)
+            })
+        }};
+    }
+    // Floats keep the `f64` comparison: NaN must stay unordered, and narrowing through an integer
+    // would destroy that.
+    macro_rules! float_range {
+        ($v:expr) => {{
+            let lo_f = lo.map(|e| (as_f64(e.value), e.inclusive));
+            let hi_f = hi.map(|e| (as_f64(e.value), e.inclusive));
+            run_matching($v, first_row, rows, buf, move |x| {
+                let x = *x as f64;
+                lo_f.is_none_or(|(b, inc)| if inc { x >= b } else { x > b })
+                    && hi_f.is_none_or(|(b, inc)| if inc { x <= b } else { x < b })
+            })
+        }};
+    }
+    match slice {
+        HotSlice::Bool(a) => {
+            // A bool is compared as the 0/1 the entity route stores it as, so `>= 1` means true on
+            // both — the mapping is `u8::from`, in one place on each side.
+            let lo_b = match narrow_lo::<u8>(lo) {
+                Narrowed::Unsatisfiable => return,
+                Narrowed::Unbounded => None,
+                Narrowed::At(x) => Some(x),
+            };
+            let hi_b = match narrow_hi::<u8>(hi) {
+                Narrowed::Unsatisfiable => return,
+                Narrowed::Unbounded => None,
+                Narrowed::At(x) => Some(x),
+            };
+            bool_matching(a, span, first_row, rows, buf, move |x| {
+                lo_b.is_none_or(|b| x >= b) && hi_b.is_none_or(|b| x <= b)
+            })
+        }
+        HotSlice::U8(v) => int_range!(&v[span], u8),
+        HotSlice::U16(v) => int_range!(&v[span], u16),
+        HotSlice::U32(v) => int_range!(&v[span], u32),
+        HotSlice::U64(v) => int_range!(&v[span], u64),
+        HotSlice::I8(v) => int_range!(&v[span], i8),
+        HotSlice::I16(v) => int_range!(&v[span], i16),
+        HotSlice::I32(v) => int_range!(&v[span], i32),
+        HotSlice::I64(v) | HotSlice::TimestampUs(v) => int_range!(&v[span], i64),
+        HotSlice::F32(v) => float_range!(&v[span]),
+        HotSlice::F64(v) => float_range!(&v[span]),
+    }
+}
+
+/// A number's value equals one of the needles — the row-space transcription of
+/// `ValueColumn::scan_num_in`, with the same rules: a needle the column's type cannot hold matches
+/// nothing and is dropped before the loop rather than compared away per row, and the survivors are
+/// sorted and searched because a linear `contains` costs O(needles) per row.
+#[inline]
+fn number_run(
+    slice: &HotSlice<'_>,
+    span: Range<usize>,
+    first_row: u32,
+    needles: &[Scalar],
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+) {
+    macro_rules! int_in {
+        ($v:expr, $t:ty) => {{
+            let mut w: Vec<$t> = needles
+                .iter()
+                .filter_map(|n| match n {
+                    Scalar::Int(i) => <$t>::try_from(*i).ok(),
+                    Scalar::Float(_) => None,
+                })
+                .collect();
+            if w.is_empty() {
+                return;
+            }
+            w.sort_unstable();
+            w.dedup();
+            run_matching($v, first_row, rows, buf, move |x| {
+                w.binary_search(x).is_ok()
+            })
+        }};
+    }
+    macro_rules! float_in {
+        ($v:expr) => {{
+            // NaN equals nothing, itself included — so a NaN needle matches no row, which the
+            // comparison gives without a special case.
+            let w: Vec<f64> = needles.iter().map(|n| as_f64(*n)).collect();
+            run_matching($v, first_row, rows, buf, move |x| {
+                let x = *x as f64;
+                w.iter().any(|n| x == *n)
+            })
+        }};
+    }
+    match slice {
+        HotSlice::Bool(a) => {
+            let mut w: Vec<u8> = needles
+                .iter()
+                .filter_map(|n| match n {
+                    Scalar::Int(i) => u8::try_from(*i).ok(),
+                    Scalar::Float(_) => None,
+                })
+                .collect();
+            if w.is_empty() {
+                return;
+            }
+            w.sort_unstable();
+            w.dedup();
+            bool_matching(a, span, first_row, rows, buf, move |x| {
+                w.binary_search(&x).is_ok()
+            })
+        }
+        HotSlice::U8(v) => int_in!(&v[span], u8),
+        HotSlice::U16(v) => int_in!(&v[span], u16),
+        HotSlice::U32(v) => int_in!(&v[span], u32),
+        HotSlice::U64(v) => int_in!(&v[span], u64),
+        HotSlice::I8(v) => int_in!(&v[span], i8),
+        HotSlice::I16(v) => int_in!(&v[span], i16),
+        HotSlice::I32(v) => int_in!(&v[span], i32),
+        HotSlice::I64(v) | HotSlice::TimestampUs(v) => int_in!(&v[span], i64),
+        HotSlice::F32(v) => float_in!(&v[span]),
+        HotSlice::F64(v) => float_in!(&v[span]),
+    }
+}
+
+/// The monomorphic inner loop every flat-slice arm above resolves to: one slice, one test, one
+/// buffered flush. Generic over the stored type so each width compiles to its own loop.
 #[inline]
 fn run_matching<T: Copy>(
     values: &[T],
@@ -2197,10 +2521,132 @@ fn run_matching<T: Copy>(
     }
 }
 
+/// [`run_matching`] for the one fixed-width type Arrow does not store as a flat slice of itself.
+/// The test is hoisted exactly as the others are; what differs is only the bit extraction.
+#[inline]
+fn bool_matching(
+    values: &arrow::array::BooleanArray,
+    span: Range<usize>,
+    first_row: u32,
+    rows: &mut croaring::Bitmap,
+    buf: &mut Vec<u32>,
+    matches: impl Fn(u8) -> bool,
+) {
+    let start = span.start;
+    for idx in span {
+        if matches(u8::from(values.value(idx))) {
+            buf.push(first_row + (idx - start) as u32);
+            if buf.len() == 1024 {
+                rows.add_many(buf);
+                buf.clear();
+            }
+        }
+    }
+}
+
+/// What a range bound becomes once narrowed to the column's own type — see [`range_run`] for why
+/// this mirrors `tessera-filter`'s private original rather than calling it.
+enum Narrowed<T> {
+    /// No constraint on this side — the bound lies beyond the type's range in the permissive
+    /// direction, or was absent.
+    Unbounded,
+    /// Nothing can satisfy it: the bound lies beyond the type's range in the excluding direction.
+    Unsatisfiable,
+    /// An inclusive native bound. Exclusivity is folded in by moving the bound one step, which is
+    /// exact for integers.
+    At(T),
+}
+
+/// The integer widths' extremes as `i128`, so the narrowing can tell "below the floor" (no
+/// constraint) from "above the ceiling" (nothing matches) without a per-type arm.
+trait NativeBound {
+    fn min_i128() -> i128;
+    fn max_i128() -> i128;
+}
+macro_rules! native_bound {
+    ($($t:ty),*) => { $(impl NativeBound for $t {
+        fn min_i128() -> i128 { <$t>::MIN as i128 }
+        fn max_i128() -> i128 { <$t>::MAX as i128 }
+    })* };
+}
+native_bound!(u8, u16, u32, u64, i8, i16, i32, i64);
+
+/// The lower bound as an **inclusive** native value.
+fn narrow_lo<T>(e: Option<Endpoint>) -> Narrowed<T>
+where
+    T: TryFrom<i128> + NativeBound,
+{
+    let Some(e) = e else {
+        return Narrowed::Unbounded;
+    };
+    // `gt x` over integers is `gte x+1`; the saturating add keeps the shift exact at the ceiling,
+    // where `x+1` would not exist and the answer is "nothing above it".
+    let want = match e.value {
+        Scalar::Int(i) if e.inclusive => i,
+        Scalar::Int(i) => i.saturating_add(1),
+        // A fractional lower bound rounds *up* to the next integer the column can hold: `> 3.2`
+        // and `>= 3.2` both admit 4 and exclude 3.
+        Scalar::Float(f) => {
+            if f.is_nan() {
+                return Narrowed::Unsatisfiable;
+            }
+            f.ceil() as i128
+        }
+    };
+    match T::try_from(want) {
+        Ok(v) => Narrowed::At(v),
+        // Below the floor: every value satisfies it. Above the ceiling: none does.
+        Err(_) if want < T::min_i128() => Narrowed::Unbounded,
+        Err(_) => Narrowed::Unsatisfiable,
+    }
+}
+
+/// The upper bound as an **inclusive** native value.
+fn narrow_hi<T>(e: Option<Endpoint>) -> Narrowed<T>
+where
+    T: TryFrom<i128> + NativeBound,
+{
+    let Some(e) = e else {
+        return Narrowed::Unbounded;
+    };
+    let want = match e.value {
+        Scalar::Int(i) if e.inclusive => i,
+        Scalar::Int(i) => i.saturating_sub(1),
+        Scalar::Float(f) => {
+            if f.is_nan() {
+                return Narrowed::Unsatisfiable;
+            }
+            f.floor() as i128
+        }
+    };
+    match T::try_from(want) {
+        Ok(v) => Narrowed::At(v),
+        Err(_) if want > T::max_i128() => Narrowed::Unbounded,
+        Err(_) => Narrowed::Unsatisfiable,
+    }
+}
+
+fn as_f64(s: Scalar) -> f64 {
+    match s {
+        Scalar::Int(i) => i as f64,
+        Scalar::Float(f) => f,
+    }
+}
+
+/// One segment's share of a row-space leaf: where its rows begin, the column's values, and which
+/// of those rows carry one.
+struct ScannedSegment<'a> {
+    row_base: u32,
+    values: HotSlice<'a>,
+    /// The rows that carry a value, **in slice row space** — the presence bitmap shifted by
+    /// `row_base` once, here, rather than per run. `None` where every row does.
+    present: Option<croaring::Bitmap>,
+}
+
 /// Test every row of `domain` against `column`'s hot values — the render-column scan, parallel
 /// over the domain on the caller's installed pool, chunked exactly as the per-tile crossing is.
 ///
-/// A segment that does not hold the column at a category width is a **malformed bundle**, refused
+/// A segment that does not hold the column at a fixed width is a **malformed bundle**, refused
 /// like the gather's equivalent: serving it as "matches nothing" would be an answer about values
 /// that were never read.
 fn scan_rows(
@@ -2209,24 +2655,46 @@ fn scan_rows(
     column: &str,
     predicate: RowPredicate<'_>,
 ) -> Result<croaring::Bitmap> {
-    // Per-segment slices, resolved once. `segments` is ascending by `row_base`
+    // Per-segment slices and presence, resolved once. `segments` is ascending by `row_base`
     // (`segments_with_row_bases` sorts), which the per-row resolution below relies on.
-    let slices: Vec<(u32, CodeSlice<'_>)> = segments
+    let slices: Vec<ScannedSegment<'_>> = segments
         .iter()
         .map(|&(segment, row_base)| {
-            let slice = match segment.columns.scalar(column) {
-                Some(ScalarSlice::U8(s)) => CodeSlice::U8(s),
-                Some(ScalarSlice::U16(s)) => CodeSlice::U16(s),
-                Some(ScalarSlice::U32(s)) => CodeSlice::U32(s),
+            let values = match segment.columns.scalar(column) {
+                Some(ScalarSlice::Bool(a)) => HotSlice::Bool(a),
+                Some(ScalarSlice::U8(s)) => HotSlice::U8(s),
+                Some(ScalarSlice::U16(s)) => HotSlice::U16(s),
+                Some(ScalarSlice::U32(s)) => HotSlice::U32(s),
+                Some(ScalarSlice::U64(s)) => HotSlice::U64(s),
+                Some(ScalarSlice::I8(s)) => HotSlice::I8(s),
+                Some(ScalarSlice::I16(s)) => HotSlice::I16(s),
+                Some(ScalarSlice::I32(s)) => HotSlice::I32(s),
+                Some(ScalarSlice::I64(s)) => HotSlice::I64(s),
+                Some(ScalarSlice::F32(s)) => HotSlice::F32(s),
+                Some(ScalarSlice::F64(s)) => HotSlice::F64(s),
+                Some(ScalarSlice::TimestampUs(s)) => HotSlice::TimestampUs(s),
+                // `utf8` and a column the tail does not hold alike: the schema refuses `render` on
+                // a string, so either way the segment and the manifest disagree about the tail.
                 _ => {
                     return Err(EngineError::Malformed(format!(
-                        "a segment of this slice has no rendered category column '{column}' at a \
-                         code width, which the routed filter requires; the manifest and the \
-                         segment disagree about the tail"
+                        "a segment of this slice has no rendered column '{column}' at a fixed \
+                         width, which the routed filter requires; the manifest and the segment \
+                         disagree about the tail"
                     )))
                 }
             };
-            Ok((row_base, slice))
+            // Only for a family that stores absence beside the column. A category's absence is a
+            // code in the column itself and it has no bitmap at all, so asking for one would be
+            // the sentinel-and-bitmap muddle decision 0064 declines.
+            let present = predicate
+                .reads_presence()
+                .then(|| present_rows(segment, column, row_base))
+                .flatten();
+            Ok(ScannedSegment {
+                row_base,
+                values,
+                present,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -2239,26 +2707,56 @@ fn scan_rows(
             // The segment owning `chunk.start`, advanced as the walk crosses a boundary — the
             // domain's ranges never span rows outside a segment, but a *merged* range can span
             // two adjacent segments.
-            let mut seg = slices.partition_point(|&(base, _)| base <= chunk.start) - 1;
+            let mut seg = slices.partition_point(|s| s.row_base <= chunk.start) - 1;
             let mut row = chunk.start;
             while row < chunk.end {
-                while seg + 1 < slices.len() && slices[seg + 1].0 <= row {
+                while seg + 1 < slices.len() && slices[seg + 1].row_base <= row {
                     seg += 1;
                 }
                 // The run this segment owns: to the next segment's base, or the chunk's end.
                 let seg_end = slices
                     .get(seg + 1)
-                    .map_or(chunk.end, |&(next_base, _)| next_base.min(chunk.end));
-                let (base, slice) = &slices[seg];
-                scan_run(slice, *base, row..seg_end, &predicate, &mut rows, &mut buf);
+                    .map_or(chunk.end, |next| next.row_base.min(chunk.end));
+                let segment = &slices[seg];
+                scan_run(
+                    &segment.values,
+                    segment.row_base,
+                    row..seg_end,
+                    &predicate,
+                    segment.present.as_ref(),
+                    &mut rows,
+                    &mut buf,
+                );
                 row = seg_end;
             }
-            rows.add_many(&buf);
             rows
         })
         .collect();
     let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
     Ok(croaring::Bitmap::fast_or(&refs))
+}
+
+/// The rows of one segment that carry a value for `column`, **in slice row space** — `None` where
+/// every row does.
+///
+/// ⊘ **The bitmap is not yet written, so every row reads as present.** Decision 0064's render half
+/// is two pieces: this route, which honours the bitmap, and the build, flush, merge and fold that
+/// produce it. Until the second lands, a rendered number with absences answers a range containing
+/// zero as though those rows carried a zero — the 2026-08-11 defect, by this route, on that column
+/// alone. `RenderPresence::all_present()` is the honest statement of what this can currently know,
+/// and the one line that changes is the accessor beneath it; `scan_run`'s own tests fix the
+/// behaviour the bitmap will produce, so the seam is pinned from this side already.
+///
+/// The shift into slice row space belongs here rather than in the scan: the bitmap is over the
+/// segment's own `0..row_count` (`render_presence`'s module doc — a merge permutes rows, so it can
+/// be nothing else), and shifting once per segment keeps the run loop comparing bitmaps in one
+/// numbering.
+fn present_rows(segment: &SegmentData, column: &str, row_base: u32) -> Option<croaring::Bitmap> {
+    let _ = (segment, column);
+    let presence = tessera_store::render_presence::RenderPresence::all_present();
+    presence
+        .bitmap()
+        .map(|rows| rows.add_offset(i64::from(row_base)))
 }
 
 /// How many times larger than the viewport a filter result must be before the per-tile crossing is
@@ -2351,8 +2849,10 @@ fn per_tile_crossing_multi(
             // Rows accumulate ascending into a small buffer per set and enter the bitmap in
             // batches: `add_many` on a sorted run appends to the container being built, where a
             // per-row `add` re-locates it every time.
-            let mut rows: Vec<croaring::Bitmap> =
-                entity_sets.iter().map(|_| croaring::Bitmap::new()).collect();
+            let mut rows: Vec<croaring::Bitmap> = entity_sets
+                .iter()
+                .map(|_| croaring::Bitmap::new())
+                .collect();
             let mut bufs: Vec<Vec<u32>> = entity_sets
                 .iter()
                 .map(|_| Vec::with_capacity(1024))
@@ -3222,7 +3722,9 @@ mod tests {
         // 20,011 is coprime with the row count, so the order is a genuine shuffle rather than a
         // shift, and no row's entity is near it.
         let rows = 40_000u32;
-        let row_order: Vec<u32> = (0..rows).map(|r| (r as u64 * 20_011 % rows as u64) as u32).collect();
+        let row_order: Vec<u32> = (0..rows)
+            .map(|r| (r as u64 * 20_011 % rows as u64) as u32)
+            .collect();
         let space = row_space_over(dir.path(), &row_order);
 
         // Every seventh entity, plus a dense block — a result that is neither uniform nor one run.
@@ -3271,8 +3773,10 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let perm_path = dir.path().join("permutation.bin");
-        let entities_in_order: Vec<EntityId> =
-            [4u64, 2, 0, 5, 1, 3].iter().map(|&e| EntityId::new(e)).collect();
+        let entities_in_order: Vec<EntityId> = [4u64, 2, 0, 5, 1, 3]
+            .iter()
+            .map(|&e| EntityId::new(e))
+            .collect();
         tessera_store::write::write_permutation(&perm_path, &entities_in_order, 6)
             .expect("permutation writes");
         let space = RowSpace::new(Arc::new(Permutation::load(&perm_path).expect("loads")), 6);
@@ -3316,14 +3820,296 @@ mod tests {
     /// still projects — the exact-everywhere route wins ties.
     #[test]
     fn the_per_tile_route_is_taken_only_past_the_ratio() {
-        let looks_cheaper =
-            |matched: u64, viewport: u64| matched > viewport.saturating_mul(PER_TILE_CROSSING_RATIO);
+        let looks_cheaper = |matched: u64, viewport: u64| {
+            matched > viewport.saturating_mul(PER_TILE_CROSSING_RATIO)
+        };
         assert!(!looks_cheaper(300_000, 300_000), "1x projects");
-        assert!(!looks_cheaper(900_000, 300_000), "exactly at the ratio projects");
+        assert!(
+            !looks_cheaper(900_000, 300_000),
+            "exactly at the ratio projects"
+        );
         assert!(looks_cheaper(900_001, 300_000), "just past it does not");
         // An empty viewport: the per-tile route walks nothing and is free, where projecting would
         // pay for the whole result to reach the same empty answer.
         assert!(looks_cheaper(1, 0));
-        assert!(!looks_cheaper(0, 0), "nothing matched -- either route is empty");
+        assert!(
+            !looks_cheaper(0, 0),
+            "nothing matched -- either route is empty"
+        );
+    }
+
+    /// Every row of one run, matched and narrowed to the rows that carry a value.
+    fn run(
+        slice: &HotSlice<'_>,
+        predicate: &RowPredicate<'_>,
+        present: Option<&croaring::Bitmap>,
+    ) -> Vec<u32> {
+        let rows_in_slice = match slice {
+            HotSlice::Bool(a) => a.len(),
+            HotSlice::I32(v) => v.len(),
+            HotSlice::U8(v) => v.len(),
+            HotSlice::F64(v) => v.len(),
+            HotSlice::I64(v) | HotSlice::TimestampUs(v) => v.len(),
+            _ => unreachable!("the fixtures below use these widths"),
+        } as u32;
+        let mut rows = croaring::Bitmap::new();
+        let mut buf = Vec::with_capacity(1024);
+        scan_run(
+            slice,
+            0,
+            0..rows_in_slice,
+            predicate,
+            present,
+            &mut rows,
+            &mut buf,
+        );
+        assert!(buf.is_empty(), "a run must leave its buffer empty");
+        rows.iter().collect()
+    }
+
+    /// The rows that carry a value, as [`present_rows`] hands them over — `None` is every row.
+    fn presence(absent: &[u32], rows: u32) -> croaring::Bitmap {
+        let mut present = croaring::Bitmap::new();
+        present.add_range(0..rows);
+        for row in absent {
+            present.remove(*row);
+        }
+        present
+    }
+
+    /// **A row with no number matches no range — including one containing zero, and including an
+    /// unbounded one.**
+    ///
+    /// This is the 2026-08-11 defect on the row route. The hot column is non-nullable, so an absent
+    /// number is written as the type's zero and is indistinguishable *in the column* from a real
+    /// zero; a range containing zero then matches every row that never had a value. Decision 0064
+    /// puts absence in a bitmap beside the column, and this is the scan honouring it.
+    ///
+    /// The fixture is built so that a scan ignoring presence passes no assertion by luck: rows 1
+    /// and 3 carry no value and hold the stored zero, row 4 carries a genuine zero, and the range
+    /// straddles zero. Against `[1, 10]` the honouring and the ignoring scan would agree.
+    #[test]
+    fn an_absent_number_matches_no_range_not_even_one_containing_zero() {
+        // rows:      0    1*   2    3*   4    5     (* = no value, stored as the type's zero)
+        let values = [7i32, 0, -3, 0, 0, 40];
+        let slice = HotSlice::I32(&values);
+        let present = presence(&[1, 3], 6);
+
+        let straddling_zero = RowPredicate::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(-10),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(10),
+                inclusive: true,
+            }),
+        };
+        assert_eq!(
+            run(&slice, &straddling_zero, Some(&present)),
+            vec![0, 2, 4],
+            "a row with no number matched a range containing zero"
+        );
+
+        // The other half of the same rule: a genuine zero must survive it. An over-eager presence
+        // rule that dropped the value with the absence would pass the assertion above.
+        let zero_only = RowPredicate::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+        };
+        assert_eq!(
+            run(&slice, &zero_only, Some(&present)),
+            vec![4],
+            "a real zero stopped matching"
+        );
+
+        // An unbounded range is "carries a value", not "every row" — the same reading the entity
+        // route gives it, and the one an absent row must still fail.
+        assert_eq!(
+            run(
+                &slice,
+                &RowPredicate::Range { lo: None, hi: None },
+                Some(&present)
+            ),
+            vec![0, 2, 4, 5]
+        );
+        // `eq` over a list is the same rule: a needle of zero names the genuine zero only.
+        assert_eq!(
+            run(
+                &slice,
+                &RowPredicate::NumberIn(&[Scalar::Int(0), Scalar::Int(40)]),
+                Some(&present)
+            ),
+            vec![4, 5]
+        );
+        // And the presence half of a negation reads the bitmap alone: the column's bytes say
+        // nothing about absence for this family.
+        assert_eq!(
+            run(&slice, &RowPredicate::ValuePresent, Some(&present)),
+            vec![0, 2, 4, 5]
+        );
+    }
+
+    /// **A category reads absence from its own code 0 and has no bitmap at all** (decision 0064 —
+    /// its vocabulary reserves the code before any data exists, so a second mechanism would be the
+    /// muddle that decision declines). The scan asks for no presence on this family, so the same
+    /// run answers the same rows however the bitmap would have read.
+    #[test]
+    fn a_category_reads_absence_from_its_sentinel_and_asks_for_no_bitmap() {
+        let codes = [1u8, 0, 2, 0, 1, 3];
+        let slice = HotSlice::U8(&codes);
+        assert!(!RowPredicate::CodeIn(&[1]).reads_presence());
+        assert!(!RowPredicate::CodePresent.reads_presence());
+
+        assert_eq!(run(&slice, &RowPredicate::CodeIn(&[1]), None), vec![0, 4]);
+        assert_eq!(
+            run(&slice, &RowPredicate::CodeIn(&[1, 2]), None),
+            vec![0, 2, 4]
+        );
+        assert_eq!(
+            run(&slice, &RowPredicate::CodeIn(&[0]), None),
+            Vec::<u32>::new(),
+            "the absent sentinel names no row, even asked for by code"
+        );
+        assert_eq!(
+            run(&slice, &RowPredicate::CodePresent, None),
+            vec![0, 2, 4, 5]
+        );
+    }
+
+    /// The bounds are the entity route's, endpoint for endpoint: exclusivity folded by one step
+    /// over integers, a bound past the type's ceiling excluding everything and one past its floor
+    /// constraining nothing, a NaN bound satisfying nothing, and a fractional bound rounding *into*
+    /// the constraint. These are the rules that are wrong in silence if the two copies drift.
+    #[test]
+    fn a_range_over_the_hot_column_reads_its_endpoints_as_the_entity_route_does() {
+        let values = [0u8, 1, 2, 254, 255];
+        let slice = HotSlice::U8(&values);
+        let at = |v: i128, inclusive: bool| {
+            Some(Endpoint {
+                value: Scalar::Int(v),
+                inclusive,
+            })
+        };
+        let range = |lo, hi| RowPredicate::Range { lo, hi };
+
+        assert_eq!(
+            run(&slice, &range(at(1, true), at(2, true)), None),
+            vec![1, 2]
+        );
+        assert_eq!(
+            run(&slice, &range(at(0, false), at(254, false)), None),
+            vec![1, 2],
+            "an exclusive integer bound is the next value along"
+        );
+        // Beyond the type in either direction, which is where a wrapped comparison would show.
+        assert_eq!(
+            run(&slice, &range(at(-5, true), None), None),
+            vec![0, 1, 2, 3, 4],
+            "a bound below the floor constrains nothing"
+        );
+        assert_eq!(
+            run(&slice, &range(at(300, true), None), None),
+            Vec::<u32>::new(),
+            "a bound above the ceiling excludes everything"
+        );
+        assert_eq!(
+            run(&slice, &range(None, at(-1, true)), None),
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            run(&slice, &range(at(255, false), None), None),
+            Vec::<u32>::new(),
+            "`> 255` over a u8 is nothing, not everything wrapped"
+        );
+
+        // A fractional bound rounds into the constraint, on both sides.
+        let fractional = |v: f64, inclusive: bool| {
+            Some(Endpoint {
+                value: Scalar::Float(v),
+                inclusive,
+            })
+        };
+        assert_eq!(
+            run(
+                &slice,
+                &range(fractional(0.5, true), fractional(2.5, true)),
+                None
+            ),
+            vec![1, 2]
+        );
+
+        // NaN is unordered: it satisfies nothing as a bound, and matches nothing as a value.
+        assert_eq!(
+            run(&slice, &range(fractional(f64::NAN, true), None), None),
+            Vec::<u32>::new()
+        );
+        let floats = [1.0f64, f64::NAN, 3.0];
+        assert_eq!(
+            run(&HotSlice::F64(&floats), &range(None, None), None),
+            vec![0, 1, 2],
+            "an unbounded range asks only that the row carry a value"
+        );
+        assert_eq!(
+            run(
+                &HotSlice::F64(&floats),
+                &range(at(0, true), at(4, true)),
+                None
+            ),
+            vec![0, 2],
+            "NaN is outside every bounded range"
+        );
+        assert_eq!(
+            run(
+                &HotSlice::F64(&floats),
+                &RowPredicate::NumberIn(&[Scalar::Float(f64::NAN)]),
+                None
+            ),
+            Vec::<u32>::new(),
+            "NaN equals nothing, itself included"
+        );
+    }
+
+    /// A bool and a datetime are read as the entity route stores them — `u8::from` for the one,
+    /// microseconds as an `i64` for the other — so a predicate means the same thing on both routes.
+    #[test]
+    fn a_bool_and_a_datetime_compare_as_their_entity_space_storage_does() {
+        let flags = arrow::array::BooleanArray::from(vec![true, false, true, false]);
+        let slice = HotSlice::Bool(&flags);
+        let (yes, no) = ([Scalar::Int(1)], [Scalar::Int(0)]);
+        assert_eq!(run(&slice, &RowPredicate::NumberIn(&yes), None), vec![0, 2]);
+        assert_eq!(run(&slice, &RowPredicate::NumberIn(&no), None), vec![1, 3]);
+        // Absence for a bool is the bitmap too: `false` is a value, not a missing one.
+        assert_eq!(
+            run(
+                &slice,
+                &RowPredicate::NumberIn(&no),
+                Some(&presence(&[3], 4))
+            ),
+            vec![1],
+            "a bool with no value matched `false`"
+        );
+
+        let micros = [1_000i64, 2_000, 3_000];
+        assert_eq!(
+            run(
+                &HotSlice::TimestampUs(&micros),
+                &RowPredicate::Range {
+                    lo: Some(Endpoint {
+                        value: Scalar::Int(2_000),
+                        inclusive: true,
+                    }),
+                    hi: None,
+                },
+                None
+            ),
+            vec![1, 2]
+        );
     }
 }

@@ -207,10 +207,14 @@ async fn meta(
         // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
         //
         // **The predicate is the engine's** (`filter::is_filterable`, decision 0068): `index`
-        // columns, plus every rendered category — the render-only ones answered over the
-        // request's own rows. The viewport parse gates on the same function, so the surface a
-        // client is published here cannot differ from the one its requests are held to. A
-        // rendered number stays off this list until 0064's render half lands.
+        // columns, plus every rendered one — the render-only ones answered over the request's own
+        // rows. The viewport parse gates on the same function, so the surface a client is
+        // published here cannot differ from the one its requests are held to.
+        //
+        // A rendered **number** is on this list with its family's full operator set, `range`
+        // included: the hot column cannot express absence, so decision 0064 puts it in a presence
+        // bitmap beside the column that the row scan reads. A client cannot tell which route
+        // answered — that is 0068's whole licence to have two.
         "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
             let family = family_of(d);
             serde_json::json!({
@@ -318,7 +322,9 @@ async fn categories(
                 .map(|c| c.trim().parse::<u32>())
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| {
-                    ApiError::Contract(format!("`codes` must be a comma-separated list of u32: {e}"))
+                    ApiError::Contract(format!(
+                        "`codes` must be a comma-separated list of u32: {e}"
+                    ))
                 })?,
         ),
         None => None,
@@ -351,17 +357,13 @@ async fn categories(
     })))
 }
 
-/// A filterable column's family — **one derivation, used by both `/v1/meta` and the parser**, so
-/// the operator list a client is published cannot differ from the one it is held to.
+/// A filterable column's family — **one derivation, used by `/v1/meta`, the parser and the engine's
+/// own routing alike**, so the operator list a client is published cannot differ from the one it is
+/// held to, nor from the rules the scan reads its values by. It lives in the engine because the row
+/// route needs it too: a rendered `u8` category and a rendered `u8` number are the same bytes and
+/// have opposite absence rules.
 fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Family {
-    use tessera_engine::filter::Family;
-    if d.vocabulary.is_some() {
-        Family::Category
-    } else if d.arrow_type == tessera_engine::ScalarType::Utf8 {
-        Family::Text
-    } else {
-        Family::Numeric
-    }
+    tessera_engine::filter::Family::of(d)
 }
 
 #[derive(Debug, Deserialize)]
@@ -654,12 +656,10 @@ fn run_viewport_stream(
         request = request.filter(filter);
     }
 
-    let outcome = state.engine.viewport_stream(
-        session,
-        request,
-        state.stream_flush_bytes,
-        &mut sink,
-    );
+    let outcome =
+        state
+            .engine
+            .viewport_stream(session, request, state.stream_flush_bytes, &mut sink);
 
     match outcome {
         Ok(timings) => {
@@ -918,7 +918,10 @@ async fn viewport(
         // the request remains perfectly answerable and refusing it would turn the fail-closed path
         // into a failure rather than a fallback. Weak-tag syntax is not used; this is an exact
         // comparison of an opaque value.
-        .header("etag", format!("\"{}\"", hex16(&first.coordinates.content_key)))
+        .header(
+            "etag",
+            format!("\"{}\"", hex16(&first.coordinates.content_key)),
+        )
         // The authorisation coordinate, which governs whether a held band may be RENDERED at all
         // and is therefore the client's cache PARTITION key. Separate from the entity tag because
         // it answers a different question and moves on a different schedule: HTTP has one
