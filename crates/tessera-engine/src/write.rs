@@ -4837,12 +4837,20 @@ impl Executor {
         carried_rels.extend(carried_runs.iter().cloned());
         carried_rels.extend(carried_locators.iter().map(|e| e.path.clone()));
         carried_rels.extend(carried_tiers.iter().cloned());
-        // Both files of every carried attribute extent — the values *and* the presence bitmap,
-        // whose absence is not "those entities carry no value" but a refusal to open
-        // (`filter-index.md` §2.5).
+        // **Every file a carried attribute extent's entry names**, not the two a numeric one has.
+        // The values and the presence bitmap always; the sorted dictionary whenever the entry names
+        // one, which is exactly when the column is a keyword — its values are ordinals into *that
+        // layer's* dictionary and nothing else numbers them, so a carried extent without it is an
+        // entry pointing at a file that is not there. The whole prefix then refuses to open, which
+        // is how this was found. `postings` and `offsets` ride along for the same reason: an entry
+        // naming a file the link set omits is a bundle that will not open, whatever the file is
+        // for (`filter-index.md` §2.5; records §4.3, §7).
         for extent in &carried_attrs {
             carried_rels.insert(extent.values.clone());
             carried_rels.insert(extent.presence.clone());
+            carried_rels.extend(extent.dict.iter().cloned());
+            carried_rels.extend(extent.postings.iter().cloned());
+            carried_rels.extend(extent.offsets.iter().cloned());
         }
         // All three files of every carried record extent: the blocks and both addressing files,
         // any of whose absence is a refusal to open rather than "those entities have no record"

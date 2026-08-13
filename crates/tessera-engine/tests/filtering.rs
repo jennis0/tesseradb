@@ -15,7 +15,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
@@ -86,7 +86,7 @@ listing    = "public"
 
 [[attribute]]
 name     = "title"
-type     = "utf8"
+type     = "keyword"
 index    = true
 
 [[attribute]]
@@ -1106,6 +1106,48 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
     assert!(open(&extents).is_ok(), "restored, it composes again");
 }
 
+/// A keyword extent built in this process: the ordinal column and the dictionary that numbers it.
+///
+/// The two are returned together because they are one layer. An ordinal is a position in **this**
+/// dictionary and means nothing against any other (records §4.3), so a test that handed `compose`
+/// the values without the dictionary would not be testing a shorter version of the same thing — it
+/// would be testing a layer that has no reading, which is what `compose` refuses.
+fn keyword_extent(
+    entities: &[u32],
+    values: &[String],
+) -> (
+    Arc<tessera_filter::ValueColumn>,
+    Arc<tessera_filter::SortedDict>,
+) {
+    let mut keys: Vec<&str> = values.iter().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut bytes = Vec::new();
+    let mut writer = tessera_filter::SortedDictWriter::new(&mut bytes).expect("a writer opens");
+    for key in &keys {
+        writer.push(key).expect("keys ascend strictly");
+    }
+    writer.finish().expect("the dictionary closes");
+    let ordinals: Vec<u32> = values
+        .iter()
+        .map(|v| keys.binary_search(&v.as_str()).expect("built from these") as u32)
+        .collect();
+    let mut presence = Bitmap::new();
+    for e in entities {
+        presence.add(*e);
+    }
+    (
+        Arc::new(
+            tessera_filter::ValueColumn::partial(
+                tessera_filter::Codes::U32(ordinals.into()),
+                presence,
+            )
+            .unwrap(),
+        ),
+        Arc::new(tessera_filter::SortedDict::from_vec(bytes).expect("the dictionary reads back")),
+    )
+}
+
 /// **Two layers may not claim one entity, and that is checked rather than reasoned about.**
 ///
 /// Entity ids are permanent and issued from the high-water (**I9**), so an extent can only add ids
@@ -1115,44 +1157,28 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
 #[test]
 fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let fx = fixture();
-    let mut presence = Bitmap::new();
-    presence.add(0);
-    let overlapping = Arc::new(
-        tessera_filter::ValueColumn::partial(
-            tessera_filter::Codes::text(vec!["collision".to_string()]),
-            presence,
-        )
-        .unwrap(),
-    );
+    let (overlapping, dict) = keyword_extent(&[0], &["collision".to_string()]);
     let err = fx
         .columns
         .with_extents(&[(
             "title".to_string(),
             "attrs/title/extents/overlapping.arrow".to_string(),
             overlapping,
-            None,
+            Some(dict),
         )])
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
     // And an extent for a column the schema does not declare filterable is refused too: it would
     // otherwise be silently dropped, which is a value column quietly going missing.
-    let mut presence = Bitmap::new();
-    presence.add(N as u32 + 1);
-    let stray = Arc::new(
-        tessera_filter::ValueColumn::partial(
-            tessera_filter::Codes::text(vec!["stray".to_string()]),
-            presence,
-        )
-        .unwrap(),
-    );
+    let (stray, stray_dict) = keyword_extent(&[N as u32 + 1], &["stray".to_string()]);
     assert!(fx
         .columns
         .with_extents(&[(
             "no_such_column".to_string(),
             "attrs/no_such_column/extents/stray.arrow".to_string(),
             stray,
-            None,
+            Some(stray_dict),
         )])
         .is_err());
 }
@@ -2773,15 +2799,39 @@ fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
 /// The folded prefix's value column for one attribute, opened directly off disc.
 fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> tessera_filter::ValueColumn {
     tessera_filter::ValueColumn::open_dir(
-        &fx.bundle
-            .join(prefix)
-            .join("partitions")
-            .join(&fx.phash)
-            .join("attrs")
-            .join(column),
+        &attr_dir(fx, prefix, column),
         tessera_filter::Access::Read,
     )
     .expect("the folded column opens")
+}
+
+fn attr_dir(fx: &Fixture, prefix: &str, column: &str) -> PathBuf {
+    fx.bundle
+        .join(prefix)
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .join(column)
+}
+
+/// The **key** a folded keyword column holds for one entity, resolved through the dictionary
+/// written beside it.
+///
+/// An ordinal alone says nothing: it is a position in one layer's dictionary and means nothing
+/// against another's (records §4.3), so a test asserting what an entity carries has to read the
+/// pair. `None` where no slot is held — which is what a blanked entity leaves behind.
+fn folded_key(fx: &Fixture, prefix: &str, column: &str, entity: u32) -> Option<String> {
+    let dir = attr_dir(fx, prefix, column);
+    let values = folded_column(fx, prefix, column);
+    let ordinal = values.value_of(entity)?.raw();
+    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+        .expect("a keyword column's dictionary is beside its values");
+    let mut scratch = Vec::new();
+    Some(
+        dict.key_of(ordinal, &mut scratch)
+            .expect("the ordinal names a key in its own layer's dictionary")
+            .to_string(),
+    )
 }
 
 /// **A deleted entity is gone from every predicate after the fold, and its bytes are gone with
@@ -2845,23 +2895,36 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
         .unwrap()
         .contains(survivor as u32));
 
-    // The artefact itself: no slot, no bytes, no posting.
-    let titles = folded_column(&fx, "v00001", "title");
-    assert_eq!(titles.text_of(deleted as u32), None);
-    assert_eq!(titles.text_of(survivor as u32).unwrap(), title_of(8));
-    let bytes = std::fs::read(
-        fx.bundle
-            .join("v00001")
-            .join("partitions")
-            .join(&fx.phash)
-            .join("attrs/title/values.arrow"),
+    // The artefact itself: no slot, no bytes, no posting. For a keyword the value's bytes live in
+    // the dictionary rather than in the ordinal column, so that is where "gone" has to be read —
+    // the fold rebuilds the dictionary from the surviving entities alone, and a key no survivor
+    // carries is not in it.
+    assert_eq!(folded_key(&fx, "v00001", "title", deleted as u32), None);
+    assert_eq!(
+        folded_key(&fx, "v00001", "title", survivor as u32).as_deref(),
+        Some(title_of(8).as_str())
+    );
+    // Walked rather than searched for as bytes: the dictionary is front-coded, so a key's bytes
+    // are not contiguous in the file and a byte-window search would report absence for keys that
+    // are present — passing vacuously, which is the direction that hides the failure.
+    let dict = tessera_filter::SortedDict::open_dir(
+        &attr_dir(&fx, "v00001", "title"),
+        tessera_filter::Access::Read,
     )
-    .expect("the folded column is on disc");
-    let needle = title_of(2);
+    .expect("the folded dictionary is on disc");
+    let mut keys = Vec::new();
+    dict.walk(|_, key| keys.push(key.to_string()))
+        .expect("the folded dictionary walks");
     assert!(
-        !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
-        "the deleted entity's value bytes are still in the folded column — blanking is removal \
-         from presence and no value bytes, never a sentinel over them"
+        !keys.contains(&title_of(2)),
+        "the deleted entity's value is still a key of the folded dictionary — blanking removes the \
+         entity from presence and rebuilds the keys from the survivors, never writing a sentinel \
+         over them"
+    );
+    assert!(
+        keys.contains(&title_of(8)),
+        "and the survivor's key is still there, so 'gone' is not satisfied by emptying the \
+         dictionary"
     );
 
     let postings = tessera_filter::ColumnPostings::open_keyed(
@@ -2906,11 +2969,10 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
         "Rule S: a suppression never retires, and the fold does not execute one"
     );
 
-    let titles = folded_column(&fx, "v00001", "title");
     assert_eq!(
-        titles.text_of(suppressed as u32).map(|s| s.to_string()),
+        folded_key(&fx, "v00001", "title", suppressed as u32),
         Some(title_of(2)),
-        "the suppressed entity keeps its slot and its bytes: no attribute artefact changes for a \
+        "the suppressed entity keeps its slot and its key: no attribute artefact changes for a \
          suppression"
     );
     let postings = tessera_filter::ColumnPostings::open_keyed(
@@ -3232,6 +3294,12 @@ fn every_answer(engine: &tessera_engine::Engine, fx: &Fixture) -> Vec<(String, V
 /// fixture can express rather than a sample, because the failure this guards against — a merge that
 /// pairs values with the wrong entities — moves some answers and not others.
 ///
+/// **`title` is exempt and asserted to be exempt**, because it is a keyword: a coalesce merges two
+/// key sets and renumbers, and the composition installs a layer's values without a dictionary to go
+/// with them, so the pass declines any column whose layers carry one (records §4.3, §7; the
+/// selection's own note in `coalesce.rs`). Its extents therefore stay one per flush, and asserting
+/// that here is what keeps a later change that quietly starts taking them from going unnoticed.
+///
 /// **Mutations this kills:** dropping the coalesced extent from `attr_extents` (the post-build
 /// entities stop matching); pushing the coalesced layer without removing the consumed ones (the
 /// disjointness check refuses at the replace); merging in list order rather than in entity order
@@ -3243,6 +3311,13 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let entities = flush_a_window(&engine, "coalesce", 0);
 
     for (column, count) in extents_per_column(&fx) {
+        if column == "title" {
+            assert_eq!(
+                count, COALESCE_WIDTH,
+                "the keyword column's extents must be left alone, one per flush"
+            );
+            continue;
+        }
         assert_eq!(
             count, 1,
             "column '{column}' still holds {count} extents where the window collapsed to one"
@@ -3275,6 +3350,9 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let more = flush_a_window(&engine, "again", COALESCE_WIDTH);
     assert!(engine.write_executor_stats().coalesces >= 2);
     for (column, count) in extents_per_column(&fx) {
+        if column == "title" {
+            continue;
+        }
         assert!(
             count <= 2,
             "column '{column}' holds {count} extents; a coalesced extent must coalesce again"
@@ -3389,9 +3467,24 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
             tessera_filter::Access::Read,
         )
         .expect("a listed extent opens");
-        if let Some(value) = column.text_of(deleted as u32) {
-            held = Some(value.to_string());
-        }
+        // The ordinal alone would not settle it: a key is what the entity carried, and only this
+        // extent's own dictionary numbers this extent's ordinals (records §4.3).
+        let Some(ordinal) = column.value_of(deleted as u32).map(|v| v.raw()) else {
+            continue;
+        };
+        let dict_rel = extent
+            .dict
+            .as_ref()
+            .expect("a keyword extent lists its dictionary beside its values");
+        let dict =
+            tessera_filter::SortedDict::open(&prefix.join(dict_rel), tessera_filter::Access::Read)
+                .expect("the listed dictionary opens");
+        let mut scratch = Vec::new();
+        held = Some(
+            dict.key_of(ordinal, &mut scratch)
+                .expect("the ordinal names a key in its own extent's dictionary")
+                .to_string(),
+        );
     }
     assert_eq!(
         held.as_deref(),
@@ -3408,6 +3501,11 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
 /// later disjointness check tests against the wrong coverage — silently, and for the life of the
 /// generation. The merge's own duplicate guard makes the mismatch unreachable, which is exactly why
 /// it is cheap to verify and wrong to assume.
+///
+/// Asserted over `bonus`, a plain numeric column, because a coalesce never takes a keyword one: its
+/// merge renumbers the joined key set, and `CoalescedWindow` carries a layer's values without the
+/// dictionary that would have to be swapped in with them, so `with_coalesced` refuses the family
+/// outright (records §4.3, §7). Using `title` here would test that refusal instead of this one.
 #[test]
 fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let fx = fixture();
@@ -3418,25 +3516,31 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         }
         Arc::new(
             tessera_filter::ValueColumn::partial(
-                tessera_filter::Codes::text(
+                tessera_filter::Codes::I32(
                     entities
                         .iter()
-                        .map(|e| format!("t-{e}"))
-                        .collect::<Vec<_>>(),
+                        .map(|e| *e as i32)
+                        .collect::<Vec<_>>()
+                        .into(),
                 ),
                 presence,
             )
             .unwrap(),
         )
     };
-    let first = "attrs/title/extents/a.arrow".to_string();
-    let second = "attrs/title/extents/b.arrow".to_string();
+    let first = "attrs/bonus/extents/a.arrow".to_string();
+    let second = "attrs/bonus/extents/b.arrow".to_string();
     let columns = fx
         .columns
         .with_extents(&[
-            ("title".to_string(), first.clone(), extent(&[100, 101]), None),
             (
-                "title".to_string(),
+                "bonus".to_string(),
+                first.clone(),
+                extent(&[100, 101]),
+                None,
+            ),
+            (
+                "bonus".to_string(),
                 second.clone(),
                 extent(&[200, 201]),
                 None,
@@ -3446,9 +3550,9 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
 
     let window =
         |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
-            column: "title".to_string(),
+            column: "bonus".to_string(),
             consumed: vec![first.clone(), second.clone()],
-            values_rel: "coalesced/c-1/attrs/title/values.arrow".to_string(),
+            values_rel: "coalesced/c-1/attrs/bonus/values.arrow".to_string(),
             values,
         };
     let err = columns
@@ -3461,7 +3565,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let mut stray = window(extent(&[100, 101, 200, 201]));
     stray
         .consumed
-        .push("attrs/title/extents/never.arrow".to_string());
+        .push("attrs/bonus/extents/never.arrow".to_string());
     assert!(columns.with_coalesced(&[stray]).is_err());
 
     // The well-formed replace, which is what the pass actually publishes.
@@ -3471,7 +3575,11 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let mut cand = Bitmap::new();
     cand.add_range(0..300);
     let answer = next
-        .resolve("title", &FilterOperand::TextEquals("t-201".into()), &cand)
+        .resolve(
+            "bonus",
+            &FilterOperand::NumEquals(tessera_filter::Scalar::Int(201)),
+            &cand,
+        )
         .expect("answers");
     assert_eq!(answer.iter().collect::<Vec<_>>(), vec![201]);
 }

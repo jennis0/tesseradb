@@ -4,8 +4,8 @@ per-entity attribute values, evaluated by a per-entity walk inside a candidate s
 **Pinned to decision 0062 and contracts §3.2 r26.** A node is a leaf — one column name mapped to
 one operator — or a combinator, `all_of` / `any_of`, over sub-expressions. A category leaf takes
 `eq` and `in`, whose values are the vocabulary's key (a string) or its code (an integer), freely
-mixed; a `utf8` or `keyword` leaf takes `eq`, `in`, `prefix` and `contains` against the stored
-bytes. Empty combinators are their operators' identities and differ: `all_of: []` matches the whole
+mixed; a `keyword` leaf — the one string family — takes `eq`, `in`, `prefix` and `contains`
+against the value the item carries. Empty combinators are their operators' identities and differ: `all_of: []` matches the whole
 candidate, `any_of: []` matches nothing. `match` is specified and unbuilt, so this module refuses it
 the way the server does — by raising, never by evaluating a guess.
 
@@ -120,11 +120,10 @@ class CategoryColumn:
 def _string_matches(held: str, operator: str, operand, family: str) -> bool:
     """The four string predicates, over the bytes an entity holds.
 
-    Shared by [`StringColumn`] and [`KeywordColumn`] because the two families' semantics are
-    **byte-identical** — records §4.3 gives `keyword` the same four operators with the same
-    meanings and a different storage cost, and one definition is how the oracle stays unable to
-    ratify a divergence between them. `in` is `eq` over a list: a generalisation of equality, not a
-    category-only one, so both string families take it.
+    Written apart from the class that calls it because it is the *definition* of what the four
+    operators mean, and records §4.4's `text` family — ⊘ specified, not built — will take its own
+    subset of them. `in` is `eq` over a list: a generalisation of equality, not a category-only
+    one, so a string family takes it too.
     """
     if operator == "eq":
         return held == operand
@@ -135,24 +134,6 @@ def _string_matches(held: str, operator: str, operand, family: str) -> bool:
     if operator == "contains":
         return operand in held
     raise UnbuiltOperator(f"{family} operator {operator!r}")
-
-
-@dataclass(frozen=True)
-class StringColumn:
-    """One `utf8` column as the fixture planted it: per-entity strings, byte-compared.
-
-    A string is row data, not a vocabulary (filter-index §2.6): there is no code to resolve, no
-    value set, and nothing here to gate — the four predicates are over the stored bytes and that is
-    the whole of the type.
-    """
-
-    values: dict[int, str]
-
-    def matches(self, entity: int, operator: str, operand) -> bool:
-        held = self.values.get(entity)
-        if held is None:
-            return False
-        return _string_matches(held, operator, operand, "utf8")
 
 
 @dataclass(frozen=True)
@@ -169,10 +150,10 @@ class KeywordColumn:
     this class the artefact's structure — a sorted key list, an ordinal per entity, a resolve —
     would make it a transcription and the agreement vacuous.
 
-    A separate class from [`StringColumn`] although the predicates are shared: the wire publishes
-    `keyword` as its own family, the two are stored by different mechanisms, and a column map that
-    mirrored the published families through one class could not notice a deployment declaring the
-    wrong one.
+    **The only string family there is.** `utf8` is retired as a declared type, so every string
+    column a deployment can declare is a keyword and publishes `keyword`; records §4.4's `text` is
+    ⊘ specified and not built, and will be a second class here when it lands rather than an
+    operator added to this one.
     """
 
     values: dict[int, str]
@@ -215,7 +196,7 @@ def _leaf_matches(column, operator: str, operand, entity: int) -> bool:
         if operator == "in":
             return any(column.matches(entity, value) for value in operand)
         raise UnbuiltOperator(f"category operator {operator!r}")
-    if isinstance(column, (StringColumn, KeywordColumn)):
+    if isinstance(column, KeywordColumn):
         return column.matches(entity, operator, operand)
     raise TypeError(f"not a filter column: {column!r}")
 

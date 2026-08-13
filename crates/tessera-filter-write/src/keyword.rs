@@ -997,16 +997,18 @@ mod tests {
     fn a_column_that_is_not_an_ordinal_column_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = layer(dir.path(), "a", &[(10, "alpha")]);
-        let text = ValueColumn::partial(Codes::text(["alpha".to_string()]), bitmap([20]))
-            .expect("a text column");
+        // A narrower width is the shape a category's column has, and pairing one with a dictionary
+        // is the caller/schema disagreement this refuses.
+        let codes = ValueColumn::partial(Codes::U16(ScalarBuffer::from(vec![0u16])), bitmap([20]))
+            .expect("a category-width column");
         let inputs = [
             first.as_ref(),
             KeywordLayer {
-                values: &text,
+                values: &codes,
                 dict: &first.dict,
             },
         ];
-        let err = coalesce(dir.path(), "text", &inputs).expect_err("a text layer is refused");
+        let err = coalesce(dir.path(), "codes", &inputs).expect_err("a code layer is refused");
         assert!(err.to_string().contains("u32 ordinals"), "{err}");
     }
 }

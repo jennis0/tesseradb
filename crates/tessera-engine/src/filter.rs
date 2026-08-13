@@ -190,11 +190,9 @@ use tessera_lifecycle::overlay::Overlay;
 pub enum Family {
     /// Values are vocabulary entries: `eq`, `in`, over a key or a code.
     Category,
-    /// Values are row data: `eq`, `in`, `prefix`, `contains`, over the stored bytes.
-    Text,
     /// Values are short strings matched exactly, stored as an ordinal into the layer's own sorted
-    /// dictionary (records §4.3). The same four operators [`Family::Text`] takes, with the same
-    /// byte-exact semantics and a different cost profile — see this module's header.
+    /// dictionary (records §4.3): `eq`, `in`, `prefix`, `contains`, byte-exact against the key the
+    /// ordinal names — see this module's header for the cost profile.
     Keyword,
     /// Values are numbers — every integer width, both floats, `timestamp_us` and `bool`. A range
     /// is a scan like everything else: no level tree, no bit slicing, no zone map
@@ -208,12 +206,13 @@ impl Family {
     /// client is published cannot differ from the ones its requests are held to, and neither can
     /// differ from the predicate the scan applies.
     /// **`Numeric` is enumerated rather than defaulted to, and that is a fail-closed choice.** A
-    /// type this function does not recognise falls to the *string* families, because that is the
-    /// direction that fails safely: a string predicate over a column whose bytes are not strings
-    /// matches nothing and under-reports, which narrows `M_sel` under **I12**, where a numeric
-    /// predicate over a keyword's *ordinal* column would compare per-layer positions as though
-    /// they were values — publishing `range` for the column, accepting one, and answering the same
-    /// request differently against the base and against a flush extent, none of it visible.
+    /// type this function does not recognise falls to `Keyword`, which is the direction that fails
+    /// safely: a keyword column is opened with its layer's dictionary and a layer without one is
+    /// refused in both directions (see [`FilterColumns::compose`]), so a misclassified column
+    /// refuses to open. Defaulting to `Numeric` would instead compare a keyword's per-layer
+    /// *ordinals* as though they were values — publishing `range` for the column, accepting one,
+    /// and answering the same request differently against the base and against a flush extent,
+    /// none of it visible.
     pub fn of(scalar: &tessera_store::manifest::DeclaredScalar) -> Family {
         if scalar.vocabulary.is_some() {
             return Family::Category;
@@ -221,26 +220,24 @@ impl Family {
         if is_numeric(scalar.arrow_type) {
             return Family::Numeric;
         }
-        if declares_keyword(scalar) {
-            Family::Keyword
-        } else {
-            Family::Text
-        }
+        Family::Keyword
     }
 
     /// The operator names this family accepts, in the order `/v1/meta` publishes them.
     pub fn operands(self) -> &'static [&'static str] {
         match self {
             Family::Category => &["eq", "in"],
-            Family::Text | Family::Keyword => &["eq", "in", "prefix", "contains"],
+            Family::Keyword => &["eq", "in", "prefix", "contains"],
             Family::Numeric => &["eq", "in", "range"],
         }
     }
 
+    /// The family name `/v1/meta` publishes, which is also the name the request parser accepts —
+    /// one definition, so the surface a client is published cannot name a family its requests
+    /// would be refused for.
     pub fn as_str(self) -> &'static str {
         match self {
             Family::Category => "category",
-            Family::Text => "string",
             Family::Keyword => "keyword",
             Family::Numeric => "numeric",
         }
@@ -249,20 +246,17 @@ impl Family {
     /// Does a value of this family occupy a slot in the hot column, and so afford the row-space
     /// route (decision 0068; records §6.2)?
     ///
-    /// Only the fixed-width families. A `keyword` and a `text` are strings, and `render` on either
-    /// is refused at the schema because the hot column is a fixed-width slot per row — so both are
+    /// Only the fixed-width families. `render` on a `keyword` is refused at the schema because the
+    /// hot column is a fixed-width slot per row and a keyword's value is not one — so a keyword is
     /// filterable in entity space alone. Stated once here rather than at each site that asks, so
     /// the two cannot come to disagree about which families the row route reaches.
     pub fn reaches_hot_column(self) -> bool {
         match self {
             Family::Category | Family::Numeric => true,
-            Family::Text | Family::Keyword => false,
+            Family::Keyword => false,
         }
     }
 }
-
-/// The declared type whose values are ordinals into a per-layer sorted dictionary (records §2).
-const KEYWORD_TYPE: &str = "keyword";
 
 /// The types whose values are numbers — every integer width, both floats, `timestamp_us` and
 /// `bool`. Listed, because [`Family::of`] must not reach `Numeric` by default; see its doc.
@@ -283,19 +277,6 @@ fn is_numeric(ty: tessera_spatial::tiler::ScalarType) -> bool {
             | T::F64
             | T::TimestampUs
     )
-}
-
-/// Is this column declared `type = "keyword"`?
-///
-/// **Read as the manifest's own spelling rather than matched as a variant**, which is a seam and
-/// not a preference: `ScalarType::arrow_type_name` is the single definition of what
-/// `declared_scalars[].arrow_type` says — it exists because two spellings once disagreed — and the
-/// spelling is fixed normatively by records §2. What the comparison costs is the compiler's help:
-/// a renamed variant would leave this `false`, which is why [`Family::of`] is arranged so that
-/// falling through lands on [`Family::Text`] — the flat byte scan, which under-reports over an
-/// ordinal column — rather than on `Numeric`, which would compare the ordinals.
-fn declares_keyword(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
-    scalar.arrow_type.arrow_type_name() == KEYWORD_TYPE
 }
 
 /// What a request may ask of one column.
@@ -1099,26 +1080,20 @@ impl FilterColumns {
             }
             // The layers are disjoint in entity space (I9, checked at compose), so the first
             // layer holding the entity is the only one.
+            let slot = values
+                .present_in(&Bitmap::from_range(0..entity))
+                .cardinality() as usize;
             let read = match values.codes() {
-                Codes::Text { .. } => RecordValue::Utf8(values.text_of(entity)?.to_string()),
-                codes => {
-                    let slot = values
-                        .present_in(&Bitmap::from_range(0..entity))
-                        .cardinality() as usize;
-                    match codes {
-                        Codes::U8(v) => RecordValue::U8(v[slot]),
-                        Codes::U16(v) => RecordValue::U16(v[slot]),
-                        Codes::U32(v) => RecordValue::U32(v[slot]),
-                        Codes::U64(v) => RecordValue::U64(v[slot]),
-                        Codes::I8(v) => RecordValue::I8(v[slot]),
-                        Codes::I16(v) => RecordValue::I16(v[slot]),
-                        Codes::I32(v) => RecordValue::I32(v[slot]),
-                        Codes::I64(v) => RecordValue::I64(v[slot]),
-                        Codes::F32(v) => RecordValue::F32(v[slot]),
-                        Codes::F64(v) => RecordValue::F64(v[slot]),
-                        Codes::Text { .. } => unreachable!("matched above"),
-                    }
-                }
+                Codes::U8(v) => RecordValue::U8(v[slot]),
+                Codes::U16(v) => RecordValue::U16(v[slot]),
+                Codes::U32(v) => RecordValue::U32(v[slot]),
+                Codes::U64(v) => RecordValue::U64(v[slot]),
+                Codes::I8(v) => RecordValue::I8(v[slot]),
+                Codes::I16(v) => RecordValue::I16(v[slot]),
+                Codes::I32(v) => RecordValue::I32(v[slot]),
+                Codes::I64(v) => RecordValue::I64(v[slot]),
+                Codes::F32(v) => RecordValue::F32(v[slot]),
+                Codes::F64(v) => RecordValue::F64(v[slot]),
             };
             return Some(read);
         }
@@ -2176,10 +2151,17 @@ fn scan(values: &ValueColumn, operand: &FilterOperand, candidate: &Bitmap) -> Bi
     match operand {
         FilterOperand::Equals(v) => values.scan_eq(candidate, *v),
         FilterOperand::In(vs) => values.scan_in(candidate, vs),
-        FilterOperand::TextEquals(s) => values.scan_text_eq(candidate, s),
-        FilterOperand::TextIn(ss) => values.scan_text_in(candidate, ss),
-        FilterOperand::TextPrefix(s) => values.scan_text_prefix(candidate, s),
-        FilterOperand::TextContains(s) => values.scan_text_contains(candidate, s),
+        // **A string operand against a layer that carries no dictionary matches nothing.** Every
+        // string operand belongs to the keyword family, whose layers all carry one, so this is
+        // unreachable through the API: the operator/family check at the parse refuses a string
+        // operator on a category or a numeric column, and `FilterColumns::compose` refuses the
+        // dictionary/family mismatch in both directions. It is the second line of defence, and
+        // empty is the direction that fails safely — it under-reports, which narrows `M_sel` under
+        // **I12**, where comparing a needle against a code would answer a different question.
+        FilterOperand::TextEquals(_)
+        | FilterOperand::TextIn(_)
+        | FilterOperand::TextPrefix(_)
+        | FilterOperand::TextContains(_) => Bitmap::new(),
         FilterOperand::NumEquals(n) => values.scan_num_eq(candidate, *n),
         FilterOperand::NumIn(ns) => values.scan_num_in(candidate, ns),
         FilterOperand::Range { lo, hi } => values.scan_range(candidate, *lo, *hi),
@@ -3026,10 +3008,15 @@ mod keyword_tests {
         }
     }
 
-    /// **Every declared type lands on a family deliberately, and `keyword` is the arm that must
-    /// not fall through.** A keyword read as `Numeric` would publish `range` for a column of
-    /// per-layer ordinals and accept one, comparing positions as though they were values — and
-    /// answering the same request differently against the base and against a flush extent.
+    /// **Every declared type lands on a family deliberately, and every numeric one must be
+    /// enumerated.** A keyword read as `Numeric` would publish `range` for a column of per-layer
+    /// ordinals and accept one, comparing positions as though they were values — and answering the
+    /// same request differently against the base and against a flush extent.
+    ///
+    /// `utf8` is in the table as a **negative**: it is not a declarable type (the schema parse
+    /// refuses it), and a manifest carrying it anyway must not be read as the flat byte column that
+    /// no longer exists. It lands on `Keyword`, whose open demands the dictionary beside the values
+    /// and fails without one — a refusal, where a fallthrough to `Numeric` would answer.
     ///
     /// A spelling this build cannot parse is skipped rather than asserted about, so the case
     /// strengthens by itself the moment the declaration gains the type.
@@ -3049,7 +3036,7 @@ mod keyword_tests {
             ("f32", Family::Numeric),
             ("f64", Family::Numeric),
             ("timestamp_us", Family::Numeric),
-            ("utf8", Family::Text),
+            ("utf8", Family::Keyword),
             ("keyword", Family::Keyword),
         ];
         let mut exercised = 0;
@@ -3060,9 +3047,9 @@ mod keyword_tests {
             let scalar = declared("col", spelling);
             let family = Family::of(&scalar);
             assert_eq!(family, expected, "type {spelling:?}");
-            // **No string family takes `range`.** A keyword's values are ordinals and a `utf8`'s
-            // are bytes; comparing either numerically is meaningless, and for the keyword it is
-            // the specific defect a `Numeric` fallthrough would produce.
+            // **A string family never takes `range`.** A keyword's values are ordinals; comparing
+            // them numerically is meaningless, and it is the specific defect a `Numeric`
+            // fallthrough would produce.
             if family != Family::Numeric {
                 assert!(
                     !family.operands().contains(&"range"),

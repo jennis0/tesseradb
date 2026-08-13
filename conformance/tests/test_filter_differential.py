@@ -164,9 +164,11 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
     is invisible on the wire**: `archive` is `public` and `department` is `per_viewer`, so
     decision 0063 answers the first from its derived postings and the second by scanning — and
     the published family and operand list are identical for both, because routing is a property
-    of the deployment's declaration, never of the query surface. And `title`'s family is
-    `"string"`, not `"utf8"`: the *type* is `utf8` and the *family* is string (filter-index
-    §2.6's family table), the design's family vocabulary being the authority."""
+    of the deployment's declaration, never of the query surface. And a string column's family is
+    `"keyword"` — the type's own name, now that `keyword` is the only declarable string family and
+    the retired `utf8` no longer needs a family word covering both (filter-index §2.6's family
+    table). The name the wire publishes is the name the operand parse accepts, from one derivation,
+    so `/v1/meta` cannot advertise a family a request would be refused for."""
     token = catalogue_server.authorise([])["token"]
     operands = catalogue_server.meta(token)["filter_operands"]
     by_column = {entry["column"]: entry for entry in operands}
@@ -528,7 +530,7 @@ def test_the_unbuilt_operators_refuse_by_name(catalogue_server, sweep_cases):
     resp = catalogue_server.viewport_request(
         token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"title": {"match": "smith"}}
     )
-    assert resp.status_code == 422, f"match on utf8: {resp.status_code} {resp.text}"
+    assert resp.status_code == 422, f"match on a keyword: {resp.status_code} {resp.text}"
     assert resp.json()["error"] == "contract"
 
 
@@ -620,7 +622,7 @@ def test_an_operator_outside_the_columns_family_refuses(catalogue_server, sweep_
     turns a client typo into a silent "no matches" and contradicts the refusal `match` already
     gets one operator over.
 
-    `in` on a `utf8` column is **no longer an example** of this: `in` is `eq` over a list, which is
+    `in` on a string column is **no longer an example** of this: `in` is `eq` over a list, which is
     not a category-only generalisation, so a string column takes it and the divergence report's
     second case was itself the bug."""
     case = sweep_cases["crossover_below"]

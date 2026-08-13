@@ -158,15 +158,20 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # `public`, so the routed reading stays clear of the vocabulary-control ruling a `per_viewer`
 # rendered category waits on; a fifth period (`(source_id // 7) % 3`), decorrelated like the rest.
 #
-# **`submitter` is the keyword column** (records §4.3): an open, exact vocabulary stored as a
-# sorted per-layer dictionary with a `u32` ordinal column, rather than as the flat bytes `title`
-# keeps. Its shapes are chosen backwards from the catalogue entries records §10 gives this family
-# — see [`submitter_of`], which names each one at the branch that plants it. It is `index`-only,
-# because `render` on a keyword is refused (a keyword's slot would be its ordinal, and an ordinal
-# is a per-layer position).
+# **`title` and `submitter` are the two keyword columns** (records §4.3) — the only declarable
+# string family, `utf8` being retired. Each is an open, exact vocabulary stored as a sorted
+# per-layer dictionary with a `u32` ordinal column. Two of them, with different value shapes: the
+# `submitter` shapes are chosen backwards from the catalogue entries records §10 gives this family
+# — see [`submitter_of`], which names each one at the branch that plants it — while `title`'s stems
+# give the string operators a second, differently distributed vocabulary to disagree over. Both are
+# `index`-only, because `render` on a keyword is refused (a keyword's slot would be its ordinal,
+# and an ordinal is a per-layer position).
 #
 # **`note` and `pages` are blob-resident** — neither key set, so their values live only in the
-# record blob, `attrs/record/` (records §3): a utf8 and a numeric, exercising mixed row content.
+# record blob, `attrs/record/` (records §3): a string and a numeric, exercising mixed row content.
+# `note`'s declared type is `keyword`, and it plants the **empty string**, which is not the
+# contradiction it looks like: the empty string is refused as a *dictionary key* and a blob-resident
+# column has no dictionary — its row carries the bytes the wire carried.
 # Their planting carries the blob's adversarial shapes: an empty string (a value, not an absence),
 # a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
 # block target (an oversized block of its own — records §3's "target, not a cap"), and entities
@@ -207,7 +212,7 @@ listing    = "public"
 
 [[attribute]]
 name     = "title"
-type     = "utf8"
+type     = "keyword"
 index    = true
 
 [[attribute]]
@@ -229,7 +234,7 @@ index    = true
 
 [[attribute]]
 name     = "note"
-type     = "utf8"
+type     = "keyword"
 
 [[attribute]]
 name     = "pages"
@@ -537,7 +542,7 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
         "department": ("category", frozenset({"eq", "in"})),
         "archive": ("category", frozenset({"eq", "in"})),
         "shelf": ("category", frozenset({"eq", "in"})),
-        "title": ("string", frozenset({"eq", "in", "prefix", "contains"})),
+        "title": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
         "submitter": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
         "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
     }
@@ -935,7 +940,7 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 ),
                 "archive": pa.array([archive_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 "title": pa.array([title_of(i) for i in range(N_ITEMS)], type=pa.string()),
-                # A keyword arrives as its value, exactly as a `utf8` does — the ordinal is the
+                # A keyword arrives as its **value**, never as an ordinal: the ordinal is the
                 # build's to assign, per layer, and a data file supplying one would be naming a
                 # position in a dictionary that does not exist yet (records §4.3).
                 "submitter": pa.array(

@@ -40,7 +40,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
-use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
+use arrow::buffer::{Buffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use croaring::{Bitmap, Portable};
@@ -64,7 +64,6 @@ pub enum ColumnKind {
     I64,
     F32,
     F64,
-    Text,
 }
 
 impl ColumnKind {
@@ -81,13 +80,10 @@ impl ColumnKind {
             Codes::I64(_) => ColumnKind::I64,
             Codes::F32(_) => ColumnKind::F32,
             Codes::F64(_) => ColumnKind::F64,
-            Codes::Text { .. } => ColumnKind::Text,
         }
     }
 
-    /// The Arrow type the file declares. `LargeUtf8` for text, for the reason [`Codes::Text`]
-    /// gives: 32-bit offsets cap the concatenated bytes at 2 GiB, which a 10⁹-entity column passes
-    /// at two bytes a value.
+    /// The Arrow type the file declares.
     fn arrow_type(self) -> DataType {
         match self {
             ColumnKind::U8 => DataType::UInt8,
@@ -100,19 +96,18 @@ impl ColumnKind {
             ColumnKind::I64 => DataType::Int64,
             ColumnKind::F32 => DataType::Float32,
             ColumnKind::F64 => DataType::Float64,
-            ColumnKind::Text => DataType::LargeUtf8,
         }
     }
 
-    /// Bytes per value, for the fixed-width families. Text has none — its values are delimited by
-    /// the offset array, which is the whole reason it spools two files rather than one.
-    fn width(self) -> Option<usize> {
+    /// Bytes per value. **Every value column is fixed-width**: a keyword's values are `u32`
+    /// ordinals into its layer's dictionary, and the dictionary is a separate artefact this writer
+    /// knows nothing about, so there is no variable-width case to spool an offset array for.
+    fn width(self) -> usize {
         match self {
-            ColumnKind::U8 | ColumnKind::I8 => Some(1),
-            ColumnKind::U16 | ColumnKind::I16 => Some(2),
-            ColumnKind::U32 | ColumnKind::I32 | ColumnKind::F32 => Some(4),
-            ColumnKind::U64 | ColumnKind::I64 | ColumnKind::F64 => Some(8),
-            ColumnKind::Text => None,
+            ColumnKind::U8 | ColumnKind::I8 => 1,
+            ColumnKind::U16 | ColumnKind::I16 => 2,
+            ColumnKind::U32 | ColumnKind::I32 | ColumnKind::F32 => 4,
+            ColumnKind::U64 | ColumnKind::I64 | ColumnKind::F64 => 8,
         }
     }
 }
@@ -229,19 +224,6 @@ pub fn write_value_column(
             Arc::new(arrow::array::Float64Array::new(v.clone(), None)),
             DataType::Float64,
         ),
-        // `try_new` is what validates the offsets ascend and the bytes are UTF-8, so a column that
-        // could not be read back is refused here rather than at the next open.
-        Codes::Text { bytes, offsets } => (
-            Arc::new(
-                arrow::array::LargeStringArray::try_new(
-                    OffsetBuffer::new(offsets.clone()),
-                    bytes.clone(),
-                    None,
-                )
-                .map_err(|e| invalid(e.to_string()))?,
-            ),
-            DataType::LargeUtf8,
-        ),
     };
     write_value_array(values_path, array, ty)?;
 
@@ -338,19 +320,14 @@ const SCRATCH: usize = 1 << 16;
 /// Values arrive in **entity order** — for a partial column, in the order of the presence
 /// bitmap's set bits, which is the same rank-addressed order the scan reads them back in.
 ///
-/// The spool files are siblings of `values.arrow` and are removed when the column is written; a
-/// writer dropped without finishing removes them too, so an abandoned fold does not leave a 4 GB
+/// The spool file is a sibling of `values.arrow` and is removed when the column is written; a
+/// writer dropped without finishing removes it too, so an abandoned fold does not leave a 4 GB
 /// transient behind.
 pub struct ValueColumnWriter {
     kind: ColumnKind,
     values_path: PathBuf,
     presence_path: PathBuf,
-    /// The values themselves — the concatenated bytes, for text.
     values: Option<Spool>,
-    /// Text only: one `i64` per value plus the leading zero.
-    offsets: Option<Spool>,
-    /// The last offset written, which is the next value's start.
-    offset_last: i64,
     count: usize,
     scratch: Vec<u8>,
 }
@@ -358,28 +335,14 @@ pub struct ValueColumnWriter {
 impl ValueColumnWriter {
     /// Create the writer for a column of `kind`, spooling beside `values_path`.
     pub fn create(values_path: &Path, presence_path: &Path, kind: ColumnKind) -> io::Result<Self> {
-        let spool = |suffix: &str| {
-            let mut name = values_path.as_os_str().to_os_string();
-            name.push(suffix);
-            PathBuf::from(name)
-        };
-        let values = Spool::create(spool(".spool"))?;
-        let offsets = match kind {
-            ColumnKind::Text => {
-                let mut s = Spool::create(spool(".offsets"))?;
-                // Arrow offsets carry a leading zero; every value appends one more.
-                s.write(&0i64.to_ne_bytes())?;
-                Some(s)
-            }
-            _ => None,
-        };
+        let mut name = values_path.as_os_str().to_os_string();
+        name.push(".spool");
+        let values = Spool::create(PathBuf::from(name))?;
         Ok(ValueColumnWriter {
             kind,
             values_path: values_path.to_path_buf(),
             presence_path: presence_path.to_path_buf(),
             values: Some(values),
-            offsets,
-            offset_last: 0,
             count: 0,
             scratch: Vec::with_capacity(SCRATCH),
         })
@@ -433,7 +396,6 @@ impl ValueColumnWriter {
             Codes::I64(v) => scalars!(v),
             Codes::F32(v) => scalars!(v),
             Codes::F64(v) => scalars!(v),
-            Codes::Text { bytes, offsets } => self.push_text(bytes, offsets)?,
         }
         Ok(())
     }
@@ -450,59 +412,6 @@ impl ValueColumnWriter {
         Ok(())
     }
 
-    /// A text chunk's own concatenation, appended and re-based.
-    ///
-    /// The chunk's offsets need not start at zero — a chunk may be a window onto a larger
-    /// column — so only the bytes the offsets actually delimit are spooled, and each offset is
-    /// carried forward by the running total rather than copied.
-    fn push_text(&mut self, bytes: &Buffer, offsets: &ScalarBuffer<i64>) -> io::Result<()> {
-        let Some((&first, rest)) = offsets.split_first() else {
-            // No offsets at all is not an empty chunk of text, it is a malformed one: a text
-            // column's offsets always carry a leading zero, so an empty chunk has one element.
-            return Err(invalid("value column: a text chunk carries no offsets"));
-        };
-        let base = usize::try_from(first).map_err(|_| invalid("value column: negative offset"))?;
-        let end = usize::try_from(*offsets.last().expect("split_first proved non-empty"))
-            .map_err(|_| invalid("value column: negative offset"))?;
-        if end < base || end > bytes.len() {
-            return Err(invalid(
-                "value column: a text chunk's offsets lie outside its bytes",
-            ));
-        }
-        let spool = self
-            .values
-            .as_mut()
-            .expect("the values spool is taken only by finish, which consumes the writer");
-        spool.write(&bytes[base..end])?;
-
-        let offsets_spool = self
-            .offsets
-            .as_mut()
-            .expect("a text column creates its offsets spool");
-        // Each of the chunk's offsets carried onto the column's own running total: the chunk's
-        // first offset becomes where the column had reached, and the rest keep their distances
-        // from it. `checked_add` rather than a wrapping one, because Arrow's offsets are `i64` and
-        // a column whose total passed `i64::MAX` must fail closed rather than wrap into a shorter
-        // value.
-        let base = self.offset_last;
-        for &o in rest {
-            let delta = o
-                .checked_sub(first)
-                .filter(|d| *d >= 0)
-                .ok_or_else(|| invalid("value column: a text chunk's offsets do not ascend"))?;
-            let next = base
-                .checked_add(delta)
-                .ok_or_else(|| invalid("value column: text bytes exceed i64::MAX"))?;
-            if next < self.offset_last {
-                return Err(invalid("value column: a text chunk's offsets do not ascend"));
-            }
-            self.offset_last = next;
-            offsets_spool.write(&self.offset_last.to_ne_bytes())?;
-        }
-        self.count += rest.len();
-        Ok(())
-    }
-
     /// Assemble the column: one record batch over the mapped spool, and the presence bitmap where
     /// presence is partial. `presence` follows [`write_value_column`]'s rule exactly — `None`
     /// means every entity in `0..len()` carries a value.
@@ -514,61 +423,29 @@ impl ValueColumnWriter {
             .take()
             .expect("the values spool is taken only here");
         let values_spool = values.path.clone();
-        let offsets_spool = self.offsets.as_ref().map(|s| s.path.clone());
 
-        let (array, ty): (ArrayRef, DataType) = match self.kind {
-            ColumnKind::Text => {
-                let offsets = self
-                    .offsets
-                    .take()
-                    .expect("a text column creates its offsets spool");
-                let offsets = offsets.map((self.count + 1) * 8)?;
-                let offsets: ScalarBuffer<i64> = ScalarBuffer::new(offsets, 0, self.count + 1);
-                let bytes = values.map(self.offset_last as usize)?;
-                (
-                    Arc::new(
-                        arrow::array::LargeStringArray::try_new(
-                            OffsetBuffer::new(offsets),
-                            bytes,
-                            None,
-                        )
-                        .map_err(|e| invalid(e.to_string()))?,
-                    ),
-                    DataType::LargeUtf8,
-                )
-            }
-            kind => {
-                let width = kind.width().expect("only text has no fixed width");
-                let buffer = values.map(self.count * width)?;
-                macro_rules! borrowed {
-                    ($arr:ty) => {
-                        Arc::new(<$arr>::new(ScalarBuffer::new(buffer, 0, self.count), None))
-                            as ArrayRef
-                    };
-                }
-                let array = match kind {
-                    ColumnKind::U8 => borrowed!(arrow::array::UInt8Array),
-                    ColumnKind::U16 => borrowed!(arrow::array::UInt16Array),
-                    ColumnKind::U32 => borrowed!(arrow::array::UInt32Array),
-                    ColumnKind::U64 => borrowed!(arrow::array::UInt64Array),
-                    ColumnKind::I8 => borrowed!(arrow::array::Int8Array),
-                    ColumnKind::I16 => borrowed!(arrow::array::Int16Array),
-                    ColumnKind::I32 => borrowed!(arrow::array::Int32Array),
-                    ColumnKind::I64 => borrowed!(arrow::array::Int64Array),
-                    ColumnKind::F32 => borrowed!(arrow::array::Float32Array),
-                    ColumnKind::F64 => borrowed!(arrow::array::Float64Array),
-                    ColumnKind::Text => unreachable!("text is handled above"),
-                };
-                (array, kind.arrow_type())
-            }
-        };
-        // The array — and with it the mapping — is dropped inside, so the spools are only removed
-        // once `values.arrow` is fully written.
-        write_value_array(&self.values_path, array, ty)?;
-        std::fs::remove_file(&values_spool)?;
-        if let Some(path) = offsets_spool {
-            std::fs::remove_file(path)?;
+        let buffer = values.map(self.count * self.kind.width())?;
+        macro_rules! borrowed {
+            ($arr:ty) => {
+                Arc::new(<$arr>::new(ScalarBuffer::new(buffer, 0, self.count), None)) as ArrayRef
+            };
         }
+        let array: ArrayRef = match self.kind {
+            ColumnKind::U8 => borrowed!(arrow::array::UInt8Array),
+            ColumnKind::U16 => borrowed!(arrow::array::UInt16Array),
+            ColumnKind::U32 => borrowed!(arrow::array::UInt32Array),
+            ColumnKind::U64 => borrowed!(arrow::array::UInt64Array),
+            ColumnKind::I8 => borrowed!(arrow::array::Int8Array),
+            ColumnKind::I16 => borrowed!(arrow::array::Int16Array),
+            ColumnKind::I32 => borrowed!(arrow::array::Int32Array),
+            ColumnKind::I64 => borrowed!(arrow::array::Int64Array),
+            ColumnKind::F32 => borrowed!(arrow::array::Float32Array),
+            ColumnKind::F64 => borrowed!(arrow::array::Float64Array),
+        };
+        // The array — and with it the mapping — is dropped inside, so the spool is only removed
+        // once `values.arrow` is fully written.
+        write_value_array(&self.values_path, array, self.kind.arrow_type())?;
+        std::fs::remove_file(&values_spool)?;
         if let Some(p) = presence {
             std::fs::write(&self.presence_path, presence_bytes(p))?;
         }
@@ -580,10 +457,7 @@ impl Drop for ValueColumnWriter {
     /// A writer that never reached [`ValueColumnWriter::finish`] — an error part-way through a
     /// fold, a panic — leaves its spool behind otherwise, and that spool is the size of the column.
     fn drop(&mut self) {
-        for spool in [self.values.take(), self.offsets.take()]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(spool) = self.values.take() {
             let _ = std::fs::remove_file(&spool.path);
         }
     }

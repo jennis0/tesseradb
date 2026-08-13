@@ -753,7 +753,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 // =============================================================================================
 
 /// The record fixture's schema: a rendered `u8` category plus two **blob-resident** columns — a
-/// `utf8` note and an `i64` revision, neither indexed nor rendered, whose only home is the record
+/// `keyword` note and an `i64` revision, neither indexed nor rendered, whose only home is the record
 /// blob. Two widths in the blob for the same reason the hot tail's fixture has three: a tag slip
 /// must be a type mismatch, not a plausible value.
 const RECORD_SCHEMA_TOML: &str = r#"
@@ -771,7 +771,7 @@ listing    = "public"
 
 [[attribute]]
 name = "note"
-type = "utf8"
+type = "keyword"
 
 [[attribute]]
 name = "revision"

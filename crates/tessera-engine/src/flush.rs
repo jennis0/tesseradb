@@ -703,7 +703,9 @@ fn write_filter_extents(
             .map(|path| {
                 tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
                     .map(Arc::new)
-                    .map_err(|e| FlushFailed(format!("keyword dictionary for '{}': {e}", spec.name)))
+                    .map_err(|e| {
+                        FlushFailed(format!("keyword dictionary for '{}': {e}", spec.name))
+                    })
             })
             .transpose()?;
         out.push(FlushedExtent {
@@ -806,23 +808,6 @@ fn extent_values<'a>(
         });
     }
 
-    if spec.ty == ScalarType::Utf8 {
-        let mut held: Vec<String> = Vec::with_capacity(entities.len());
-        for (entity, value) in entities {
-            // No slot for an absent value — the k-th set bit's value is at slot k, so a
-            // placeholder here would shift every later entity's string onto its neighbour.
-            if matches!(value, WalScalar::Null) {
-                continue;
-            }
-            let WalScalar::Utf8(text) = value else {
-                return Err(wrong(value));
-            };
-            presence.add(entity);
-            held.push(text.clone());
-        }
-        return Ok(ExtentColumn::flat(Codes::text(held), presence));
-    }
-
     if spec.category {
         let mut held: Vec<u32> = Vec::with_capacity(entities.len());
         for (entity, value) in entities {
@@ -897,9 +882,11 @@ fn extent_values<'a>(
         ScalarType::F32 => gather!(F32, Codes::F32),
         ScalarType::F64 => gather!(F64, Codes::F64),
         ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 | ScalarType::Keyword => {
-            unreachable!("both string types are handled above")
-        }
+        ScalarType::Keyword => unreachable!("a keyword is handled above"),
+        // `utf8` survives as the *wire* type of a keyword's value and of a category's key
+        // (`DeclaredScalar::wire_type`); the schema parse refuses it as a declared type, so no
+        // column's storage is one.
+        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
     };
     Ok(ExtentColumn::flat(codes, presence))
 }
@@ -1076,10 +1063,11 @@ fn record_value_of(
         ScalarType::F32 => expect!(F32),
         ScalarType::F64 => expect!(F64),
         ScalarType::TimestampUs => expect!(TimestampUs),
-        // **A blob-resident keyword stores its bytes, not an ordinal**, and shares `utf8`'s arm
-        // for that reason rather than by convenience. The blob is the values' only home when a
-        // column has no other (records §3), so there is no dictionary beside it and no layer for
-        // an ordinal to be a position in; the row carries what the wire carried.
+        // **A blob-resident keyword stores its bytes, not an ordinal.** The blob is the values'
+        // only home when a column has no other (records §3), so there is no dictionary beside it
+        // and no layer for an ordinal to be a position in; the row carries what the wire carried,
+        // which is why this shares the arm of `utf8`, that same wire type
+        // (`DeclaredScalar::wire_type`).
         ScalarType::Utf8 | ScalarType::Keyword => match value {
             WalScalar::Utf8(text) => RecordValue::Utf8(text.clone()),
             WalScalar::Null => return Ok(None),

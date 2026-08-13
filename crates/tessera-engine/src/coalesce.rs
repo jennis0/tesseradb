@@ -948,7 +948,7 @@ mod tests {
                 },
                 values: Arc::new(
                     tessera_filter::ValueColumn::partial(
-                        tessera_filter::Codes::text(Vec::<String>::new()),
+                        tessera_filter::Codes::U32(Vec::<u32>::new().into()),
                         croaring::Bitmap::new(),
                     )
                     .expect("an empty extent"),
