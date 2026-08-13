@@ -717,7 +717,7 @@ fn arrow_type_of(ty: ScalarType) -> DataType {
         // ever did, its rendered form would be the value's bytes — which is what
         // `ScalarValue::or_render_placeholder` substitutes for it — never the ordinal, which is a
         // per-layer index internal (records §4.3). The two must agree, so they are stated as one.
-        ScalarType::Utf8 | ScalarType::Keyword => DataType::Utf8,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => DataType::Utf8,
     }
 }
 
@@ -869,7 +869,7 @@ impl ScalarColumnData {
                     ScalarType::Bool => ScalarColumnData::Bool(Vec::with_capacity(capacity)),
                     // A keyword renders as its bytes if it ever renders at all — see
                     // `arrow_type_of`, which this must agree with.
-                    ScalarType::Utf8 | ScalarType::Keyword => {
+                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                         ScalarColumnData::Utf8(Vec::with_capacity(capacity))
                     }
                 }

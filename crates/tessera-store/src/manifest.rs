@@ -43,6 +43,20 @@ pub struct DeclaredScalar {
     /// not tolerance of an older manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
+    /// For a `text` column, the full `<name>/<version>` identity of the analyser that produced its
+    /// terms; `None` for every other type (decision 0070).
+    ///
+    /// **Per column, not per bundle**, because two `text` columns may be analysed differently — and
+    /// because the failure this records is silent. An index built by one analyser and queried by
+    /// another matches on precisely the strings whose segmentation differs, with no error anywhere;
+    /// there is no way to detect it from the postings, which are individually valid either way. §7's
+    /// fold-merge argument reads this too: two layers merge only because the same versioned
+    /// analyser produced them over the same values.
+    ///
+    /// `default` here is the `Option`'s own absence, as [`DeclaredScalar::vocabulary`]'s is — a
+    /// numeric column genuinely has no analyser — and not tolerance of an older manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyser: Option<String>,
     /// Whether this column carries an entity-space index (`records-and-search.md` §3;
     /// `filter-index.md` §2). Declared `index = true`, compiled here.
     ///
@@ -894,6 +908,7 @@ mod tests {
             name: "department".to_string(),
             arrow_type: ScalarType::U16,
             vocabulary: Some("departments".to_string()),
+            analyser: None,
             index: false,
             render: true,
         };
@@ -904,6 +919,7 @@ mod tests {
             name: "score".to_string(),
             arrow_type: ScalarType::U16,
             vocabulary: None,
+            analyser: None,
             index: false,
             render: true,
         };

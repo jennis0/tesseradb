@@ -883,6 +883,10 @@ fn extent_values<'a>(
         ScalarType::F64 => gather!(F64, Codes::F64),
         ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
         ScalarType::Keyword => unreachable!("a keyword is handled above"),
+        // ⊘ Text has no flush extent yet (#116). `write::filter_schema_of` excludes it, which is
+        // what makes this arm unreachable rather than a panic waiting for a declaration; the
+        // exclusion carries the reason.
+        ScalarType::Text => unreachable!("text is excluded from the flush's filter schema"),
         // `utf8` survives as the *wire* type of a keyword's value and of a category's key
         // (`DeclaredScalar::wire_type`); the schema parse refuses it as a declared type, so no
         // column's storage is one.
@@ -1068,7 +1072,7 @@ fn record_value_of(
         // and no layer for an ordinal to be a position in; the row carries what the wire carried,
         // which is why this shares the arm of `utf8`, that same wire type
         // (`DeclaredScalar::wire_type`).
-        ScalarType::Utf8 | ScalarType::Keyword => match value {
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => match value {
             WalScalar::Utf8(text) => RecordValue::Utf8(text.clone()),
             WalScalar::Null => return Ok(None),
             _ => return Err(wrong()),

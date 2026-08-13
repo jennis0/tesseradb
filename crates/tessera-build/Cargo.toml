@@ -10,6 +10,9 @@ libc = "0.2"
 tessera-types = { path = "../tessera-types" }
 tessera-plugin = { path = "../tessera-plugin" }
 tessera-spatial = { path = "../tessera-spatial" }
+# The text family's analysers, resolved at schema parse so a name this build does not carry is
+# refused where its author can read the message (decision 0070).
+tessera-analyse = { path = "../tessera-analyse" }
 tessera-store = { path = "../tessera-store" }
 tessera-authz = { path = "../tessera-authz" }
 # The build writes the filter artefact through the crate that reads it, exactly as it writes

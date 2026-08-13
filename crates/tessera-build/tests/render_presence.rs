@@ -110,6 +110,7 @@ fn render(name: &str, ty: ScalarType) -> Attribute {
     Attribute {
         name: name.to_string(),
         ty,
+        analyser: None,
         vocabulary: None,
         vocabulary_kind: None,
         index: false,
@@ -121,6 +122,7 @@ fn schema() -> Schema {
     let archive = Attribute {
         name: "archive".to_string(),
         ty: ScalarType::U8,
+        analyser: None,
         vocabulary: Some("archive".to_string()),
         vocabulary_kind: Some(VocabularyKind::Declared),
         index: false,

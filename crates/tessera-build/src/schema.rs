@@ -92,6 +92,11 @@ struct AttributeDecl {
     multi: bool,
     #[serde(default)]
     render_in: Option<Vec<String>>,
+    /// Which analyser a `text` column's terms are produced by, by name (decision 0070). Absent
+    /// means [`tessera_analyse::UNICODE`]; present on a non-`text` column is refused, because an
+    /// analyser a column does not use is a setting its author believes is in effect.
+    #[serde(default)]
+    analyser: Option<String>,
     #[serde(default)]
     vocabulary: Option<String>,
     #[serde(default)]
@@ -130,6 +135,14 @@ pub struct Attribute {
     /// The declared type. For a `render` column this is the hot column's width; for an
     /// `index`-only one it is the entity-space column's.
     pub ty: ScalarType,
+    /// The analyser producing this column's terms, resolved to its full `<name>/<version>`
+    /// identity at parse; `Some` **iff** the type is `text` (decision 0070).
+    ///
+    /// Resolved here rather than at index time so a schema naming an analyser this binary does not
+    /// carry is refused at the declaration — where the author can read the message — instead of
+    /// part-way through a build. It reaches the reader as the manifest's per-column identity, and
+    /// changing it rebuilds that column's index and nothing else.
+    pub analyser: Option<String>,
     /// The vocabulary this column's values are drawn from, for a category; `None` for a plain
     /// numeric attribute. Names a key in [`Schema::vocabularies`].
     pub vocabulary: Option<String>,
@@ -341,6 +354,7 @@ impl Schema {
                     Attribute {
                         name: decl.name.clone(),
                         ty,
+                        analyser: None,
                         vocabulary: Some(vocab_name),
                         vocabulary_kind: Some(vocab_kind),
                         // Every flag combination is legal for a category — a rendered category
@@ -362,8 +376,8 @@ impl Schema {
                          matched whole — an identifier, an order number, a hostname — is \
                          `keyword`, which stores a per-layer sorted dictionary and a `u32` \
                          ordinal and keeps `eq`, `in`, `prefix` and `contains` byte-exact. Prose \
-                         searched by word is `text` (records-and-search §4.4), ⊘ specified but not \
-                         yet built, so there is no declarable type for it today",
+                         searched by word is `text` (records-and-search §4.4), whose values live \
+                         in the record blob and whose terms come from a named analyser",
                         decl.name
                     )));
                 }
@@ -376,7 +390,7 @@ impl Schema {
                         schema_error(format!(
                             "attribute '{}': unknown type '{other}'. Declarable types are \
                              bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
-                             timestamp_us, keyword and category",
+                             timestamp_us, keyword, text and category",
                             decl.name
                         ))
                     })?;
@@ -410,6 +424,48 @@ impl Schema {
                     // dictionary that means nothing outside that layer and is an index internal
                     // that never crosses the trust boundary (records §4.3, **I10**). Neither is a
                     // colour a client can draw.
+                    // **The analyser is resolved here** (decision 0070): a `text` column's terms
+                    // are whatever its named analyser produces, so a name this binary does not
+                    // carry must be refused at the declaration rather than defaulted — indexing a
+                    // column with a pipeline its author did not ask for is the silent mismatch the
+                    // named shape exists to prevent.
+                    let analyser = match (ty, decl.analyser.as_deref()) {
+                        (ScalarType::Text, name) => {
+                            let name = name.unwrap_or(tessera_analyse::UNICODE);
+                            let resolved = tessera_analyse::analyser(name).ok_or_else(|| {
+                                schema_error(format!(
+                                    "attribute '{}': '{name}' is not an analyser this build \
+                                     carries. Available: {}",
+                                    decl.name,
+                                    tessera_analyse::ANALYSER_NAMES.join(", ")
+                                ))
+                            })?;
+                            Some(resolved.identity())
+                        }
+                        (_, Some(name)) => {
+                            return Err(schema_error(format!(
+                                "attribute '{}' is type '{other}', not `text`, so `analyser = \
+                                 \"{name}\"` has no meaning for it. Refused rather than ignored: \
+                                 an ignored analyser is a pipeline its author believes is in use",
+                                decl.name
+                            )));
+                        }
+                        (_, None) => None,
+                    };
+                    // **`render` on `text` is refused for the reason `keyword`'s is, and one more.**
+                    // Prose is not a fixed-width slot, and a text column's value does not live in
+                    // entity space at all — it lives in the record blob, which no scan reads
+                    // (records §3, §4.4).
+                    if ty == ScalarType::Text && decl.render {
+                        return Err(schema_error(format!(
+                            "attribute '{}': `render` on `text` is refused — the hot column is a \
+                             fixed-width slot in every row and prose is not one, and a text \
+                             column's value lives in the record blob, which no scan reads \
+                             (records-and-search §3, §4.4). `index = true` gives it a token index \
+                             and costs the hot column nothing",
+                            decl.name
+                        )));
+                    }
                     if ty == ScalarType::Keyword && decl.render {
                         return Err(schema_error(format!(
                             "attribute '{}': `render` on `keyword` is refused \
@@ -424,6 +480,7 @@ impl Schema {
                     Attribute {
                         name: decl.name.clone(),
                         ty,
+                        analyser,
                         vocabulary: None,
                         vocabulary_kind: None,
                         index: decl.index,
@@ -1246,6 +1303,90 @@ render = true
 
     /// **`utf8` is refused as a declared type, and the refusal names what to declare instead.**
     ///
+    /// **A `text` column declares its analyser, and an unknown name is refused at the schema.**
+    /// Resolving here rather than at index time is what puts the message where its author is:
+    /// indexing a column with a pipeline its declaration did not ask for is the silent mismatch
+    /// decision 0070's named shape exists to prevent.
+    #[test]
+    fn a_text_column_resolves_its_analyser_and_refuses_an_unknown_one() {
+        let schema = parse_str(
+            r#"
+[[attribute]]
+name = "abstract"
+type = "text"
+index = true
+"#,
+        )
+        .expect("a text column with no analyser named takes the default");
+        assert_eq!(
+            schema.attributes[0].analyser.as_deref(),
+            Some("unicode/icu4x-2.2/p1"),
+            "the default resolves to a full identity, not to a bare name"
+        );
+
+        let named = parse_str(
+            r#"
+[[attribute]]
+name = "abstract"
+type = "text"
+analyser = "unicode"
+index = true
+"#,
+        )
+        .expect("naming the analyser explicitly is the same declaration");
+        assert_eq!(named.attributes[0].analyser, schema.attributes[0].analyser);
+
+        let message = err(
+            r#"
+[[attribute]]
+name = "abstract"
+type = "text"
+analyser = "standard"
+"#,
+        );
+        assert!(
+            message.contains("standard") && message.contains("unicode"),
+            "the refusal must name what was asked for and what is available: {message}"
+        );
+    }
+
+    /// An analyser on a column that has no analyser is refused rather than ignored — the same rule
+    /// `listing` on a non-category gets, and for the same reason.
+    #[test]
+    fn an_analyser_on_a_non_text_column_is_refused() {
+        let message = err(
+            r#"
+[[attribute]]
+name = "score"
+type = "i64"
+analyser = "unicode"
+"#,
+        );
+        assert!(
+            message.contains("not `text`") && message.contains("believes"),
+            "{message}"
+        );
+    }
+
+    /// `render` on `text` is refused: prose is not a fixed-width slot, and a text column's value
+    /// lives in the record blob, which no scan reads.
+    #[test]
+    fn render_on_text_is_refused_at_the_declaration() {
+        let message = err(
+            r#"
+[[attribute]]
+name = "abstract"
+type = "text"
+render = true
+"#,
+        );
+        assert!(message.contains("text"), "{message}");
+        assert!(
+            message.contains("record blob"),
+            "the refusal must say where a text value actually lives: {message}"
+        );
+    }
+
     /// A refusal rather than an alias for `keyword`: decision 0048 spends no effort on a past, and
     /// a silent rename would give a column a storage layout — a dictionary and an ordinal — that
     /// its author never chose. The message must reach both successors, because a schema that meant
@@ -1302,10 +1443,10 @@ index = true
         assert_eq!(schema.row_bits(), Some(0));
     }
 
-    /// An unknown type names the whole declarable set, `keyword` included: the message is how an
-    /// author discovers the type exists.
+    /// An unknown type names the whole declarable set, `keyword` and `text` included: the message
+    /// is how an author discovers the type exists.
     #[test]
-    fn the_type_list_names_keyword() {
+    fn the_type_list_names_keyword_and_text() {
         let text = r#"
 [[attribute]]
 name = "title"
@@ -1313,7 +1454,7 @@ type = "keywords"
 index = true
 "#;
         let message = err(text);
-        assert!(message.contains("keyword and category"), "{message}");
+        assert!(message.contains("keyword, text and category"), "{message}");
         assert!(
             !message.contains("utf8"),
             "the retired type must not be advertised as declarable: {message}"

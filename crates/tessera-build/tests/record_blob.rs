@@ -131,6 +131,7 @@ fn blob_schema() -> Schema {
     let neither = |name: &str, ty: ScalarType| Attribute {
         name: name.to_string(),
         ty,
+        analyser: None,
         vocabulary: None,
         vocabulary_kind: None,
         index: false,
@@ -144,6 +145,7 @@ fn blob_schema() -> Schema {
             Attribute {
                 name: "flag".to_string(),
                 ty: ScalarType::I64,
+                analyser: None,
                 vocabulary: None,
                 vocabulary_kind: None,
                 index: false,

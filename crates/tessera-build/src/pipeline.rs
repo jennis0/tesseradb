@@ -1953,6 +1953,10 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
         // attribute carries it.
         ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
         ScalarType::Keyword => unreachable!("a keyword returns above"),
+        // A text column's terms are `u32` ordinals into the layer's token dictionary, exactly as a
+        // keyword's value is — what differs is how many a row has, which is the postings' business
+        // and not this width's.
+        ScalarType::Text => ColumnKind::U32,
     }
 }
 
@@ -2016,6 +2020,7 @@ fn push_numeric_chunks(
         ScalarType::TimestampUs => stream!(TimestampUs, Codes::I64),
         ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
         ScalarType::Keyword => unreachable!("the caller handles a keyword before reaching here"),
+        ScalarType::Text => unreachable!("the caller handles text before reaching here"),
     }
     Ok(())
 }
@@ -2520,6 +2525,7 @@ mod tests {
         let category = crate::schema::Attribute {
             name: "department".to_string(),
             ty: ScalarType::U16,
+            analyser: None,
             vocabulary: Some("departments".to_string()),
             vocabulary_kind: Some(crate::schema::VocabularyKind::Declared),
             index: false,
@@ -2528,6 +2534,7 @@ mod tests {
         let note = crate::schema::Attribute {
             name: "note".to_string(),
             ty: ScalarType::Keyword,
+            analyser: None,
             vocabulary: None,
             vocabulary_kind: None,
             index: false,

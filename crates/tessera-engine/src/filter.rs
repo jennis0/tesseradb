@@ -3163,6 +3163,7 @@ mod keyword_tests {
             arrow_type: tessera_spatial::tiler::ScalarType::parse(spelling)
                 .expect("the caller checked the spelling parses"),
             vocabulary: None,
+            analyser: None,
             index: true,
             render: false,
         }

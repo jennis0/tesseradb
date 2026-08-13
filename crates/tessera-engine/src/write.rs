@@ -2849,7 +2849,17 @@ pub(crate) fn filter_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
-        .filter(|(_, d)| crate::filter::owes_value_column(d, &manifest.vocabularies))
+        // ⊘ **Text is excluded until its flush extent lands (#116).** A flushed batch's text
+        // reaches the record blob, so drill-down answers it; what lags is the *index*, so a
+        // `match` sees the base build's terms until the next fold rebuilds them. That is a bounded
+        // staleness rather than a lost value, and it is the same shape a keyword column had between
+        // its base build and its own flush track. Excluding it here is what keeps
+        // `flush::extent_column`'s refusal unreachable rather than a panic waiting for a
+        // declaration.
+        .filter(|(_, d)| {
+            crate::filter::owes_value_column(d, &manifest.vocabularies)
+                && d.arrow_type != tessera_spatial::tiler::ScalarType::Text
+        })
         .map(|(index, d)| crate::flush::FilterColumnSpec {
             index,
             name: d.name.clone(),
@@ -3015,6 +3025,7 @@ mod segment_schema_tests {
                     name: "department".to_string(),
                     arrow_type: ScalarType::U16,
                     vocabulary: Some("departments".to_string()),
+                    analyser: None,
                     index: true,
                     render: true,
                 },
@@ -3022,6 +3033,7 @@ mod segment_schema_tests {
                     name: "title".to_string(),
                     arrow_type: ScalarType::Utf8,
                     vocabulary: None,
+                    analyser: None,
                     index: true,
                     render: false,
                 },

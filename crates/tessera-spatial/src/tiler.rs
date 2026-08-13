@@ -84,7 +84,9 @@ impl ScalarValue {
             // Unreachable in practice — `render` on a string type is refused at schema parse — and
             // the empty string rather than a panic, because this function's whole job is to keep a
             // non-nullable column writable.
-            ScalarType::Utf8 | ScalarType::Keyword => ScalarValue::Utf8(String::new()),
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                ScalarValue::Utf8(String::new())
+            }
         }
     }
 }
@@ -138,6 +140,18 @@ pub enum ScalarType {
     /// a buffered row, in the WAL — has no ordinal to carry and must not appear to. The ordinal is
     /// minted where the layer is written and nowhere else.
     Keyword,
+    /// Prose, matched by what it says rather than by its bytes (`records-and-search.md` §4.4).
+    ///
+    /// Its *value* is a [`ScalarValue::Utf8`] for the same reason a keyword's is — the ingest wire
+    /// carries text as a string — and what the type names is the storage: the value lives in the
+    /// record blob whether or not the field is indexed, and `index = true` adds a per-layer token
+    /// dictionary and postings over the terms a **named analyser** produced (decision 0070).
+    ///
+    /// **The analyser is part of the column's declaration, not of this type.** Two `text` columns
+    /// may be analysed differently, and a column's resolved analyser identity is recorded against
+    /// it in the manifest, because an index built by one analyser and queried by another matches
+    /// on precisely the strings whose segmentation differs — with no error anywhere.
+    Text,
 }
 
 impl ScalarType {
@@ -165,6 +179,7 @@ impl ScalarType {
             ScalarType::TimestampUs => "timestamp_us",
             ScalarType::Utf8 => "utf8",
             ScalarType::Keyword => "keyword",
+            ScalarType::Text => "text",
         }
     }
 
@@ -186,6 +201,7 @@ impl ScalarType {
             "timestamp_us" => ScalarType::TimestampUs,
             "utf8" => ScalarType::Utf8,
             "keyword" => ScalarType::Keyword,
+            "text" => ScalarType::Text,
             _ => return None,
         })
     }
@@ -196,10 +212,11 @@ impl ScalarType {
     /// round it to either 0 or 1 — the first hiding the cost, the second reporting eight times it
     /// and erasing the reason to declare a `bool` at all.
     ///
-    /// The two `None`s are not the same `None`. A [`ScalarType::Utf8`] column has a row cost that
-    /// depends on the data; a [`ScalarType::Keyword`] has no row cost at all, because it is never
-    /// in a row — `render` on it is refused at the declaration and its `u32` ordinal is an
-    /// entity-space artefact. Neither is a number this can report, so both decline.
+    /// The `None`s are not all the same `None`. A [`ScalarType::Utf8`] column has a row cost that
+    /// depends on the data; a [`ScalarType::Keyword`] and a [`ScalarType::Text`] have no row cost
+    /// at all, because neither is ever in a row — `render` on both is refused at the declaration,
+    /// and their storage is a `u32` ordinal in entity space and a blob row respectively. None is a
+    /// number this can report, so all three decline.
     pub fn row_bits(self) -> Option<u64> {
         Some(match self {
             ScalarType::Bool => 1,
@@ -207,7 +224,9 @@ impl ScalarType {
             ScalarType::U16 | ScalarType::I16 => 16,
             ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 32,
             ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 64,
-            ScalarType::Utf8 | ScalarType::Keyword => return None,
+            // Neither is ever in a row: `render` is refused on both at the declaration, and their
+            // storage is entity-space (a keyword's ordinal) or the record blob (a text value).
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => return None,
         })
     }
 

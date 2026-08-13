@@ -755,6 +755,9 @@ fn write_manifests(
                 name: a.name.clone(),
                 arrow_type: a.ty,
                 vocabulary: a.vocabulary.clone(),
+                // Resolved at the schema parse, so what a bundle records is the identity the build
+                // actually indexed with rather than the name a schema asked for.
+                analyser: a.analyser.clone(),
                 index: a.index,
                 render: a.render,
             })
