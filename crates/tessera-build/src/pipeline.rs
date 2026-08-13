@@ -1492,6 +1492,14 @@ fn write_filter_postings_banded(
         let column_dir = partition_dir.join("attrs").join(&attribute.name);
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
 
+        // **A text column has no value column**, so it leaves before the one below is written. Its
+        // entity-space artefact is the token dictionary and the postings over it; the values
+        // themselves are in the record blob, which no scan reads (records §4.4).
+        if attribute.ty == ScalarType::Text {
+            paths.extend(write_text_index(&column_dir, attribute, values)?);
+            continue;
+        }
+
         // The value column is the artefact of record (filter-index §2.1); the postings below are
         // derived from it. Written first so that a build interrupted between the two leaves the
         // record without its accelerator rather than an accelerator with no record.
@@ -1573,7 +1581,12 @@ pub(crate) fn write_record_blob(
         .attributes
         .iter()
         .enumerate()
-        .filter(|(_, a)| !a.render && !postings_are_owed(schema, a))
+        // **Text is blob-resident whether or not it is indexed** (records §4.4), which is the one
+        // place this predicate is not simply "has no other home": an indexed text column has a
+        // token index *and* a blob row, because the index answers `match` and only the blob can
+        // answer `entity → value`. Postings are term → entities; nothing in them reconstructs the
+        // prose a drill-down returns.
+        .filter(|(_, a)| a.ty == ScalarType::Text || (!a.render && !postings_are_owed(schema, a)))
         .map(|(i, _)| i)
         .collect();
     if blob_columns.is_empty() {
@@ -2044,6 +2057,87 @@ fn push_numeric_chunks(
 /// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
 /// that does not answer identically and differ only in latency, but here a disclosure control depends
 /// on them existing.
+/// One text column's entity-space index: the per-layer token dictionary and the postings over it.
+///
+/// **The dictionary's ordinals are positions in the sorted distinct term set**, exactly as a
+/// keyword's are in its key set, and the postings are written in that same order — so posting *i*
+/// belongs to the *i*-th key the dictionary holds. A `BTreeMap` is what keeps those two in step
+/// without a second sort to get wrong: its iteration order *is* the dictionary's order.
+///
+/// **A term repeated within one document contributes one posting entry.** The analyser keeps
+/// duplicates and order because the positional payload upgrade (§4.5) needs both; a posting is a
+/// set, so the duplicate collapses here rather than in the analyser.
+///
+/// The singleton encoding is `tessera-authz`'s, unchanged: a term carried by few enough entities is
+/// a bare `u32` array rather than a serialised bitmap, which is what the string-storage campaign
+/// measured at 4.4× smaller on the singleton-heavy vocabularies real prose produces. Reusing that
+/// format rather than minting a second one is the whole reason this crate already depends on it.
+fn write_text_index(
+    column_dir: &Path,
+    attribute: &crate::schema::Attribute,
+    values: &[ScalarValue],
+) -> Result<Vec<PathBuf>> {
+    // The identity was resolved at the schema parse; the name is its first component. Resolving it
+    // again here rather than threading an `Analyser` down keeps the build's contract with the
+    // manifest one-directional: what is recorded is what indexed.
+    let identity = attribute.analyser.as_deref().ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "attribute '{}' is text but carries no resolved analyser — the schema parse is what \
+             resolves one, so this is a compilation defect rather than a schema error",
+            attribute.name
+        ))
+    })?;
+    let name = identity.split('/').next().unwrap_or_default();
+    let analyser = tessera_analyse::analyser(name).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "attribute '{}' names analyser '{name}', which this build does not carry",
+            attribute.name
+        ))
+    })?;
+
+    let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
+    for (entity, value) in values.iter().enumerate() {
+        let entity = entity as u32;
+        let prose = match value {
+            ScalarValue::Utf8(s) => s.as_str(),
+            // Absence is `Null`, and the empty string is a value a corpus may hold — the same
+            // out-of-band rule the string families share. Neither yields a term.
+            ScalarValue::Null => continue,
+            other => {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{}': a text column's value must be a string, got {other:?}",
+                    attribute.name
+                )))
+            }
+        };
+        for token in analyser.tokens(prose) {
+            let postings = terms.entry(token).or_default();
+            // Entities arrive ascending, so the duplicate a repeated term produces is always the
+            // last entry — no sort and no set needed to collapse it.
+            if postings.last() != Some(&entity) {
+                postings.push(entity);
+            }
+        }
+    }
+
+    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    tessera_filter::write_sorted_dict(&dict_path, terms.keys().map(String::as_str))
+        .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
+    fsync_file(&dict_path)?;
+
+    let per_term: Vec<Vec<u32>> = terms.into_values().collect();
+    let postings_path = column_dir.join("postings.arrow");
+    tessera_authz::postings::write_postings(
+        &postings_path,
+        &per_term,
+        SMALL_TERM_THRESHOLD_DEFAULT,
+    )
+    .map_err(|e| BuildError::io(&postings_path, e))?;
+    fsync_file(&postings_path)?;
+
+    Ok(vec![dict_path, postings_path])
+}
+
 fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::Attribute) -> bool {
     if attribute.index {
         return true;

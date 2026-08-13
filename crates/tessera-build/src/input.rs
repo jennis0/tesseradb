@@ -988,7 +988,12 @@ impl BatchColumn {
             // contract.** The dictionary and the ordinal are storage, minted where the layer is
             // written; a points file carries the values themselves, so there is nothing here to
             // resolve and no ordinal to be wrong about (records §7, "ingest wire").
-            ScalarType::Utf8 | ScalarType::Keyword => BatchValues::Text(
+            //
+            // **Text reads the same way, for the same reason and one more.** Its terms are minted
+            // by an analyser at index time and its prose goes to the record blob, so what a points
+            // file carries is the prose and nothing else — there is no term column to supply and
+            // no analyser to run this side of the declaration (records §4.4).
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => BatchValues::Text(
                 any.downcast_ref::<arrow::array::StringArray>()
                     .ok_or_else(mismatch)?
                     .clone(),

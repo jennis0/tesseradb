@@ -865,6 +865,12 @@ pub(crate) fn blob_resident(
     scalar: &tessera_store::manifest::DeclaredScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> bool {
+    // **Text is blob-resident whether or not it is indexed** (records §4.4). Its index is postings
+    // over terms, which answer `match` and reconstruct nothing — only the blob can answer
+    // `entity → value` for prose, so an indexed text column has both homes rather than one.
+    if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+        return true;
+    }
     !scalar.render && !owes_value_column(scalar, vocabularies)
 }
 
