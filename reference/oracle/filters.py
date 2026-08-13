@@ -4,8 +4,8 @@ per-entity attribute values, evaluated by a per-entity walk inside a candidate s
 **Pinned to decision 0062 and contracts §3.2 r26.** A node is a leaf — one column name mapped to
 one operator — or a combinator, `all_of` / `any_of`, over sub-expressions. A category leaf takes
 `eq` and `in`, whose values are the vocabulary's key (a string) or its code (an integer), freely
-mixed; a `utf8` or `keyword` leaf takes `eq`, `in`, `prefix` and `contains` against the stored
-bytes. Empty combinators are their operators' identities and differ: `all_of: []` matches the whole
+mixed; a `keyword` leaf — the one string family — takes `eq`, `in`, `prefix` and `contains`
+against the value the item carries. Empty combinators are their operators' identities and differ: `all_of: []` matches the whole
 candidate, `any_of: []` matches nothing. `match` is specified and unbuilt, so this module refuses it
 the way the server does — by raising, never by evaluating a guess.
 
