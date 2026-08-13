@@ -7228,7 +7228,10 @@ impl Executor {
                         column: e.column.clone(),
                         values: e.values_rel.clone(),
                         presence: e.presence_rel.clone(),
-                        dict: None,
+                        // One record, so the layer's files swap as one: an extent's ordinals are
+                        // positions in *that* extent's dictionary, and a reader that saw a new
+                        // dictionary beside old ordinals would recolour the window (records §7).
+                        dict: e.dict_rel.clone(),
                         postings: None,
                         offsets: None,
                     }),

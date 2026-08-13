@@ -397,7 +397,13 @@ pub(crate) fn execute_flush(
     // ---- the filter columns' extents (filter-index §2.1) ------------------------------------
     let filter_extents = write_filter_extents(&plan, &ctx)?;
     for extent in &filter_extents {
-        for rel in [&extent.values_rel, &extent.presence_rel] {
+        // The dictionary is digested with the pair it belongs to, not beside it: a keyword
+        // extent's ordinals cannot be read at all without it, so a bundle whose manifest named the
+        // values and omitted the dictionary would be one this check called complete (records §7).
+        for rel in [&extent.values_rel, &extent.presence_rel]
+            .into_iter()
+            .chain(extent.dict_rel.as_ref())
+        {
             files.insert(
                 rel.clone(),
                 digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
@@ -616,10 +622,19 @@ pub(crate) struct FilterColumnSpec {
 }
 
 /// One flush's extent for one column: durable, digested by the caller, and open.
+///
+/// **The three paths travel together because the layer's files must swap atomically** (records §7,
+/// review B2). An extent's ordinals are positions in *that extent's own* dictionary, so a reader
+/// that saw a new dictionary beside old ordinals would recolour the window's values with no error
+/// anywhere. Carrying the dictionary here — rather than letting the publication rediscover it from
+/// a path convention — is what puts all three in one manifest record.
 pub(crate) struct FlushedExtent {
     pub(crate) column: String,
     pub(crate) values_rel: String,
     pub(crate) presence_rel: String,
+    /// The extent's own sorted dictionary — keyword columns only, `None` for every family whose
+    /// values file carries the values themselves.
+    pub(crate) dict_rel: Option<String>,
     /// Opened here on the pool, so publication is a pointer push on the executor thread.
     pub(crate) values: Arc<tessera_filter::ValueColumn>,
 }
@@ -634,18 +649,30 @@ pub(crate) struct FlushedExtent {
 /// **A deleted entity is already gone from the plan**, so it acquires no slot here any more than it
 /// acquires a row — which is what keeps write-path §5.4's Rule F the only route by which a deletion
 /// touches an artefact, rather than this pass quietly becoming a second one.
+///
+/// **A keyword's sort and front-code happen here, on the pool, and that placement is load-bearing**
+/// (records §7, review N9; write-path §4.3). This function runs at flush *execution*; the serial
+/// group-commit section write-path §2.3 defines is upstream of it and its latency is shared by
+/// every ingest and every deny in flight. A batch's distinct values are bounded by the batch, and
+/// there is no shared dictionary to promote into — which is what makes the near-unique-string
+/// quadratic hazard (filter-index §5's history) impossible here rather than merely avoided.
 fn write_filter_extents(
     plan: &FlushPlan,
     ctx: &FlushContext,
 ) -> Result<Vec<FlushedExtent>, FlushFailed> {
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
-        let (codes, presence) = extent_values(spec, plan)?;
+        let column = extent_values(spec, plan)?;
         let column_rel = format!("partitions/{}/attrs/{}", ctx.partition, spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
-        let (values_path, presence_path) =
-            tessera_filter::write_extent(&column_dir, &ctx.seg_id, &codes, &presence)
-                .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+            &column_dir,
+            &ctx.seg_id,
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
+        )
+        .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
         // Derived from the paths just written rather than formatted a second time: the manifest
         // names what is on disk, or it names nothing.
         let rel = |path: &PathBuf| -> Result<String, FlushFailed> {
@@ -670,6 +697,7 @@ fn write_filter_extents(
             column: spec.name.clone(),
             values_rel: rel(&values_path)?,
             presence_rel: rel(&presence_path)?,
+            dict_rel: dict_path.as_ref().map(rel).transpose()?,
             values: Arc::new(values),
         });
     }
@@ -692,10 +720,10 @@ fn write_filter_extents(
 /// dropped: the commit window narrows a category key to its declared width before the row is
 /// buffered, so a mismatch here is a defect on the write path and not caller input, and filtering
 /// on a value this code invented is worse than not flushing.
-fn extent_values(
+fn extent_values<'a>(
     spec: &FilterColumnSpec,
-    plan: &FlushPlan,
-) -> Result<(tessera_filter::Codes, croaring::Bitmap), FlushFailed> {
+    plan: &'a FlushPlan,
+) -> Result<ExtentColumn<'a>, FlushFailed> {
     use tessera_filter::Codes;
 
     let mut presence = croaring::Bitmap::new();
@@ -725,6 +753,45 @@ fn extent_values(
         ))
     };
 
+    if spec.ty == ScalarType::Keyword {
+        // The batch's own present values, in entity order — the slot sequence. A keyword arrives
+        // as a string on the wire and in the WAL (records §7): the ordinal is minted below, here,
+        // and exists nowhere upstream of this layer.
+        let mut held: Vec<&str> = Vec::with_capacity(entities.len());
+        for (entity, value) in entities {
+            if matches!(value, WalScalar::Null) {
+                continue;
+            }
+            let WalScalar::Utf8(text) = value else {
+                return Err(wrong(value));
+            };
+            presence.add(entity);
+            held.push(text.as_str());
+        }
+        // **This extent's own dictionary, over this batch alone** (records §7). Its ordinals are
+        // positions in it and are not comparable with the base's or any other extent's; the
+        // coalesce remaps them and the fold rebuilds them from nothing, which is what keeps term
+        // identity layer-scoped and never durable.
+        let mut keys: Vec<&str> = held.clone();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut ordinals = Vec::with_capacity(held.len());
+        for text in held {
+            let ordinal = keys.binary_search(&text).map_err(|_| {
+                FlushFailed(format!(
+                    "column '{}': the value {text:?} is absent from the dictionary built from it",
+                    spec.name
+                ))
+            })?;
+            ordinals.push(ordinal as u32);
+        }
+        return Ok(ExtentColumn {
+            codes: Codes::U32(ordinals.into()),
+            presence,
+            dict_keys: Some(keys),
+        });
+    }
+
     if spec.ty == ScalarType::Utf8 {
         let mut held: Vec<String> = Vec::with_capacity(entities.len());
         for (entity, value) in entities {
@@ -739,7 +806,7 @@ fn extent_values(
             presence.add(entity);
             held.push(text.clone());
         }
-        return Ok((Codes::text(held), presence));
+        return Ok(ExtentColumn::flat(Codes::text(held), presence));
     }
 
     if spec.category {
@@ -771,7 +838,7 @@ fn extent_values(
             }
             _ => Codes::U32(held.into()),
         };
-        return Ok((codes, presence));
+        return Ok(ExtentColumn::flat(codes, presence));
     }
 
     // A plain numeric: absent where the item carried no value, present otherwise — the same rule
@@ -816,9 +883,35 @@ fn extent_values(
         ScalarType::F32 => gather!(F32, Codes::F32),
         ScalarType::F64 => gather!(F64, Codes::F64),
         ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 => unreachable!("utf8 is handled above"),
+        ScalarType::Utf8 | ScalarType::Keyword => {
+            unreachable!("both string types are handled above")
+        }
     };
-    Ok((codes, presence))
+    Ok(ExtentColumn::flat(codes, presence))
+}
+
+/// One column's extent content: the values, the entities that carry one, and the dictionary those
+/// values are ordinals into where the family has one.
+///
+/// A struct rather than a tuple because the third field is only meaningful beside the first: a
+/// keyword's `codes` are positions in `dict_keys` and nothing else, so returning them apart would
+/// invite a caller to write one without the other.
+struct ExtentColumn<'a> {
+    codes: tessera_filter::Codes,
+    presence: croaring::Bitmap,
+    /// Sorted and distinct, `Some` for keyword columns only.
+    dict_keys: Option<Vec<&'a str>>,
+}
+
+impl ExtentColumn<'_> {
+    /// A column whose values file carries the values themselves — every family but keyword.
+    fn flat(codes: tessera_filter::Codes, presence: croaring::Bitmap) -> Self {
+        ExtentColumn {
+            codes,
+            presence,
+            dict_keys: None,
+        }
+    }
 }
 
 /// One blob-resident column, and where its value sits in a buffered row's positional scalar list.
@@ -969,7 +1062,11 @@ fn record_value_of(
         ScalarType::F32 => expect!(F32),
         ScalarType::F64 => expect!(F64),
         ScalarType::TimestampUs => expect!(TimestampUs),
-        ScalarType::Utf8 => match value {
+        // **A blob-resident keyword stores its bytes, not an ordinal**, and shares `utf8`'s arm
+        // for that reason rather than by convenience. The blob is the values' only home when a
+        // column has no other (records §3), so there is no dictionary beside it and no layer for
+        // an ordinal to be a position in; the row carries what the wire carried.
+        ScalarType::Utf8 | ScalarType::Keyword => match value {
             WalScalar::Utf8(text) => RecordValue::Utf8(text.clone()),
             WalScalar::Null => return Ok(None),
             _ => return Err(wrong()),
@@ -1252,5 +1349,204 @@ mod tests {
         let plan = plan(&generation).unwrap();
         let ids: Vec<u64> = plan.items.iter().map(|(e, _)| e.raw()).collect();
         assert_eq!(ids, vec![3, 7, 9]);
+    }
+
+    // ---- the keyword family's extent (records §4.3, §7) ------------------------------------
+
+    /// One item carrying a keyword value, or none at all.
+    fn keyword_item(value: Option<&str>) -> BufferedItem {
+        let mut buffered = item(&[1]);
+        buffered.scalars = vec![match value {
+            Some(text) => WalScalar::Utf8(text.to_string()),
+            None => WalScalar::Null,
+        }];
+        buffered
+    }
+
+    fn keyword_spec() -> FilterColumnSpec {
+        FilterColumnSpec {
+            index: 0,
+            name: "doi".to_string(),
+            ty: ScalarType::Keyword,
+            category: false,
+        }
+    }
+
+    /// The three things one flush's keyword column produces: a sorted, **distinct** dictionary of
+    /// this batch's values, one `u32` ordinal per present entity naming a position in it, and the
+    /// presence bitmap that says which entities those slots belong to.
+    ///
+    /// The repeated value is the point of the fixture: two entities carrying `zeta` share one key
+    /// and one ordinal, which is the interning the family's byte win rests on.
+    #[test]
+    fn a_keyword_extent_interns_its_batchs_values_and_stores_ordinals() {
+        let generation = generation_with(
+            &[
+                (3, keyword_item(Some("zeta"))),
+                (5, keyword_item(Some("alpha"))),
+                (7, keyword_item(None)),
+                (9, keyword_item(Some("zeta"))),
+            ],
+            &[],
+        );
+        let plan = plan(&generation).expect("the batch flushes");
+        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+
+        assert_eq!(
+            column.dict_keys.as_deref(),
+            Some(&["alpha", "zeta"][..]),
+            "sorted and distinct — the writer refuses anything else"
+        );
+        assert_eq!(
+            column.presence.iter().collect::<Vec<_>>(),
+            vec![3, 5, 9],
+            "the entity carrying nothing occupies no slot"
+        );
+        match &column.codes {
+            tessera_filter::Codes::U32(ordinals) => {
+                assert_eq!(
+                    ordinals.as_ref(),
+                    &[1, 0, 1],
+                    "slot k belongs to the k-th set bit: zeta, alpha, zeta"
+                );
+            }
+            other => panic!("a keyword extent stores u32 ordinals, not {other:?}"),
+        }
+    }
+
+    /// **The pair, through the files.** An extent's ordinals are positions in *that extent's own*
+    /// dictionary, so what has to hold is that the two files this flush writes reconstruct the
+    /// values the batch carried — read back through the readers that will serve them.
+    #[test]
+    fn a_keyword_extent_round_trips_through_the_files_it_writes() {
+        let generation = generation_with(
+            &[
+                (3, keyword_item(Some("zeta"))),
+                (5, keyword_item(Some("alpha"))),
+                (7, keyword_item(None)),
+                (9, keyword_item(Some("zeta"))),
+            ],
+            &[],
+        );
+        let plan = plan(&generation).expect("the batch flushes");
+        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+            dir.path(),
+            "flush-1",
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
+        )
+        .expect("the extent writes");
+        let dict_path = dict_path.expect("a keyword extent names a dictionary");
+
+        let values = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Mapped,
+        )
+        .expect("the values reopen");
+        let dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Mapped)
+            .expect("the dictionary reopens");
+        dict.self_check().expect("the dictionary is well formed");
+
+        let mut scratch = Vec::new();
+        for (entity, expected) in [(3u32, Some("zeta")), (5, Some("alpha")), (9, Some("zeta"))] {
+            let ordinal = values
+                .value_of(entity)
+                .expect("a present entity has a slot");
+            assert_eq!(
+                dict.key_of(ordinal.raw(), &mut scratch)
+                    .expect("it decodes"),
+                expected.expect("present"),
+                "entity {entity}"
+            );
+        }
+        assert_eq!(values.value_of(7), None, "the absent entity has no slot");
+    }
+
+    /// **The file set is a function of the schema, not of the batch.** A flush whose items carry no
+    /// value in a keyword column still writes the dictionary — empty — so an operator can predict
+    /// what a flush produces from the manifest alone, and so the manifest record that names all
+    /// three files never names one that is not there.
+    #[test]
+    fn a_keyword_extent_with_no_values_still_writes_an_empty_dictionary() {
+        let generation = generation_with(&[(3, keyword_item(None)), (5, keyword_item(None))], &[]);
+        let plan = plan(&generation).expect("the batch flushes");
+        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+        assert_eq!(column.dict_keys.as_deref(), Some(&[][..]));
+
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let (_, _, dict_path) = tessera_filter::write_extent(
+            dir.path(),
+            "flush-1",
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
+        )
+        .expect("the extent writes");
+        let dict = tessera_filter::SortedDict::open(
+            &dict_path.expect("named even when empty"),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("an empty dictionary opens");
+        assert!(dict.is_empty());
+    }
+
+    /// **Ordinals are per layer**, which is exactly what makes them unusable across layers. Two
+    /// flushes of the same column mint their own numbering over their own batch, so the same
+    /// ordinal names different values in the two — the property the read and lifecycle tracks must
+    /// never assume away, and the reason a layer's files are one manifest record.
+    #[test]
+    fn two_flushes_of_one_column_mint_independent_numberings() {
+        let first = plan(&generation_with(
+            &[
+                (3, keyword_item(Some("alpha"))),
+                (5, keyword_item(Some("zeta"))),
+            ],
+            &[],
+        ))
+        .expect("the first batch flushes");
+        let second = plan(&generation_with(
+            &[
+                (11, keyword_item(Some("zeta"))),
+                (13, keyword_item(Some("omega"))),
+            ],
+            &[],
+        ))
+        .expect("the second batch flushes");
+
+        let spec = keyword_spec();
+        let a = extent_values(&spec, &first).expect("gathers");
+        let b = extent_values(&spec, &second).expect("gathers");
+
+        assert_eq!(a.dict_keys.as_deref(), Some(&["alpha", "zeta"][..]));
+        assert_eq!(b.dict_keys.as_deref(), Some(&["omega", "zeta"][..]));
+        // Ordinal 0 is `alpha` in one layer and `omega` in the other. Resolving the first
+        // extent's ordinals against the second's dictionary would answer `omega` to a scan
+        // looking for `alpha` — a recolouring with no error anywhere, which is why the two
+        // travel in one manifest record and why nothing caches an ordinal across layers.
+        assert_eq!(a.dict_keys.as_deref().unwrap()[0], "alpha");
+        assert_eq!(b.dict_keys.as_deref().unwrap()[0], "omega");
+    }
+
+    /// A dictionary beside anything but an ordinal column is a pair that cannot be read together,
+    /// and the extent writer refuses it rather than leaving a scan to read a `u64` as an ordinal.
+    #[test]
+    fn a_dictionary_beside_a_non_ordinal_column_is_refused() {
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let mut presence = croaring::Bitmap::new();
+        presence.add(3);
+        let error = tessera_filter::write_extent(
+            dir.path(),
+            "flush-1",
+            &tessera_filter::Codes::I64(vec![7i64].into()),
+            &presence,
+            Some(&["alpha"]),
+        )
+        .expect_err("the mismatch is refused");
+        assert!(error.to_string().contains("not u32 ordinals"), "{error}");
     }
 }

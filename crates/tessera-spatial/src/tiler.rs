@@ -81,10 +81,10 @@ impl ScalarValue {
             ScalarType::F32 => ScalarValue::F32(0.0),
             ScalarType::F64 => ScalarValue::F64(0.0),
             ScalarType::TimestampUs => ScalarValue::TimestampUs(0),
-            // Unreachable in practice — `render` on `utf8` is refused at schema parse — and the
-            // empty string rather than a panic, because this function's whole job is to keep a
+            // Unreachable in practice — `render` on a string type is refused at schema parse — and
+            // the empty string rather than a panic, because this function's whole job is to keep a
             // non-nullable column writable.
-            ScalarType::Utf8 => ScalarValue::Utf8(String::new()),
+            ScalarType::Utf8 | ScalarType::Keyword => ScalarValue::Utf8(String::new()),
         }
     }
 }
@@ -127,6 +127,17 @@ pub enum ScalarType {
     F64,
     TimestampUs,
     Utf8,
+    /// A short string with no vocabulary, matched exactly (`records-and-search.md` §4.3). Its
+    /// *value* is a [`ScalarValue::Utf8`] — the ingest wire carries a keyword as a string and knows
+    /// nothing of the storage — and what the type names is the storage the filter index gives it: a
+    /// per-layer front-coded dictionary of the distinct values, with a `u32` ordinal into it per
+    /// present entity, in place of the flat string column `Utf8` gets.
+    ///
+    /// **There is no `ScalarValue::Keyword`, deliberately.** An ordinal is a position in one
+    /// layer's dictionary and means nothing outside it, so a value in flight — in a points file, in
+    /// a buffered row, in the WAL — has no ordinal to carry and must not appear to. The ordinal is
+    /// minted where the layer is written and nowhere else.
+    Keyword,
 }
 
 impl ScalarType {
@@ -153,6 +164,7 @@ impl ScalarType {
             ScalarType::F64 => "f64",
             ScalarType::TimestampUs => "timestamp_us",
             ScalarType::Utf8 => "utf8",
+            ScalarType::Keyword => "keyword",
         }
     }
 
@@ -173,16 +185,21 @@ impl ScalarType {
             "f64" => ScalarType::F64,
             "timestamp_us" => ScalarType::TimestampUs,
             "utf8" => ScalarType::Utf8,
+            "keyword" => ScalarType::Keyword,
             _ => return None,
         })
     }
 
-    /// **Bits**, not bytes, this column adds to every row — `None` for [`ScalarType::Utf8`],
-    /// whose cost depends on the data.
+    /// **Bits**, not bytes, this column adds to every row — `None` for the two string types.
     ///
     /// Bits because [`ScalarType::Bool`] costs one, and a byte-denominated figure would have to
     /// round it to either 0 or 1 — the first hiding the cost, the second reporting eight times it
     /// and erasing the reason to declare a `bool` at all.
+    ///
+    /// The two `None`s are not the same `None`. A [`ScalarType::Utf8`] column has a row cost that
+    /// depends on the data; a [`ScalarType::Keyword`] has no row cost at all, because it is never
+    /// in a row — `render` on it is refused at the declaration and its `u32` ordinal is an
+    /// entity-space artefact. Neither is a number this can report, so both decline.
     pub fn row_bits(self) -> Option<u64> {
         Some(match self {
             ScalarType::Bool => 1,
@@ -190,7 +207,7 @@ impl ScalarType {
             ScalarType::U16 | ScalarType::I16 => 16,
             ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 32,
             ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 64,
-            ScalarType::Utf8 => return None,
+            ScalarType::Utf8 | ScalarType::Keyword => return None,
         })
     }
 

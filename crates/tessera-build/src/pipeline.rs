@@ -1497,10 +1497,19 @@ fn write_filter_postings_banded(
         // record without its accelerator rather than an accelerator with no record.
         let values_path = column_dir.join("values.arrow");
         let presence_path = column_dir.join("presence.roaring");
-        let presence = write_column_values(&values_path, &presence_path, attribute, values)?;
+        let written =
+            write_column_values(&column_dir, &values_path, &presence_path, attribute, values)?;
         fsync_file(&values_path)?;
         paths.push(values_path);
-        if presence {
+        // The dictionary is not an accelerator and the ordering above does not apply to it: a
+        // keyword's value column holds ordinals, which name nothing without the dictionary they
+        // index. Both are digested, so a build interrupted between them refuses at open either
+        // way — the pair is the artefact of record, not the values file alone (records §7).
+        if let Some(dict_path) = written.dict {
+            fsync_file(&dict_path)?;
+            paths.push(dict_path);
+        }
+        if written.presence {
             fsync_file(&presence_path)?;
             paths.push(presence_path);
         }
@@ -1703,28 +1712,47 @@ fn write_category_postings(
     .map_err(|e| BuildError::io(path, e))
 }
 
-/// Write one column's values in entity order, and its presence bitmap where presence is partial.
+/// What writing one column's values produced beside the values file itself.
+struct WrittenColumn {
+    /// Whether a presence bitmap was written — see [`write_column_values`] on why its absence is
+    /// meaningful rather than an omission.
+    presence: bool,
+    /// The layer's sorted dictionary, for the one family that has one.
+    dict: Option<PathBuf>,
+}
+
+/// Write one column's values in entity order, its presence bitmap where presence is partial, and
+/// its dictionary where the family stores one.
 ///
-/// Returns whether a presence bitmap was written. **A column every entity carries a value in gets
-/// none**, and that is the fast path rather than an omission: the entity id is then the array index,
-/// which measured 28.7 ms against a presence-addressed 1,078 ms at 10⁹
-/// (`probes/2026-08-08-filter-layout/`). Writing an all-ones bitmap would be correct and would cost
-/// the scan that path, so the distinction lives in the file set rather than in the bitmap's contents.
+/// **A column every entity carries a value in gets no presence bitmap**, and that is the fast path
+/// rather than an omission: the entity id is then the array index, which measured 28.7 ms against a
+/// presence-addressed 1,078 ms at 10⁹ (`probes/2026-08-08-filter-layout/`). Writing an all-ones
+/// bitmap would be correct and would cost the scan that path, so the distinction lives in the file
+/// set rather than in the bitmap's contents.
 ///
-/// **Absence is out of band in both families, and by different means.** A category spends the
+/// **Absence is out of band in every family, and by different means.** A category spends the
 /// reserved code 0, which its vocabulary reserves out of the value space. A string has no spare
 /// value to spend — the empty string is one a corpus may legitimately hold, and contracts §2.4
 /// already refuses it on the ingest plane because an unset field and a client bug both produce it —
 /// so absence arrives as `ScalarValue::Null`. Folding the two together would report an item as
-/// matching a value it does not have.
+/// matching a value it does not have. A keyword inherits the string rule exactly: absence is
+/// `ScalarValue::Null` and never ordinal 0, which is an ordinary key like any other.
+///
+/// **A keyword's values file holds `u32` ordinals into the dictionary written beside it, and both
+/// belong to this layer alone** (records §4.3). The base build is one layer, so the ordinals here
+/// are positions in *this* base's dictionary and mean nothing against any extent's. Nothing
+/// downstream may assume otherwise — which is what keeps a durable manufactured identity, and the
+/// reuse hazard that comes with one, out of the family.
 fn write_column_values(
+    column_dir: &Path,
     values_path: &Path,
     presence_path: &Path,
     attribute: &crate::schema::Attribute,
     values: &[ScalarValue],
-) -> Result<bool> {
+) -> Result<WrittenColumn> {
     let mut present = croaring::Bitmap::new();
     let mut universal = true;
+    let mut dict = None;
 
     let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
         .map_err(|e| BuildError::io(values_path, e))?;
@@ -1741,7 +1769,43 @@ fn write_column_values(
     // code 0, which its vocabulary reserves out of the value space; a string has no spare value to
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
-    if attribute.ty == ScalarType::Utf8 {
+    if attribute.ty == ScalarType::Keyword {
+        let present_values = keyword_values(attribute, values, &mut present, &mut universal)?;
+        // The distinct key set, sorted — the dictionary's contents and, by position, the ordinals
+        // the column stores. `sort_unstable` is sound where a stable sort would not be, because
+        // the elements compared are the keys themselves: equal elements are indistinguishable, and
+        // `dedup` then leaves one of each.
+        let mut keys: Vec<&str> = present_values.clone();
+        keys.sort_unstable();
+        keys.dedup();
+        let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+        tessera_filter::write_sorted_dict(&dict_path, keys.iter().copied())
+            .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
+        dict = Some(dict_path);
+
+        // The ordinal is the key's position in the sorted distinct set, which is exactly the
+        // ordinal the writer assigned it: `SortedDictWriter::push` returns positions in the order
+        // it is fed, and it was fed this vector. Searching rather than threading the writer's
+        // return values through keeps that equality checkable in one line instead of resting on
+        // two loops staying in step.
+        let mut held: Vec<u32> = Vec::new();
+        for text in present_values {
+            let ordinal = keys.binary_search(&text).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "attribute '{}': the value {text:?} is absent from the dictionary built from \
+                     it — the ordinal column would name a different value's key",
+                    attribute.name
+                ))
+            })?;
+            held.push(ordinal as u32);
+            if held.len() >= VALUE_CHUNK {
+                push!(Codes::U32(std::mem::take(&mut held).into()));
+            }
+        }
+        if !held.is_empty() {
+            push!(Codes::U32(held.into()));
+        }
+    } else if attribute.ty == ScalarType::Utf8 {
         let mut held: Vec<String> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
             match value {
@@ -1806,7 +1870,59 @@ fn write_column_values(
     writer
         .finish(presence)
         .map_err(|e| BuildError::io(values_path, e))?;
-    Ok(!universal)
+    Ok(WrittenColumn {
+        presence: !universal,
+        dict,
+    })
+}
+
+/// One keyword column's present values, in entity order, with `present` and `universal` updated as
+/// the string families update them.
+///
+/// Separate from the ordinal emit so that the pass which decides *presence* is the pass which
+/// decides *slots*: the k-th set bit's value is at slot k (filter-index §2.1), and the vector this
+/// returns is the slot sequence, so the two cannot come to disagree about an absent entity.
+///
+/// **A keyword's values arrive as [`ScalarValue::Utf8`]**, because that is what the wire carries
+/// (records §7) — the type names the storage, not the value in flight.
+///
+/// **The empty string is refused, where a `utf8` column stores it.** That is the families
+/// differing, not this pass being stricter than it need be: records §7 refuses an empty keyword on
+/// the ingest wire for the reason contracts §2.4 gives — an unset field and a client bug both
+/// produce it — and the dictionary has no key for it either. A points file is not the ingest plane
+/// and has no upstream check, so the refusal is here, naming the column and the entity a build
+/// operator has to go and fix.
+fn keyword_values<'a>(
+    attribute: &crate::schema::Attribute,
+    values: &'a [ScalarValue],
+    present: &mut croaring::Bitmap,
+    universal: &mut bool,
+) -> Result<Vec<&'a str>> {
+    let mut out = Vec::new();
+    for (entity, value) in values.iter().enumerate() {
+        match value {
+            ScalarValue::Utf8(text) if text.is_empty() => {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{}' is declared `keyword` and entity {entity} carries the empty \
+                     string, which is not a value (records §7, contracts §2.4 — an unset field and \
+                     a client bug both produce it). Leave the cell null for absence",
+                    attribute.name
+                )))
+            }
+            ScalarValue::Utf8(text) => {
+                present.add(entity as u32);
+                out.push(text.as_str());
+            }
+            ScalarValue::Null => *universal = false,
+            other => {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{}' is declared `keyword` but carries {other:?}",
+                    attribute.name
+                )))
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Values pushed to the column writer at a time. The writer spools each chunk as it arrives, so
@@ -1832,6 +1948,12 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
     if attribute.ty == ScalarType::Utf8 {
         return ColumnKind::Text;
     }
+    // A keyword's values file is an ordinal column, not a string one: the strings live once each
+    // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
+    // measured constants rather than at a string scan's (records §4.3).
+    if attribute.ty == ScalarType::Keyword {
+        return ColumnKind::U32;
+    }
     if attribute.vocabulary.is_some() {
         return match attribute.ty {
             ScalarType::U8 => ColumnKind::U8,
@@ -1852,7 +1974,7 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
         ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
         ScalarType::F32 => ColumnKind::F32,
         ScalarType::F64 => ColumnKind::F64,
-        ScalarType::Utf8 => ColumnKind::Text,
+        ScalarType::Utf8 | ScalarType::Keyword => unreachable!("both string types return above"),
     }
 }
 
@@ -1914,7 +2036,9 @@ fn push_numeric_chunks(
         ScalarType::F32 => stream!(F32, Codes::F32),
         ScalarType::F64 => stream!(F64, Codes::F64),
         ScalarType::TimestampUs => stream!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 => unreachable!("the caller handles utf8 before reaching here"),
+        ScalarType::Utf8 | ScalarType::Keyword => {
+            unreachable!("the caller handles both string types before reaching here")
+        }
     }
     Ok(())
 }
@@ -2509,7 +2633,9 @@ mod tests {
         )
         .expect("open");
         assert_eq!(
-            blob.fields_of(0).expect("read").expect("entity 0 has a row"),
+            blob.fields_of(0)
+                .expect("read")
+                .expect("entity 0 has a row"),
             vec![tessera_filter::RecordField {
                 tag: 0,
                 value: tessera_filter::RecordValue::U16(7),
