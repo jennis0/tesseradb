@@ -200,15 +200,24 @@ impl Family {
     /// routing, by `/v1/meta`'s operand list and by the request parser alike, so the operators a
     /// client is published cannot differ from the ones its requests are held to, and neither can
     /// differ from the predicate the scan applies.
+    /// **`Numeric` is enumerated rather than defaulted to, and that is a fail-closed choice.** A
+    /// type this function does not recognise falls to the *string* families, because that is the
+    /// direction that fails safely: a string predicate over a column whose bytes are not strings
+    /// matches nothing and under-reports, which narrows `M_sel` under **I12**, where a numeric
+    /// predicate over a keyword's *ordinal* column would compare per-layer positions as though
+    /// they were values — publishing `range` for the column, accepting one, and answering the same
+    /// request differently against the base and against a flush extent, none of it visible.
     pub fn of(scalar: &tessera_store::manifest::DeclaredScalar) -> Family {
         if scalar.vocabulary.is_some() {
-            Family::Category
-        } else if declares_keyword(scalar) {
+            return Family::Category;
+        }
+        if is_numeric(scalar.arrow_type) {
+            return Family::Numeric;
+        }
+        if declares_keyword(scalar) {
             Family::Keyword
-        } else if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Utf8 {
-            Family::Text
         } else {
-            Family::Numeric
+            Family::Text
         }
     }
 
@@ -245,21 +254,41 @@ impl Family {
     }
 }
 
-/// Is this column declared `type = "keyword"` (records §2)?
+/// The declared type whose values are ordinals into a per-layer sorted dictionary (records §2).
+const KEYWORD_TYPE: &str = "keyword";
+
+/// The types whose values are numbers — every integer width, both floats, `timestamp_us` and
+/// `bool`. Listed, because [`Family::of`] must not reach `Numeric` by default; see its doc.
+fn is_numeric(ty: tessera_spatial::tiler::ScalarType) -> bool {
+    use tessera_spatial::tiler::ScalarType as T;
+    matches!(
+        ty,
+        T::Bool
+            | T::U8
+            | T::U16
+            | T::U32
+            | T::U64
+            | T::I8
+            | T::I16
+            | T::I32
+            | T::I64
+            | T::F32
+            | T::F64
+            | T::TimestampUs
+    )
+}
+
+/// Is this column declared `type = "keyword"`?
 ///
-/// ⊘ **The compiled declaration cannot yet say so, so this is `false` for every column and the
-/// keyword route below is exercised by this module's own tests alone.** A column's type reaches the
-/// engine as [`tessera_spatial::tiler::ScalarType`], which has no `Keyword` variant, and both the
-/// manifest and that enum are frozen to this track. What a reader must assume meanwhile: a `utf8`
-/// column keeps the flat byte scan it has always had, no dictionary is opened for any column, and
-/// `/v1/meta` publishes no keyword column. This function is the single edit that lands the family.
-///
-/// Deriving it instead from `arrow_type == Utf8 && index` — the shape a keyword column will have
-/// once `utf8` stops parsing — is declined rather than merely unbuilt: it would route today's
-/// `utf8` columns through a dictionary no build has written, and the flat scan is the measured
-/// baseline both `contains` routes owe a comparison against before it is retired.
-fn declares_keyword(_scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
-    false
+/// **Read as the manifest's own spelling rather than matched as a variant**, which is a seam and
+/// not a preference: `ScalarType::arrow_type_name` is the single definition of what
+/// `declared_scalars[].arrow_type` says — it exists because two spellings once disagreed — and the
+/// spelling is fixed normatively by records §2. What the comparison costs is the compiler's help:
+/// a renamed variant would leave this `false`, which is why [`Family::of`] is arranged so that
+/// falling through lands on [`Family::Text`] — the flat byte scan, which under-reports over an
+/// ordinal column — rather than on `Numeric`, which would compare the ordinals.
+fn declares_keyword(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+    scalar.arrow_type.arrow_type_name() == KEYWORD_TYPE
 }
 
 /// What a request may ask of one column.
@@ -2171,11 +2200,16 @@ pub fn candidate(
 mod keyword_tests {
     //! The keyword read route, over dictionaries and ordinal columns built in this process.
     //!
-    //! ⊘ **No build writes a keyword column yet**, so there is no end-to-end fixture to filter
-    //! against and `tests/filtering.rs` — which builds a real bundle — cannot reach this family.
-    //! What these cover instead is every step the route is made of: the per-layer resolve, the
-    //! sentinel rule, the two `contains` routes against each other, and the slot arithmetic the
-    //! narrow one depends on.
+    //! **Unit level, and deliberately so for the parts that carry the argument.** A dictionary and
+    //! an ordinal column are cheap to build in a test and the interesting cases — two layers that
+    //! number one key differently, a scattered presence under a scattered candidate, a needle
+    //! nobody holds — are ones a fixture would have to be contrived to produce. What these cover
+    //! is every step the route is made of: the per-layer resolve, the sentinel rule, the two
+    //! `contains` routes against each other, and the slot arithmetic the narrow one depends on.
+    //!
+    //! ⊘ An end-to-end pass over a built bundle — a keyword column filtered through a real
+    //! principal's mask, which is what `tests/filtering.rs` does for every other family — is owed
+    //! and is not here.
 
     use super::*;
     use tessera_filter::SortedDictWriter;
@@ -2689,6 +2723,70 @@ mod keyword_tests {
             Some(RecordValue::Utf8("beta".into()))
         );
         assert_eq!(columns.stored_value("sub", 7), None);
+    }
+
+    /// A declaration as the manifest carries it.
+    fn declared(name: &str, spelling: &str) -> tessera_store::manifest::DeclaredScalar {
+        tessera_store::manifest::DeclaredScalar {
+            name: name.to_string(),
+            arrow_type: tessera_spatial::tiler::ScalarType::parse(spelling)
+                .expect("the caller checked the spelling parses"),
+            vocabulary: None,
+            index: true,
+            render: false,
+        }
+    }
+
+    /// **Every declared type lands on a family deliberately, and `keyword` is the arm that must
+    /// not fall through.** A keyword read as `Numeric` would publish `range` for a column of
+    /// per-layer ordinals and accept one, comparing positions as though they were values — and
+    /// answering the same request differently against the base and against a flush extent.
+    ///
+    /// A spelling this build cannot parse is skipped rather than asserted about, so the case
+    /// strengthens by itself the moment the declaration gains the type.
+    #[test]
+    fn every_declared_type_lands_on_a_deliberate_family() {
+        use tessera_spatial::tiler::ScalarType;
+        let cases = [
+            ("bool", Family::Numeric),
+            ("u8", Family::Numeric),
+            ("u16", Family::Numeric),
+            ("u32", Family::Numeric),
+            ("u64", Family::Numeric),
+            ("i8", Family::Numeric),
+            ("i16", Family::Numeric),
+            ("i32", Family::Numeric),
+            ("i64", Family::Numeric),
+            ("f32", Family::Numeric),
+            ("f64", Family::Numeric),
+            ("timestamp_us", Family::Numeric),
+            ("utf8", Family::Text),
+            ("keyword", Family::Keyword),
+        ];
+        let mut exercised = 0;
+        for (spelling, expected) in cases {
+            if ScalarType::parse(spelling).is_none() {
+                continue;
+            }
+            let scalar = declared("col", spelling);
+            let family = Family::of(&scalar);
+            assert_eq!(family, expected, "type {spelling:?}");
+            // **No string family takes `range`.** A keyword's values are ordinals and a `utf8`'s
+            // are bytes; comparing either numerically is meaningless, and for the keyword it is
+            // the specific defect a `Numeric` fallthrough would produce.
+            if family != Family::Numeric {
+                assert!(
+                    !family.operands().contains(&"range"),
+                    "{spelling:?} must not be offered `range`"
+                );
+            }
+            exercised += 1;
+        }
+        assert!(
+            exercised >= cases.len() - 1,
+            "only {exercised} of {} spellings parsed; the mapping is barely tested",
+            cases.len()
+        );
     }
 
     /// The family's operator list and its published name, which `/v1/meta` and the request parser
