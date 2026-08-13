@@ -2063,6 +2063,10 @@ fn contains_narrow(
 /// Rank is **affine inside a run**: an entity `e` in a presence run starting at `ps`, with `base`
 /// bits set before that run, is at slot `base + (e − ps)`. Merging the two bitmaps' runs therefore
 /// gives every slot by arithmetic at O(runs).
+///
+/// Being a second copy, this walk is **not** seen by `tessera_filter::take_scan_work`, which counts
+/// the scan's own traversal. The narrow route is therefore the one keyword shape whose work no test
+/// asserts; the broad route ends in an ordinal scan and is asserted there.
 fn for_each_slot_run(
     present: &Bitmap,
     candidate: &Bitmap,
