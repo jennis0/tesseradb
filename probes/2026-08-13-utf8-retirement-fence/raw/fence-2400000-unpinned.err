@@ -1,0 +1,3 @@
+reading /home/joe/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json ...
+read 2400000 records in 18.9 s (snapshot order = submission order = entity order)
+every keyword route agrees with the flat scan, on every needle, over the whole corpus
