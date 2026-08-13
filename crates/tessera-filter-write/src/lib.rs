@@ -55,7 +55,10 @@
 //! [`fold_value_column`] and [`coalesce_attr_extents`] are the same linear merge under two
 //! different obligations, so they share it rather than each stating the checks above (§5.2's
 //! "attribute extents are the same shape as delta tiers, and take the same safety argument").
-//! What differs is small and worth naming, because getting either wrong is silent:
+//! [`fold_keyword_column`] and [`coalesce_keyword_extents`] are the same two producers again, over
+//! a family whose values are ordinals into a per-layer dictionary; they reach the merge through the
+//! same order and the same guards, and add a remap of their own that the `keyword` module argues
+//! for. What differs is small and worth naming, because getting either wrong is silent:
 //!
 //! - The fold **retires**: `D₀`'s entities are blanked. A coalesce **retires nothing** — removal is
 //!   Rule F's, and a deleted-but-unfolded entity's value rides through untouched (§5.2, §6).
@@ -72,18 +75,21 @@
 //! built one over the same live entities are the same bytes — and it is why one crate holds both
 //! producers' emit rather than each holding its own.
 
+mod keyword;
 mod record;
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
+use arrow::buffer::ScalarBuffer;
 use croaring::Bitmap;
 use tessera_authz::KeyedPostingsSpool;
 use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
 
+pub use keyword::{coalesce_keyword_extents, fold_keyword_column, KeywordLayer};
 pub use record::{coalesce_record_extents, fold_record_blob, RecordBlobWriter};
 
 /// The vocabulary's reserved *absent* code: never drawn, never bound to a key, and carried by
@@ -112,7 +118,7 @@ pub const POSTINGS_BAND_ROWS: usize = 1 << 26;
 /// croaring's public cursor.
 const RUN_BUF: usize = 64;
 
-struct Runs<'a> {
+pub(crate) struct Runs<'a> {
     cursor: croaring::bitmap::BitmapCursor<'a>,
     buf: [croaring::RangeInclusive<u32>; RUN_BUF],
     filled: usize,
@@ -120,7 +126,7 @@ struct Runs<'a> {
 }
 
 impl<'a> Runs<'a> {
-    fn new(bitmap: &'a Bitmap) -> Self {
+    pub(crate) fn new(bitmap: &'a Bitmap) -> Self {
         Runs {
             cursor: bitmap.cursor(),
             buf: [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF],
@@ -130,7 +136,7 @@ impl<'a> Runs<'a> {
     }
 
     /// The next run as `(start, last)`, inclusive.
-    fn next(&mut self) -> Option<(u32, u32)> {
+    pub(crate) fn next(&mut self) -> Option<(u32, u32)> {
         if self.at == self.filled {
             self.filled = self.cursor.read_many_ranges(&mut self.buf);
             self.at = 0;
@@ -191,6 +197,7 @@ pub fn fold_value_column(
         values_path,
         presence_path,
         (!universal).then_some(&out_presence),
+        None,
     )?;
     Ok(!universal)
 }
@@ -227,6 +234,7 @@ pub fn coalesce_attr_extents(
         values_path,
         presence_path,
         Some(&presence),
+        None,
     )
 }
 
@@ -239,7 +247,7 @@ pub fn coalesce_attr_extents(
 /// The empty layers are dropped rather than ordered: an extent for a column no flushed entity
 /// carried a value in is written anyway, so the file set is a function of the schema (§2.5), and
 /// such a layer has no entity range to sort by.
-fn merge_order(
+pub(crate) fn merge_order(
     layers: &[&ValueColumn],
     tombstones: &Bitmap,
     pass: &str,
@@ -306,13 +314,20 @@ pub(crate) fn ordered_disjoint(
 ///
 /// `presence` is the file the reader will address by, or `None` where the caller's convention lets
 /// it be omitted — which is a base column dense from zero, and never an extent.
-fn write_merged(
+///
+/// `remap` is the keyword family's `old ordinal -> new ordinal` table per layer, and its presence
+/// is what separates the two write paths: without it every value is pushed as a **borrowed slice**
+/// of the layer's own buffers, so the bytes cannot change; with it every value is rewritten. That
+/// difference is the whole reason the `keyword` module carries a content guard the checks above
+/// cannot supply, and the guard runs before this function is called.
+pub(crate) fn write_merged(
     layers: &[&ValueColumn],
     order: &[(usize, Bitmap)],
     tombstones: &Bitmap,
     values_path: &Path,
     presence_path: &Path,
     presence: Option<&Bitmap>,
+    remap: Option<&[Vec<u32>]>,
 ) -> io::Result<()> {
     // **The family comes from the first layer, not from the schema.** Both passes rewrite what
     // exists, and a kind re-derived from the declaration would silently re-type a column whose file
@@ -333,13 +348,51 @@ fn write_merged(
             let mut left = (last - start) as usize + 1;
             while left > 0 {
                 let take = left.min(MERGE_CHUNK);
-                writer.push(&slice_codes(codes, at, take))?;
+                match remap {
+                    None => writer.push(&slice_codes(codes, at, take))?,
+                    Some(tables) => writer.push(&recolour(codes, at, take, &tables[*layer])?)?,
+                }
                 at += take;
                 left -= take;
             }
         }
     }
     writer.finish(presence)
+}
+
+/// `len` ordinals from `start`, each rewritten through this layer's remap.
+///
+/// The one place in either pass where a merged value is **built** rather than borrowed, which is
+/// why the two refusals here are worth their cost per chunk. An ordinal past the end of the remap
+/// is a column paired with a dictionary that never coloured it; an ordinal mapping to
+/// [`keyword::NO_KEY`] is an entity still reaching a key the rebuild found no survivor for. Both
+/// are contradictions, and both would otherwise be published as some other key.
+fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Result<Codes> {
+    let Codes::U32(src) = codes else {
+        return Err(invalid(format!(
+            "a remapped merge was given a {:?} column; only a keyword layer's u32 ordinals are \
+             rewritten",
+            ColumnKind::of(codes)
+        )));
+    };
+    let mut out = Vec::with_capacity(len);
+    for &ordinal in &src[start..start + len] {
+        let new = *remap.get(ordinal as usize).ok_or_else(|| {
+            invalid(format!(
+                "a remapped merge met ordinal {ordinal} in a layer whose dictionary holds {} keys \
+                 — the column and the dictionary are not the same layer's",
+                remap.len()
+            ))
+        })?;
+        if new == keyword::NO_KEY {
+            return Err(invalid(format!(
+                "a remapped merge met ordinal {ordinal}, whose key the rebuild dropped as carried \
+                 by no surviving entity — yet an entity carries it"
+            )));
+        }
+        out.push(new);
+    }
+    Ok(Codes::U32(ScalarBuffer::from(out)))
 }
 
 /// `len` values from `start`, borrowed rather than copied: every arm is a window onto the layer's

@@ -38,7 +38,10 @@
 //!   [`tessera_filter_write::coalesce_attr_extents`] preserves exactly. The selection is per column
 //!   because that is the identity the format carries — an `AttrExtent` records no flush, and
 //!   filter-index §2.5 forbids recovering one from the path — and because it is what keeps one
-//!   heavy text column from stalling every other column's axis.
+//!   heavy text column from stalling every other column's axis. ⊘ A column whose layers carry
+//!   **their own dictionaries** is excluded, and the exclusion is stated at the selection: the
+//!   merge for it exists ([`tessera_filter_write::coalesce_keyword_extents`]) but the composition
+//!   below carries a layer's values alone, so the merged dictionary would have nowhere to swap in.
 //! - **Record-blob extents** take the attribute axis's argument for the one pseudo-column
 //!   `record` (records §7): the layers are disjoint in entity space and probed by has-row, so
 //!   their division into files is immaterial, and what must not change is the set of
@@ -248,7 +251,29 @@ pub(crate) fn plan_coalesce(
             .push(extent);
     }
     for (column, extents) in by_column {
-        let size = |extent: &&AttrExtent| Some(size_of(&extent.values) + size_of(&extent.presence));
+        // ⊘ **A column whose layers carry a dictionary is not taken**, and the reason is the
+        // *layer's* atomicity rather than the merge's absence:
+        // `tessera_filter_write::coalesce_keyword_extents` merges the dictionaries and rewrites the
+        // ordinals through a guarded remap, but the live generation's composition carries a layer's
+        // values alone. A coalesced extent installed there would sit beside the dictionaries of the
+        // extents it replaced — ordinals renumbered against a dictionary no reader holds, which
+        // records §7 calls a recolouring with no symptom, and a layer's index files are one atomic
+        // manifest unit precisely to prevent it. Such a column waits for the fold, exactly as one
+        // whose single extent exceeds the input cap does.
+        if extents.iter().any(|extent| extent.dict.is_some()) {
+            continue;
+        }
+        // **A layer's dictionary counts toward the cap**, because the merge holds it: a keyword
+        // window's transient is its remap and its decode cursors, both sized by the keys those
+        // files hold, and a cap that ignored them would bound the ordinals while the dictionary —
+        // which for a near-unique column is the larger half — grew unwatched (records §7).
+        let size = |extent: &&AttrExtent| {
+            Some(
+                size_of(&extent.values)
+                    + size_of(&extent.presence)
+                    + extent.dict.as_deref().map_or(0, &size_of),
+            )
+        };
         // **The width narrows to fit the input cap, and for no other reason.** The cap bounds the
         // pass transient — the window's values and presence held during the merge — and it applies
         // per column, so a text column whose values outgrow it stalls *itself* and never its
@@ -484,6 +509,18 @@ pub(crate) fn execute_coalesce(
     // `attr_extents` names paths and never a path convention (filter-index §2.5).
     let mut attrs = Vec::with_capacity(plan.attrs.len());
     for window in &plan.attrs {
+        // The second line under the selection rule above, and the one that is definitionally safe:
+        // this merge concatenates values **byte-preserved**, which for a column whose values are
+        // ordinals into a per-layer dictionary would publish one layer's ordinals under another
+        // layer's colouring. It refuses rather than doing that.
+        if window.extents.iter().any(|extent| extent.dict.is_some()) {
+            return Err(CoalesceFailed(format!(
+                "column '{}' has layers with their own dictionaries; its values are ordinals and \
+                 concatenating them would recolour the window, so the byte-preserving merge \
+                 refuses it",
+                window.column
+            )));
+        }
         let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
@@ -1102,6 +1139,87 @@ mod tests {
         assert!(
             !plan.attrs.iter().any(|w| w.column == "title"),
             "a column whose single extent exceeds the cap must not be selected"
+        );
+    }
+
+    /// **A layer's dictionary counts toward the input cap.**
+    ///
+    /// The cap bounds the pass transient, and for a column whose values are ordinals the dictionary
+    /// is the half that grows with distinct values rather than with entities — on a near-unique
+    /// column, the larger half (records §7). Sizing the window on values and presence alone would
+    /// bound the cheap term and let the expensive one through.
+    ///
+    /// Stated against [`select_window`] directly, because [`plan_coalesce`] refuses a column with
+    /// dictionaries outright for the separate reason the next test asserts.
+    #[test]
+    fn a_layers_dictionary_counts_toward_the_input_cap() {
+        let mut sizes: BTreeMap<String, u64> = BTreeMap::new();
+        let extents: Vec<AttrExtent> = (0..3)
+            .map(|i| {
+                let mut extent = attr_extent_at(PARTITION, "submitter", &format!("flush-{i}-1"));
+                extent.dict = Some(format!(
+                    "partitions/{PARTITION}/attrs/submitter/extents/flush-{i}-1.dict"
+                ));
+                sizes.insert(extent.values.clone(), 1 << 20);
+                sizes.insert(extent.presence.clone(), 0);
+                sizes.insert(extent.dict.clone().expect("a dictionary"), 1 << 20);
+                extent
+            })
+            .collect();
+        let policy = CoalescePolicy {
+            width: 3,
+            floor_bytes: 1 << 20,
+            max_input_bytes: 4 << 20,
+        };
+        let counted = |extent: &AttrExtent| {
+            Some(
+                sizes[&extent.values]
+                    + sizes[&extent.presence]
+                    + extent.dict.as_ref().map_or(0, |d| sizes[d]),
+            )
+        };
+        let values_only =
+            |extent: &AttrExtent| Some(sizes[&extent.values] + sizes[&extent.presence]);
+        assert_eq!(
+            select_window(&extents, policy.width, policy, values_only),
+            Some(0..3),
+            "three 1 MiB values files fit a 4 MiB cap on their own"
+        );
+        assert_eq!(
+            select_window(&extents, policy.width, policy, counted),
+            None,
+            "counting the dictionaries, the same window is 6 MiB and must not be selected"
+        );
+    }
+
+    /// ⊘ **A column whose layers carry their own dictionaries is not coalesced**, and the reason is
+    /// the layer's atomicity, not the merge's absence: the merge exists
+    /// (`tessera_filter_write::coalesce_keyword_extents`, guarded remap and all), but the live
+    /// generation's composition carries a layer's values alone, so a coalesced extent would be
+    /// installed beside the dictionaries of the extents it replaced. The column waits for the fold.
+    ///
+    /// Its neighbours are unaffected, which is the same per-column stalling the input cap has.
+    #[test]
+    fn a_column_with_per_layer_dictionaries_waits_for_the_fold() {
+        let (mut manifest, build_files) = manifest_with(4);
+        for extent in manifest
+            .attr_extents
+            .iter_mut()
+            .filter(|e| e.column == "title")
+        {
+            let dict = format!("{}.dict", extent.values);
+            manifest.files.insert(dict.clone(), digest(64));
+            extent.dict = Some(dict);
+        }
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert!(
+            !plan.attrs.iter().any(|w| w.column == "title"),
+            "a column whose layers carry dictionaries must not be coalesced by the \
+             byte-preserving merge"
+        );
+        assert!(
+            plan.attrs.iter().any(|w| w.column == "department"),
+            "the neighbour is unaffected"
         );
     }
 
