@@ -158,6 +158,13 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # `public`, so the routed reading stays clear of the vocabulary-control ruling a `per_viewer`
 # rendered category waits on; a fifth period (`(source_id // 7) % 3`), decorrelated like the rest.
 #
+# **`submitter` is the keyword column** (records §4.3): an open, exact vocabulary stored as a
+# sorted per-layer dictionary with a `u32` ordinal column, rather than as the flat bytes `title`
+# keeps. Its shapes are chosen backwards from the catalogue entries records §10 gives this family
+# — see [`submitter_of`], which names each one at the branch that plants it. It is `index`-only,
+# because `render` on a keyword is refused (a keyword's slot would be its ordinal, and an ordinal
+# is a per-layer position).
+#
 # **`note` and `pages` are blob-resident** — neither key set, so their values live only in the
 # record blob, `attrs/record/` (records §3): a utf8 and a numeric, exercising mixed row content.
 # Their planting carries the blob's adversarial shapes: an empty string (a value, not an absence),
@@ -216,6 +223,11 @@ listing    = "public"
   east  = 53
 
 [[attribute]]
+name     = "submitter"
+type     = "keyword"
+index    = true
+
+[[attribute]]
 name     = "note"
 type     = "utf8"
 
@@ -272,6 +284,7 @@ ARCHIVE_ABSENT_STRIDE = 107
 SHELF_ABSENT_STRIDE = 109
 NOTE_ABSENT_STRIDE = 113
 PAGES_ABSENT_STRIDE = 127
+SUBMITTER_ABSENT_STRIDE = 131
 
 # `pages` is planted as a *present zero* on this stride (after the absence rule): the blob must
 # keep "carries the value 0" and "carries no value" distinct, absence being absence from the row.
@@ -345,6 +358,87 @@ def shelf_of(source_id: int) -> str | None:
     return ("north", "south", "east")[(source_id // 7) % 3]
 
 
+# ---------------------------------------------------------------------------------------------
+# submitter — the keyword column
+# ---------------------------------------------------------------------------------------------
+
+# The three regions both keyword families share. A shared region is deliberate: it gives
+# `contains "apac"` a needle that spans the repeat-heavy family *and* the near-unique one, which is
+# the shape the dictionary walk has to get right (a substring may span a front-coded elision).
+_SUBMITTER_REGIONS = ("apac", "emea", "latam")
+
+# The repeat-heavy family's twelve hub letters. **Letters, not numbers**, and that is the
+# `PLANTED_ID_BASE` rule arriving by its other door: a bucket written `03` is the digit run `03`,
+# which `test_byte_scan` reads out of a drill-down body as the integer 3 — a real entity id. A
+# keyword's values reach a client as text, so nothing here may carry a bare small number.
+_SUBMITTER_HUB_LETTERS = "abcdefghijkl"
+
+# One entity in 19 (after the absence rule) carries a value **no other entity carries**; the rest
+# share a hub. The stride is a prime distinct from every other period in this corpus, so which
+# entities are unique correlates with nothing — and it sizes the base build's dictionary at
+# ~8,000 keys, which is what puts both `contains` routes in play across the catalogue's principals:
+# the engine chooses narrow below ~15% of the dictionary's key count and broad at or above it, so
+# the small cases take one route and the crossover and full-coverage cases take the other.
+SUBMITTER_UNIQUE_STRIDE = 19
+
+# **The two ordinal-boundary values** (records §10). Sorted lexicographically, `aaa-` precedes
+# every `hub-`/`node-` value and `zzz-` follows every one, so these are the first and the last key
+# of the base build's dictionary — ordinals 0 and `len - 1`. Each is carried by exactly one entity,
+# which makes `eq` on them a single-item answer a cross-layer ordinal confusion cannot fake: an
+# engine that resolved ordinal 0 against the base and then scanned a *flush extent* with it would
+# return that extent's own first-key rows instead.
+#
+# Both ids sit inside `cross_lo` so a principal short of full coverage can reach them, and both are
+# off `SUBMITTER_ABSENT_STRIDE`.
+SUBMITTER_FIRST_ID = 65_900
+SUBMITTER_LAST_ID = 65_901
+SUBMITTER_FIRST = "aaa-ingress-anchor"
+SUBMITTER_LAST = "zzz-egress-anchor"
+
+
+def submitter_of(source_id: int) -> str | None:
+    """`submitter` as planted — the keyword column. Same contract as [`department_of`]: what the
+    entity was *given*, upstream of the ordinal the build stored.
+
+    Three value shapes, each here for a catalogue entry records §10 names:
+
+    * the two **anchors**, one entity each, first and last in byte order — the ordinal boundaries;
+    * `node-<region>-<id>`, one entity each, heavily prefix-shared — a `prefix` range over one
+      region spans thousands of keys and therefore hundreds of front-coded blocks, which is the
+      only way a prefix range crosses a block boundary rather than sitting inside one;
+    * `hub-<region>-<letter>`, thirty-six values carried by thousands of entities each — the
+      repeat-heavy half, and the values a flush extent can also carry so that one string has a
+      *different ordinal in each layer*.
+    """
+    if source_id % SUBMITTER_ABSENT_STRIDE == 0:
+        return None
+    if source_id == SUBMITTER_FIRST_ID:
+        return SUBMITTER_FIRST
+    if source_id == SUBMITTER_LAST_ID:
+        return SUBMITTER_LAST
+    region = _SUBMITTER_REGIONS[(source_id // 13) % 3]
+    if source_id % SUBMITTER_UNIQUE_STRIDE == 0:
+        return f"node-{region}-{PLANTED_ID_BASE + source_id}"
+    return f"hub-{region}-{_SUBMITTER_HUB_LETTERS[(source_id // 3) % 12]}"
+
+
+def submitter_values_in_order() -> list[str]:
+    """Every distinct planted `submitter`, in the byte order a sorted dictionary holds them.
+
+    **Not a dictionary, and not an accelerator.** Nothing evaluates a filter through this list:
+    `oracle.filters` answers `eq`, `in`, `prefix` and `contains` by walking [`submitter_of`] one
+    entity at a time, which is what keeps the oracle a second derivation rather than a
+    transcription of the artefact (records §10). This exists so a test can *name* the values whose
+    ordinals are the base build's dictionary boundaries without opening the artefact to find out
+    which they are — and the answers those tests then assert still come from the per-entity walk,
+    so a build that wrote a different dictionary disagrees with the oracle rather than with this.
+
+    Every planted value is ASCII, so Python's code-point order is the byte order the dictionary is
+    sorted in.
+    """
+    return sorted({v for e in range(N_ITEMS) if (v := submitter_of(e)) is not None})
+
+
 # The blob-resident string's cycling stems — a period of 33 (stride 11 × 3 ledgers), decorrelated
 # from every other cycle here. The appended source id makes every full note unique, so the future
 # drill-down differential compares a value only its entity can carry.
@@ -398,6 +492,10 @@ def record_of(source_id: int, fx: list[int]) -> dict[str, object]:
     exactly these values for every visible entity. Absent values are omitted, not `None`-valued —
     absence is absence from the record, exactly as it is absence from the blob row.
 
+    A keyword's record is its **key**, never its ordinal: the dictionary is an index internal and
+    an ordinal is a per-layer position, so nothing about either crosses the trust boundary
+    (records §4.3).
+
     `fx` is [`fx_keys`]'s list, passed in because recomputing 150,000 seeded draws per entity
     would make a whole-corpus sweep quadratic; the caller computes it once.
     """
@@ -407,6 +505,7 @@ def record_of(source_id: int, fx: list[int]) -> dict[str, object]:
         "department": department_of(source_id),
         "archive": archive_of(source_id),
         "title": title_of(source_id),
+        "submitter": submitter_of(source_id),
         "note": note_of(source_id),
         "pages": pages_of(source_id),
     }
@@ -426,12 +525,20 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
     presence bitmap beside the hot column, so a range no longer matches the rows that have no
     value. A column's operand set is a property of its family alone — routing is a property of the
     deployment's declaration, never of the query surface.
+
+    **`submitter` publishes `keyword` and its four string operators, and `range` is not among
+    them.** A keyword's stored values are ordinals — positions in the layer's own sorted dictionary
+    — so a numeric range over them would compare one layer's positions against another's and answer
+    the same request differently against the base build and against a flush extent, invisibly. The
+    family derivation enumerates the numeric types rather than defaulting to them precisely so that
+    cannot happen (records §4.3); this line is where the surface it produces is pinned.
     """
     return {
         "department": ("category", frozenset({"eq", "in"})),
         "archive": ("category", frozenset({"eq", "in"})),
         "shelf": ("category", frozenset({"eq", "in"})),
         "title": ("string", frozenset({"eq", "in", "prefix", "contains"})),
+        "submitter": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
         "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
     }
 
@@ -828,6 +935,12 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 ),
                 "archive": pa.array([archive_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 "title": pa.array([title_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # A keyword arrives as its value, exactly as a `utf8` does — the ordinal is the
+                # build's to assign, per layer, and a data file supplying one would be naming a
+                # position in a dictionary that does not exist yet (records §4.3).
+                "submitter": pa.array(
+                    [submitter_of(i) for i in range(N_ITEMS)], type=pa.string()
+                ),
                 # The render-only category arrives as its key, like the other two categories.
                 "shelf": pa.array([shelf_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 # The blob-resident pair. A null is the absent value — for these, absence from
@@ -897,6 +1010,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
+        # 9: the corpus gained the keyword column (`submitter`) and its planting rules, for the
+        #    keyword family's conformance coverage (2026-08-13).
         # 8: every planted value that writes an id into free text (`note`, `title`) offsets it by
         #    `PLANTED_ID_BASE`, so the byte scan stops reading the fixture quoting itself as a
         #    leak once drill-down serves those fields (2026-08-12).
@@ -910,7 +1025,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
         # version moves with them.
         # 3: the bundle gained a declared `fx_key` column (2026-08-07).
-        "recipe_version": 8,
+        "recipe_version": 9,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -937,6 +1052,18 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # schema text does not carry.
         "render_category": {
             "shelf_absent_stride": SHELF_ABSENT_STRIDE,
+        },
+        # The keyword column's planting rules — same reasoning again, and load-bearing twice over
+        # here: the ordinal-boundary tests name `SUBMITTER_FIRST`/`SUBMITTER_LAST` as the first and
+        # last key of the base dictionary, which is only true while the regions, the hub letters
+        # and the unique stride are the ones the bundle was built from.
+        "keyword_column": {
+            "submitter_absent_stride": SUBMITTER_ABSENT_STRIDE,
+            "submitter_unique_stride": SUBMITTER_UNIQUE_STRIDE,
+            "submitter_regions": list(_SUBMITTER_REGIONS),
+            "submitter_hub_letters": _SUBMITTER_HUB_LETTERS,
+            "submitter_first": [SUBMITTER_FIRST_ID, SUBMITTER_FIRST],
+            "submitter_last": [SUBMITTER_LAST_ID, SUBMITTER_LAST],
         },
         "record_columns": {
             "note_absent_stride": NOTE_ABSENT_STRIDE,

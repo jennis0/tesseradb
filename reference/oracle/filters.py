@@ -4,10 +4,10 @@ per-entity attribute values, evaluated by a per-entity walk inside a candidate s
 **Pinned to decision 0062 and contracts §3.2 r26.** A node is a leaf — one column name mapped to
 one operator — or a combinator, `all_of` / `any_of`, over sub-expressions. A category leaf takes
 `eq` and `in`, whose values are the vocabulary's key (a string) or its code (an integer), freely
-mixed; a `utf8` leaf takes `eq`, `prefix` and `contains` against the stored bytes. Empty
-combinators are their operators' identities and differ: `all_of: []` matches the whole candidate,
-`any_of: []` matches nothing. `none_of` and `match` are specified and unbuilt, so this module
-refuses them the way the server does — by raising, never by evaluating a guess.
+mixed; a `utf8` or `keyword` leaf takes `eq`, `in`, `prefix` and `contains` against the stored
+bytes. Empty combinators are their operators' identities and differ: `all_of: []` matches the whole
+candidate, `any_of: []` matches nothing. `match` is specified and unbuilt, so this module refuses it
+the way the server does — by raising, never by evaluating a guess.
 
 ## What makes this a second implementation rather than a transcription
 
@@ -37,9 +37,14 @@ unknown-value / hidden-value / valueless-value outcome equivalence (C11, per-poi
 deliberately not asserted by a conformance test — surface §9's C11 row); I12's frontier half and
 I3 (no label service exists); Rule S over filter results (the suite's overlay machinery drives
 suppression against its own servers, and no filter test drives it yet — stated in the test module
-rather than silently absent); and any post-build ingest state — the per-flush extent is built and an
-entity ingested after the build answers on its own value, but the suite's fixtures are build-only, so
-this oracle has no such state to model and would owe a generation function for it if they gained one.
+rather than silently absent).
+
+**Post-build layers are the caller's to model, and need nothing here.** A flush publishes its own
+extent, so a column the engine serves is the base plus every live extent; the per-entity definition
+is unchanged by that — an entity holds one value whichever layer stores it — so a driver that
+ingests adds the ingested entities to the column's `values` and asks the same question.
+`conformance/tests/test_keyword_layers.py` does that across a base, two flush extents and a
+compaction fold, which is where the layering is under test rather than assumed away.
 
 ## The mask is an input, not a product
 
@@ -67,12 +72,14 @@ class UnknownColumn(Exception):
 
 
 class UnbuiltOperator(Exception):
-    """`none_of`, or an operator the column's family does not take (`match`, a range, ...).
+    """An operator the column's family does not take — `match`, `prefix` on a category, a range on
+    a keyword — or one that is specified and unbuilt.
 
-    Raised rather than evaluated, because guessing at unbuilt semantics is how an oracle stops
-    disagreeing: `none_of` over a `per_viewer` category has a C11 rule that must be built with it
-    (decision 0062), and an oracle that pre-implemented a guess would ratify whichever behaviour
-    the engine happened to ship.
+    Raised rather than evaluated, because guessing at semantics is how an oracle stops disagreeing:
+    an oracle that pre-implemented a guess would ratify whichever behaviour the engine happened to
+    ship. The server's answer to the same request is a `422`, for the reason contracts §3.2 gives —
+    a column's family is deployment schema, so refusing discloses nothing, where refusing a *value*
+    would be an existence oracle over the viewer's data.
     """
 
 
@@ -110,36 +117,82 @@ class CategoryColumn:
         return held == operand
 
 
+def _string_matches(held: str, operator: str, operand, family: str) -> bool:
+    """The four string predicates, over the bytes an entity holds.
+
+    Shared by [`StringColumn`] and [`KeywordColumn`] because the two families' semantics are
+    **byte-identical** — records §4.3 gives `keyword` the same four operators with the same
+    meanings and a different storage cost, and one definition is how the oracle stays unable to
+    ratify a divergence between them. `in` is `eq` over a list: a generalisation of equality, not a
+    category-only one, so both string families take it.
+    """
+    if operator == "eq":
+        return held == operand
+    if operator == "in":
+        return any(held == value for value in operand)
+    if operator == "prefix":
+        return held.startswith(operand)
+    if operator == "contains":
+        return operand in held
+    raise UnbuiltOperator(f"{family} operator {operator!r}")
+
+
 @dataclass(frozen=True)
 class StringColumn:
     """One `utf8` column as the fixture planted it: per-entity strings, byte-compared.
 
     A string is row data, not a vocabulary (filter-index §2.6): there is no code to resolve, no
-    value set, and nothing here to gate — `eq`, `prefix` and `contains` are predicates over the
-    stored bytes and that is the whole of the type.
+    value set, and nothing here to gate — the four predicates are over the stored bytes and that is
+    the whole of the type.
     """
 
     values: dict[int, str]
 
-    def matches(self, entity: int, operator: str, operand: str) -> bool:
+    def matches(self, entity: int, operator: str, operand) -> bool:
         held = self.values.get(entity)
         if held is None:
             return False
-        if operator == "eq":
-            return held == operand
-        if operator == "prefix":
-            return held.startswith(operand)
-        if operator == "contains":
-            return operand in held
-        raise UnbuiltOperator(f"utf8 operator {operator!r}")
+        return _string_matches(held, operator, operand, "utf8")
+
+
+@dataclass(frozen=True)
+class KeywordColumn:
+    """One `keyword` column as the fixture planted it: per-entity strings, byte-compared.
+
+    **This holds no dictionary and no ordinals, and that absence is the whole of what makes the
+    keyword differential a differential** (records §10). The engine stores a `u32` ordinal per
+    entity into a *per-layer* sorted dictionary, resolves each needle inside the layer it is about
+    to scan, and unions the layers; this module holds the strings the fixture planted and compares
+    them. So the two sides agree only if the build interned, front-coded, renumbered and resolved
+    correctly at every layer — an implementation that wrote one dictionary and then answered
+    consistently by its own wrong ordinals disagrees here rather than being agreed with. Teaching
+    this class the artefact's structure — a sorted key list, an ordinal per entity, a resolve —
+    would make it a transcription and the agreement vacuous.
+
+    A separate class from [`StringColumn`] although the predicates are shared: the wire publishes
+    `keyword` as its own family, the two are stored by different mechanisms, and a column map that
+    mirrored the published families through one class could not notice a deployment declaring the
+    wrong one.
+    """
+
+    values: dict[int, str]
+
+    def matches(self, entity: int, operator: str, operand) -> bool:
+        held = self.values.get(entity)
+        if held is None:
+            # Absence is absence from the layer's presence bitmap, and no predicate matches it —
+            # including `contains ""`, which matches every *value* and therefore every entity that
+            # has one, never an entity that has none.
+            return False
+        return _string_matches(held, operator, operand, "keyword")
 
 
 def _carries_a_value(column, entity: int) -> bool:
     """Does `entity` hold any value in this column at all?
 
-    **The predicate `none_of` rests on** (decision 0066). Both column kinds record absence the same
-    way here — the entity is simply not in `values` — which mirrors the artefact, where a category
-    spends its reserved code 0 and every other family is left out of the presence bitmap.
+    **The predicate `none_of` rests on** (decision 0066). Every column kind records absence the
+    same way here — the entity is simply not in `values` — which mirrors the artefact, where a
+    category spends its reserved code 0 and every other family is left out of the presence bitmap.
     """
     return entity in column.values
 
@@ -162,7 +215,7 @@ def _leaf_matches(column, operator: str, operand, entity: int) -> bool:
         if operator == "in":
             return any(column.matches(entity, value) for value in operand)
         raise UnbuiltOperator(f"category operator {operator!r}")
-    if isinstance(column, StringColumn):
+    if isinstance(column, (StringColumn, KeywordColumn)):
         return column.matches(entity, operator, operand)
     raise TypeError(f"not a filter column: {column!r}")
 
