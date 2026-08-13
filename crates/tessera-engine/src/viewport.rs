@@ -2739,22 +2739,18 @@ fn scan_rows(
 /// The rows of one segment that carry a value for `column`, **in slice row space** — `None` where
 /// every row does.
 ///
-/// ⊘ **The bitmap is not yet written, so every row reads as present.** Decision 0064's render half
-/// is two pieces: this route, which honours the bitmap, and the build, flush, merge and fold that
-/// produce it. Until the second lands, a rendered number with absences answers a range containing
-/// zero as though those rows carried a zero — the 2026-08-11 defect, by this route, on that column
-/// alone. `RenderPresence::all_present()` is the honest statement of what this can currently know,
-/// and the one line that changes is the accessor beneath it; `scan_run`'s own tests fix the
-/// behaviour the bitmap will produce, so the seam is pinned from this side already.
+/// `ColumnsRef::presence` answers for a column with no file, and for a name it does not know, with
+/// an all-present bitmap — so there is no branch here and no way for a caller to read a missing
+/// artefact as an absence. A damaged bitmap has already refused, at `ColumnsRef::load`.
 ///
 /// The shift into slice row space belongs here rather than in the scan: the bitmap is over the
 /// segment's own `0..row_count` (`render_presence`'s module doc — a merge permutes rows, so it can
 /// be nothing else), and shifting once per segment keeps the run loop comparing bitmaps in one
 /// numbering.
 fn present_rows(segment: &SegmentData, column: &str, row_base: u32) -> Option<croaring::Bitmap> {
-    let _ = (segment, column);
-    let presence = tessera_store::render_presence::RenderPresence::all_present();
-    presence
+    segment
+        .columns
+        .presence(column)
         .bitmap()
         .map(|rows| rows.add_offset(i64::from(row_base)))
 }

@@ -14,8 +14,6 @@ What each case pins, beyond the non-zero exit:
 - `render` with `multi = true` — the **permanent** fence, names decision 0039, and must win over
   the bare-`multi` refusal so a caller who set both hears the fence that survives the epic that
   lifts the other;
-- `index` on a rendered number — store-once would serve the filter from a hot column that cannot
-  express absence; names decision 0064, whose render half is the restoration path;
 - a column named `record` — `attrs/record/` is the blob's namespace (review N10), so the name is
   reserved;
 - a stale `used_for` key — the retired surface refuses loudly (decision 0048's shape: replaced,
@@ -125,17 +123,6 @@ multi  = true
         # 0039 and not records §5: both refusals apply to this declaration, and the caller must
         # hear the one that survives the epic that lifts the other.
         ["0039", "margin"],
-    ),
-    (
-        "index_on_a_rendered_number",
-        """\
-[[attribute]]
-name   = "margin"
-type   = "u32"
-render = true
-index  = true
-""",
-        ["0064", "margin"],
     ),
     (
         "record_is_a_reserved_name",

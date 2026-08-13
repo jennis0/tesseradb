@@ -84,6 +84,7 @@ use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
+use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
@@ -4809,12 +4810,29 @@ impl Executor {
         // `hard_link_forward` refuses.
         let mut carried_rels: BTreeSet<String> = BTreeSet::new();
         for descriptor in &carried_segments {
+            let segment_prefix = format!(
+                "partitions/{}/slices/{}/segments/{}",
+                plan.partition, descriptor.slice, descriptor.seg_id
+            );
             for name in ["morton.u32", "columns.arrow"] {
-                carried_rels.insert(format!(
-                    "partitions/{}/slices/{}/segments/{}/{name}",
-                    plan.partition, descriptor.slice, descriptor.seg_id
-                ));
+                carried_rels.insert(format!("{segment_prefix}/{name}"));
             }
+            // **And every render column's presence bitmap the live manifest names for it**
+            // (decision 0064). A fixed list of two files was right while a segment held exactly
+            // two; a segment now holds a `presence/<column>.roaring` per rendered column that has
+            // an absence, and a carried segment that arrived without one would read as
+            // every-row-present — an item with no number matching a range containing zero, which
+            // is the 2026-08-11 defect reached by the fold's carry-forward rather than by the
+            // scan. Taken from the manifest, not from a directory scan, for the reason
+            // `AttrExtent` gives: a scan finds what is there, and the manifest says what must be.
+            let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
+            carried_rels.extend(
+                live_manifest
+                    .files
+                    .keys()
+                    .filter(|rel| rel.starts_with(&presence_prefix))
+                    .cloned(),
+            );
         }
         carried_rels.extend(carried_runs.iter().cloned());
         carried_rels.extend(carried_locators.iter().map(|e| e.path.clone()));

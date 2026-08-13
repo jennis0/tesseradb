@@ -81,6 +81,19 @@ type     = "f32"
 render = true
 "#;
 
+/// The rendered number, **with absences** — every seventh item carries none.
+///
+/// The absences are the point. A render column is non-nullable, so an absent number is written as
+/// the type's zero (decision 0064), and this fixture's filter below is `score < 16`, a range that
+/// contains zero. If the presence bitmap beside the column were not honoured, every absent item
+/// would match it — the 2026-08-11 defect, end to end, through a real build and a real request.
+fn score_of(entity: u64) -> Option<f32> {
+    if entity.is_multiple_of(7) {
+        return None;
+    }
+    Some((entity % 97) as f32 * 0.5)
+}
+
 /// Five archives, so several codes are live and no code is the only one present.
 fn archive_of(entity: u64) -> &'static str {
     ["astro", "cond", "hep", "math", "quant"][(entity % 5) as usize]
@@ -103,14 +116,14 @@ fn write_points(path: &Path, n: u64) {
         Field::new("y", DataType::Float64, false),
         Field::new("archive", DataType::Utf8, false),
         Field::new("department", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, false),
+        Field::new("score", DataType::Float32, true),
     ]));
     let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
     let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (e % 97) as f32 * 0.5).collect();
+    let scores: Vec<Option<f32>> = ids.iter().map(|&e| score_of(e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -307,9 +320,10 @@ async fn a_viewport_filters_on_a_rendered_number_over_its_own_rows() {
             .send()
     };
 
-    // `score` is `(e % 97) * 0.5` over 64 items, so this is the lower half of the corpus — a real
-    // narrowing, and a fractional bound, which is the endpoint form an integer column would have
-    // had to round and a float column must not.
+    // `score` is `(e % 97) * 0.5` over 64 items with every seventh absent, so this is the lower
+    // half of the corpus minus those — a real narrowing, a fractional bound (the endpoint form an
+    // integer column would have had to round and a float column must not), and a range that
+    // **contains zero**, which is what makes the absences load-bearing rather than decorative.
     let resp = viewport(Some(serde_json::json!({"score": {"range": {"lt": 16.0}}})))
         .await
         .unwrap();
@@ -318,12 +332,25 @@ async fn a_viewport_filters_on_a_rendered_number_over_its_own_rows() {
     let matched: u64 = tiles.iter().map(|t| t.2).sum();
     let visible: u64 = tiles.iter().map(|t| t.1).sum();
 
-    let expected = (0..N).filter(|e| ((e % 97) as f32) * 0.5 < 16.0).count() as u64;
+    let expected = (0..N)
+        .filter(|&e| score_of(e).is_some_and(|v| v < 16.0))
+        .count() as u64;
     assert_eq!(
         matched, expected,
         "the filtered count disagrees with the corpus"
     );
     assert!(matched < visible, "the filter narrowed nothing");
+    // The absence half, stated as its own assertion because the count above would also pass if
+    // the corpus happened to have none: an item with no score is stored as 0.0 in the hot column,
+    // and 0.0 is inside this range. Only the presence bitmap keeps it out.
+    let absent = (0..N).filter(|&e| score_of(e).is_none()).count() as u64;
+    assert!(absent > 0, "the fixture must plant absences for this to mean anything");
+    assert_eq!(
+        matched,
+        expected,
+        "an item with no score matched a range containing zero — decision 0064's bitmap is not \
+         being honoured on the row route"
+    );
     assert_eq!(points.len() as u64, matched, "every matching item is drawn");
 
     // The unfiltered request over the same window: `visible` is the composed mask's own count and

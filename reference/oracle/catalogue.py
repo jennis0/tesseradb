@@ -419,16 +419,20 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
     function alone, so the operand surface is recorded in **one place**.
 
     What the exactness pins: the blob-resident columns (`note`, `pages`) publish no operand —
-    records §3 gives them no query surface — while the render-only category (`shelf`) publishes
-    one, because decision 0068 makes `render = true` imply filterable and the row-space route
-    answers it over the request's own rows. A category's operand set is the same either way:
-    routing is a property of the deployment's declaration, never of the query surface.
+    records §3 gives them no query surface — while every *rendered* column publishes one, because
+    decision 0068 makes `render = true` imply filterable and the row-space route answers it over
+    the request's own rows. That covers the render-only category (`shelf`) and, since decision
+    0064's render half landed, the rendered number `fx_key`: a number's absence now lives in a
+    presence bitmap beside the hot column, so a range no longer matches the rows that have no
+    value. A column's operand set is a property of its family alone — routing is a property of the
+    deployment's declaration, never of the query surface.
     """
     return {
         "department": ("category", frozenset({"eq", "in"})),
         "archive": ("category", frozenset({"eq", "in"})),
         "shelf": ("category", frozenset({"eq", "in"})),
         "title": ("string", frozenset({"eq", "in", "prefix", "contains"})),
+        "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
     }
 
 # The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
