@@ -70,7 +70,7 @@ def catalogue_filter_columns():
     id == source id for this corpus, an equality `verify()` re-derives rather than assumes.
     """
     from oracle import catalogue as cat  # noqa: PLC0415
-    from oracle.filters import CategoryColumn, KeywordColumn, StringColumn  # noqa: PLC0415
+    from oracle.filters import CategoryColumn, KeywordColumn  # noqa: PLC0415
 
     return {
         "department": CategoryColumn(
@@ -90,7 +90,7 @@ def catalogue_filter_columns():
             },
             codes=dict(cat.ARCHIVE_CODES),
         ),
-        "title": StringColumn(
+        "title": KeywordColumn(
             values={
                 e: text for e in range(cat.N_ITEMS) if (text := cat.title_of(e)) is not None
             }

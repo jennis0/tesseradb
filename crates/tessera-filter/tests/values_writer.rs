@@ -34,15 +34,12 @@ fn both(
     }
     w.finish(presence).expect("finish");
 
-    // The spools are transients, not artefacts: a caller that has finished a column must be left
+    // The spool is a transient, not an artefact: a caller that has finished a column must be left
     // with the two files the format names and nothing else.
     for stray in std::fs::read_dir(dir).expect("dir") {
         let name = stray.expect("entry").file_name();
         let name = name.to_string_lossy();
-        assert!(
-            !name.contains("spool") && !name.contains("offsets"),
-            "the writer left {name} behind"
-        );
+        assert!(!name.contains("spool"), "the writer left {name} behind");
     }
     if presence.is_some() {
         assert_eq!(read(&one_presence), read(&streamed_presence));
@@ -113,31 +110,6 @@ fn split(whole: &Codes, at: usize) -> Vec<Codes> {
         Codes::I64(v) => halves!(v, Codes::I64),
         Codes::F32(v) => halves!(v, Codes::F32),
         Codes::F64(v) => halves!(v, Codes::F64),
-        Codes::Text { .. } => unreachable!("text splits by value, not by slice"),
-    }
-}
-
-#[test]
-fn a_text_column_streams_byte_identically() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    // The empty string is a value a corpus may legitimately hold, and a multi-byte character is
-    // what makes the offsets more than a length count.
-    let values: Vec<String> = (0..1_000)
-        .map(|i| match i % 4 {
-            0 => String::new(),
-            1 => format!("value-{i}"),
-            2 => "naïve—dash".to_string(),
-            _ => "x".repeat(i % 37),
-        })
-        .collect();
-    for chunk in [1usize, 3, 128, 1_000] {
-        let whole = Codes::text(values.clone());
-        let chunks: Vec<Codes> = values
-            .chunks(chunk)
-            .map(|c| Codes::text(c.to_vec()))
-            .collect();
-        let (one, streamed) = both(dir.path(), &whole, chunks, None);
-        assert_eq!(one, streamed, "chunk size {chunk}");
     }
 }
 
@@ -145,8 +117,6 @@ fn a_text_column_streams_byte_identically() {
 fn an_empty_column_streams_byte_identically() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (one, streamed) = both(dir.path(), &Codes::U32(Vec::<u32>::new().into()), [], None);
-    assert_eq!(one, streamed);
-    let (one, streamed) = both(dir.path(), &Codes::text(Vec::<String>::new()), [], None);
     assert_eq!(one, streamed);
 }
 
@@ -227,11 +197,10 @@ fn an_abandoned_writer_leaves_no_spool_behind() {
         let mut w = ValueColumnWriter::create(
             &dir.path().join("v.arrow"),
             &dir.path().join("p.roaring"),
-            ColumnKind::Text,
+            ColumnKind::U32,
         )
         .expect("create");
-        w.push(&Codes::text(vec!["a".to_string(); 100]))
-            .expect("push");
+        w.push(&Codes::U32(vec![7u32; 100].into())).expect("push");
     }
     let left: Vec<_> = std::fs::read_dir(dir.path())
         .expect("dir")

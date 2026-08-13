@@ -1805,29 +1805,6 @@ fn write_column_values(
         if !held.is_empty() {
             push!(Codes::U32(held.into()));
         }
-    } else if attribute.ty == ScalarType::Utf8 {
-        let mut held: Vec<String> = Vec::new();
-        for (entity, value) in values.iter().enumerate() {
-            match value {
-                ScalarValue::Utf8(text) => {
-                    present.add(entity as u32);
-                    held.push(text.clone());
-                }
-                ScalarValue::Null => universal = false,
-                other => {
-                    return Err(BuildError::Invalid(format!(
-                        "attribute '{}' is declared `utf8` but carries {other:?}",
-                        attribute.name
-                    )))
-                }
-            }
-            if held.len() >= VALUE_CHUNK {
-                push!(Codes::text(held.drain(..)));
-            }
-        }
-        if !held.is_empty() {
-            push!(Codes::text(held));
-        }
     } else if attribute.vocabulary.is_some() {
         let mut held: Vec<u32> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
@@ -1945,9 +1922,6 @@ fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
 /// The kind of column a declared attribute stores — the type the writer is created with, before
 /// its first value arrives.
 fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
-    if attribute.ty == ScalarType::Utf8 {
-        return ColumnKind::Text;
-    }
     // A keyword's values file is an ordinal column, not a string one: the strings live once each
     // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
     // measured constants rather than at a string scan's (records §4.3).
@@ -1974,7 +1948,11 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
         ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
         ScalarType::F32 => ColumnKind::F32,
         ScalarType::F64 => ColumnKind::F64,
-        ScalarType::Utf8 | ScalarType::Keyword => unreachable!("both string types return above"),
+        // `utf8` survives as the *wire* type of a keyword's value and of a category's key
+        // (`DeclaredScalar::wire_type`); it is refused at the schema parse, so no declared
+        // attribute carries it.
+        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
+        ScalarType::Keyword => unreachable!("a keyword returns above"),
     }
 }
 
@@ -2036,9 +2014,8 @@ fn push_numeric_chunks(
         ScalarType::F32 => stream!(F32, Codes::F32),
         ScalarType::F64 => stream!(F64, Codes::F64),
         ScalarType::TimestampUs => stream!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 | ScalarType::Keyword => {
-            unreachable!("the caller handles both string types before reaching here")
-        }
+        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
+        ScalarType::Keyword => unreachable!("the caller handles a keyword before reaching here"),
     }
     Ok(())
 }
@@ -2550,7 +2527,7 @@ mod tests {
         };
         let note = crate::schema::Attribute {
             name: "note".to_string(),
-            ty: ScalarType::Utf8,
+            ty: ScalarType::Keyword,
             vocabulary: None,
             vocabulary_kind: None,
             index: false,

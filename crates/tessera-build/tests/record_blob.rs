@@ -41,6 +41,19 @@ fn note_of(e: u64) -> Option<String> {
     }
 }
 
+/// The same notes without the empty string, for the fixture that declares `note` **filterable**.
+///
+/// The two differ because the families differ, not to dodge a check. A blob row stores the bytes
+/// the wire carried, so the empty string is a value it can hold and this file asserts it does; a
+/// `keyword`'s values are dictionary keys, and the empty string is refused as a key at the build
+/// (records §4.3) — an unset field and a client bug both produce it, so absence is the null.
+fn filterable_note_of(e: u64) -> Option<String> {
+    match e {
+        e if e.is_multiple_of(5) => None,
+        e => Some(format!("note-{e}")),
+    }
+}
+
 fn score_of(e: u64) -> Option<f64> {
     (!e.is_multiple_of(7)).then_some(e as f64 * 0.5 + 0.25)
 }
@@ -55,7 +68,7 @@ fn flag_of(e: u64) -> i64 {
     (e % 2) as i64
 }
 
-fn write_points(path: &Path) {
+fn write_points(path: &Path, note: &dyn Fn(u64) -> Option<String>) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
@@ -75,7 +88,7 @@ fn write_points(path: &Path) {
             Arc::new(Float64Array::from(xs)),
             Arc::new(Float64Array::from(ys)),
             Arc::new(StringArray::from(
-                ids.iter().map(|&e| note_of(e)).collect::<Vec<_>>(),
+                ids.iter().map(|&e| note(e)).collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
                 ids.iter().map(|&e| score_of(e)).collect::<Vec<_>>(),
@@ -125,7 +138,7 @@ fn blob_schema() -> Schema {
     };
     Schema {
         attributes: vec![
-            neither("note", ScalarType::Utf8),
+            neither("note", ScalarType::Keyword),
             neither("score", ScalarType::F64),
             neither("count", ScalarType::I64),
             Attribute {
@@ -148,7 +161,7 @@ fn no_blob_schema() -> Schema {
     for attribute in &mut schema.attributes {
         match attribute.ty {
             // A string may be filter-only, never rendered.
-            ScalarType::Utf8 => attribute.index = true,
+            ScalarType::Keyword => attribute.index = true,
             _ => attribute.render = true,
         }
     }
@@ -181,11 +194,11 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
     }
 }
 
-fn build_with(schema: Schema) -> tempfile::TempDir {
+fn build_with(schema: Schema, note: &dyn Fn(u64) -> Option<String>) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
-    write_points(&points);
+    write_points(&points, note);
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&args(&points, &pairs, out, schema)).expect("the build succeeds");
@@ -245,7 +258,7 @@ fn record_dir(out: &Path) -> PathBuf {
 /// only home, so this is the whole of "the record always exists" for the build half.
 #[test]
 fn the_blob_carries_every_neither_columns_values() {
-    let dir = build_with(blob_schema());
+    let dir = build_with(blob_schema(), &note_of);
     let out = dir.path().join("bundle");
     let entity_of = source_to_entity(&out);
     let blob = RecordBlob::open_dir(&record_dir(&out), Access::Read).expect("the blob opens");
@@ -283,7 +296,7 @@ fn the_blob_carries_every_neither_columns_values() {
 /// puts them under the digest-or-refuse rule (records §7).
 #[test]
 fn the_blob_files_are_under_the_manifest_digest() {
-    let dir = build_with(blob_schema());
+    let dir = build_with(blob_schema(), &note_of);
     let out = dir.path().join("bundle");
     let bundle = open_bundle(&out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap();
@@ -301,7 +314,7 @@ fn the_blob_files_are_under_the_manifest_digest() {
 /// digested file does — the blob is not outside the rule every other artefact is under.
 #[test]
 fn a_corrupted_blob_file_refuses_the_bundle_open() {
-    let dir = build_with(blob_schema());
+    let dir = build_with(blob_schema(), &note_of);
     let out = dir.path().join("bundle");
     let blocks = record_dir(&out).join("blocks.bin");
     let mut bytes = std::fs::read(&blocks).unwrap();
@@ -317,7 +330,7 @@ fn a_corrupted_blob_file_refuses_the_bundle_open() {
 /// names nothing there: the stage and the open rule are both functions of the compiled schema.
 #[test]
 fn no_blob_columns_means_no_blob_files() {
-    let dir = build_with(no_blob_schema());
+    let dir = build_with(no_blob_schema(), &filterable_note_of);
     let out = dir.path().join("bundle");
     assert!(
         !record_dir(&out).exists(),

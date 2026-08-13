@@ -168,16 +168,15 @@ fn parse_operand(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FilterOperand::In(codes))
         }
-        // **`keyword` parses exactly as `utf8` does, and produces the same operands.** The four
-        // string predicates mean the same thing over both families — byte-exact equality, prefix
-        // and substring over the value the item carries — and which of them is answered by a flat
-        // byte scan and which by a dictionary and an ordinal scan is the *column's* business, not
-        // the request's. A separate set of operand variants would have made the wire shape depend
-        // on a storage choice the client is not told about and cannot act on.
-        (Family::Text | Family::Keyword, "eq") => {
-            Ok(FilterOperand::TextEquals(text_value(column, op, value)?))
-        }
-        (Family::Text | Family::Keyword, "in") => {
+        // **The operand kinds are the request's string predicates, not one family's storage.** The
+        // four mean byte-exact equality, prefix and substring over the value the item carries;
+        // which of them a dictionary resolve answers and which an ordinal scan does is the
+        // *column's* business, not the request's. Keeping them named for the predicate rather than
+        // for the family is what stops the wire shape depending on a storage choice the client is
+        // not told about and cannot act on — and is what the `text` family (records §4.4, ⊘
+        // unbuilt) joins without a wire change.
+        (Family::Keyword, "eq") => Ok(FilterOperand::TextEquals(text_value(column, op, value)?)),
+        (Family::Keyword, "in") => {
             let arr = value
                 .as_array()
                 .ok_or_else(|| bad(format!("column '{column}': `in` takes an array")))?;
@@ -187,10 +186,10 @@ fn parse_operand(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FilterOperand::TextIn(needles))
         }
-        (Family::Text | Family::Keyword, "prefix") => {
+        (Family::Keyword, "prefix") => {
             Ok(FilterOperand::TextPrefix(text_value(column, op, value)?))
         }
-        (Family::Text | Family::Keyword, "contains") => {
+        (Family::Keyword, "contains") => {
             Ok(FilterOperand::TextContains(text_value(column, op, value)?))
         }
         (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value)?)),
@@ -331,9 +330,7 @@ mod tests {
         move |c: &str| {
             if c == name {
                 Some(Family::Category)
-            } else if c == "title" {
-                Some(Family::Text)
-            } else if c == "submitter" {
+            } else if c == "title" || c == "submitter" {
                 Some(Family::Keyword)
             } else if c == "score" {
                 Some(Family::Numeric)
@@ -600,6 +597,6 @@ mod tests {
             format!("{err:?}").contains("does not take 'regex'"),
             "{err:?}"
         );
-        assert!(format!("{err:?}").contains("string column"), "{err:?}");
+        assert!(format!("{err:?}").contains("keyword column"), "{err:?}");
     }
 }

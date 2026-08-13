@@ -409,12 +409,6 @@ fn slice_codes(codes: &Codes, start: usize, len: usize) -> Codes {
         Codes::I64(v) => Codes::I64(v.slice(start, len)),
         Codes::F32(v) => Codes::F32(v.slice(start, len)),
         Codes::F64(v) => Codes::F64(v.slice(start, len)),
-        // The offsets are `len + 1` — a window carries the end of its last value — and the bytes
-        // ride along whole, which the writer's rebasing push is written for.
-        Codes::Text { bytes, offsets } => Codes::Text {
-            bytes: bytes.clone(),
-            offsets: offsets.slice(start, len + 1),
-        },
     }
 }
 
@@ -667,34 +661,6 @@ mod tests {
         );
     }
 
-    /// **Blanking removes the value bytes**, rather than overwriting them with a sentinel — the
-    /// distinction the whole retention argument rests on, asserted against the file itself.
-    #[test]
-    fn a_blanked_entitys_bytes_are_not_in_the_folded_column() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let base =
-            ValueColumn::universal(Codes::text(["alpha", "bravo", "charlie"].map(String::from)));
-        let (folded, _) = fold_to_bytes(dir.path(), "text", &[&base], &bitmap([1]), 3);
-        assert!(
-            !folded.windows(5).any(|w| w == b"bravo"),
-            "the blanked value's bytes are still in the column"
-        );
-        for kept in [&b"alpha"[..], &b"charlie"[..]] {
-            assert!(folded.windows(kept.len()).any(|w| w == kept));
-        }
-        // And the survivors still read back against their own entities, which a shifted offset
-        // array would break silently.
-        let column = ValueColumn::open(
-            &dir.path().join("text-values.arrow"),
-            Some(&dir.path().join("text-presence.roaring")),
-            tessera_filter::Access::Read,
-        )
-        .expect("the folded column opens");
-        assert_eq!(column.text_of(0), Some("alpha"));
-        assert_eq!(column.text_of(1), None);
-        assert_eq!(column.text_of(2), Some("charlie"));
-    }
-
     /// **The duplicate-entity refusal is the merge's own**, because after the merge there is one
     /// layer and the between-layer disjointness check can never see the overlap again.
     #[test]
@@ -723,9 +689,9 @@ mod tests {
 
     /// **A coalesced extent carries exactly the `(entity, value)` triples its inputs carried
     /// between them**, which is the whole of §5.2's content-preserving claim — asserted over a
-    /// text column, where the merge has to rebase offsets rather than concatenate slices, and over
-    /// a *second* coalesce of the first's output, which is the recursion the per-column selection
-    /// unit is what makes free.
+    /// *second* coalesce of the first's output, which is the recursion the per-column selection
+    /// unit is what makes free. The keyword family's own version of this claim, where the merge
+    /// additionally renumbers every ordinal, is in `keyword.rs`.
     #[test]
     fn a_coalesced_extent_carries_its_inputs_triples_and_coalesces_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -733,16 +699,7 @@ mod tests {
         // publishes, where the ids are issued from a high-water other slices also draw on.
         let extent = |base: u32| {
             let entities: Vec<u32> = (0..3).map(|k| base + k * 2).collect();
-            ValueColumn::partial(
-                Codes::text(
-                    entities
-                        .iter()
-                        .map(|e| format!("value-{e}"))
-                        .collect::<Vec<_>>(),
-                ),
-                bitmap(entities),
-            )
-            .expect("an extent")
+            ValueColumn::partial(codes_u32(entities.clone()), bitmap(entities)).expect("an extent")
         };
         let extents: Vec<ValueColumn> = [100u32, 200, 300, 400].into_iter().map(extent).collect();
         let refs: Vec<&ValueColumn> = extents.iter().collect();
@@ -755,10 +712,9 @@ mod tests {
 
         for column in [&first, &second, &again] {
             for entity in column.present().iter() {
-                let expected = format!("value-{entity}");
                 assert_eq!(
-                    column.text_of(entity),
-                    Some(expected.as_str()),
+                    column.value_of(entity).map(|v| v.raw()),
+                    Some(entity),
                     "entity {entity} reads back another entity's value"
                 );
             }
