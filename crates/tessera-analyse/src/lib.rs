@@ -108,11 +108,10 @@ impl Analyser {
     /// the same rule as the segmenter's own `is_word_like()` and deliberately so. Measured against
     /// icu_segmenter 2.2's compiled data, that flag drops content:
     ///
-    /// - a CJK run the dictionary resolves to a **single** word is reported not-word-like, so
-    ///   `中文`, `日本語` and `x 日本語` yield *no* tokens at all, while `中文分词测试` and
-    ///   `日本語のテキスト` — the same scripts, segmented into two or more words — yield theirs;
-    /// - Khmer has no model in that data, so `ភាសាខ្មែរ` is one not-word-like run and yields
-    ///   nothing.
+    /// **any run the dictionary resolves to a single word is reported not-word-like**, so `中文`,
+    /// `日本語`, `x 日本語` and `ភាសាខ្មែរ` yield *no* tokens at all, while `中文分词测试`,
+    /// `日本語のテキスト` and `ភាសាខ្មែរពិរោះណាស់` — the same scripts, segmented into two or more
+    /// words — yield theirs.
     ///
     /// Either would be a silent recall failure of the worst kind: a document containing exactly
     /// `中文` would be unfindable by the query `中文`, with no error anywhere. Keeping a segment on
@@ -120,11 +119,13 @@ impl Analyser {
     /// runs still carry no alphanumeric character and are still dropped — and it makes the failure
     /// mode *under-segmentation* (one token where two were wanted) rather than *no token at all*.
     ///
-    /// ⊘ **Khmer is therefore not word-segmented**, and `records-and-search.md` §4.4 names it among
-    /// the six scripts that need dictionary segmentation. It is indexed as one token per run, which
-    /// matches a whole-field query and not a word within it. The design's named escalation for
-    /// segmentation quality is `lindera`; this is the same class of gap and is stated rather than
-    /// hidden.
+    /// **All six of §4.4's dictionary scripts segment**, Khmer included — surveyed across
+    /// twenty-one scripts, every space-separated one returns exactly its source word count and
+    /// every no-space one splits. ⊘ What is imperfect is segmentation *quality* in the no-space
+    /// scripts: Japanese `はとても` splits as `はと`/`て`/`も` and Thai `มาก` as `มา`/`ก`, so a
+    /// query for the mis-split word does not find the document. That is the gap `lindera` is the
+    /// design's named escalation for, and it is a recall shortfall on word-internal queries rather
+    /// than a coverage hole.
     pub fn tokens(&self, text: &str) -> Vec<String> {
         let normalised = self.nfkc.normalize(text);
         let folded = self.case.fold_string(&normalised);

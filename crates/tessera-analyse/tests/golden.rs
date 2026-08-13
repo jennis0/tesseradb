@@ -56,8 +56,8 @@ fn the_golden_vectors_hold() {
     // cover Latin, CJK and Thai at minimum; asserting the coverage here stops a future edit from
     // quietly deleting the awkward cases rather than fixing them.
     for required in [
-        "latin", "japanese", "chinese", "thai", "lao", "burmese", "khmer", "mixed-script",
-        "chinese-single-word",
+        "latin", "japanese", "chinese", "thai", "lao", "burmese", "khmer", "khmer-phrase",
+        "mixed-script", "chinese-single-word",
     ] {
         assert!(
             families.contains(&required),

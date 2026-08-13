@@ -59,9 +59,15 @@
     },
     {
       "family": "khmer",
-      "why": "KNOWN GAP, stated not hidden: icu_segmenter 2.2 carries no Khmer model, so the run is not word-segmented and is indexed as one token. That matches a whole-field query and not a word within it. records-and-search.md 4.4 names Khmer among the six scripts needing dictionary segmentation; lindera is the design's named escalation.",
+      "why": "Khmer has a working dictionary; this compound is one word in it. The phrase vector below is what shows the dictionary running, and both are here because the single-word case is the one that used to yield nothing at all.",
       "input": "ភាសាខ្មែរ",
       "tokens": ["ភាសាខ្មែរ"]
+    },
+    {
+      "family": "khmer-phrase",
+      "why": "The dictionary segmenting a Khmer run into three words — the evidence that the family is covered, against an earlier claim in this repository that icu_segmenter carries no Khmer model. It does.",
+      "input": "ភាសាខ្មែរពិរោះណាស់",
+      "tokens": ["ភាសាខ្មែរ", "ពិរោះ", "ណាស់"]
     },
     {
       "family": "mixed-script",
