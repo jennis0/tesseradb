@@ -266,3 +266,12 @@ paths = [
   "docs/design/conformance.md",
   "docs/design/per-point-attributes.md",
 ]
+
+# The performance-suite design (owner ask, 2026-08-13): what the new surface must measure, at
+# what scales, against which budget. A design task, so it owns its own new document and nothing
+# else — the suite it specifies is built afterwards, by tracks that own code.
+[track.perfdesign]
+paths = [
+  "docs/design/performance-suite.md",
+  "docs/design/README.md",
+]
