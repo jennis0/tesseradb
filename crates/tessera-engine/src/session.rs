@@ -900,6 +900,11 @@ impl Engine {
                 .get(&partition)
                 .map(|p| p.manifest.record_extents.clone())
                 .unwrap_or_default();
+            let text_extents = bundle
+                .partitions
+                .get(&partition)
+                .map(|p| p.manifest.text_extents.clone())
+                .unwrap_or_default();
             Arc::new(
                 crate::filter::FilterColumns::open(
                     &prefix_dir,
@@ -908,6 +913,7 @@ impl Engine {
                     &bundle.manifest.vocabularies,
                     &extents,
                     &record_extents,
+                    &text_extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
                     // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
@@ -2288,6 +2294,7 @@ pub(crate) fn open_rotation(
             // The record blob rotates with the prefix for the reason the value columns do: the
             // fold rewrites it, and the superseded prefix's files are pre-blanking.
             &partition.manifest.record_extents,
+            &partition.manifest.text_extents,
             true,
         )
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,

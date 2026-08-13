@@ -790,6 +790,7 @@ listing    = "public"
   bronze = 1
   silver = 2
   gold   = 3
+
 "#;
 
 fn note_of(source: u64) -> String {
@@ -811,6 +812,7 @@ fn tier_of(entity: u64) -> &'static str {
 fn tier_code_of(entity: u64) -> u8 {
     (entity % 3) as u8 + 1
 }
+
 
 /// The blob row the fixture's generation functions predict for `source`: `note` is declared at
 /// position 1 and `revision` at position 2, and the field tag **is** the declared position

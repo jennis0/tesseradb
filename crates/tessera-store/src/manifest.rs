@@ -595,6 +595,45 @@ pub struct AttrExtent {
     pub offsets: Option<String>,
 }
 
+/// One entry of `text_extents`: one flush's text layer — **dictionary, postings and presence, and
+/// no value column** (`records-and-search.md` §4.4).
+///
+/// **A separate list from [`AttrExtent`] because the shape genuinely differs**, as the record
+/// blob's does. Every other indexed family stores one value per entity, so its extent is a value
+/// slice plus presence with the dictionary beside it; a text field has *many* terms per entity, so
+/// there is no per-entity slot to store and the postings are the whole index. Widening `AttrExtent`
+/// instead would make `values` optional for one family and force every reader of every other family
+/// to handle an absence that cannot occur.
+///
+/// The three files are **one record**, which is what makes them one atomic unit (§7, review B2):
+/// this extent's postings are positions in *this* extent's dictionary and name nothing against
+/// another's, so a reader that saw a new dictionary beside old postings would recolour the layer
+/// with no symptom.
+///
+/// ⊘ §7's flush paragraph reads "for keyword and text the extent's own sorted dictionary, ordinals
+/// against it, and postings" — the *ordinals* clause is a keyword's and cannot be a text column's,
+/// there being no single ordinal per entity to hold. §4.4 is the family's own section and is
+/// explicit that `index = true` adds "only the per-layer token dictionary and hybrid postings";
+/// this follows §4.4, and §7 owes the narrowing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TextExtent {
+    /// The column this extent belongs to.
+    pub column: String,
+    /// Prefix-relative path of the extent's **own** front-coded token dictionary. An extent's
+    /// postings are positions in this dictionary and name nothing against another's.
+    pub dict: String,
+    /// Prefix-relative path of the extent's postings over that dictionary.
+    pub postings: String,
+    /// Prefix-relative path of the entities this extent holds a value for.
+    ///
+    /// **Not derivable from the postings**, which is why it is stored: an entity whose text
+    /// analysed to no terms at all — an empty string, a field of pure punctuation — carries a value
+    /// and appears in no posting. Without this the layer would report it absent, and a later
+    /// extent could claim it.
+    pub presence: String,
+}
+
 /// One entry of `record_extents`: one flush's record-blob layer (`records-and-search.md` §3, §7).
 ///
 /// The record blob is not a column, so its extents cannot live in [`AttrExtent`]'s list — that
@@ -611,7 +650,8 @@ pub struct AttrExtent {
 /// the same epic as the code that reads it. A reader that ignored it would answer drill-down
 /// short over post-build entities — the failure the extent exists to remove — so there is no
 /// version of this reader for which ignoring it is a posture.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecordExtent {
     /// Prefix-relative path of the extent's zstd blocks, rows in entity order (records §3).
     pub blocks: String,
@@ -697,6 +737,18 @@ pub struct SegmentsManifest {
     /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
     /// omits it is malformed, not extent-free.
     pub record_extents: Vec<RecordExtent>,
+    /// One flush's text layer per entry, oldest first — the base build's index is not in this list
+    /// and is opened from the column's own directory, exactly as `record_extents` treats the base
+    /// blob.
+    ///
+    /// The layers are **disjoint in entity space** (**I9**), so a `match` unions across them and
+    /// order decides nothing. That disjointness is why this list needs no coverage check of the
+    /// kind [`SegmentsManifest::attr_extents`] carries: an entity id is never reused, so no two
+    /// text layers can hold the same entity's terms.
+    ///
+    /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
+    /// omits it is malformed, not extent-free.
+    pub text_extents: Vec<TextExtent>,
     #[serde(default)]
     pub external_id_runs: Vec<String>,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
@@ -967,6 +1019,7 @@ mod tests {
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+            text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),

@@ -617,11 +617,15 @@ struct Layers {
     /// identity rather than from a default. A query is analysed with it, which is what makes the
     /// two token streams the same one.
     analyser: Option<Arc<tessera_analyse::Analyser>>,
-    /// A `text` column's token dictionary, held here rather than on a [`Layer`] because this family
-    /// has no layers: its terms are postings and its prose is a blob row, so there is no value
-    /// column for a layer to hold. ⊘ Per-extent token dictionaries arrive with the text flush
-    /// (#116); until then a text column's index is the base build's alone.
-    text_dict: Option<Arc<SortedDict>>,
+    /// A `text` column's layers: the base build's index first, then one per flush extent, oldest
+    /// first. Held here rather than on a [`Layer`] because that type is a value column and its
+    /// dictionary, and this family has neither — its terms are postings and its prose is a blob
+    /// row.
+    ///
+    /// **Disjoint in entity space by I9**, so a `match` unions across them and order decides
+    /// nothing; there is no coverage check to keep, because an entity id is never reused and no
+    /// two layers can hold the same entity's terms.
+    text: Vec<TextLayer>,
     route: Route,
     /// The family whose rules this column's values are read by — carried so a layer's storage can
     /// be checked against its declaration rather than inferred from it. A `keyword` column's layers
@@ -641,6 +645,40 @@ struct Layers {
 ///
 /// `None` is the build's base column, which is named in `MANIFEST.files` rather than in
 /// `attr_extents` and which no entity-space pass may take (`crate::coalesce`'s module doc).
+/// One `text` layer: its own dictionary, its own postings over that dictionary, and the entities
+/// it holds a value for.
+///
+/// **The three travel together because an ordinal is a position in *this* dictionary.** Postings
+/// read against another layer's terms would answer every `match` from the wrong words with no
+/// symptom, which is why the manifest names them as one record.
+#[derive(Debug, Clone)]
+struct TextLayer {
+    dict: Arc<SortedDict>,
+    postings: Arc<ColumnPostings>,
+    /// The entities this layer holds a value for. **Stored rather than derived from the postings**:
+    /// text that analyses to no terms — an empty string, a field of pure punctuation — carries a
+    /// value and appears in no posting.
+    ///
+    /// ⊘ Read by nobody yet. `match` unions across layers and needs no coverage, the layers being
+    /// disjoint by **I9**; this is here for the fold, which must know which entities a layer stood
+    /// for in order to rebuild without it (#117), and for the coverage check a coalesce would owe.
+    #[allow(dead_code)]
+    present: Bitmap,
+    /// The manifest path that named this layer, or `None` for the base build's index — the identity
+    /// a coalesce or fold names a layer by, for [`Layer::values_rel`]'s reason.
+    #[allow(dead_code)]
+    dict_rel: Option<String>,
+}
+
+/// The three files one published text extent names, resolved to paths.
+#[derive(Debug, Clone)]
+pub struct TextExtentPaths {
+    pub column: String,
+    pub dict: std::path::PathBuf,
+    pub postings: std::path::PathBuf,
+    pub presence: std::path::PathBuf,
+}
+
 #[derive(Debug, Clone)]
 struct Layer {
     values_rel: Option<String>,
@@ -982,6 +1020,8 @@ impl FilterColumns {
     /// rules that it belongs only to mappings the fold owns and must never be applied to these —
     /// which are the request path's. A `bool` here cannot express it, so the rule is enforced by the
     /// signature rather than by a comment asking the next caller to remember it.
+    #[allow(clippy::too_many_arguments)] // One argument per artefact class the manifest names;
+    // bundling them into a struct would be a second shape to keep in step with the manifest.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
@@ -989,6 +1029,7 @@ impl FilterColumns {
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
         record_extents: &[tessera_store::manifest::RecordExtent],
+        text_extents: &[tessera_store::manifest::TextExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
         let partition_dir = prefix_dir.join("partitions").join(partition);
@@ -1032,11 +1073,34 @@ impl FilterColumns {
                     continue;
                 }
                 let dir = partition_dir.join("attrs").join(&scalar.name);
-                let text_dict = Arc::new(SortedDict::open_dir(&dir, request_access(mmap))?);
-                // Positional, not keyed: a token ordinal is a dense position in this dictionary,
-                // where a category's code is a scattered vocabulary entry (§2.5).
-                let postings =
-                    Arc::new(ColumnPostings::open(&dir.join("postings.arrow"), mmap)?);
+                // The base build's layer, then one per published extent, oldest first.
+                let mut text_layers = vec![TextLayer {
+                    dict: Arc::new(SortedDict::open_dir(&dir, request_access(mmap))?),
+                    // Positional, not keyed: a token ordinal is a dense position in this
+                    // dictionary, where a category's code is a scattered vocabulary entry (§2.5).
+                    postings: Arc::new(ColumnPostings::open(&dir.join("postings.arrow"), mmap)?),
+                    // The base covers every entity the build knew about that carried a value; it
+                    // writes no presence file of its own, so the postings' union is the closest
+                    // available and is only used to answer "which layer holds this entity".
+                    present: Bitmap::new(),
+                    dict_rel: None,
+                }];
+                for extent in text_extents.iter().filter(|e| e.column == scalar.name) {
+                    text_layers.push(TextLayer {
+                        dict: Arc::new(SortedDict::open(
+                            &prefix_dir.join(&extent.dict),
+                            request_access(mmap),
+                        )?),
+                        postings: Arc::new(ColumnPostings::open(
+                            &prefix_dir.join(&extent.postings),
+                            mmap,
+                        )?),
+                        present: Bitmap::deserialize::<croaring::Portable>(&std::fs::read(
+                            prefix_dir.join(&extent.presence),
+                        )?),
+                        dict_rel: Some(extent.dict.clone()),
+                    });
+                }
                 // **The analyser that indexed it, not the default.** A bundle records the identity
                 // its build resolved; opening with anything else would answer `match` against a
                 // token stream the index was not built from.
@@ -1073,9 +1137,9 @@ impl FilterColumns {
                         layers: Vec::new(),
                         covered: Bitmap::new(),
                         filterable: true,
-                        postings: Some(postings),
+                        postings: None,
                         analyser: Some(analyser),
-                        text_dict: Some(text_dict),
+                        text: text_layers,
                         route: Route::Postings,
                         family,
                     },
@@ -1124,7 +1188,7 @@ impl FilterColumns {
                     filterable: entity,
                     postings,
                     analyser: None,
-                    text_dict: None,
+                    text: Vec::new(),
                     route,
                     family,
                 },
@@ -1333,6 +1397,7 @@ impl FilterColumns {
         &self,
         extents: &[PublishedExtent],
         records: &[RecordExtentPaths],
+        texts: &[TextExtentPaths],
     ) -> std::io::Result<FilterColumns> {
         // The record blob's extent composes here for the same reason a filter extent does: the
         // manifest entry makes the bytes reachable to a *reopen*, and this process serves from the
@@ -1354,6 +1419,30 @@ impl FilterColumns {
             access: self.access,
             records,
         };
+        // A text extent appends a layer: its own dictionary, its own postings, and the entities it
+        // covers. Composed here for the same reason a filter extent is — a published layer the live
+        // generation does not hold answers no `match` until the next fold.
+        for text in texts {
+            let Some(layers) = next.columns.get_mut(&text.column) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a flush published a text extent for column '{}', which this generation \
+                         does not hold",
+                        text.column
+                    ),
+                ));
+            };
+            layers.text.push(TextLayer {
+                dict: Arc::new(SortedDict::open(&text.dict, self.access)?),
+                postings: Arc::new(ColumnPostings::open(
+                    &text.postings,
+                    self.access != tessera_filter::Access::Read,
+                )?),
+                present: Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&text.presence)?),
+                dict_rel: Some(text.dict.display().to_string()),
+            });
+        }
         for (column, values_rel, extent, dict) in extents {
             next.compose(column, values_rel, Arc::clone(extent), dict.clone())?;
         }
@@ -1498,16 +1587,11 @@ impl FilterColumns {
             .ok_or_else(|| FilterError::UndeclaredColumn(name.to_string()))?;
 
         // **Text answers from postings and nothing else**, because it has nothing else: no value
-        // column, no layers, and ⊘ no flush extent until #116 — so a `match` sees the base build's
-        // terms and a batch ingested since lags until the fold. That staleness is stated at the
-        // flush's own exclusion; here it means the postings are the whole answer rather than the
-        // base's half of one.
+        // column and no scan. Every layer is asked and the answers are unioned — the base build's
+        // index plus one per flush — which is sound because the layers are disjoint in entity space
+        // (I9) and each holds its own entities' terms whole.
         if column.family == Family::Text {
-            let (Some(postings), Some(dict), Some(analyser)) = (
-                column.postings.as_ref(),
-                column.text_dict.as_ref(),
-                column.analyser.as_ref(),
-            ) else {
+            let Some(analyser) = column.analyser.as_ref() else {
                 // Unreachable: `open` inserts a text column only with both, and refuses if either
                 // is absent. Empty is the fail-safe reading — it narrows.
                 return Ok(Bitmap::new());
@@ -1522,12 +1606,15 @@ impl FilterColumns {
             tokens.sort();
             tokens.dedup();
             let minimum = minimum.unwrap_or(tokens.len() as u32);
-            return text_match(dict, postings, &tokens, minimum, candidate).map_err(|e| {
-                FilterError::PostingsUnreadable {
-                    column: name.to_string(),
-                    detail: e.to_string(),
-                }
-            });
+            let mut out = Bitmap::new();
+            for layer in &column.text {
+                out |= text_match(&layer.dict, &layer.postings, &tokens, minimum, candidate)
+                    .map_err(|e| FilterError::PostingsUnreadable {
+                        column: name.to_string(),
+                        detail: e.to_string(),
+                    })?;
+            }
+            return Ok(out);
         }
 
         // **The routed pair, and the split between them is the whole of decision 0063.** The base
@@ -2578,7 +2665,7 @@ mod keyword_tests {
                 filterable: true,
                 postings: None,
                 analyser: None,
-                text_dict: None,
+                text: Vec::new(),
                 route: Route::Scan,
                 family: Family::Keyword,
             },

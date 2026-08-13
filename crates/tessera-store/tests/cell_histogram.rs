@@ -118,6 +118,7 @@ fn build_bundle(root: &Path) {
         dict_extents: vec![],
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        text_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
         tombstones: vec![],

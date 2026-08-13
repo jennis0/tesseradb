@@ -298,6 +298,7 @@ fn fixture() -> Fixture {
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
         &opened.partitions[&phash].manifest.record_extents,
+        &opened.partitions[&phash].manifest.text_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
         true,
@@ -1087,6 +1088,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &opened.manifest.vocabularies,
             extents,
             &[],
+            &[],
             true,
         )
     };
@@ -1165,7 +1167,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             "attrs/title/extents/overlapping.arrow".to_string(),
             overlapping,
             Some(dict),
-        )], &[])
+        )], &[], &[])
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
@@ -1179,7 +1181,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             "attrs/no_such_column/extents/stray.arrow".to_string(),
             stray,
             Some(stray_dict),
-        )], &[])
+        )], &[], &[])
         .is_err());
 }
 
@@ -2128,6 +2130,7 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &fx.declared,
         &fx.vocabularies,
         &fx.extents,
+        &[],
         &[],
         true,
     )
@@ -3545,7 +3548,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
                 extent(&[200, 201]),
                 None,
             ),
-        ], &[])
+        ], &[], &[])
         .expect("two extents above the build's high-water compose");
 
     let window =

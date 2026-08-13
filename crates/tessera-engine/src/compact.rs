@@ -1109,6 +1109,28 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     let mut attr_written = 0u64;
     let file_len = |path: &std::path::Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
+    // ⊘ **A text column blocks the fold, and the refusal is deliberate** (#117 rebuilds its index
+    // from the surviving values). The two alternatives are both worse than stopping. Folding it as
+    // a value column is impossible — it has none — and *carrying its index forward* would keep a
+    // deleted entity's terms in the postings, so a `match` would go on naming an entity the fold
+    // just executed a deletion for: Rule F broken, fail-open, silent.
+    //
+    // The cost of refusing is real and belongs here rather than in a footnote: **compaction is what
+    // executes deletions**, so a bundle with an indexed text column retires none until #117 lands.
+    if let Some(text) = ctx
+        .declared_scalars
+        .iter()
+        .find(|d| d.arrow_type == tessera_spatial::tiler::ScalarType::Text && d.index)
+    {
+        return Err(FoldFailed(format!(
+            "column '{}' is an indexed text column, whose index the fold cannot yet rebuild \
+             (#117). Refusing: carrying it forward would leave a deleted entity's terms in the \
+             postings, which is Rule F broken silently, and no deletion in this bundle retires \
+             until that pass exists",
+            text.name
+        )));
+    }
+
     for scalar in ctx
         .declared_scalars
         .iter()

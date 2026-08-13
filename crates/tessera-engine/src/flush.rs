@@ -189,6 +189,10 @@ pub(crate) struct FlushContext {
     /// (records §4.2) — and where each one's value sits in a buffered row's positional scalar
     /// list. The third home's schema, beside the other two's.
     pub(crate) record_schema: Vec<RecordColumnSpec>,
+    /// The indexed `text` columns, each with the analyser its declaration resolved. Separate from
+    /// [`FlushContext::filter_schema`] because a text column has no value column for that pass to
+    /// write — its extent is a dictionary, postings and presence, and nothing per entity.
+    pub(crate) text_schema: Vec<TextColumnSpec>,
     /// The dictionary the plan's terms were resolved against, and the one promotion extends.
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every **extension** term id this plan's items carry (§3.2).
@@ -252,6 +256,10 @@ pub(crate) struct CompletedFlush {
     /// unlike a filter extent, no live reader composes it, because drill-down opens the stack
     /// from the manifest.
     pub(crate) record_extent: Option<RecordExtent>,
+    /// This flush's text layers, one per indexed `text` column. Composed onto the live generation
+    /// at publication, exactly as a filter extent is: a `match` over a batch flushed since the
+    /// build must see it without waiting for a fold.
+    pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
@@ -413,6 +421,7 @@ pub(crate) fn execute_flush(
 
     // ---- the record-blob extent (records §7) ------------------------------------------------
     let record_extent = write_record_extent(&plan, &ctx)?;
+    let text_extents = write_text_extents(&plan, &ctx)?;
     if let Some(extent) = &record_extent {
         for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
             files.insert(
@@ -446,6 +455,7 @@ pub(crate) fn execute_flush(
         dict_extent,
         filter_extents,
         record_extent,
+        text_extents,
         files,
         tier,
         tier_path: tier_rel,
@@ -949,6 +959,108 @@ pub(crate) struct RecordColumnSpec {
 /// The extent is reopened before it is named, so a writer defect refuses the flush here rather
 /// than publishing a manifest whose extent the fail-closed reader then refuses on every
 /// drill-down.
+/// One indexed `text` column, for the flush's own pass over it.
+///
+/// The analyser is carried rather than looked up per row: constructing one deserialises the
+/// segmenter's dictionaries, and a flush that built one per value would pay that per value.
+#[derive(Clone)]
+pub(crate) struct TextColumnSpec {
+    /// Position in a buffered row's scalar list.
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) analyser: std::sync::Arc<tessera_analyse::Analyser>,
+}
+
+/// This flush's text layers: per indexed `text` column, its own dictionary over the terms this
+/// batch produced, postings against that dictionary, and the entities it holds a value for.
+///
+/// **Its own dictionary, not the base's** — the ordinals are positions in *this* extent's term set
+/// and name nothing against another's, which is what makes the three files one atomic manifest
+/// record (§7, review B2). A flushed batch is bounded and there is no shared dictionary to promote
+/// into, which is what keeps the near-unique-string quadratic hazard structurally impossible rather
+/// than merely avoided.
+///
+/// **Presence is stored rather than derived from the postings**, because an entity whose text
+/// analyses to no terms at all — an empty string, a field of pure punctuation — carries a value and
+/// appears in no posting. Deriving coverage from the postings would report it absent.
+///
+/// The analysis runs here, at flush execution on the pool (write-path §4.3), and never on the
+/// serial group-commit section whose latency both the ingest and the deny lane share.
+fn write_text_extents(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<Vec<tessera_store::manifest::TextExtent>, FlushFailed> {
+    if ctx.text_schema.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(ctx.text_schema.len());
+    for spec in &ctx.text_schema {
+        let rel_dir = format!(
+            "partitions/{}/attrs/{}/extents",
+            ctx.partition, spec.name
+        );
+        let dir = ctx.prefix_dir.join(&rel_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
+
+        let mut terms: std::collections::BTreeMap<String, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        let mut presence = croaring::Bitmap::new();
+        for (entity, row) in &plan.items {
+            let entity = entity.raw() as u32;
+            let value = row.scalars.get(spec.index);
+            let prose = match value {
+                Some(WalScalar::Utf8(s)) => s.as_str(),
+                // Absence carries no value and no terms; anything else is a buffered row whose
+                // shape disagrees with the declaration, which the flush refuses rather than guesses
+                // at.
+                Some(WalScalar::Null) | None => continue,
+                Some(other) => {
+                    return Err(FlushFailed(format!(
+                        "column '{}' is text but a buffered row carries {other:?}",
+                        spec.name
+                    )))
+                }
+            };
+            presence.add(entity);
+            for token in spec.analyser.tokens(prose) {
+                let postings = terms.entry(token).or_default();
+                if postings.last() != Some(&entity) {
+                    postings.push(entity);
+                }
+            }
+        }
+
+        let dict_rel = format!("{rel_dir}/{}-dict.bin", ctx.seg_id);
+        let postings_rel = format!("{rel_dir}/{}-postings.arrow", ctx.seg_id);
+        let presence_rel = format!("{rel_dir}/{}-presence.roaring", ctx.seg_id);
+        tessera_filter::write_sorted_dict(
+            &ctx.prefix_dir.join(&dict_rel),
+            terms.keys().map(String::as_str),
+        )
+        .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
+        let per_term: Vec<Vec<u32>> = terms.into_values().collect();
+        tessera_authz::postings::write_postings(
+            &ctx.prefix_dir.join(&postings_rel),
+            &per_term,
+            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        )
+        .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
+        std::fs::write(
+            ctx.prefix_dir.join(&presence_rel),
+            presence.serialize::<croaring::Portable>(),
+        )
+        .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
+
+        out.push(tessera_store::manifest::TextExtent {
+            column: spec.name.clone(),
+            dict: dict_rel,
+            postings: postings_rel,
+            presence: presence_rel,
+        });
+    }
+    Ok(out)
+}
+
 fn write_record_extent(
     plan: &FlushPlan,
     ctx: &FlushContext,

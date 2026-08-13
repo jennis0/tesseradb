@@ -871,6 +871,7 @@ mod tests {
             }],
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+            text_extents: Vec::new(),
             external_id_runs: vec!["entities/external-ids-0.arrow".to_string()],
             locator_extents: Vec::new(),
             tombstones: Vec::new(),

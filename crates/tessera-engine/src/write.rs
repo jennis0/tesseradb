@@ -2869,6 +2869,45 @@ pub(crate) fn filter_schema_of(
         .collect()
 }
 
+/// The indexed `text` columns, each with the analyser its declaration named — resolved once per
+/// dispatch rather than per row, because constructing one deserialises the segmenter's dictionaries.
+///
+/// **Refuses rather than defaults when the binary does not carry the recorded analyser.** A flush
+/// that indexed a batch with a different pipeline than the base build used would leave one column
+/// whose two layers disagree about what a word is, and a `match` would answer from whichever layer
+/// happened to hold the entity — a wrong answer with no error anywhere.
+pub(crate) fn text_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Result<Vec<crate::flush::TextColumnSpec>, crate::flush::FlushFailed> {
+    let mut out = Vec::new();
+    for (index, d) in manifest.declared_scalars.iter().enumerate() {
+        if d.arrow_type != tessera_spatial::tiler::ScalarType::Text || !d.index {
+            continue;
+        }
+        let identity = d.analyser.as_deref().ok_or_else(|| {
+            crate::flush::FlushFailed(format!(
+                "column '{}' is text but the manifest records no analyser identity",
+                d.name
+            ))
+        })?;
+        let analyser = tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+            .filter(|a| a.identity() == identity)
+            .ok_or_else(|| {
+                crate::flush::FlushFailed(format!(
+                    "column '{}' was indexed by analyser '{identity}', which this binary does not \
+                     carry — a flush cannot extend an index whose terms it cannot reproduce",
+                    d.name
+                ))
+            })?;
+        out.push(crate::flush::TextColumnSpec {
+            index,
+            name: d.name.clone(),
+            analyser: std::sync::Arc::new(analyser),
+        });
+    }
+    Ok(out)
+}
+
 /// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
 /// also its field tag (records §3).
 ///
@@ -3070,6 +3109,7 @@ mod vocabulary_extensions_tests {
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+        text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -4739,6 +4779,11 @@ impl Executor {
         published_overlay.retire(&executed);
 
         let mut segments_manifest = SegmentsManifest {
+            // ⊘ The fold rebuilds a text column's index whole from the surviving values (#117);
+            // until it does, the new prefix carries none and a `match` answers from the base the
+            // fold just wrote. Empty is the honest state, not a dropped extent — the fold's own
+            // inputs are gone with the prefix it consumed.
+            text_extents: Vec::new(),
             // **Live, and untouched.** Deriving either from the fold's inputs moves the watermark
             // backwards past every post-snapshot entity, and composition treats an entity at or
             // above it as buffered rather than rowed — so the gap goes invisible to every principal
@@ -5495,6 +5540,22 @@ impl Executor {
         let scalar_schema = scalar_schema_of(manifest);
         let filter_schema = filter_schema_of(manifest);
         let record_schema = record_schema_of(manifest);
+        // **An unusable analyser stops the dispatch rather than flushing an unindexed batch.** A
+        // flush that skipped the column would leave the buffer's text out of the index with no
+        // error, and the next fold would rebuild from values that are in the blob — so the gap
+        // would close silently and look like nothing had happened.
+        let text_schema = match text_schema_of(manifest) {
+            Ok(schema) => schema,
+            Err(e) => {
+                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e.0,
+                    "ALARM: a text column's analyser is not one this binary carries; no flush is \
+                     dispatched, and the buffer is retained"
+                );
+                return;
+            }
+        };
         let render_indices: Vec<usize> = manifest.render_indices().collect();
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
@@ -5586,6 +5647,7 @@ impl Executor {
                     render_indices: render_indices.clone(),
                     filter_schema: filter_schema.clone(),
                     record_schema: record_schema.clone(),
+                    text_schema: text_schema.clone(),
                     dict: Arc::clone(&generation.dict),
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
@@ -7227,7 +7289,21 @@ impl Executor {
                 directory: record_dir.join(&e.directory),
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_extents(&extents, &record_paths) {
+        let text_paths: Vec<crate::filter::TextExtentPaths> = completed
+            .text_extents
+            .iter()
+            .map(|e| crate::filter::TextExtentPaths {
+                column: e.column.clone(),
+                dict: record_dir.join(&e.dict),
+                postings: record_dir.join(&e.postings),
+                presence: record_dir.join(&e.presence),
+            })
+            .collect();
+        let filter_columns =
+            match live
+                .filter_columns
+                .with_extents(&extents, &record_paths, &text_paths)
+            {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -7281,6 +7357,13 @@ impl Executor {
         // what `record_extents` names, so bytes this list omits answer no drill-down and bytes it
         // names but that are absent refuse the open (records §7's fail-closed rule).
         manifest.record_extents.extend(completed.record_extent);
+        // The text layers, under the same two-obligation rule: the files are already digested in
+        // `files`, and this entry is what makes them reachable to a reopen. The live generation
+        // composes them below — a published layer no live reader holds answers no `match` until the
+        // next fold, which is the defect the record blob's own composition was missing.
+        manifest
+            .text_extents
+            .extend(completed.text_extents.iter().cloned());
         write_deny_state(&mut manifest, &live.overlay);
         write_vocabulary_extensions(
             &mut manifest,

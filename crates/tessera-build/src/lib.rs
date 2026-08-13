@@ -722,6 +722,7 @@ fn write_manifests(
         dict_extents,
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        text_extents: Vec::new(),
         external_id_runs,
         locator_extents: Vec::new(),
         tombstones: Vec::new(),
