@@ -1,0 +1,22 @@
+[package]
+name = "tessera-analyse"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# **The analyser is icu4x, and that is the capability rather than an interface**
+# (`records-and-search.md` §4.4). Supporting a range of languages is a requirement of this design,
+# which is what rules out the obvious tokeniser: split-on-non-alphanumerics is Latin-only and
+# produces garbage for every script without inter-word spaces. These three crates are Unicode's own
+# pure-Rust implementation of the three stages, with no JVM (decision 0021).
+#
+# `icu_normalizer` and `icu_properties` are already in the tree transitively (via `idna` → `url`);
+# `icu_casemap` and `icu_segmenter` are new, and `icu_segmenter`'s compiled data carries the
+# dictionaries for the scripts with no inter-word spaces. Promoting icu4x to a direct dependency of
+# an indexing crate is stated here rather than hidden — the `memchr` precedent.
+icu_normalizer = "2"
+icu_casemap = "2"
+icu_segmenter = "2"
+
+[dev-dependencies]
+serde_json = "1"

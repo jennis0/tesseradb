@@ -9,6 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 tessera-build = { path = "../tessera-build" }
+# The `tokenise` verb only — the conformance oracle's access to the shipped analyser, so the two
+# sides of the text differential share one pipeline (`records-and-search.md` §4.4).
+tessera-analyse = { path = "../tessera-analyse" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-server = { path = "../tessera-server" }
 tessera-store = { path = "../tessera-store" }

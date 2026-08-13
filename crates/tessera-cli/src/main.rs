@@ -123,6 +123,21 @@ enum Command {
         /// Bundle root (the directory containing `CURRENT`).
         bundle: PathBuf,
     },
+    /// Analyse text through the shipped tokeniser, one input per line, tokens tab-separated.
+    ///
+    /// **The conformance oracle's access to the analyser** (`records-and-search.md` §4.4). The
+    /// oracle derives expected `match` results from the fixture's own values and must pass them
+    /// through the *same* pipeline the index was built with; reimplementing it in Python would
+    /// test PyICU's ICU4C against icu4x rather than testing Tessera. This verb is that access, on
+    /// the harness's existing drive-the-CLI precedent.
+    Tokenise {
+        /// Text to analyse. Repeatable. With none given, reads one input per line from stdin.
+        #[arg(long = "text")]
+        text: Vec<String>,
+        /// Print the analyser's version and exit — what a bundle records, and what a rebuild moves.
+        #[arg(long)]
+        version: bool,
+    },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     Serve {
         /// Path to `tessera.toml` (SA §7).
@@ -732,6 +747,29 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        Command::Tokenise { text, version } if version => {
+            println!("{}", tessera_analyse::ANALYSER_VERSION);
+            let _ = text;
+            ExitCode::SUCCESS
+        }
+        Command::Tokenise { text, .. } => {
+            let analyser = tessera_analyse::Analyser::new();
+            // Tab-separated because a token can contain anything but a tab or a newline: the
+            // segmenter's word-like segments never span a line break, and a caller that split on
+            // spaces would corrupt nothing here but would elsewhere.
+            let emit = |line: &str| println!("{}", analyser.tokens(line).join("\t"));
+            if text.is_empty() {
+                use std::io::BufRead;
+                for line in std::io::stdin().lock().lines() {
+                    emit(&line.expect("a readable line on stdin"));
+                }
+            } else {
+                for line in &text {
+                    emit(line);
+                }
+            }
+            ExitCode::SUCCESS
         }
         Command::Verify { bundle } => match tessera_build::verify(&bundle) {
             Ok(report) => {
