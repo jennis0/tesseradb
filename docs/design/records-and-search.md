@@ -1077,8 +1077,15 @@ immediately after the text epic — over the machinery it delivers — and gate 
 dataset tiers, the removal of §4.4's extrapolation ⊘, and the corpus-scale claims, **not the
 epic's start**. Item 1 populates the ruled row. Items 4–6 are owed but do not block.
 
-1. **Work at vocabulary scale** (memo §6.1): hidden-versus-absent term cost over the shipped
-   reader at ≥250k terms, 10⁸⁺ — populates decision 0067's Appendix C row with its own figures.
+1. ~~**Work at vocabulary scale**~~ — **measured**
+   ([`hidden-vs-absent`](../../probes/2026-08-14-hidden-vs-absent/results.md), 2026-08-14), and
+   Appendix C's C25 now carries the figures. Hidden costs the absent arm **+155 ns** at one carrier
+   and **+46 µs** at 158k, over 265,867 and 478,282 terms through `FilterColumns::resolve`. The
+   item's own premise is the negative result: **vocabulary scale is not what drives it**. The
+   absent arm is flat across a 1.8× vocabulary growth — a failed dictionary search grows
+   logarithmically — and the separation is a function of the queried term's posting alone, so
+   "≥250k terms" was the wrong axis to have asked for. What is still open is the same channel
+   *over a network*, which is where the practical question was all along.
 2. **The token index's scale trend**: B/entity at an order nearer 10⁹ than 2.4M (the standard
    dataset's 25M tier is the natural rung). The *sign* — index smaller than flat — is what ruling
    the text ruling (§12) rests on.

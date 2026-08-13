@@ -1,0 +1,14 @@
+   Compiling hiddentiming v0.1.0 (/home/joe/code/tessera/probes/2026-08-14-hidden-vs-absent/hiddentiming)
+    Finished `release` profile [optimized] target(s) in 0.78s
+     Running `probes/2026-08-14-hidden-vs-absent/hiddentiming/target/release/hiddentiming --snapshot /home/joe/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json --scales 400000,1000000`
+reading 1000000 abstracts…
+| entities | terms | stratum | posting | absent med/min ns | hidden med/min ns | visible ns | hidden/absent | separation |
+|---|---|---|---|---|---|---|---|---|
+| 400000 | 265867 | singleton (`hamlitonians`) | 1 | 562 / 549 | 741 / 728 | 803 | 1.32× | +179 ns |
+| 400000 | 265867 | small (`cxb`) | 22 | 555 / 546 | 1439 / 1422 | 1646 | 2.59× | +876 ns |
+| 400000 | 265867 | mid (`newly`) | 2361 | 556 / 544 | 4216 / 4179 | 2859 | 7.58× | +3635 ns |
+| 400000 | 265867 | head (`this`) | 221655 | 531 / 523 | 21863 / 21140 | 21013 | 41.19× | +20617 ns |
+| 1000000 | 478282 | singleton (`hanzer`) | 1 | 525 / 516 | 684 / 671 | 741 | 1.30× | +155 ns |
+| 1000000 | 478282 | small (`vinylidene`) | 21 | 526 / 518 | 1928 / 1910 | 2315 | 3.67× | +1392 ns |
+| 1000000 | 478282 | mid (`ti`) | 2392 | 531 / 519 | 4834 / 4817 | 3632 | 9.11× | +4298 ns |
+| 1000000 | 478282 | head (`new`) | 158126 | 533 / 522 | 47110 / 46753 | 46202 | 88.40× | +46231 ns |
