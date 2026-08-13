@@ -134,9 +134,13 @@ enum Command {
         /// Text to analyse. Repeatable. With none given, reads one input per line from stdin.
         #[arg(long = "text")]
         text: Vec<String>,
-        /// Print the analyser's version and exit — what a bundle records, and what a rebuild moves.
+        /// Which analyser, by declared name (decision 0070). A column records the identity this
+        /// resolves to, and an unknown name is refused rather than defaulted.
+        #[arg(long, default_value = tessera_analyse::UNICODE)]
+        analyser: String,
+        /// Print the analyser's identity and exit — what a column records, and what a rebuild moves.
         #[arg(long)]
-        version: bool,
+        identity: bool,
     },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     Serve {
@@ -748,13 +752,23 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Tokenise { text, version } if version => {
-            println!("{}", tessera_analyse::ANALYSER_VERSION);
-            let _ = text;
-            ExitCode::SUCCESS
-        }
-        Command::Tokenise { text, .. } => {
-            let analyser = tessera_analyse::Analyser::new();
+        Command::Tokenise {
+            text,
+            analyser,
+            identity,
+        } => {
+            let Some(analyser) = tessera_analyse::analyser(&analyser) else {
+                eprintln!(
+                    "'{analyser}' is not an analyser this binary carries. Available: {}",
+                    tessera_analyse::ANALYSER_NAMES.join(", ")
+                );
+                return ExitCode::FAILURE;
+            };
+            if identity {
+                println!("{}", analyser.identity());
+                let _ = text;
+                return ExitCode::SUCCESS;
+            }
             // Tab-separated because a token can contain anything but a tab or a newline: the
             // segmenter's word-like segments never span a line break, and a caller that split on
             // spaces would corrupt nothing here but would elsewhere.

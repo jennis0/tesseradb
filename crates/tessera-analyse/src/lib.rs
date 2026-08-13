@@ -1,5 +1,19 @@
-//! The text family's analyser: one pipeline, language-agnostic, with no per-column configuration
-//! (`records-and-search.md` §4.4).
+//! The text family's analysers: named, versioned pipelines, one declared per `text` column
+//! (`records-and-search.md` §4.4, [decision 0070](../../../docs/decisions/0070-analysers-are-named-and-declared-per-column.md)).
+//!
+//! **One ships today — [`UNICODE`] — and the shape holds more.** A pipeline that is right for a
+//! column of abstracts is wrong for a column of stack traces: identifiers split on case and
+//! punctuation boundaries that prose must not, and prose wants folding that an identifier must
+//! not. The choice belongs to the column, so an analyser is selected by *name* and its full
+//! identity is recorded against the column that used it.
+//!
+//! ⊘ **Not a plugin, and deliberately** (0070 §5). Analysers are built-in variants, because a
+//! loaded one would make the token stream a deployment variable and demote the golden vectors from
+//! pinning *the* analyser to pinning only a default — and determinism here is load-bearing for I9
+//! and for §7's fold-merge argument. If a plugin host ever arrives, a hosted analyser is one more
+//! named variant.
+//!
+//! # `unicode`, the one that ships
 //!
 //! **Three stages, in this order, and the order is load-bearing.** NFKC normalisation, then full
 //! Unicode case folding, then UAX #29 word segmentation. Normalising first means the case folder
@@ -21,20 +35,23 @@
 //! mixed-script corpus with nothing declared — an English abstract containing a Japanese title
 //! segments both halves correctly in one pass.
 //!
-//! Stemming, stopwords, diacritic folding and synonyms are **deliberately absent** (§9). Each is
-//! language-dependent — `ö` and `o` are the same letter in German and different letters in Swedish
-//! — each is a conformance surface, and a wrong default corrupts recall silently rather than
-//! loudly. If language-specific analysis is ever wanted it is a per-column `language` declaration
-//! and a rebuild; the index format does not change, only the token stream.
+//! Stemming, stopwords, diacritic folding and synonyms are **deliberately absent from `unicode`**
+//! (§9). Each is language-dependent — `ö` and `o` are the same letter in German and different
+//! letters in Swedish — each is a conformance surface, and a wrong default corrupts recall
+//! silently rather than loudly. Under 0070 that is a statement about *this* analyser rather than
+//! about analysers, which is what makes a future stemming pipeline an addition rather than a
+//! contradiction: it would be a new name, with its own vectors, declared by the columns that want
+//! it.
 //!
-//! # The version is part of the artefact
+//! # The identity is part of the artefact
 //!
-//! [`ANALYSER_VERSION`] is recorded in the manifest, and **changing it is a rebuild** — exactly as
-//! changing a category's width is. A token stream is not self-describing: an index built under one
-//! Unicode release and queried under another would fail to match on precisely the strings whose
-//! segmentation changed, which is a silent recall bug rather than an error. The fold's merge
-//! argument depends on it too (§7): two layers' postings may be merged only because they were
-//! produced by the same versioned analyser over the same values.
+//! [`Analyser::identity`] is recorded in the manifest **against the column that used it**, and
+//! changing it is a rebuild of that column — exactly as changing a category's width is. A token
+//! stream is not self-describing: an index built under one identity and queried under another
+//! would fail to match on precisely the strings whose segmentation differs, which is a silent
+//! recall bug rather than an error. The fold's merge argument depends on it too (§7): two layers'
+//! postings may be merged only because the same versioned analyser produced them over the same
+//! values, which is a per-column check and not a global assumption.
 //!
 //! # One implementation, two accesses
 //!
@@ -51,20 +68,34 @@ use icu_normalizer::{ComposingNormalizer, ComposingNormalizerBorrowed};
 use icu_segmenter::options::WordBreakInvariantOptions;
 use icu_segmenter::{WordSegmenter, WordSegmenterBorrowed};
 
-/// The analyser's identity, recorded in the manifest and checked at open.
-///
-/// **It names the pipeline and the data, because either changing changes the token stream.** The
-/// `icu4x` component is the crate major-minor whose compiled data this binary carries; the `p`
-/// component is this pipeline's own shape, and it moves if a stage is added, removed or reordered
-/// even when icu4x does not move.
-///
-/// A bundle carrying a different value is not readable by this binary: §7's merge argument and
-/// every `match` answer depend on one token stream, and there is no way to detect the mismatch from
-/// the postings themselves — two analysers disagree by producing *different but individually valid*
-/// terms. Pre-release this is a fail-closed refusal rather than a migration (decision 0048).
-pub const ANALYSER_VERSION: &str = "icu4x-2.2/p1";
+/// The name a `text` column declares to select the general prose pipeline.
+pub const UNICODE: &str = "unicode";
 
-/// The three stages, constructed once and reused.
+/// `unicode`'s version: the data it carries and the shape of its stages, because either changing
+/// changes the token stream.
+///
+/// The `icu4x` component is the crate major-minor whose compiled data this binary carries; the `p`
+/// component is the pipeline's own shape, and it moves if a stage is added, removed or reordered
+/// even when icu4x does not.
+const UNICODE_VERSION: &str = "icu4x-2.2/p1";
+
+/// Every analyser this binary can be asked for, by name. **A name not in this list is refused** —
+/// there is no default fallback, because falling back would index a column with a pipeline its
+/// declaration did not ask for, which is the silent-mismatch failure 0070 exists to prevent.
+pub const ANALYSER_NAMES: &[&str] = &[UNICODE];
+
+/// Resolve an analyser by declared name.
+///
+/// `None` for a name this binary does not carry — a caller's error to report, never one to paper
+/// over with a default.
+pub fn analyser(name: &str) -> Option<Analyser> {
+    match name {
+        UNICODE => Some(Analyser::new()),
+        _ => None,
+    }
+}
+
+/// `unicode`: the three stages, constructed once and reused.
 ///
 /// **Construction is not free and tokenising is**, which is why this is a type rather than a
 /// function: the segmenter's dictionary data is deserialised at construction, and a flush that
@@ -86,6 +117,16 @@ impl Default for Analyser {
 }
 
 impl Analyser {
+    /// The identity recorded against every column this analyser indexed — `<name>/<version>`.
+    pub fn identity(&self) -> String {
+        format!("{UNICODE}/{UNICODE_VERSION}")
+    }
+
+    /// The declared name that selects this analyser.
+    pub fn name(&self) -> &'static str {
+        UNICODE
+    }
+
     pub fn new() -> Self {
         Analyser {
             nfkc: ComposingNormalizer::new_nfkc(),

@@ -1,102 +1,195 @@
 {
-  "analyser_version": "icu4x-2.2/p1",
-  "note": "Known answers per script family. These pin the analyser: a change to any of them is a change to every text index built with it, so a diff here must be accompanied by a bump to ANALYSER_VERSION and a rebuild. They were produced by the shipped Analyser and read back by a human against the design's rules, not copied from a second library.",
-  "vectors": [
+  "note": "Known answers per script family. These pin the analyser: a change to any of them is a change to every text index built with it, so a diff here must be accompanied by a bump to ANALYSER_VERSION and a rebuild. They were produced by the shipped Analyser and read back by a human against the design's rules, not copied from a second library. Keyed by analyser name: every analyser owes its own set before a column may declare it (decision 0070).",
+  "analysers": [
     {
-      "family": "latin",
-      "input": "The quick brown fox jumps over the lazy dog",
-      "tokens": ["the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"]
-    },
-    {
-      "family": "latin-diacritics",
-      "why": "Diacritics are NOT folded — o with umlaut stays distinct from o, because they are different letters in Swedish and the same in German, and a wrong default corrupts recall silently. The sharp s does fold, because full case folding maps it to ss.",
-      "input": "Grüße aus Köln — naïve café, résumé",
-      "tokens": ["grüsse", "aus", "köln", "naïve", "café", "résumé"]
-    },
-    {
-      "family": "greek",
-      "input": "ΑΘΗΝΑ Ελληνικά",
-      "tokens": ["αθηνα", "ελληνικά"]
-    },
-    {
-      "family": "cyrillic",
-      "why": "The hyphen is a break, so a hyphenated proper noun is two tokens.",
-      "input": "Москва и Санкт-Петербург",
-      "tokens": ["москва", "и", "санкт", "петербург"]
-    },
-    {
-      "family": "japanese",
-      "why": "Dictionary segmentation across kanji, hiragana and katakana in one run, with no declaration.",
-      "input": "日本語のテキストを分割します",
-      "tokens": ["日本語", "の", "テキスト", "を", "分割", "しま", "す"]
-    },
-    {
-      "family": "chinese",
-      "why": "The fullwidth colon is punctuation and is dropped; the run either side is segmented.",
-      "input": "中文分词测试：这是一个句子",
-      "tokens": ["中文", "分词", "测试", "这", "是", "一个", "句子"]
-    },
-    {
-      "family": "chinese-single-word",
-      "why": "REGRESSION: the segmenter's own is_word_like() reports a single-word CJK run as not word-like, which would make a document containing exactly this string unfindable by exactly this query. Tokens are kept on their characters instead.",
-      "input": "中文",
-      "tokens": ["中文"]
-    },
-    {
-      "family": "thai",
-      "input": "ภาษาไทยเป็นภาษาที่ไม่มีการเว้นวรรค",
-      "tokens": ["ภาษา", "ไทย", "เป็น", "ภาษา", "ที่", "ไม่", "มี", "การ", "เว้นวรรค"]
-    },
-    {
-      "family": "lao",
-      "input": "ນີ້ແມ່ນພາສາລາວ",
-      "tokens": ["ນີ້", "ແມ່ນ", "ພາສາ", "ລາວ"]
-    },
-    {
-      "family": "burmese",
-      "input": "မြန်မာဘာသာစကား",
-      "tokens": ["မြန်", "မာ", "ဘာသာ", "စကား"]
-    },
-    {
-      "family": "khmer",
-      "why": "Khmer has a working dictionary; this compound is one word in it. The phrase vector below is what shows the dictionary running, and both are here because the single-word case is the one that used to yield nothing at all.",
-      "input": "ភាសាខ្មែរ",
-      "tokens": ["ភាសាខ្មែរ"]
-    },
-    {
-      "family": "khmer-phrase",
-      "why": "The dictionary segmenting a Khmer run into three words — the evidence that the family is covered, against an earlier claim in this repository that icu_segmenter carries no Khmer model. It does.",
-      "input": "ភាសាខ្មែរពិរោះណាស់",
-      "tokens": ["ភាសាខ្មែរ", "ពិរោះ", "ណាស់"]
-    },
-    {
-      "family": "mixed-script",
-      "why": "One analyser, nothing declared, and no run lost at a script boundary. Both CJK runs here are the single-word shape that the word-like flag drops.",
-      "input": "Ｔｅｓｔ 日本語 mixed English 中文",
-      "tokens": ["test", "日本語", "mixed", "english", "中文"]
-    },
-    {
-      "family": "identifiers",
-      "why": "An arXiv id survives as one token because the dots sit between digits and letters; the colon and brackets do not. A keyword column is still the right home for exactness — this only says what text does with one.",
-      "input": "arXiv:2401.00042v1 [cs.LG]",
-      "tokens": ["arxiv", "2401.00042v1", "cs.lg"]
-    },
-    {
-      "family": "fullwidth",
-      "why": "NFKC maps fullwidth forms to their ASCII compatibility equivalents, so a fullwidth query finds a halfwidth document.",
-      "input": "ＦＵＬＬＷＩＤＴＨ ｈａｌｆ",
-      "tokens": ["fullwidth", "half"]
-    },
-    {
-      "family": "punctuation-internal",
-      "why": "UAX 29 keeps the apostrophe inside a contraction and breaks on the hyphen. Stated because it is the pair a reader most often expects to behave alike.",
-      "input": "e-mail don't co-operate",
-      "tokens": ["e", "mail", "don't", "co", "operate"]
-    },
-    {
-      "family": "empty-and-blank",
-      "input": "   \t\n  ",
-      "tokens": []
+      "name": "unicode",
+      "identity": "unicode/icu4x-2.2/p1",
+      "vectors": [
+        {
+          "family": "latin",
+          "input": "The quick brown fox jumps over the lazy dog",
+          "tokens": [
+            "the",
+            "quick",
+            "brown",
+            "fox",
+            "jumps",
+            "over",
+            "the",
+            "lazy",
+            "dog"
+          ]
+        },
+        {
+          "family": "latin-diacritics",
+          "why": "Diacritics are NOT folded — o with umlaut stays distinct from o, because they are different letters in Swedish and the same in German, and a wrong default corrupts recall silently. The sharp s does fold, because full case folding maps it to ss.",
+          "input": "Grüße aus Köln — naïve café, résumé",
+          "tokens": [
+            "grüsse",
+            "aus",
+            "köln",
+            "naïve",
+            "café",
+            "résumé"
+          ]
+        },
+        {
+          "family": "greek",
+          "input": "ΑΘΗΝΑ Ελληνικά",
+          "tokens": [
+            "αθηνα",
+            "ελληνικά"
+          ]
+        },
+        {
+          "family": "cyrillic",
+          "why": "The hyphen is a break, so a hyphenated proper noun is two tokens.",
+          "input": "Москва и Санкт-Петербург",
+          "tokens": [
+            "москва",
+            "и",
+            "санкт",
+            "петербург"
+          ]
+        },
+        {
+          "family": "japanese",
+          "why": "Dictionary segmentation across kanji, hiragana and katakana in one run, with no declaration.",
+          "input": "日本語のテキストを分割します",
+          "tokens": [
+            "日本語",
+            "の",
+            "テキスト",
+            "を",
+            "分割",
+            "しま",
+            "す"
+          ]
+        },
+        {
+          "family": "chinese",
+          "why": "The fullwidth colon is punctuation and is dropped; the run either side is segmented.",
+          "input": "中文分词测试：这是一个句子",
+          "tokens": [
+            "中文",
+            "分词",
+            "测试",
+            "这",
+            "是",
+            "一个",
+            "句子"
+          ]
+        },
+        {
+          "family": "chinese-single-word",
+          "why": "REGRESSION: the segmenter's own is_word_like() reports a single-word CJK run as not word-like, which would make a document containing exactly this string unfindable by exactly this query. Tokens are kept on their characters instead.",
+          "input": "中文",
+          "tokens": [
+            "中文"
+          ]
+        },
+        {
+          "family": "thai",
+          "input": "ภาษาไทยเป็นภาษาที่ไม่มีการเว้นวรรค",
+          "tokens": [
+            "ภาษา",
+            "ไทย",
+            "เป็น",
+            "ภาษา",
+            "ที่",
+            "ไม่",
+            "มี",
+            "การ",
+            "เว้นวรรค"
+          ]
+        },
+        {
+          "family": "lao",
+          "input": "ນີ້ແມ່ນພາສາລາວ",
+          "tokens": [
+            "ນີ້",
+            "ແມ່ນ",
+            "ພາສາ",
+            "ລາວ"
+          ]
+        },
+        {
+          "family": "burmese",
+          "input": "မြန်မာဘာသာစကား",
+          "tokens": [
+            "မြန်",
+            "မာ",
+            "ဘာသာ",
+            "စကား"
+          ]
+        },
+        {
+          "family": "khmer",
+          "why": "Khmer has a working dictionary; this compound is one word in it. The phrase vector below is what shows the dictionary running, and both are here because the single-word case is the one that used to yield nothing at all.",
+          "input": "ភាសាខ្មែរ",
+          "tokens": [
+            "ភាសាខ្មែរ"
+          ]
+        },
+        {
+          "family": "khmer-phrase",
+          "why": "The dictionary segmenting a Khmer run into three words — the evidence that the family is covered, against an earlier claim in this repository that icu_segmenter carries no Khmer model. It does.",
+          "input": "ភាសាខ្មែរពិរោះណាស់",
+          "tokens": [
+            "ភាសាខ្មែរ",
+            "ពិរោះ",
+            "ណាស់"
+          ]
+        },
+        {
+          "family": "mixed-script",
+          "why": "One analyser, nothing declared, and no run lost at a script boundary. Both CJK runs here are the single-word shape that the word-like flag drops.",
+          "input": "Ｔｅｓｔ 日本語 mixed English 中文",
+          "tokens": [
+            "test",
+            "日本語",
+            "mixed",
+            "english",
+            "中文"
+          ]
+        },
+        {
+          "family": "identifiers",
+          "why": "An arXiv id survives as one token because the dots sit between digits and letters; the colon and brackets do not. A keyword column is still the right home for exactness — this only says what text does with one.",
+          "input": "arXiv:2401.00042v1 [cs.LG]",
+          "tokens": [
+            "arxiv",
+            "2401.00042v1",
+            "cs.lg"
+          ]
+        },
+        {
+          "family": "fullwidth",
+          "why": "NFKC maps fullwidth forms to their ASCII compatibility equivalents, so a fullwidth query finds a halfwidth document.",
+          "input": "ＦＵＬＬＷＩＤＴＨ ｈａｌｆ",
+          "tokens": [
+            "fullwidth",
+            "half"
+          ]
+        },
+        {
+          "family": "punctuation-internal",
+          "why": "UAX 29 keeps the apostrophe inside a contraction and breaks on the hyphen. Stated because it is the pair a reader most often expects to behave alike.",
+          "input": "e-mail don't co-operate",
+          "tokens": [
+            "e",
+            "mail",
+            "don't",
+            "co",
+            "operate"
+          ]
+        },
+        {
+          "family": "empty-and-blank",
+          "input": "   \t\n  ",
+          "tokens": []
+        }
+      ]
     }
   ]
 }

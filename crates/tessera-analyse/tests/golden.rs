@@ -13,24 +13,65 @@
 //! [`tessera_analyse::ANALYSER_VERSION`], which the file records and this test checks, and every
 //! text index built under the old value must be rebuilt.
 
-use tessera_analyse::{Analyser, ANALYSER_VERSION};
+use tessera_analyse::{analyser, Analyser, ANALYSER_NAMES};
+
+/// **Every analyser this binary carries owes a vector set**, and every set names an analyser the
+/// binary carries. Either half failing is the shape decision 0070 forbids: a pipeline a column can
+/// declare but nothing pins, or a pinned pipeline nothing can declare.
+#[test]
+fn every_analyser_has_vectors_and_every_vector_set_an_analyser() {
+    let doc = vectors();
+    let named: Vec<&str> = doc["analysers"]
+        .as_array()
+        .expect("an analyser array")
+        .iter()
+        .map(|a| a["name"].as_str().expect("a name"))
+        .collect();
+    for name in ANALYSER_NAMES {
+        assert!(named.contains(name), "{name} ships with no golden vectors");
+    }
+    for name in &named {
+        assert!(
+            ANALYSER_NAMES.contains(name),
+            "{name} has vectors but is not an analyser this binary carries"
+        );
+    }
+}
+
+/// A declared name this binary does not carry is refused rather than defaulted — falling back
+/// would index a column with a pipeline its declaration did not ask for.
+#[test]
+fn an_unknown_analyser_name_is_refused() {
+    for name in ["", "Unicode", "icu", "unicode/icu4x-2.2/p1", "standard"] {
+        assert!(
+            analyser(name).is_none(),
+            "{name:?} resolved to an analyser"
+        );
+    }
+    assert!(analyser("unicode").is_some());
+}
+
+fn vectors() -> serde_json::Value {
+    serde_json::from_str(include_str!("vectors/golden.json")).expect("the vector file parses")
+}
 
 #[test]
 fn the_golden_vectors_hold() {
-    let raw = include_str!("vectors/golden.json");
-    let doc: serde_json::Value = serde_json::from_str(raw).expect("the vector file parses");
+    let doc = vectors();
+    let set = &doc["analysers"][0];
+    let name = set["name"].as_str().expect("a name");
+    let analyser = analyser(name).unwrap_or_else(|| panic!("{name} is not carried"));
 
     assert_eq!(
-        doc["analyser_version"].as_str().expect("a version string"),
-        ANALYSER_VERSION,
-        "the vectors were recorded under a different analyser version than this binary carries. \
-         Either the constant moved without re-recording the vectors, or the vectors were edited \
-         without moving the constant — and the second is the one that silently invalidates every \
-         index already built"
+        set["identity"].as_str().expect("an identity string"),
+        analyser.identity(),
+        "the vectors were recorded under a different identity than this binary carries. Either \
+         the version moved without re-recording the vectors, or the vectors were edited without \
+         moving the version — and the second is the one that silently invalidates every index \
+         already built"
     );
 
-    let analyser = Analyser::new();
-    let vectors = doc["vectors"].as_array().expect("a vector array");
+    let vectors = set["vectors"].as_array().expect("a vector array");
     assert!(vectors.len() >= 10, "the file lost its vectors");
 
     let mut families: Vec<&str> = Vec::new();
@@ -71,7 +112,7 @@ fn the_golden_vectors_hold() {
 /// same terms (§7). A per-instance or per-call difference would make that false.
 #[test]
 fn two_analysers_agree_and_repeat() {
-    let (a, b) = (Analyser::new(), Analyser::new());
+    let (a, b): (Analyser, Analyser) = (Analyser::new(), Analyser::new());
     for sample in [
         "The quick brown fox",
         "日本語のテキスト",

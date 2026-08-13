@@ -468,7 +468,19 @@ addressing) plus the index; the ~1.4× win stands. ⊘ **The 10⁹ figure is a l
 a per-entity cost measured to 2.4M**; §11 gates promotion on extending it, and no ruling below
 depends on its exact value, only its sign.
 
-**The analyser is one pipeline, language-agnostic, with no per-column configuration**: NFKC
+**An analyser is a named, versioned pipeline, and a `text` column declares which one it uses**
+([decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md), amending this
+section's original "one pipeline … with no per-column configuration"). One pipeline cannot be right
+for a column of abstracts and a column of stack traces at once: identifiers split on case and
+punctuation boundaries that prose must not, and prose wants folding that an identifier must not, so
+the choice belongs to the column. The declaration carries the *name*; the manifest records the full
+identity the build resolved it to, **per column**, and changing it rebuilds that column's index and
+nothing else. ⊘ Analysers are built-in variants selected by name, **not plugins** — a loaded one
+would make the token stream a deployment variable and demote the golden vectors from pinning the
+analyser to pinning only a default, where determinism is load-bearing for I9 and for §7's
+fold-merge argument.
+
+**`unicode` is the one that ships**, and it is language-agnostic: NFKC
 normalisation, full Unicode case folding, then UAX #29 word segmentation with dictionary-backed
 segmentation for the scripts that need it — Chinese, Japanese, Thai, Lao, Khmer, Burmese.
 Supporting a range of languages is a requirement of this design, not an aspiration, and it is what
@@ -483,10 +495,23 @@ its method per script run, so one analyser serves mixed-script corpora with noth
 direct dependency of an indexing crate is stated here rather than hidden — the `memchr` precedent.
 `lindera` (MeCab-style morphology, 50 MB+ dictionaries) is the named escalation if Japanese
 segmentation quality ever demands it. Stemming, stopwords, diacritic folding and synonyms are all
-deliberately absent (§9): each is language-dependent (ö ≠ o in German and Swedish), each is a
-conformance surface, and a wrong default corrupts recall silently. If language-specific analysis
-is ever wanted it is a per-column `language` declaration and a rebuild; the index format does not
-change, only the token stream.
+deliberately absent **from `unicode`** (§9): each is language-dependent (ö ≠ o in German and
+Swedish), each is a conformance surface, and a wrong default corrupts recall silently. Under 0070
+that is a statement about this analyser rather than about analysers, which is what makes a future
+stemming or identifier pipeline an addition rather than a contradiction — a new name, with its own
+golden vectors, declared by the columns that want it. The index format does not change when an
+analyser does; only the token stream.
+
+**Measured coverage, and the gap that is quality rather than coverage.** Surveyed across
+twenty-one scripts through the shipped pipeline: every space-separated script returns exactly its
+source word count — Arabic, Hebrew, Devanagari, Bengali, Tamil, Telugu, Korean, Vietnamese,
+Amharic, Georgian, Armenian, Sinhala, Turkish — and every no-space script is segmented, all six
+of the ones named above included. ⊘ What is imperfect is segmentation *quality* in the no-space
+scripts: Japanese `はとても` splits as `はと`/`て`/`も` and Thai `มาก` as `มา`/`ก`, so a query for
+the mis-split word does not find the document. That is a recall shortfall on word-internal
+queries rather than a coverage hole, it is per-script (a library that fixes Japanese fixes only
+Japanese), and it is what 0070's named-analyser shape exists to let a deployment answer without a
+format change.
 
 **Whole-engine adoption was considered and declined on cost, not on Appendix D.** A text filter
 only narrows `M_sel`, so the access-layer prohibition does not even arise; what decides it is that
@@ -1168,6 +1193,19 @@ is still owed**; everything below them is made or is waiting on machinery that d
 ---
 
 ## Appendix R — review trail
+
+**2026-08-13 (r7) — analysers are named and declared per column** (owner ruling,
+[decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md)). §4.4's "one
+pipeline … with no per-column configuration" is replaced: an analyser is a named, versioned
+pipeline, a `text` column declares which one, and the manifest records the resolved identity per
+column. `unicode` is the one that ships and its absent transforms — stemming, stopwords, diacritic
+folding, synonyms — become statements about *it* rather than about analysers, which is what makes a
+future identifier or stemming pipeline an addition rather than a contradiction. ⊘ Not plugins:
+built-in variants, because a loaded analyser would demote the golden vectors from pinning the
+analyser to pinning a default, and determinism is load-bearing for I9 and §7's merge. §4.4 also
+gains the measured coverage picture — no coverage hole across twenty-one scripts, and a quality
+shortfall in the no-space ones that is per-script and is what the named shape lets a deployment
+answer.
 
 **2026-08-13 (r6) — the keyword family is built, and §4.3's `contains` band is corrected to the
 shipped one.** The dictionary, the ordinal column, both `contains` routes, the coalesce content
