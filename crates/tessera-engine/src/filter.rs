@@ -45,6 +45,41 @@
 //! alone would omit every entity ingested since the build — narrower, safe under **I12**, and
 //! indistinguishable from a correct answer, which is the failure this subsystem exists to avoid.
 //!
+//! # The keyword family: one dictionary per layer, and the needle resolved inside it
+//!
+//! A `keyword` column stores a `u32` **ordinal** per present entity and, beside it, that layer's own
+//! front-coded sorted dictionary of the distinct values the layer holds (records §4.3). Every fast
+//! operator is then an ordinal question, answered by the same fixed-width scan the numeric families
+//! use: `eq` resolves the needle to one ordinal, `in` to a list of them, and `prefix` — sortedness
+//! being the reason the dictionary is sorted at all — to a contiguous ordinal range the range scan
+//! already knows how to test.
+//!
+//! **The resolve is per layer, against that layer's own dictionary.** An ordinal is a position in
+//! one dictionary and means nothing outside it: the base build and every flush extent number their
+//! own keys, so one string is a different ordinal in each, and reading one layer's ordinals against
+//! another's dictionary is a recolouring with no symptom (`tessera_filter::SortedDict`'s module
+//! doc). [`Layer`] therefore holds the value column and its dictionary together, and an ordinal
+//! produced by a resolve never outlives the single scan it was made for — it is never stored, never
+//! served, and never compared against an ordinal from elsewhere.
+//!
+//! **A needle no dictionary resolves is scanned for anyway, and that is security-bearing.** The
+//! miss becomes [`NO_SUCH_ORDINAL`], which no slot can hold, and the scan runs over the whole
+//! candidate exactly as it would for a needle that resolved. Returning early instead would make
+//! *no item has this value* measurably cheaper than *some do* — a timing channel about content the
+//! principal cannot see (records §4.3; per-point-attributes §3.8, whose rule is that the two be
+//! indistinguishable in outcome **and in work**). [`OrdinalPredicate`] is the shape that keeps the
+//! early return out: it is total, it has no "matches nothing, so skip the scan" variant, and every
+//! arm of [`scan_ordinals`] runs a scan.
+//!
+//! **`contains` has two routes and a crossover that reads no data.** The broad route walks the
+//! dictionary, decodes and substring-searches **every** key whatever the needle — front coding
+//! elides shared prefixes, so a substring can span an elided one — and scans for the ordinals it
+//! collected. The narrow route takes each candidate entity's ordinal and probes the dictionary for
+//! that one key. [`contains_route`] chooses between them from the candidate's cardinality and the
+//! layer's dictionary size and nothing else: the first is the principal's own quantity, which they
+//! can compute for themselves, and the second is a property of the bundle, identical for every
+//! principal — §8.2's admissible class, never a statistic about what the principal's data contains.
+//!
 //! # A column is layers, because the corpus grows and the build's column does not
 //!
 //! The batch build writes a column covering `[0, entity_id_high_water)`, and every flush since has
@@ -114,13 +149,15 @@
 //! `tests/filtering.rs`'s suppression differential is the proof.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 use tessera_filter::{
-    resolve_union, Codes, ColumnPostings, RecordExtentPaths, RecordStack, RecordValue, ValueColumn,
+    resolve_union, Codes, ColumnPostings, DictError, RecordExtentPaths, RecordStack, RecordValue,
+    SortedDict, ValueColumn,
 };
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
@@ -148,6 +185,10 @@ pub enum Family {
     Category,
     /// Values are row data: `eq`, `in`, `prefix`, `contains`, over the stored bytes.
     Text,
+    /// Values are short strings matched exactly, stored as an ordinal into the layer's own sorted
+    /// dictionary (records §4.3). The same four operators [`Family::Text`] takes, with the same
+    /// byte-exact semantics and a different cost profile — see this module's header.
+    Keyword,
     /// Values are numbers — every integer width, both floats, `timestamp_us` and `bool`. A range
     /// is a scan like everything else: no level tree, no bit slicing, no zone map
     /// (`filter-index.md` §3).
@@ -162,6 +203,8 @@ impl Family {
     pub fn of(scalar: &tessera_store::manifest::DeclaredScalar) -> Family {
         if scalar.vocabulary.is_some() {
             Family::Category
+        } else if declares_keyword(scalar) {
+            Family::Keyword
         } else if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Utf8 {
             Family::Text
         } else {
@@ -173,7 +216,7 @@ impl Family {
     pub fn operands(self) -> &'static [&'static str] {
         match self {
             Family::Category => &["eq", "in"],
-            Family::Text => &["eq", "in", "prefix", "contains"],
+            Family::Text | Family::Keyword => &["eq", "in", "prefix", "contains"],
             Family::Numeric => &["eq", "in", "range"],
         }
     }
@@ -182,9 +225,41 @@ impl Family {
         match self {
             Family::Category => "category",
             Family::Text => "string",
+            Family::Keyword => "keyword",
             Family::Numeric => "numeric",
         }
     }
+
+    /// Does a value of this family occupy a slot in the hot column, and so afford the row-space
+    /// route (decision 0068; records §6.2)?
+    ///
+    /// Only the fixed-width families. A `keyword` and a `text` are strings, and `render` on either
+    /// is refused at the schema because the hot column is a fixed-width slot per row — so both are
+    /// filterable in entity space alone. Stated once here rather than at each site that asks, so
+    /// the two cannot come to disagree about which families the row route reaches.
+    pub fn reaches_hot_column(self) -> bool {
+        match self {
+            Family::Category | Family::Numeric => true,
+            Family::Text | Family::Keyword => false,
+        }
+    }
+}
+
+/// Is this column declared `type = "keyword"` (records §2)?
+///
+/// ⊘ **The compiled declaration cannot yet say so, so this is `false` for every column and the
+/// keyword route below is exercised by this module's own tests alone.** A column's type reaches the
+/// engine as [`tessera_spatial::tiler::ScalarType`], which has no `Keyword` variant, and both the
+/// manifest and that enum are frozen to this track. What a reader must assume meanwhile: a `utf8`
+/// column keeps the flat byte scan it has always had, no dictionary is opened for any column, and
+/// `/v1/meta` publishes no keyword column. This function is the single edit that lands the family.
+///
+/// Deriving it instead from `arrow_type == Utf8 && index` — the shape a keyword column will have
+/// once `utf8` stops parsing — is declined rather than merely unbuilt: it would route today's
+/// `utf8` columns through a dictionary no build has written, and the flat scan is the measured
+/// baseline both `contains` routes owe a comparison against before it is retired.
+fn declares_keyword(_scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+    false
 }
 
 /// What a request may ask of one column.
@@ -433,12 +508,13 @@ pub struct Placement {
 /// Is this column filterable at all under decision 0068 — `index = true`, or rendered?
 ///
 /// **The server's `/v1/meta` operand list and its parse gate call this**, so the surface a client
-/// is published cannot drift from the one the engine routes. A rendered `utf8` column is excluded
-/// rather than assumed away: the schema refuses `render` on `utf8` because the hot column is
-/// fixed-width, so the combination reaches no manifest — and a predicate that relied on that
-/// instead of stating it would publish a byte predicate over a column the row scan cannot read.
+/// is published cannot drift from the one the engine routes. A rendered **string** column is
+/// excluded rather than assumed away: the schema refuses `render` on `utf8`, and on `keyword` and
+/// `text` alike, because the hot column is fixed-width — so the combination reaches no manifest,
+/// and a predicate that relied on that instead of stating it would publish a byte predicate over a
+/// column the row scan cannot read.
 pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
-    scalar.index || (scalar.render && Family::of(scalar) != Family::Text)
+    scalar.index || (scalar.render && Family::of(scalar).reaches_hot_column())
 }
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
@@ -481,6 +557,12 @@ struct Layers {
     /// for.
     postings: Option<Arc<ColumnPostings>>,
     route: Route,
+    /// The family whose rules this column's values are read by — carried so a layer's storage can
+    /// be checked against its declaration rather than inferred from it. A `keyword` column's layers
+    /// each owe a dictionary, and [`FilterColumns::compose`] refuses one that arrives without it:
+    /// a `u32` ordinal column read as though it were a category's codes would answer every string
+    /// predicate with the empty set, which under-reports silently rather than failing.
+    family: Family,
 }
 
 /// One layer of a column, and the manifest entry it came from.
@@ -497,6 +579,15 @@ struct Layers {
 struct Layer {
     values_rel: Option<String>,
     values: Arc<ValueColumn>,
+    /// The layer's own sorted dictionary, for a `keyword` column and nothing else.
+    ///
+    /// **Held beside the values it numbers, because an ordinal has no meaning apart from them.**
+    /// The base and every extent mint their own ordinals, so pairing them here is what makes
+    /// "resolve the needle in *this* layer's dictionary, then scan *this* layer's ordinals" the
+    /// only expressible order of operations — the alternative, a dictionary per column, would read
+    /// an extent's ordinals against the base's keys and recolour the layer with no symptom
+    /// (`tessera_filter::SortedDict`'s module doc; records §7).
+    dict: Option<Arc<SortedDict>>,
 }
 
 /// One column's window of extents, and the coalesced extent that replaces them.
@@ -611,6 +702,12 @@ pub enum FilterError {
     /// unreadable, and the alternative to *that* — an empty result — says no entity carries the
     /// value. Neither is distinguishable from a right answer, so this refuses.
     PostingsUnreadable { column: String, detail: String },
+    /// A keyword layer's sorted dictionary refused a read. **Fail-closed, for the reason
+    /// [`FilterError::PostingsUnreadable`] gives and one more of its own**: a dictionary that
+    /// answered wrongly would resolve a needle to the wrong ordinal and return a different value's
+    /// entities, so a read that cannot vouch for its answer must refuse rather than treat the miss
+    /// as ordinary. An ordinary miss is not this — it is [`NO_SUCH_ORDINAL`], and it still scans.
+    DictionaryUnreadable { column: String, detail: String },
     /// The column has no derived membership postings, so the `per_viewer` visibility predicate
     /// cannot be evaluated for it. Fail-closed for the reason `categories.rs` gives: an empty value
     /// set is what a principal who may see none of them is told.
@@ -634,6 +731,12 @@ impl std::fmt::Display for FilterError {
                 f,
                 "column '{column}' is routed through its derived postings and they could not be \
                  read ({detail}); refused rather than answered short"
+            ),
+            FilterError::DictionaryUnreadable { column, detail } => write!(
+                f,
+                "column '{column}' is a keyword column and one of its layers' sorted dictionaries \
+                 could not be read ({detail}); refused rather than answered, because a dictionary \
+                 that cannot be trusted resolves a needle to another value's ordinal"
             ),
             FilterError::MembershipUnavailable(column) => write!(
                 f,
@@ -680,7 +783,9 @@ impl FilterError {
             FilterError::UndeclaredColumn(_)
             | FilterError::TooDeep { .. }
             | FilterError::NegationSpansColumns { .. } => true,
-            FilterError::PostingsUnreadable { .. } | FilterError::MembershipUnavailable(_) => false,
+            FilterError::PostingsUnreadable { .. }
+            | FilterError::DictionaryUnreadable { .. }
+            | FilterError::MembershipUnavailable(_) => false,
         }
     }
 }
@@ -794,7 +899,7 @@ impl FilterColumns {
             // `per_viewer` column with neither flag keeps its value column for membership and
             // stays unfilterable, exactly as before.
             let family = Family::of(scalar);
-            let row = scalar.render && family != Family::Text;
+            let row = scalar.render && family.reaches_hot_column();
             let entity = owes_value_column(scalar, vocabularies) && (scalar.index || row);
             if row || entity {
                 placements.insert(
@@ -811,6 +916,15 @@ impl FilterColumns {
             }
             let dir = partition_dir.join("attrs").join(&scalar.name);
             let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
+            // The base layer's dictionary sits in the column's own directory under the canonical
+            // name, exactly where the values do. Opened on the declaration rather than probed for:
+            // a keyword column whose dictionary is missing is a bundle that is not what its
+            // manifest says, and reading its ordinal column without one would answer every string
+            // predicate with the empty set — a wrong answer wearing a correct one's clothes, the
+            // failure every open in this function refuses instead.
+            let base_dict = (family == Family::Keyword)
+                .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
+                .transpose()?;
             let covered = base.present();
             // Opened whenever the build owed them, and a missing file is an error for the same
             // reason a missing value column is: the manifest digests them, so absence means the
@@ -833,11 +947,13 @@ impl FilterColumns {
                     layers: vec![Layer {
                         values_rel: None,
                         values: base,
+                        dict: base_dict,
                     }],
                     covered,
                     filterable: entity,
                     postings,
                     route,
+                    family,
                 },
             );
         }
@@ -874,7 +990,17 @@ impl FilterColumns {
                 &prefix_dir.join(&extent.presence),
                 request_access(mmap),
             )?;
-            open.compose(&extent.column, &extent.values, Arc::new(column))?;
+            // An extent's dictionary is named by the manifest rather than derived from the values
+            // path: `AttrExtent::column` carries the same rule for the column name, and a path
+            // parsed back out of another path is one the manifest no longer digests.
+            let dict = extent
+                .dict
+                .as_ref()
+                .map(|rel| {
+                    SortedDict::open(&prefix_dir.join(rel), request_access(mmap)).map(Arc::new)
+                })
+                .transpose()?;
+            open.compose(&extent.column, &extent.values, Arc::new(column), dict)?;
         }
         Ok(open)
     }
@@ -912,6 +1038,19 @@ impl FilterColumns {
             if values.present_in(&probe).is_empty() {
                 continue;
             }
+            // **A keyword's ordinal never crosses the trust boundary**, so drill-down is served the
+            // key it names rather than the number (records §4.3; **I10**). Decoded against *this*
+            // layer's dictionary, which is the only one that numbers it. A dictionary that refuses
+            // leaves the field with no value: under-reporting, which narrows, where the alternative
+            // would publish an index internal.
+            if let Some(dict) = &layer.dict {
+                let ordinal = values.value_of(entity)?.raw();
+                let mut scratch = Vec::new();
+                return dict
+                    .key_of(ordinal, &mut scratch)
+                    .ok()
+                    .map(|key| RecordValue::Utf8(key.to_string()));
+            }
             // The layers are disjoint in entity space (I9, checked at compose), so the first
             // layer holding the entity is the only one.
             let read = match values.codes() {
@@ -947,11 +1086,19 @@ impl FilterColumns {
     /// the overlap is unreachable — which is exactly why it is checked here rather than reasoned
     /// about at the call site: if I9 ever failed, the symptom would be an entity matching two
     /// values at once and a filter naming either returning it, with nothing to notice.
+    ///
+    /// **A keyword extent must bring its own dictionary, and one that does not is refused rather
+    /// than composed.** Its values are ordinals into a dictionary this flush minted, so a layer
+    /// without one has no reading at all: scanned as codes it would answer every string predicate
+    /// with the empty set, and resolved against the base's keys it would return another value's
+    /// entities. The pairing is checked in both directions, because a dictionary arriving for a
+    /// column that is not a keyword means the caller and the schema disagree about the family.
     fn compose(
         &mut self,
         column: &str,
         values_rel: &str,
         extent: Arc<ValueColumn>,
+        dict: Option<Arc<SortedDict>>,
     ) -> std::io::Result<()> {
         let Some(layers) = self.columns.get_mut(column) else {
             return Err(std::io::Error::new(
@@ -962,6 +1109,29 @@ impl FilterColumns {
                 ),
             ));
         };
+        match (layers.family == Family::Keyword, dict.is_some()) {
+            (true, false) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a filter extent for keyword column '{column}' carries no sorted \
+                         dictionary; its values are ordinals into the dictionary the flush minted \
+                         for them (records §4.3, §7), and a layer without one has no reading"
+                    ),
+                ));
+            }
+            (false, true) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a filter extent for column '{column}' carries a sorted dictionary, but \
+                         the schema does not declare the column a keyword; the two disagree about \
+                         what its values are"
+                    ),
+                ));
+            }
+            _ => {}
+        }
         let present = extent.present();
         if layers.covered.and_cardinality(&present) != 0 {
             return Err(std::io::Error::new(
@@ -977,6 +1147,7 @@ impl FilterColumns {
         layers.layers.push(Layer {
             values_rel: Some(values_rel.to_string()),
             values: extent,
+            dict,
         });
         Ok(())
     }
@@ -987,6 +1158,14 @@ impl FilterColumns {
     /// clones pointers rather than re-opening a memory-mapped column per declared attribute. Each
     /// extent is `(column, values path, opened column)`, the path being what the manifest names it
     /// by and what a later coalesce replaces it by.
+    ///
+    /// ⊘ **A keyword column's extent cannot be published through this and is refused.** The tuple
+    /// carries no dictionary, and a keyword layer without its own is meaningless — see
+    /// [`FilterColumns::compose`]. Publishing a keyword flush therefore needs a shape that carries
+    /// the dictionary the flush minted alongside the values it numbers; until it exists, the
+    /// refusal is what keeps a live generation from serving ordinals nothing can decode. Reopening
+    /// the generation from the manifest is unaffected, [`FilterColumns::open`] taking each extent's
+    /// dictionary from `AttrExtent::dict`.
     pub fn with_extents(
         &self,
         extents: &[(String, String, Arc<ValueColumn>)],
@@ -997,7 +1176,7 @@ impl FilterColumns {
             records: Arc::clone(&self.records),
         };
         for (column, values_rel, extent) in extents {
-            next.compose(column, values_rel, Arc::clone(extent))?;
+            next.compose(column, values_rel, Arc::clone(extent), None)?;
         }
         Ok(next)
     }
@@ -1018,6 +1197,12 @@ impl FilterColumns {
     /// was made against a manifest, so a layer it names and this process cannot find means the two
     /// disagree about what the bundle is, and publishing on that basis would serve a column short
     /// of a window's worth of entities.
+    ///
+    /// ⊘ **A keyword column is refused here for the reason [`FilterColumns::with_extents`] gives.**
+    /// A coalesce merges two key sets and renumbers, so its output layer's ordinals are new ones;
+    /// [`CoalescedWindow`] carries no dictionary to go with them, and installing the layer without
+    /// one would leave the column's ordinals resolving against a dictionary that no longer numbers
+    /// them — the recolouring records §7 makes the remap's verification condition about.
     pub fn with_coalesced(&self, windows: &[CoalescedWindow]) -> std::io::Result<FilterColumns> {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
@@ -1034,6 +1219,18 @@ impl FilterColumns {
                     ),
                 ));
             };
+            if layers.family == Family::Keyword {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a coalesce names keyword column '{}', and its replacement layer carries \
+                         no sorted dictionary; a coalesce renumbers the merged key set, so the \
+                         layer's ordinals are meaningless without the dictionary that minted them \
+                         (records §4.3, §7)",
+                        window.column
+                    ),
+                ));
+            }
             let mut union = Bitmap::new();
             for rel in &window.consumed {
                 let Some(layer) = layers
@@ -1075,6 +1272,8 @@ impl FilterColumns {
             layers.layers.push(Layer {
                 values_rel: Some(window.values_rel.clone()),
                 values: Arc::clone(&window.values),
+                // Never a keyword column — refused above — so no dictionary is owed here.
+                dict: None,
             });
             // `covered` is unchanged by construction — the equality above is what says so — so it
             // is neither recomputed nor adjusted here.
@@ -1143,7 +1342,7 @@ impl FilterColumns {
 
         let mut out = Bitmap::new();
         for layer in &column.layers {
-            out |= scan(&layer.values, operand, candidate);
+            out |= scan_layer(name, layer, operand, candidate)?;
         }
         Ok(out)
     }
@@ -1490,7 +1689,437 @@ fn codes_of(operand: &FilterOperand) -> Option<&[AttrLocalId]> {
     }
 }
 
-/// One operand against one layer.
+// ---------------------------------------------------------------------------------------------
+// The keyword route: a dictionary per layer, an ordinal question per operand
+// ---------------------------------------------------------------------------------------------
+
+/// The ordinal a needle no dictionary resolves is scanned for.
+///
+/// **No dictionary can mint it**, which is what makes it a reserved value rather than a convenient
+/// one: `SortedDictWriter` refuses the `u32::MAX`-th key, so a dictionary's ordinals run
+/// `0..key_count` with `key_count ≤ u32::MAX`, and `u32::MAX` is therefore outside every layer's
+/// ordinal space at once. A slot cannot hold it, so a scan for it matches nothing — while still
+/// walking every entity in the candidate, which is the whole point (see this module's header).
+const NO_SUCH_ORDINAL: u32 = u32::MAX;
+
+/// What one layer's dictionary turns a keyword operand into: a question about ordinals that the
+/// fixed-width scan can answer.
+///
+/// **Total on purpose, and this is the security-bearing shape.** There is deliberately no variant
+/// meaning *matches nothing, so do not scan*. A needle the layer does not hold becomes
+/// [`NO_SUCH_ORDINAL`]; a prefix no key carries becomes the sentinel *range*; a `contains` that
+/// matched no key becomes a one-element list holding the sentinel. Every arm of [`scan_ordinals`]
+/// then runs a scan over the whole candidate, so a dictionary miss costs what a hit costs — the
+/// rule records §4.3 states and per-point-attributes §3.8 requires. A future variant that skipped
+/// the scan would have to be added here *and* given an arm there, which is where a reader is most
+/// likely to see what it is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OrdinalPredicate {
+    /// One ordinal — `eq`, resolved.
+    Eq(u32),
+    /// A list of ordinals — `in`, one entry per needle the caller named, and the ordinals the
+    /// broad `contains` route collected.
+    In(Vec<u32>),
+    /// A contiguous ordinal range, **inclusive at both ends** — what a prefix's dictionary range
+    /// becomes, sortedness being the reason the dictionary is sorted.
+    ///
+    /// **Inclusive because the natural spelling of an empty prefix range is the early return
+    /// wearing another hat.** `SortedDict::prefix_range` answers "no key carries this" with a
+    /// half-open `k..k`, and where the prefix sorts below every key — an ordinary case, a needle
+    /// alphabetically before the whole dictionary — that is `0..0`. Carried through as an
+    /// exclusive upper bound of 0, the range scan narrows it to −1, finds it unrepresentable in
+    /// the column's `u32` and returns *without scanning* (`values.rs`'s `narrow_hi`, whose
+    /// `Unsatisfiable` verdict short-circuits by design for bounds a client wrote). So that
+    /// spelling would make exactly the prefixes nobody carries the cheap ones. The sentinel range
+    /// `NO_SUCH_ORDINAL..=NO_SUCH_ORDINAL` is representable, matches no slot, and scans.
+    Range { lo: u32, hi: u32 },
+}
+
+/// A dictionary's half-open prefix range as an inclusive ordinal predicate.
+fn ordinal_range(range: Range<u32>) -> OrdinalPredicate {
+    if range.start >= range.end {
+        return OrdinalPredicate::Range {
+            lo: NO_SUCH_ORDINAL,
+            hi: NO_SUCH_ORDINAL,
+        };
+    }
+    OrdinalPredicate::Range {
+        lo: range.start,
+        hi: range.end - 1,
+    }
+}
+
+/// Resolve one operand against **one layer's** dictionary.
+///
+/// A miss is ordinary and is not an error: `SortedDict::resolve` says so, and the whole point of
+/// [`NO_SUCH_ORDINAL`] is that the scan proceeds. Only a malformed dictionary refuses.
+///
+/// `in` yields exactly one ordinal per needle the caller named, misses included, so the list this
+/// hands the scan has the caller's own length rather than a length that counts how many of their
+/// needles this layer happens to hold. The set scan then sorts and de-duplicates it, which leaves
+/// one residual difference in work — a list of *k* distinct resolved ordinals against a list of one
+/// sentinel costs `O(log k)` more per candidate slot, `k` being the operand's own size and never a
+/// corpus quantity. Named rather than engineered around: the scan itself, which dominates, runs
+/// identically either way, and the same residual is what the category route's unresolved keys have
+/// always had.
+fn keyword_ordinals(
+    dict: &SortedDict,
+    operand: &FilterOperand,
+) -> Result<OrdinalPredicate, DictError> {
+    Ok(match operand {
+        FilterOperand::TextEquals(needle) => {
+            OrdinalPredicate::Eq(dict.resolve(needle)?.unwrap_or(NO_SUCH_ORDINAL))
+        }
+        FilterOperand::TextIn(needles) => {
+            let mut ordinals = Vec::with_capacity(needles.len());
+            for needle in needles {
+                ordinals.push(dict.resolve(needle)?.unwrap_or(NO_SUCH_ORDINAL));
+            }
+            OrdinalPredicate::In(ordinals)
+        }
+        FilterOperand::TextPrefix(prefix) => ordinal_range(dict.prefix_range(prefix)?),
+        // **The second line of defence, and it still scans.** `contains` is routed by
+        // [`keyword_contains`] before this is reached, and the remaining operands belong to other
+        // families — the parse refuses each of them on a keyword column, so arriving here means a
+        // caller built the expression directly. The sentinel is the fail-closed answer: it matches
+        // nothing, and it matches nothing the same way a needle nobody holds does.
+        FilterOperand::TextContains(_)
+        | FilterOperand::Equals(_)
+        | FilterOperand::In(_)
+        | FilterOperand::NumEquals(_)
+        | FilterOperand::NumIn(_)
+        | FilterOperand::Range { .. } => OrdinalPredicate::Eq(NO_SUCH_ORDINAL),
+    })
+}
+
+/// One ordinal predicate against one layer's `u32` ordinal column.
+///
+/// **Every arm scans, and none of them may learn to return early.** See [`OrdinalPredicate`].
+///
+/// The ordinals are handed to the value column as `AttrLocalId` because that is the type its
+/// fixed-width scans compare, and the crossing is safe here for a reason worth stating: the value
+/// is minted from *this* layer's dictionary two calls above, consumed by *this* layer's column, and
+/// never stored, returned or compared against an ordinal from anywhere else. It is a comparand for
+/// the width of one call, not an identity.
+fn scan_ordinals(values: &ValueColumn, predicate: &OrdinalPredicate, candidate: &Bitmap) -> Bitmap {
+    match predicate {
+        OrdinalPredicate::Eq(ordinal) => values.scan_eq(candidate, AttrLocalId::new(*ordinal)),
+        OrdinalPredicate::In(ordinals) => {
+            let ids: Vec<AttrLocalId> = ordinals.iter().copied().map(AttrLocalId::new).collect();
+            values.scan_in(candidate, &ids)
+        }
+        OrdinalPredicate::Range { lo, hi } => values.scan_range(
+            candidate,
+            Some(Endpoint {
+                value: Scalar::Int(i128::from(*lo)),
+                inclusive: true,
+            }),
+            Some(Endpoint {
+                value: Scalar::Int(i128::from(*hi)),
+                inclusive: true,
+            }),
+        ),
+    }
+}
+
+/// One operand against one keyword layer: resolve in that layer's dictionary, then scan its
+/// ordinals.
+fn scan_keyword(
+    values: &ValueColumn,
+    dict: &SortedDict,
+    operand: &FilterOperand,
+    candidate: &Bitmap,
+) -> Result<Bitmap, DictError> {
+    if let FilterOperand::TextContains(needle) = operand {
+        return keyword_contains(values, dict, needle, candidate);
+    }
+    let predicate = keyword_ordinals(dict, operand)?;
+    Ok(scan_ordinals(values, &predicate, candidate))
+}
+
+/// Which of `contains`' two routes a layer takes (records §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainsRoute {
+    /// Decode and substring-search **every** key in the layer's dictionary, collect the matching
+    /// ordinals, then scan for them. Front coding elides shared prefixes, so a substring can span
+    /// an elided one and a flat search of the file's bytes would miss matches — it is a per-key
+    /// loop, not a byte stream. Reading every key whatever the needle is also what keeps this
+    /// route's work a function of `(candidate, column)`.
+    Broad,
+    /// Take each candidate entity's ordinal and probe the dictionary for that one key. One random
+    /// dictionary access per candidate entity, and none at all for keys no visible entity carries.
+    Narrow,
+}
+
+/// Per-key cost of the broad route's walk, in nanoseconds.
+///
+/// **Measured**: 11.0–18.8 ns to decode one key, over the three real arXiv columns records §4.3
+/// quotes, through the shipped reader at the shipped restart interval
+/// (`probes/2026-08-13-keyword-dict/results.md`). 15 is the middle of that band. The figure is
+/// decode *alone* — the substring search over the decoded key is not in it — so this understates
+/// the broad route and biases the choice towards it, which is the conservative direction: the
+/// broad route is the one whose cost is bounded by the artefact rather than by the request.
+///
+/// The measurement is at 2.4M keys and records §4.3 sizes this family at 10⁹, so cache behaviour at
+/// 400× the size is not in it. **The 2–10 s the design originally modelled must not be quoted**;
+/// the honest extrapolation is 11–19 s single-threaded at 10⁹ before the search.
+const BROAD_KEY_NS: u64 = 15;
+
+/// Per-candidate cost of the narrow route's probe, in nanoseconds.
+///
+/// 0.10 µs for one `SortedDict::key_of` at the restart interval the campaign chose — the bottom of
+/// records §4.3's *modelled* 0.1–0.3 µs band, and the figure that interval was chosen against
+/// (`tessera_filter::DEFAULT_RESTART_INTERVAL`). The substring search over one decoded key and the
+/// ordinal scan the broad route also pays per candidate entity (0.25–0.28 ns contiguous) both
+/// vanish beside it at this precision, so neither is carried separately.
+const NARROW_PROBE_NS: u64 = 100;
+
+/// Choose a `contains` route from **the candidate's cardinality and the layer's dictionary size,
+/// and nothing else** (records §4.3).
+///
+/// `|candidate| · NARROW_PROBE_NS` against `|dictionary| · BROAD_KEY_NS`: the narrow route costs
+/// one probe per candidate entity, the broad route one decode per key plus an ordinal scan the
+/// narrow route does not run. Both inputs are admissible under §8.2 — the candidate's cardinality
+/// is the principal's own quantity, which the caller can compute for itself and already receives as
+/// a request's `visible` count, and a dictionary's key count is a property of the bundle, identical
+/// for every principal. Neither reads a statistic about *what* the principal's data contains, which
+/// is the class §6 forbids a route rule to consult, and neither depends on the needle: the same
+/// request over the same mask takes the same route whether the value exists or not.
+fn contains_route(candidate_entities: u64, dictionary_keys: u64) -> ContainsRoute {
+    if candidate_entities.saturating_mul(NARROW_PROBE_NS)
+        < dictionary_keys.saturating_mul(BROAD_KEY_NS)
+    {
+        ContainsRoute::Narrow
+    } else {
+        ContainsRoute::Broad
+    }
+}
+
+/// `contains` against one keyword layer, by whichever route [`contains_route`] names.
+///
+/// ⊘ **The crossover's constants are measured but the routes are not benched against each other,
+/// nor against the flat `utf8` scan they replace.** That comparison is the epic's own barrier
+/// before the flat scan is retired; until it is run, the constants above are the whole calibration
+/// and either route answers correctly whichever is chosen.
+fn keyword_contains(
+    values: &ValueColumn,
+    dict: &SortedDict,
+    needle: &str,
+    candidate: &Bitmap,
+) -> Result<Bitmap, DictError> {
+    // Every key contains the empty needle, so the answer is *carries a value in this column* — the
+    // whole ordinal range, which the range scan expresses without materialising an ordinal per key.
+    // No key is read because no key's content bears on the answer, and the needle's emptiness is
+    // the caller's own input rather than anything about the corpus.
+    if needle.is_empty() {
+        let whole = if dict.is_empty() {
+            OrdinalPredicate::Range {
+                lo: NO_SUCH_ORDINAL,
+                hi: NO_SUCH_ORDINAL,
+            }
+        } else {
+            OrdinalPredicate::Range {
+                lo: 0,
+                hi: dict.len() - 1,
+            }
+        };
+        return Ok(scan_ordinals(values, &whole, candidate));
+    }
+    match contains_route(candidate.cardinality(), u64::from(dict.len())) {
+        ContainsRoute::Broad => contains_broad(values, dict, needle, candidate),
+        ContainsRoute::Narrow => contains_narrow(values, dict, needle, candidate),
+    }
+}
+
+/// The broad route: walk the dictionary, keep the ordinals whose keys contain the needle, scan.
+fn contains_broad(
+    values: &ValueColumn,
+    dict: &SortedDict,
+    needle: &str,
+    candidate: &Bitmap,
+) -> Result<Bitmap, DictError> {
+    let mut ordinals = Vec::new();
+    // `SortedDict::walk` has no early exit by construction, so the walk's cost is the dictionary's
+    // size and never the needle's selectivity.
+    dict.walk(|ordinal, key| {
+        if key.contains(needle) {
+            ordinals.push(ordinal);
+        }
+    })?;
+    // No key matched. The scan still runs, for the reason [`OrdinalPredicate`] gives — an empty
+    // list would leave `scan_in` with nothing to compare, which is correct, but the sentinel says
+    // *why* it is one element rather than none.
+    if ordinals.is_empty() {
+        ordinals.push(NO_SUCH_ORDINAL);
+    }
+    Ok(scan_ordinals(
+        values,
+        &OrdinalPredicate::In(ordinals),
+        candidate,
+    ))
+}
+
+/// The narrow route: one dictionary probe per candidate entity that carries a value.
+///
+/// The probe is `SortedDict::key_of` into a scratch buffer the loop owns, so a candidate of ten
+/// million entities allocates once rather than ten million times.
+fn contains_narrow(
+    values: &ValueColumn,
+    dict: &SortedDict,
+    needle: &str,
+    candidate: &Bitmap,
+) -> Result<Bitmap, DictError> {
+    // A keyword layer's ordinals are `u32` by construction. Any other width means the column and
+    // its declaration disagree, and the fail-closed reading is that nothing matches — the same
+    // second line of defence `scan_eq` keeps for a code predicate over a text column.
+    let Codes::U32(ordinals) = values.codes() else {
+        return Ok(Bitmap::new());
+    };
+    let present = values.present();
+    let mut scratch = Vec::new();
+    let mut hits = Bitmap::new();
+    let mut failure: Option<DictError> = None;
+    for_each_slot_run(
+        &present,
+        candidate,
+        ordinals.len(),
+        |slot0, count, entity0| {
+            for i in 0..count {
+                match dict.key_of(ordinals[slot0 + i], &mut scratch) {
+                    Ok(key) => {
+                        if key.contains(needle) {
+                            hits.add(entity0 + i as u32);
+                        }
+                    }
+                    // Recorded and the walk continues rather than returning here: the caller refuses
+                    // on it, so the result is discarded either way, and stopping early would make a
+                    // malformed dictionary's cost depend on where the damage sits.
+                    Err(e) => {
+                        failure.get_or_insert(e);
+                    }
+                }
+            }
+        },
+    );
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(hits),
+    }
+}
+
+/// Walk `candidate ∩ present` as `(slot0, count, entity0)` runs — a layer's values are addressed by
+/// **rank**, and this is what turns an entity id into the slot holding its ordinal.
+///
+/// **Deliberately a second copy of `tessera_filter`'s own slot walk, which is private to the scan.**
+/// The narrow `contains` route needs the same mapping outside that crate, and the two obvious
+/// alternatives are worse than a duplicate: `ValueColumn::value_of` per entity pays a bitmap rank
+/// per read — drill-down cadence, and O(containers below the entity), which at 10⁹ is thousands of
+/// container steps per candidate entity — while stepping the presence bitmap one bit at a time
+/// costs O(present) however small the candidate is, defeating the route's whole reason to exist.
+///
+/// Rank is **affine inside a run**: an entity `e` in a presence run starting at `ps`, with `base`
+/// bits set before that run, is at slot `base + (e − ps)`. Merging the two bitmaps' runs therefore
+/// gives every slot by arithmetic at O(runs).
+fn for_each_slot_run(
+    present: &Bitmap,
+    candidate: &Bitmap,
+    len: usize,
+    mut f: impl FnMut(usize, usize, u32),
+) {
+    let live = candidate.and(present);
+    let mut pres = RunIter::new(present);
+    let mut liv = RunIter::new(&live);
+    let mut base: u64 = 0;
+    let mut p = pres.next();
+    let mut l = liv.next();
+    while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
+        if pl < ls {
+            base += u64::from(pl - ps) + 1;
+            p = pres.next();
+            continue;
+        }
+        if ll < ps {
+            l = liv.next();
+            continue;
+        }
+        let lo = ls.max(ps);
+        let hi = ll.min(pl);
+        let slot0 = (base + u64::from(lo - ps)) as usize;
+        let count = (hi - lo) as usize + 1;
+        if slot0 < len {
+            f(slot0, count.min(len - slot0), lo);
+        }
+        if ll <= pl {
+            l = liv.next();
+        } else {
+            base += u64::from(pl - ps) + 1;
+            p = pres.next();
+        }
+    }
+}
+
+/// How many runs one bulk read from a bitmap cursor collects.
+const RUN_BUF: usize = 64;
+
+/// One run at a time from a bitmap, buffered through the cursor's bulk read.
+struct RunIter<'a> {
+    cursor: croaring::bitmap::BitmapCursor<'a>,
+    buf: [croaring::RangeInclusive<u32>; RUN_BUF],
+    filled: usize,
+    at: usize,
+}
+
+impl<'a> RunIter<'a> {
+    fn new(bitmap: &'a Bitmap) -> Self {
+        RunIter {
+            cursor: bitmap.cursor(),
+            buf: [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF],
+            filled: 0,
+            at: 0,
+        }
+    }
+
+    /// The next run as `(start, last)`, inclusive.
+    fn next(&mut self) -> Option<(u32, u32)> {
+        if self.at == self.filled {
+            self.filled = self.cursor.read_many_ranges(&mut self.buf);
+            self.at = 0;
+            if self.filled == 0 {
+                return None;
+            }
+        }
+        let r = self.buf[self.at];
+        self.at += 1;
+        Some((r.start, r.last))
+    }
+}
+
+/// One operand against one layer, whichever family the layer belongs to.
+///
+/// **The dictionary decides, not the declaration, and that is the narrower of the two.** A layer
+/// carries a dictionary exactly when it is a keyword layer — [`FilterColumns::compose`] refuses
+/// every other pairing in both directions — so reading the route off the layer keeps the resolve
+/// and the ordinals it is compared against inseparable by construction, where consulting the
+/// column's family here would leave a keyword layer with a missing dictionary silently scanning
+/// its ordinals as though they were bytes.
+fn scan_layer(
+    column: &str,
+    layer: &Layer,
+    operand: &FilterOperand,
+    candidate: &Bitmap,
+) -> Result<Bitmap, FilterError> {
+    match &layer.dict {
+        Some(dict) => scan_keyword(&layer.values, dict, operand, candidate).map_err(|e| {
+            FilterError::DictionaryUnreadable {
+                column: column.to_string(),
+                detail: e.to_string(),
+            }
+        }),
+        None => Ok(scan(&layer.values, operand, candidate)),
+    }
+}
+
+/// One operand against one layer's value column.
 ///
 /// **The dispatch is here, once, rather than per layer inside a scan.** Each arm is the scan the
 /// column crate exposes for that family, and the match is on the *operand* — never on the values —
@@ -1536,4 +2165,543 @@ pub fn candidate(
         }
     }
     live
+}
+
+#[cfg(test)]
+mod keyword_tests {
+    //! The keyword read route, over dictionaries and ordinal columns built in this process.
+    //!
+    //! ⊘ **No build writes a keyword column yet**, so there is no end-to-end fixture to filter
+    //! against and `tests/filtering.rs` — which builds a real bundle — cannot reach this family.
+    //! What these cover instead is every step the route is made of: the per-layer resolve, the
+    //! sentinel rule, the two `contains` routes against each other, and the slot arithmetic the
+    //! narrow one depends on.
+
+    use super::*;
+    use tessera_filter::SortedDictWriter;
+
+    /// A dictionary over already-sorted distinct keys, read back from memory.
+    fn dict(keys: &[&str]) -> Arc<SortedDict> {
+        let mut bytes = Vec::new();
+        let mut writer = SortedDictWriter::new(&mut bytes).expect("a writer opens");
+        for key in keys {
+            writer.push(key).expect("keys ascend strictly");
+        }
+        writer.finish().expect("the dictionary closes");
+        Arc::new(SortedDict::from_vec(bytes).expect("the dictionary reads back"))
+    }
+
+    /// An ordinal column every entity carries a value in: entity id is the slot.
+    fn universal(ordinals: &[u32]) -> Arc<ValueColumn> {
+        Arc::new(ValueColumn::universal(Codes::U32(ordinals.to_vec().into())))
+    }
+
+    /// An ordinal column only `entities` carry a value in, in ascending entity order.
+    fn partial(entities: &[u32], ordinals: &[u32]) -> Arc<ValueColumn> {
+        Arc::new(
+            ValueColumn::partial(Codes::U32(ordinals.to_vec().into()), Bitmap::of(entities))
+                .expect("one ordinal per present entity"),
+        )
+    }
+
+    fn set(entities: &[u32]) -> Bitmap {
+        Bitmap::of(entities)
+    }
+
+    fn members(bitmap: &Bitmap) -> Vec<u32> {
+        bitmap.iter().collect()
+    }
+
+    /// A keyword column of one or more layers, each with its own dictionary — the shape
+    /// [`FilterColumns::open`] builds from a manifest, assembled here without one.
+    fn keyword_column(
+        name: &str,
+        layers: Vec<(Option<&str>, Arc<ValueColumn>, Arc<SortedDict>)>,
+    ) -> FilterColumns {
+        let mut covered = Bitmap::new();
+        let layers: Vec<Layer> = layers
+            .into_iter()
+            .map(|(values_rel, values, dict)| {
+                covered |= values.present();
+                Layer {
+                    values_rel: values_rel.map(str::to_string),
+                    values,
+                    dict: Some(dict),
+                }
+            })
+            .collect();
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            name.to_string(),
+            Layers {
+                layers,
+                covered,
+                filterable: true,
+                postings: None,
+                route: Route::Scan,
+                family: Family::Keyword,
+            },
+        );
+        let mut placements = BTreeMap::new();
+        placements.insert(
+            name.to_string(),
+            Placement {
+                entity: true,
+                row: false,
+                family: Family::Keyword,
+            },
+        );
+        FilterColumns {
+            columns,
+            placements,
+            records: Arc::new(empty_record_stack()),
+        }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The sentinel rule
+    // -------------------------------------------------------------------------------------
+
+    /// **A needle the layer does not hold resolves to the reserved ordinal, never to a shortcut.**
+    /// The assertion is on the *representation* rather than on the answer, because both are empty:
+    /// what must not drift is that a miss is carried to the scan as a value to look for.
+    #[test]
+    fn a_dictionary_miss_is_the_reserved_ordinal() {
+        let d = dict(&["alpha", "beta", "gamma"]);
+        assert_eq!(
+            keyword_ordinals(&d, &FilterOperand::TextEquals("delta".into())).unwrap(),
+            OrdinalPredicate::Eq(NO_SUCH_ORDINAL)
+        );
+        assert_eq!(
+            keyword_ordinals(&d, &FilterOperand::TextEquals("beta".into())).unwrap(),
+            OrdinalPredicate::Eq(1)
+        );
+    }
+
+    /// **A prefix no key carries is the sentinel *range*, not an empty one**, and that distinction
+    /// is the whole reason [`OrdinalPredicate::Range`] is inclusive — see its doc for the bound
+    /// that would make an empty range skip the scan. Both directions are covered: `zeta` sorts
+    /// above every key here and `aa` below every one of them, the second being the `0..0` case.
+    #[test]
+    fn a_prefix_no_key_carries_is_the_sentinel_range() {
+        let d = dict(&["alpha", "alpine", "beta"]);
+        for absent in ["zeta", "aa"] {
+            assert_eq!(
+                keyword_ordinals(&d, &FilterOperand::TextPrefix(absent.into())).unwrap(),
+                OrdinalPredicate::Range {
+                    lo: NO_SUCH_ORDINAL,
+                    hi: NO_SUCH_ORDINAL
+                },
+                "prefix {absent:?}"
+            );
+        }
+        assert_eq!(
+            keyword_ordinals(&d, &FilterOperand::TextPrefix("alp".into())).unwrap(),
+            OrdinalPredicate::Range { lo: 0, hi: 1 }
+        );
+    }
+
+    /// **The pin on the whole rule: a sentinel predicate is answered by a real scan.**
+    ///
+    /// The column below holds `NO_SUCH_ORDINAL` in a slot, which no dictionary can mint and no real
+    /// keyword column therefore has — so the only way that entity comes back is if the scan walked
+    /// the candidate and compared. An implementation that recognised the miss and returned
+    /// `Bitmap::new()` — the early return records §4.3 forbids, because it makes *no item has this
+    /// value* cheaper than *some do* — returns nothing here and fails, in all three predicate
+    /// shapes at once.
+    #[test]
+    fn a_sentinel_predicate_is_scanned_for_and_not_short_circuited() {
+        let column = universal(&[7, NO_SUCH_ORDINAL, 9]);
+        let all = set(&[0, 1, 2]);
+        for predicate in [
+            OrdinalPredicate::Eq(NO_SUCH_ORDINAL),
+            OrdinalPredicate::In(vec![NO_SUCH_ORDINAL]),
+            OrdinalPredicate::Range {
+                lo: NO_SUCH_ORDINAL,
+                hi: NO_SUCH_ORDINAL,
+            },
+        ] {
+            assert_eq!(
+                members(&scan_ordinals(&column, &predicate, &all)),
+                vec![1],
+                "{predicate:?} must reach the slot holding the reserved ordinal"
+            );
+        }
+    }
+
+    /// The reserved ordinal names no key, which is what makes it safe to scan for rather than
+    /// merely unlikely to collide.
+    ///
+    /// That a dictionary's ordinals run `0..key_count` with `key_count` a `u32` puts `u32::MAX`
+    /// outside them **as a type-level tautology** — clippy says so if it is asserted — so what is
+    /// worth checking is the reader's own answer to it.
+    #[test]
+    fn no_dictionary_holds_the_reserved_ordinal() {
+        let d = dict(&["alpha", "beta"]);
+        assert!(d.key_of(NO_SUCH_ORDINAL, &mut Vec::new()).is_err());
+    }
+
+    /// `in` hands the scan one ordinal per needle the caller named, misses included, so the list's
+    /// length is the operand's own and never a count of how many of them this layer holds.
+    #[test]
+    fn an_in_set_carries_one_ordinal_per_needle_hit_or_miss() {
+        let d = dict(&["alpha", "beta", "gamma"]);
+        let operand = FilterOperand::TextIn(vec!["gamma".into(), "delta".into(), "alpha".into()]);
+        assert_eq!(
+            keyword_ordinals(&d, &operand).unwrap(),
+            OrdinalPredicate::In(vec![2, NO_SUCH_ORDINAL, 0])
+        );
+    }
+
+    /// An operand from another family cannot reach a keyword column through the parse; arriving
+    /// here from an embedder that built the expression directly, it matches nothing **and still
+    /// scans** — the same fail-closed answer a needle nobody holds gets.
+    #[test]
+    fn an_operand_from_another_family_takes_the_sentinel() {
+        let d = dict(&["alpha"]);
+        assert_eq!(
+            keyword_ordinals(&d, &FilterOperand::NumEquals(Scalar::Int(3))).unwrap(),
+            OrdinalPredicate::Eq(NO_SUCH_ORDINAL)
+        );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Per-layer resolution
+    // -------------------------------------------------------------------------------------
+
+    /// **The layer's own dictionary, and nothing else would be correct.** The two layers below
+    /// number `beta` differently — 1 in the base, 0 in the extent — which is what independent
+    /// per-layer numbering produces. Resolving once and scanning both layers with that one ordinal
+    /// returns the wrong entities from one of them; this asserts the right ones from both.
+    #[test]
+    fn a_needle_resolves_against_each_layers_own_dictionary() {
+        let columns = keyword_column(
+            "sub",
+            vec![
+                // Base: alpha = 0, beta = 1. Entities 0..3.
+                (None, universal(&[0, 1, 0]), dict(&["alpha", "beta"])),
+                // Extent: beta = 0, gamma = 1. Entities 10, 11.
+                (
+                    Some("extents/f1.arrow"),
+                    partial(&[10, 11], &[1, 0]),
+                    dict(&["beta", "gamma"]),
+                ),
+            ],
+        );
+        let candidate = set(&[0, 1, 2, 10, 11]);
+        let hits = columns
+            .resolve("sub", &FilterOperand::TextEquals("beta".into()), &candidate)
+            .unwrap();
+        assert_eq!(members(&hits), vec![1, 11]);
+
+        // `gamma` exists only in the extent's dictionary; the base's resolve misses and still
+        // scans, contributing nothing.
+        let hits = columns
+            .resolve(
+                "sub",
+                &FilterOperand::TextEquals("gamma".into()),
+                &candidate,
+            )
+            .unwrap();
+        assert_eq!(members(&hits), vec![10]);
+
+        // A needle no layer holds is an ordinary empty answer, not a refusal.
+        let hits = columns
+            .resolve(
+                "sub",
+                &FilterOperand::TextEquals("omega".into()),
+                &candidate,
+            )
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    /// The result is a subset of the candidate whatever the operand — **I12** as a property of the
+    /// shape, checked here for the family whose leaves are new.
+    #[test]
+    fn a_keyword_leaf_never_widens_the_candidate() {
+        let columns = keyword_column(
+            "sub",
+            vec![(None, universal(&[0, 1, 0, 1]), dict(&["alpha", "beta"]))],
+        );
+        let candidate = set(&[1, 3]);
+        for operand in [
+            FilterOperand::TextEquals("alpha".into()),
+            FilterOperand::TextIn(vec!["alpha".into(), "beta".into()]),
+            FilterOperand::TextPrefix("".into()),
+            FilterOperand::TextContains("a".into()),
+        ] {
+            let hits = columns.resolve("sub", &operand, &candidate).unwrap();
+            assert!(
+                hits.and(&candidate) == hits,
+                "{operand:?} escaped the candidate"
+            );
+        }
+    }
+
+    /// `prefix` is the contiguous ordinal range sortedness gives it, tested by the range scan.
+    #[test]
+    fn a_prefix_is_a_contiguous_ordinal_range() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                universal(&[0, 1, 2, 3]),
+                dict(&["alpha", "alpine", "beta", "gamma"]),
+            )],
+        );
+        let candidate = set(&[0, 1, 2, 3]);
+        let hits = columns
+            .resolve("sub", &FilterOperand::TextPrefix("alp".into()), &candidate)
+            .unwrap();
+        assert_eq!(members(&hits), vec![0, 1]);
+        // The empty prefix is every key, which is every entity carrying a value — the honest
+        // reading, and not every entity.
+        let hits = columns
+            .resolve("sub", &FilterOperand::TextPrefix("".into()), &candidate)
+            .unwrap();
+        assert_eq!(members(&hits), vec![0, 1, 2, 3]);
+    }
+
+    /// `in` over a keyword column is `eq` over a list, and a set naming values nobody holds costs
+    /// the same shape of answer as one naming values everybody does.
+    #[test]
+    fn an_in_set_unions_its_needles() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                universal(&[0, 1, 2, 0]),
+                dict(&["alpha", "beta", "gamma"]),
+            )],
+        );
+        let candidate = set(&[0, 1, 2, 3]);
+        let hits = columns
+            .resolve(
+                "sub",
+                &FilterOperand::TextIn(vec!["gamma".into(), "alpha".into(), "nope".into()]),
+                &candidate,
+            )
+            .unwrap();
+        assert_eq!(members(&hits), vec![0, 2, 3]);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // `contains`, and its two routes
+    // -------------------------------------------------------------------------------------
+
+    /// **The two routes must agree, or the crossover is a correctness switch rather than a cost
+    /// one.** Run over a partial column with a scattered presence and a scattered candidate, which
+    /// is the shape the narrow route's slot arithmetic is most likely to get wrong.
+    #[test]
+    fn the_two_contains_routes_agree() {
+        let keys = [
+            "arxiv/0001",
+            "arxiv/0002",
+            "arxiv/1001",
+            "bio/0001",
+            "bio/2002",
+            "cs/0003",
+            "cs/1001",
+            "math/0001",
+        ];
+        let d = dict(&keys);
+        let entities = [1u32, 2, 5, 9, 40, 41, 42, 100_000, 100_001, 200_000];
+        let ordinals = [0u32, 3, 6, 1, 7, 2, 4, 5, 0, 6];
+        let values = partial(&entities, &ordinals);
+        for candidate in [
+            set(&entities),
+            set(&[1, 42, 200_000]),
+            set(&[5]),
+            set(&[7, 8]),
+            Bitmap::new(),
+        ] {
+            for needle in ["1001", "arxiv", "0001", "zzz", "/", "math/0001"] {
+                let broad = contains_broad(&values, &d, needle, &candidate).unwrap();
+                let narrow = contains_narrow(&values, &d, needle, &candidate).unwrap();
+                assert_eq!(
+                    members(&broad),
+                    members(&narrow),
+                    "routes disagree on {needle:?} over {:?}",
+                    members(&candidate)
+                );
+            }
+        }
+    }
+
+    /// The routes agree on a universal column too, where the entity id is the slot and the run
+    /// merge has no presence bitmap to thread.
+    #[test]
+    fn the_two_contains_routes_agree_over_a_universal_column() {
+        let d = dict(&["ab", "abc", "bc", "cd"]);
+        let values = universal(&[0, 1, 2, 3, 1, 0]);
+        for candidate in [set(&[0, 1, 2, 3, 4, 5]), set(&[1, 4]), set(&[5])] {
+            for needle in ["b", "ab", "cd", "q"] {
+                assert_eq!(
+                    members(&contains_broad(&values, &d, needle, &candidate).unwrap()),
+                    members(&contains_narrow(&values, &d, needle, &candidate).unwrap()),
+                    "routes disagree on {needle:?}"
+                );
+            }
+        }
+    }
+
+    /// A substring that spans an elided shared prefix is still found — the reason the broad route
+    /// decodes every key rather than searching the file's bytes. `alphabet` front-codes against
+    /// `alpha`, so `phab` exists in no stored suffix.
+    #[test]
+    fn contains_finds_a_substring_spanning_an_elided_prefix() {
+        let d = dict(&["alpha", "alphabet"]);
+        let values = universal(&[0, 1]);
+        let candidate = set(&[0, 1]);
+        assert_eq!(
+            members(&contains_broad(&values, &d, "phab", &candidate).unwrap()),
+            vec![1]
+        );
+        assert_eq!(
+            members(&contains_narrow(&values, &d, "phab", &candidate).unwrap()),
+            vec![1]
+        );
+    }
+
+    /// `contains` matching no key is the empty answer by way of the sentinel, and the whole
+    /// candidate is still scanned for it.
+    #[test]
+    fn a_contains_matching_no_key_still_scans() {
+        let d = dict(&["alpha", "beta"]);
+        let values = universal(&[0, 1]);
+        assert!(contains_broad(&values, &d, "zzz", &set(&[0, 1]))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The empty needle is *carries a value in this column*, which is not every entity: entity 2
+    /// below has no value and matches nothing.
+    #[test]
+    fn an_empty_contains_needle_is_carrying_a_value() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                partial(&[0, 1, 3], &[0, 1, 0]),
+                dict(&["alpha", "beta"]),
+            )],
+        );
+        let hits = columns
+            .resolve(
+                "sub",
+                &FilterOperand::TextContains("".into()),
+                &set(&[0, 1, 2, 3]),
+            )
+            .unwrap();
+        assert_eq!(members(&hits), vec![0, 1, 3]);
+    }
+
+    /// **The crossover reads two numbers and neither is about content.** A candidate small against
+    /// the dictionary takes the narrow route; one large against it takes the broad. The boundary is
+    /// the ratio of the two measured constants, and the same request over the same mask takes the
+    /// same route whatever the needle.
+    #[test]
+    fn the_contains_crossover_is_candidate_size_against_dictionary_size() {
+        // 10³ candidate entities against 10⁹ keys: probing a thousand keys beats decoding a
+        // billion.
+        assert_eq!(contains_route(1_000, 1_000_000_000), ContainsRoute::Narrow);
+        // The whole corpus against a small vocabulary: one pass over the dictionary, then a scan.
+        assert_eq!(contains_route(1_000_000_000, 1_000), ContainsRoute::Broad);
+        // The boundary itself, from the constants rather than from a remembered number.
+        let keys = 1_000_000u64;
+        let boundary = keys * BROAD_KEY_NS / NARROW_PROBE_NS;
+        assert_eq!(contains_route(boundary - 1, keys), ContainsRoute::Narrow);
+        assert_eq!(contains_route(boundary, keys), ContainsRoute::Broad);
+        // An empty dictionary can only be walked — there is nothing to probe for.
+        assert_eq!(contains_route(0, 0), ContainsRoute::Broad);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The layer pairing, and what crosses the boundary
+    // -------------------------------------------------------------------------------------
+
+    /// A keyword extent arriving without its dictionary is refused rather than composed: scanned
+    /// as codes it would answer every string predicate with the empty set, which under-reports
+    /// with no symptom.
+    #[test]
+    fn a_keyword_extent_without_its_dictionary_is_refused() {
+        let mut columns = keyword_column(
+            "sub",
+            vec![(None, universal(&[0, 1]), dict(&["alpha", "beta"]))],
+        );
+        let err = columns
+            .compose("sub", "extents/f1.arrow", partial(&[10], &[0]), None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("carries no sorted dictionary"),
+            "{err}"
+        );
+    }
+
+    /// And the other direction: a dictionary for a column the schema does not call a keyword means
+    /// the caller and the declaration disagree about what its values are.
+    #[test]
+    fn a_dictionary_on_a_non_keyword_extent_is_refused() {
+        let mut columns = keyword_column(
+            "sub",
+            vec![(None, universal(&[0, 1]), dict(&["alpha", "beta"]))],
+        );
+        columns.columns.get_mut("sub").expect("the column").family = Family::Numeric;
+        let err = columns
+            .compose(
+                "sub",
+                "extents/f1.arrow",
+                partial(&[10], &[0]),
+                Some(dict(&["alpha"])),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not declare the column a keyword"),
+            "{err}"
+        );
+    }
+
+    /// **Drill-down is served the key, never the ordinal** (records §4.3, **I10**): an ordinal is a
+    /// position in one layer's dictionary and an index internal, so it does not cross the trust
+    /// boundary. Decoded against the layer that holds the entity, which is what makes the two
+    /// layers' clashing numbering come out right.
+    #[test]
+    fn drill_down_reads_the_key_not_the_ordinal() {
+        let columns = keyword_column(
+            "sub",
+            vec![
+                (None, universal(&[0, 1]), dict(&["alpha", "beta"])),
+                (
+                    Some("extents/f1.arrow"),
+                    partial(&[10], &[0]),
+                    dict(&["beta", "gamma"]),
+                ),
+            ],
+        );
+        assert_eq!(
+            columns.stored_value("sub", 1),
+            Some(RecordValue::Utf8("beta".into()))
+        );
+        assert_eq!(
+            columns.stored_value("sub", 10),
+            Some(RecordValue::Utf8("beta".into()))
+        );
+        assert_eq!(columns.stored_value("sub", 7), None);
+    }
+
+    /// The family's operator list and its published name, which `/v1/meta` and the request parser
+    /// both read from here — one derivation, so a client cannot be offered an operator the engine
+    /// would not route.
+    #[test]
+    fn the_keyword_family_publishes_the_four_string_operators() {
+        assert_eq!(Family::Keyword.as_str(), "keyword");
+        assert_eq!(
+            Family::Keyword.operands(),
+            &["eq", "in", "prefix", "contains"]
+        );
+        // A string is never in the hot column, so a keyword affords the entity route alone.
+        assert!(!Family::Keyword.reaches_hot_column());
+    }
 }
