@@ -723,9 +723,9 @@ ruling) and this design's 100 ms target. Measured constants; the 10⁹ multiplic
 | any viewport-bounded filter | row space (§6.2, §6.3) | ≲ 1–33 ms *(probe-measured / modelled — N4's caveat)* | 100 ms |
 | number range, contiguous candidate | scan | ~250–280 ms *(measured)* | 1 s |
 | keyword `eq`/`prefix`, contiguous, no postings | ordinal scan | ~250–280 ms *(modelled from measured constant)* | 1 s |
-| fixed-width scan, scattered 25% principal | scan | ~2.4 s *(measured at 10⁸ ×10)* | ÷ cores |
-| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | 11–19 s decode alone at 10⁹ *(measured per-key at 2.4M, extrapolated — §4.3)* | ÷ cores |
-| phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(169 µs/block measured; count result-bound)* | 100 ms |
+| fixed-width scan, scattered 25% principal | scan | ~2.4 s *(measured at 10⁸ ×10)* | ÷ cores, measured 7.4–8.5× on twelve |
+| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | 11–19 s decode alone at 10⁹ *(per-key measured at 2.4M; **extrapolation refused** — the dictionary fits this machine's L3 at that size and does not at 10⁸, so this is a flag, not a figure — `performance-suite.md` §5)* | ÷ cores |
+| phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(253–265 µs/block measured through the built reader; count result-bound)* | 100 ms |
 | phrase verify, common phrase | as above | unbounded — result-bound | known class |
 | CSR list scan, broad candidate | scan | ~2.7–10 s *(measured constants ×10⁹)* | **postings instead** |
 | unselective predicate (matches ≥25% of corpus) | any | 3.4–6 s *(measured; result-bound — index §2.2)* | known gap, unchanged |
