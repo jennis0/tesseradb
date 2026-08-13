@@ -70,7 +70,7 @@ disposition).
 
 **The mechanism follows the vocabulary, not the type** (memo §4). A category's closed vocabulary
 earns per-value postings (built). A keyword's open, exact vocabulary earns a sorted per-layer
-dictionary with an ordinal column — measured at a 2.9–4.4× storage floor over the flat `utf8`
+dictionary with an ordinal column — measured 2.18–3.61× smaller than the flat `utf8`
 column it replaces, **>2× modelled on every shape for the decodable format** (§4.3) — while
 turning string equality and prefix into fixed-width scans. Prose earns a token index that is
 **3.5× smaller than the flat column it replaces** and is the only mechanism that serves its
@@ -313,9 +313,13 @@ against the flat column's 17.8** on a fully unique column, 5.7 against 22.3 on a
 7.7 against 33.2 on a sparse one — the win coming from front-coded shared prefixes, interning of
 repeats, and a `u32` ordinal replacing an `i64` offset. **Those dictionary bytes are a floor, not
 the format's cost** (review N3): the probe's front coder stores no suffix lengths and no restarts,
-so it is not decodable as stored; the specified format below costs ~1–2 B/key more, which moves
-the unique-identifier headline from 2.9× to ~2.2–2.3× and the modelled range across the three
-shapes to ~2.2–3.9× — the sign is safe everywhere. The per-key figure is also shape-scoped:
+so it is not decodable as stored. **The built format costs 2.0–2.9 B/key over that floor and the
+whole family measures 2.18–3.61× smaller than the flat column** ([the dictionary campaign](../../probes/2026-08-13-keyword-dict/results.md), *measured* on the same three
+arXiv columns through the shipped writer) — against the ~2.2–3.9× this modelled, so marginally
+under at both ends, and the sign is safe everywhere. The model's "~1–2 B/key more" holds for the
+two identifier columns and is exceeded by `doi` at +2.9, the excess being the prefix elision a
+block's first key gives up; it therefore scales with how much neighbouring keys share, which is
+the one direction the model did not carry. The per-key figure is also shape-scoped:
 2–4 B/key holds for the two identifier columns, while `submitter` measures **7.5 B/key** (1.7
 B/entity over 542,489 distinct in 2.4M) — repeat-heavy columns pay more per key and far less per
 entity. The postings-plus-compressed-record layout that is right for prose was measured **wrong**
@@ -345,9 +349,12 @@ unioned — disjoint by I9, exactly as every layered scan composes today (index 
   against the shipped scan never ships. **Broad candidate**: a substring search over the
   dictionary's own key bytes, yielding matching ordinals, then the ordinal scan. Because front
   coding elides shared prefixes, a substring can span an elided prefix, so **every key is decoded
-  and searched — a per-key loop, not a flat byte stream** (review N5): at 10⁹ unique keys that is
-  order **2–10 s single-threaded** (*modelled* from per-key decode-and-search constants; §11
-  item 4's harness measures it), divided by cores, and milliseconds on repeat-heavy vocabularies.
+  and searched — a per-key loop, not a flat byte stream** (review N5): at 10⁹ unique keys the
+  **decode alone measures 11.0–18.8 ns/key, so 11–19 s single-threaded before the substring
+  search** ([the dictionary campaign](../../probes/2026-08-13-keyword-dict/results.md)) — above the 2–10 s this modelled, and measured at 2.4M rather than at 10⁹, so
+  cache behaviour at 400× the size is not in it. Divided by cores, and milliseconds on
+  repeat-heavy vocabularies; §11 item 4's harness owes the figure at scale, and **2–10 s must not
+  be quoted as measured**.
   **Narrow candidate**: resolve each candidate slot's ordinal and probe the dictionary for its
   bytes — one random dictionary access per candidate entity (~0.1–0.3 µs *modelled*). The
   crossover compares the candidate's cardinality against the dictionary's size — the principal's
@@ -717,7 +724,7 @@ ruling) and this design's 100 ms target. Measured constants; the 10⁹ multiplic
 | number range, contiguous candidate | scan | ~250–280 ms *(measured)* | 1 s |
 | keyword `eq`/`prefix`, contiguous, no postings | ordinal scan | ~250–280 ms *(modelled from measured constant)* | 1 s |
 | fixed-width scan, scattered 25% principal | scan | ~2.4 s *(measured at 10⁸ ×10)* | ÷ cores |
-| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | ~2–10 s *(modelled — §4.3, review N5)* | ÷ cores |
+| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | 11–19 s decode alone at 10⁹ *(measured per-key at 2.4M, extrapolated — §4.3)* | ÷ cores |
 | phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(169 µs/block measured; count result-bound)* | 100 ms |
 | phrase verify, common phrase | as above | unbounded — result-bound | known class |
 | CSR list scan, broad candidate | scan | ~2.7–10 s *(measured constants ×10⁹)* | **postings instead** |
