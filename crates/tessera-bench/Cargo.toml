@@ -45,6 +45,11 @@ croaring = { workspace = true }
 # and both are transitive dependencies of this crate already.
 tessera-wire = { path = "../tessera-wire" }
 arrow = { workspace = true }
+# `utf8_retirement_fence` searches dictionary keys for a substring, which is the same question the
+# flat column's `scan_text_contains` answers — and it must ask it with the same searcher, or the
+# two sides of that comparison would differ by their string algorithm as well as by their format.
+# `tessera-filter` already takes this exact version for that scan.
+memchr = "2"
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

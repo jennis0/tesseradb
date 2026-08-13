@@ -2286,6 +2286,7 @@ dependencies = [
  "clap",
  "croaring",
  "libc",
+ "memchr",
  "rand 0.8.7",
  "reqwest",
  "rustc-hash 1.1.0",

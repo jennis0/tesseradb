@@ -1,0 +1,195 @@
+
+### the needles, fixed by position before anything was timed
+
+column      entities  distinct eq[0]                      prefix     contains
+id            600000    600000 0807.4007                  111        1.17    
+submitter     600000    151810 Brandilyn Stigler          Adr        e Lo    
+doi           600000    347336 10.1103/PhysRevA.78.052306 10.1073/   /pna    
+
+### stored bytes: the same column both ways, on disk, through the shipped writers
+
+column       present  flat values  flat pres   dict.bin   ordinals    kw pres  flat B/e    kw B/e   ratio
+id            600000     10288946          0    2463261    2475578          0     17.15      8.23    2.08
+submitter     599908     13702962        486    1579799    2475258        486     22.84      6.76    3.38
+doi           347971     11686322      82008    2246629    1436026      82008     33.82     10.82    3.13
+
+Presence is written for both formats and is identical in both, so it appears on both
+sides rather than being excluded from either. ratio = flat / keyword: above 1 the family
+is the smaller artefact.
+
+### cell 1: the four operators, one candidate of 25% of the corpus, both shapes
+
+column     op        candidate      |cand|   scanned route                         ms    ns/ent    matched
+id         eq        contiguous     150000    150000 flat scan                   0.40     2.642          1
+id         eq        contiguous     150000    150000 resolve+ordinal             0.08     0.552          1
+id         eq-miss   contiguous     150000    150000 flat scan                   0.07     0.443          0
+id         eq-miss   contiguous     150000    150000 resolve+ordinal             0.08     0.548          0
+id         prefix    contiguous     150000    150000 flat scan                   0.37     2.493      20681
+id         prefix    contiguous     150000    150000 range+ordinal               0.07     0.496      20681
+id         in        contiguous     150000    150000 flat scan                   2.44    16.292          2
+id         in        contiguous     150000    150000 resolve+ordinal             0.26     1.744          2
+id         contains  contiguous     150000    150000 flat scan                   0.06     0.396        300
+id         contains  contiguous     150000    150000 broad: walk only            9.47    63.151       1500
+id         contains  contiguous     150000    150000 broad: +set scan           10.66    71.079        300
+id         contains  contiguous     150000    150000 broad: +bitset              9.54    63.631        300
+id         contains  contiguous     150000    150000 narrow: key_of/cand        10.58    70.519        300
+id         cont-miss contiguous     150000    150000 flat scan                   0.02     0.139          0
+id         cont-miss contiguous     150000    150000 broad: walk only            6.89    45.930          0
+id         cont-miss contiguous     150000    150000 broad: +set scan            6.89    45.930          0
+id         cont-miss contiguous     150000    150000 broad: +bitset              6.96    46.394          0
+id         cont-miss contiguous     150000    150000 narrow: key_of/cand         9.17    61.122          0
+id         eq        scattered      150000    150000 flat scan                   1.66    11.048          5
+id         eq        scattered      150000    150000 resolve+ordinal             1.49     9.930          5
+id         eq-miss   scattered      150000    150000 flat scan                   1.34     8.902          0
+id         eq-miss   scattered      150000    150000 resolve+ordinal             1.48     9.895          0
+id         prefix    scattered      150000    150000 flat scan                   1.65    10.975       5170
+id         prefix    scattered      150000    150000 range+ordinal               1.35     9.008       5170
+id         in        scattered      150000    150000 flat scan                   3.34    22.269          7
+id         in        scattered      150000    150000 resolve+ordinal             1.68    11.208          7
+id         contains  scattered      150000    150000 flat scan                   2.05    13.667        375
+id         contains  scattered      150000    150000 broad: walk only            9.92    66.125       1500
+id         contains  scattered      150000    150000 broad: +set scan           12.51    83.427        375
+id         contains  scattered      150000    150000 broad: +bitset             11.28    75.207        375
+id         contains  scattered      150000    150000 narrow: key_of/cand        10.58    70.563        375
+id         cont-miss scattered      150000    150000 flat scan                   1.35     8.969          0
+id         cont-miss scattered      150000    150000 broad: walk only            6.78    45.204          0
+id         cont-miss scattered      150000    150000 broad: +set scan            6.78    45.204          0
+id         cont-miss scattered      150000    150000 broad: +bitset              8.16    54.425          0
+id         cont-miss scattered      150000    150000 narrow: key_of/cand         9.38    62.503          0
+submitter  eq        contiguous     150000    150000 flat scan                   0.16     1.059          8
+submitter  eq        contiguous     150000    150000 resolve+ordinal             0.13     0.835          8
+submitter  eq-miss   contiguous     150000    150000 flat scan                   0.16     1.072          0
+submitter  eq-miss   contiguous     150000    150000 resolve+ordinal             0.12     0.827          0
+submitter  prefix    contiguous     150000    150000 flat scan                   0.42     2.780        272
+submitter  prefix    contiguous     150000    150000 range+ordinal               0.10     0.696        272
+submitter  in        contiguous     150000    150000 flat scan                   0.66     4.428         18
+submitter  in        contiguous     150000    150000 resolve+ordinal             0.25     1.637         18
+submitter  contains  contiguous     150000    150000 flat scan                   0.10     0.659         75
+submitter  contains  contiguous     150000    150000 broad: walk only            3.86    25.761        108
+submitter  contains  contiguous     150000    150000 broad: +set scan            4.49    29.935         75
+submitter  contains  contiguous     150000    150000 broad: +bitset              3.93    26.204         75
+submitter  contains  contiguous     150000    150000 narrow: key_of/cand        17.15   114.344         75
+submitter  cont-miss contiguous     150000    150000 flat scan                   0.05     0.365          0
+submitter  cont-miss contiguous     150000    150000 broad: walk only            3.03    20.227          0
+submitter  cont-miss contiguous     150000    150000 broad: +set scan            3.03    20.228          0
+submitter  cont-miss contiguous     150000    150000 broad: +bitset              3.10    20.659          0
+submitter  cont-miss contiguous     150000    150000 narrow: key_of/cand        16.07   107.163          0
+submitter  eq        scattered      150000    149979 flat scan                   1.79    11.907          8
+submitter  eq        scattered      150000    149979 resolve+ordinal             1.61    10.720          8
+submitter  eq-miss   scattered      150000    149979 flat scan                   1.74    11.634          0
+submitter  eq-miss   scattered      150000    149979 resolve+ordinal             1.62    10.780          0
+submitter  prefix    scattered      150000    149979 flat scan                   1.86    12.410        254
+submitter  prefix    scattered      150000    149979 range+ordinal               1.47     9.793        254
+submitter  in        scattered      150000    149979 flat scan                   2.25    14.995         12
+submitter  in        scattered      150000    149979 resolve+ordinal             1.83    12.184         12
+submitter  contains  scattered      150000    149979 flat scan                   3.24    21.601         79
+submitter  contains  scattered      150000    149979 broad: walk only            3.80    25.356        108
+submitter  contains  scattered      150000    149979 broad: +set scan            6.00    39.991         79
+submitter  contains  scattered      150000    149979 broad: +bitset              5.33    35.510         79
+submitter  contains  scattered      150000    149979 narrow: key_of/cand        19.24   128.299         79
+submitter  cont-miss scattered      150000    149979 flat scan                   2.43    16.180          0
+submitter  cont-miss scattered      150000    149979 broad: walk only            3.13    20.842          0
+submitter  cont-miss scattered      150000    149979 broad: +set scan            3.13    20.842          0
+submitter  cont-miss scattered      150000    149979 broad: +bitset              4.63    30.881          0
+submitter  cont-miss scattered      150000    149979 narrow: key_of/cand        18.19   121.282          0
+doi        eq        contiguous     150000     87910 flat scan                   1.49    16.930          1
+doi        eq        contiguous     150000     87910 resolve+ordinal             1.41    16.024          1
+doi        eq-miss   contiguous     150000     87910 flat scan                   1.37    15.546          0
+doi        eq-miss   contiguous     150000     87910 resolve+ordinal             1.42    16.143          0
+doi        prefix    contiguous     150000     87910 flat scan                   1.52    17.296        193
+doi        prefix    contiguous     150000     87910 range+ordinal               1.52    17.337        193
+doi        in        contiguous     150000     87910 flat scan                   2.22    25.267          2
+doi        in        contiguous     150000     87910 resolve+ordinal             1.48    16.786          2
+doi        contains  contiguous     150000     87910 flat scan                   1.66    18.876        193
+doi        contains  contiguous     150000     87910 broad: walk only            5.87    66.752        768
+doi        contains  contiguous     150000     87910 broad: +set scan            7.76    88.325        193
+doi        contains  contiguous     150000     87910 broad: +bitset              7.23    82.198        193
+doi        contains  contiguous     150000     87910 narrow: key_of/cand        10.30   117.135        193
+doi        cont-miss contiguous     150000     87910 flat scan                   1.70    19.392          0
+doi        cont-miss contiguous     150000     87910 broad: walk only            6.05    68.802          0
+doi        cont-miss contiguous     150000     87910 broad: +set scan            6.05    68.802          0
+doi        cont-miss contiguous     150000     87910 broad: +bitset              7.41    84.278          0
+doi        cont-miss contiguous     150000     87910 narrow: key_of/cand        10.08   114.645          0
+doi        eq        scattered      150000     87054 flat scan                   3.04    34.952          2
+doi        eq        scattered      150000     87054 resolve+ordinal             2.71    31.170          2
+doi        eq-miss   scattered      150000     87054 flat scan                   2.64    30.353          0
+doi        eq-miss   scattered      150000     87054 resolve+ordinal             2.70    31.014          0
+doi        prefix    scattered      150000     87054 flat scan                   2.82    32.339        184
+doi        prefix    scattered      150000     87054 range+ordinal               2.75    31.564        184
+doi        in        scattered      150000     87054 flat scan                   3.59    41.276          2
+doi        in        scattered      150000     87054 resolve+ordinal             2.75    31.588          2
+doi        contains  scattered      150000     87054 flat scan                   3.07    35.283        184
+doi        contains  scattered      150000     87054 broad: walk only            5.83    66.927        768
+doi        contains  scattered      150000     87054 broad: +set scan            8.91   102.405        184
+doi        contains  scattered      150000     87054 broad: +bitset              8.37    96.127        184
+doi        contains  scattered      150000     87054 narrow: key_of/cand        11.10   127.534        184
+doi        cont-miss scattered      150000     87054 flat scan                   3.18    36.582          0
+doi        cont-miss scattered      150000     87054 broad: walk only            5.95    68.291          0
+doi        cont-miss scattered      150000     87054 broad: +set scan            5.95    68.292          0
+doi        cont-miss scattered      150000     87054 broad: +bitset              8.50    97.694          0
+doi        cont-miss scattered      150000     87054 narrow: key_of/cand        11.16   128.205          0
+
+`scanned` is the candidate's entities the column holds a value for, which is what both
+formats walk and therefore the denominator of `ns/ent`. For `eq` and `in`, `ms` is the
+mean over the needle set and `matched` its total. `broad: walk only` reports keys, not
+entities, and its milliseconds are included in the two rows below it.
+
+### cell 2: the `contains` crossover, swept over candidate cardinality
+
+column     candidate      |cand|   scanned    C/D   flat ms broad set broad bit    narrow    cheaper
+id         contiguous      12000     12000   0.02      0.01      9.49      9.40      0.83     narrow
+id         contiguous      30000     30000   0.05      0.02      9.74      9.51      2.07     narrow
+id         contiguous      60000     60000   0.10      0.03      9.92      9.46      4.21     narrow
+id         contiguous      90000     90000   0.15      0.04     10.12      9.44      6.28     narrow
+id         contiguous     120000    120000   0.20      0.05     10.39      9.49      8.41     narrow
+id         contiguous     180000    180000   0.30      0.08     10.61      9.29     12.49      broad
+id         contiguous     300000    300000   0.50      0.14     11.58      9.39     20.76      broad
+id         contiguous     450000    450000   0.75      0.22     12.94      9.62     31.75      broad
+id         contiguous     600000    600000   1.00      0.31     14.17      9.75     42.76      broad
+id         scattered       12000     12000   0.02      0.17      9.61      9.51      0.87     narrow
+id         scattered       30000     30000   0.05      0.42      9.94      9.70      2.13     narrow
+id         scattered       60000     60000   0.10      0.84     10.52     10.03      4.26     narrow
+id         scattered       90000     90000   0.15      1.24     10.98     10.24      6.39     narrow
+id         scattered      120000    120000   0.20      1.66     11.55     10.53      8.57     narrow
+id         scattered      150000    150000   0.25      2.09     12.01     10.81     10.61     narrow
+submitter  contiguous       3036      3036   0.02      0.00      3.87      3.86      0.35     narrow
+submitter  contiguous       7590      7590   0.05      0.01      3.89      3.86      0.87     narrow
+submitter  contiguous      15181     15181   0.10      0.01      3.90      3.84      1.77     narrow
+submitter  contiguous      22771     22771   0.15      0.01      3.93      3.84      2.60     narrow
+submitter  contiguous      30362     30362   0.20      0.02      3.96      3.84      3.51     narrow
+submitter  contiguous      45543     45543   0.30      0.03      4.01      3.84      5.22      broad
+submitter  contiguous      75905     75905   0.50      0.06      4.15      3.86      8.62      broad
+submitter  contiguous     113857    113857   0.75      0.09      4.25      3.82     12.98      broad
+submitter  contiguous     151810    151810   1.00      0.11      4.49      3.89     17.63      broad
+submitter  contiguous     303620    303591   2.00      0.21      5.20      3.99     34.55      broad
+submitter  contiguous     600000    599908   3.95      0.41      6.42      4.11     68.04      broad
+submitter  scattered        3036      3036   0.02      0.05      3.81      3.80      0.36     narrow
+submitter  scattered        7590      7590   0.05      0.16      3.87      3.83      0.95     narrow
+submitter  scattered       15181     15181   0.10      0.32      3.98      3.91      1.90     narrow
+submitter  scattered       22771     22771   0.15      0.48      4.09      3.99      2.84     narrow
+submitter  scattered       30362     30362   0.20      0.65      4.20      4.06      3.81     narrow
+submitter  scattered       45543     45543   0.30      0.98      4.41      4.21      5.73      broad
+submitter  scattered       75905     75901   0.50      1.62      4.86      4.52      9.52      broad
+submitter  scattered      113857    113843   0.75      2.47      5.50      4.97     14.56      broad
+submitter  scattered      150000    149979   0.99      3.28      6.08      5.39     18.90      broad
+doi        contiguous       6946      3999   0.02      0.67      6.46      6.44      1.03     narrow
+doi        contiguous      17366      9889   0.05      0.74      6.56      6.51      1.61     narrow
+doi        contiguous      34733     19966   0.10      0.85      6.68      6.57      2.65     narrow
+doi        contiguous      52100     30255   0.15      0.98      6.83      6.66      3.71     narrow
+doi        contiguous      69467     40659   0.20      1.09      6.97      6.73      4.74     narrow
+doi        contiguous     104200     61080   0.30      1.33      7.27      6.91      6.91      broad
+doi        contiguous     173668    101586   0.50      1.79      7.86      7.23     10.93      broad
+doi        contiguous     260502    151788   0.75      2.40      8.57      7.66     16.25      broad
+doi        contiguous     347336    201966   1.00      3.01      9.27      8.04     21.38      broad
+doi        contiguous     600000    347971   1.73      4.76     11.44      9.32     36.41      broad
+doi        scattered        6946      3956   0.02      0.72      6.48      6.46      1.07     narrow
+doi        scattered       17366     10157   0.05      0.90      6.64      6.59      1.82     narrow
+doi        scattered       34733     20325   0.10      1.19      6.95      6.84      3.00     narrow
+doi        scattered       52100     30517   0.15      1.46      7.22      7.04      4.30     narrow
+doi        scattered       69467     40317   0.20      1.75      7.52      7.29      5.42     narrow
+doi        scattered      104200     60682   0.30      2.30      8.14      7.77      7.89      broad
+doi        scattered      150000     87054   0.43      3.06      8.87      8.33     11.06      broad
+
+C/D = |candidate| / |dictionary|, the quantity §4.3's route rule compares. `cheaper`
+reads narrow against the bitset broad route, which is the broad route as it would be
+built; the `broad set` column is the same route assembled from the shipped `scan_num_in`.
