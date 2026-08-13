@@ -29,6 +29,7 @@
 paths = [
   "crates/tessera-store/src/manifest.rs",
   "crates/tessera-store/src/render_presence.rs",
+  "crates/tessera-filter/src/dict.rs",
   "crates/tessera-authz/*",
   "crates/tessera-spatial/*",
   "crates/tessera-wire/*",
@@ -184,4 +185,39 @@ paths = [
   "crates/tessera-filter/src/lib.rs",
   "crates/tessera-filter/tests/*",
   "probes/*",
+]
+
+# Epic 2's three pairs, dispatched 2026-08-13 against the dictionary seam (#102, landed).
+# `kwbuild` writes the family (parse, base build, flush); `kwread` reads it (resolve, the
+# operators, contains' two routes); `kwlife` transforms it (coalesce's remap, the fold's rebuild).
+# `crates/tessera-filter/src/dict.rs` is frozen above — the seam is spent.
+[track.kwbuild]
+paths = [
+  "crates/tessera-build/src/schema.rs",
+  "crates/tessera-build/src/pipeline.rs",
+  "crates/tessera-build/src/input.rs",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-spatial/src/tiler.rs",
+  "crates/tessera-engine/src/flush.rs",
+  "crates/tessera-filter/src/extent.rs",
+  "crates/tessera-store/src/flush.rs",
+]
+
+[track.kwread]
+paths = [
+  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/src/viewport.rs",
+  "crates/tessera-engine/tests/filtering.rs",
+  "crates/tessera-server/src/viewer.rs",
+  "crates/tessera-server/src/filter_dto.rs",
+  "crates/tessera-server/tests/*",
+]
+
+[track.kwlife]
+paths = [
+  "crates/tessera-filter-write/*",
+  "crates/tessera-engine/src/coalesce.rs",
+  "crates/tessera-engine/tests/coalesce.rs",
+  "crates/tessera-engine/tests/fold.rs",
+  "crates/tessera-engine/tests/merge.rs",
 ]
