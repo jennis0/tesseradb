@@ -132,6 +132,29 @@ of removing it, and backlogs of issues for things that should just have been fix
   approach or a real problem turns up, say so in a sentence and continue rather than quietly
   widening the task.
 
+## Talking to the owner
+
+**The house style below is for the corpus. A message is not a document, and writing one in the
+other's register is the recurring failure.** `§4.4`, `I2`, `C25`, `decision 0067` and a type name
+are correct in a design document and near-useless in a chat message: they compress for a reader who
+has the corpus loaded, and the owner is not holding it in his head at the moment of reading. A
+message built out of them transmits nothing and has to be asked again.
+
+- **Lead with the consequence, not the mechanism.** *"Searches would silently return nothing — no
+  error, just wrong answers"* beats *"the analyser identity is resolved from the manifest"*.
+- **Identifiers go in brackets, or not at all.** Never open a paragraph with one; never make one the
+  subject of a sentence. The owner can ask for the reference.
+- **A concrete example earns its space.** One real string segmented two ways says more than a
+  paragraph about segmentation agreement.
+- **Bold only around plain-language claims.** A bolded line of jargon looks like a summary and
+  carries none — it is the specific shape that has failed here.
+- **Prefer a few short paragraphs to a wall of headed sections**, and offer the depth at the end
+  rather than supplying it unasked.
+
+Everything below governs what is written **into the repository** — design documents, module docs,
+decisions, commit messages — where precision, citations and the established vocabulary are exactly
+right.
+
 ## House style
 
 Full guide in [docs/agents/writing.md](docs/agents/writing.md). The rules that matter most:
