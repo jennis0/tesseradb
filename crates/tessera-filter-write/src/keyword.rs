@@ -625,6 +625,17 @@ mod tests {
                 "entity {entity} reads back another entity's key"
             );
         }
+        // The same claim as a differential against the inputs themselves rather than against a
+        // literal: a coalesced layer answers what the layer that held the entity answered.
+        for input in &inputs {
+            for entity in input.values.present().iter() {
+                assert_eq!(
+                    key_of(&column, &dict, entity),
+                    key_of(input.values, input.dict, entity),
+                    "entity {entity} answers differently coalesced than uncoalesced"
+                );
+            }
+        }
         // The merged dictionary is the sorted union of the inputs', interned: five keys, not eight.
         let mut merged_keys = Vec::new();
         dict.walk(|_, key| merged_keys.push(key.to_string()))
