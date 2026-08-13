@@ -637,6 +637,11 @@ pub(crate) struct FlushedExtent {
     pub(crate) dict_rel: Option<String>,
     /// Opened here on the pool, so publication is a pointer push on the executor thread.
     pub(crate) values: Arc<tessera_filter::ValueColumn>,
+    /// The dictionary those values are ordinals into, opened on the pool for the reason beside
+    /// it — and travelling with them, because an extent's ordinals mean nothing against any other
+    /// dictionary. Publication takes the pair or neither (`filter.rs`'s composition refuses a
+    /// half), which is the in-process half of the atomic swap `AttrExtent` makes on disc.
+    pub(crate) dict: Option<Arc<tessera_filter::SortedDict>>,
 }
 
 /// Write one extent per filterable column, covering exactly the entities this flush publishes.
@@ -693,12 +698,21 @@ fn write_filter_extents(
             tessera_filter::Access::Mapped,
         )
         .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        let dict = dict_path
+            .as_ref()
+            .map(|path| {
+                tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
+                    .map(Arc::new)
+                    .map_err(|e| FlushFailed(format!("keyword dictionary for '{}': {e}", spec.name)))
+            })
+            .transpose()?;
         out.push(FlushedExtent {
             column: spec.name.clone(),
             values_rel: rel(&values_path)?,
             presence_rel: rel(&presence_path)?,
             dict_rel: dict_path.as_ref().map(rel).transpose()?,
             values: Arc::new(values),
+            dict,
         });
     }
     Ok(out)

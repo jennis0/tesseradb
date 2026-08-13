@@ -883,6 +883,16 @@ fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
     }
 }
 
+/// One flushed extent, as publication hands it over: the column it extends, the prefix-relative
+/// path of its values, the opened column, and — for a keyword — the dictionary those values are
+/// ordinals into.
+///
+/// **The dictionary travels with the values or not at all**, which is why this is one tuple rather
+/// than two arguments that could disagree: an extent's ordinals are positions in its own
+/// dictionary and name nothing against any other (`records-and-search.md` §4.3), so composition
+/// refuses a half. On disc the same pairing is `AttrExtent`'s single record.
+pub type PublishedExtent = (String, String, Arc<ValueColumn>, Option<Arc<SortedDict>>);
+
 impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
     /// side-manifest names.
@@ -1195,17 +1205,14 @@ impl FilterColumns {
     /// refusal is what keeps a live generation from serving ordinals nothing can decode. Reopening
     /// the generation from the manifest is unaffected, [`FilterColumns::open`] taking each extent's
     /// dictionary from `AttrExtent::dict`.
-    pub fn with_extents(
-        &self,
-        extents: &[(String, String, Arc<ValueColumn>)],
-    ) -> std::io::Result<FilterColumns> {
+    pub fn with_extents(&self, extents: &[PublishedExtent]) -> std::io::Result<FilterColumns> {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             records: Arc::clone(&self.records),
         };
-        for (column, values_rel, extent) in extents {
-            next.compose(column, values_rel, Arc::clone(extent), None)?;
+        for (column, values_rel, extent, dict) in extents {
+            next.compose(column, values_rel, Arc::clone(extent), dict.clone())?;
         }
         Ok(next)
     }

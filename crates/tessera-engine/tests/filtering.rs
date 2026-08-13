@@ -1130,6 +1130,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             "title".to_string(),
             "attrs/title/extents/overlapping.arrow".to_string(),
             overlapping,
+            None,
         )])
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
@@ -1151,6 +1152,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             "no_such_column".to_string(),
             "attrs/no_such_column/extents/stray.arrow".to_string(),
             stray,
+            None,
         )])
         .is_err());
 }
@@ -3432,8 +3434,13 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let columns = fx
         .columns
         .with_extents(&[
-            ("title".to_string(), first.clone(), extent(&[100, 101])),
-            ("title".to_string(), second.clone(), extent(&[200, 201])),
+            ("title".to_string(), first.clone(), extent(&[100, 101]), None),
+            (
+                "title".to_string(),
+                second.clone(),
+                extent(&[200, 201]),
+                None,
+            ),
         ])
         .expect("two extents above the build's high-water compose");
 

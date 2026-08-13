@@ -1147,24 +1147,82 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         }
         let layers: Vec<&tessera_filter::ValueColumn> =
             std::iter::once(&base).chain(extents.iter()).collect();
+        // A keyword layer's dictionary, opened beside its ordinals and in the same order, because
+        // an ordinal names a position in *its own* layer's dictionary and nothing anywhere else.
+        // Empty for every other family, which is what selects the generic fold below.
+        let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
+        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+            keyword_dicts.push(
+                tessera_filter::SortedDict::open_dir(
+                    &from_dir,
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
+            );
+            for extent in plan.attr_extents.iter().filter(|e| e.column == scalar.name) {
+                let Some(dict_rel) = extent.dict.as_ref() else {
+                    return Err(FoldFailed(format!(
+                        "pass 4a (attributes): keyword column '{}' has an extent with no \
+                         dictionary; its ordinals name nothing",
+                        scalar.name
+                    )));
+                };
+                keyword_dicts.push(
+                    tessera_filter::SortedDict::open(
+                        &ctx.from_prefix_dir.join(dict_rel),
+                        tessera_filter::Access::MappedSequential,
+                    )
+                    .map_err(|e| failed("pass 4a (attributes: an extent dictionary)", &e))?,
+                );
+            }
+        }
 
         let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
         let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
+        let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
         let values_path = ctx.to_prefix_dir.join(&values_rel);
         let presence_path = ctx.to_prefix_dir.join(&presence_rel);
-        let partial = tessera_filter_write::fold_value_column(
-            &layers,
-            &plan.tombstones,
-            // The snapshot's entity space, which is what the folded column covers. A column dense
-            // to this bound writes no presence bitmap at all — the reader's "the entity id is the
-            // array index" — and one deletion below it is what takes that away.
-            u32::try_from(plan.entity_bound).map_err(|_| {
-                FoldFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
-            })?,
-            &values_path,
-            &presence_path,
-        )
-        .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?;
+        let dict_path = ctx.to_prefix_dir.join(&dict_rel);
+        // The snapshot's entity space, which is what the folded column covers. A column dense to
+        // this bound writes no presence bitmap at all — the reader's "the entity id is the array
+        // index" — and one deletion below it is what takes that away.
+        let bound = u32::try_from(plan.entity_bound).map_err(|_| {
+            FoldFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
+        })?;
+        // **A keyword folds through its own pass, because its values are ordinals.** The generic
+        // fold carries values through byte-preserved, which is exactly wrong for a column whose
+        // dictionary is rebuilt from the survivors and whose ordinals must be renumbered against
+        // it — a key whose only carrier was blanked leaves the corpus, which is the retention
+        // argument reaching dictionary keys (records §7). The two passes are otherwise the same
+        // merge under the same guards.
+        let partial = if keyword_dicts.is_empty() {
+            tessera_filter_write::fold_value_column(
+                &layers,
+                &plan.tombstones,
+                bound,
+                &values_path,
+                &presence_path,
+            )
+            .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?
+        } else {
+            let keyword_layers: Vec<tessera_filter_write::KeywordLayer<'_>> = layers
+                .iter()
+                .zip(keyword_dicts.iter())
+                .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
+                .collect();
+            let partial = tessera_filter_write::fold_keyword_column(
+                &keyword_layers,
+                &plan.tombstones,
+                bound,
+                &values_path,
+                &presence_path,
+                &dict_path,
+            )
+            .map_err(|e| failed("pass 4a (attributes: the keyword merge)", &e))?;
+            attr_written += file_len(&dict_path);
+            written.push((dict_rel, dict_path.clone()));
+            partial
+        };
         attr_written += file_len(&values_path);
         written.push((values_rel, values_path.clone()));
         if partial {

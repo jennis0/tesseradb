@@ -7176,7 +7176,7 @@ impl Executor {
         // an extent covers entities I9 has just issued, which no earlier layer can hold — so this
         // is the same posture as every other flush failure: the files are orphans, the buffer
         // stands, the next tick re-plans.
-        let extents: Vec<(String, String, Arc<tessera_filter::ValueColumn>)> = completed
+        let extents: Vec<crate::filter::PublishedExtent> = completed
             .filter_extents
             .iter()
             .map(|e| {
@@ -7184,6 +7184,10 @@ impl Executor {
                     e.column.clone(),
                     e.values_rel.clone(),
                     Arc::clone(&e.values),
+                    // A keyword extent's dictionary travels with its ordinals or the composition
+                    // refuses: the ordinals are positions in *this* dictionary and name nothing
+                    // against another (records §4.3).
+                    e.dict.clone(),
                 )
             })
             .collect();
