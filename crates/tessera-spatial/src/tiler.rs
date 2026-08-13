@@ -44,18 +44,24 @@ impl ScalarValue {
     /// This value as a **render** column holds it — `columns.arrow`, which is contractually
     /// non-nullable (contracts R4) and has nowhere to put [`ScalarValue::Null`].
     ///
-    /// ⊘ **Absence is lost here, deliberately and visibly.** [Decision 0064] rules that a render
-    /// column records absence in a presence bitmap beside it, exactly as a filter column does, and
-    /// **defers the render half while the client is under active development**: it needs a file, a
-    /// manifest entry, a way for the points batch to say "absent", and a client that understands
-    /// it. Until that lands an absent number is drawn at the type's zero, so the two artefacts
-    /// disagree — the filter says an item has no score while the map draws it at 0. That is a
-    /// *narrowing* disagreement (**I12**: the filter shows fewer items, never more), which is why
-    /// it is a stated residual rather than a blocker.
+    /// **The zero still goes in the column; what changed is that something now records it was a
+    /// substitution.** [Decision 0064] rules that a render column keeps absence in a presence
+    /// bitmap *beside* it — declining the validity buffer precisely so this array stays flat,
+    /// dense and non-nullable — so this substitution is not a loss any more and the call sites
+    /// stay. `tessera_store::render_presence` is the bitmap; every producer of a segment writes it
+    /// beside the column, and the row-space filter route reads it, so an item with no number
+    /// matches no range (the 2026-08-11 defect, closed on this side too).
     ///
-    /// This function is the one place that substitution happens, so the three render paths — the
-    /// linear build, the streaming build and the flush — cannot come to disagree about it, and so
-    /// the render half has one call site to delete when it lands.
+    /// ⊘ **What remains deferred is the wire and the client**: the points batch has no way to say
+    /// "absent", so a client still draws an absent number at the type's zero while the filter
+    /// treats it as having no value. The two artefacts therefore still disagree, in the
+    /// *narrowing* direction (**I12**: the filter shows fewer items, never more), which is why it
+    /// stays a stated residual rather than a blocker. 0064 defers that half while the client is
+    /// under active development, and it is the half this substitution is visible in.
+    ///
+    /// This function is the one place the substitution happens, so the three render paths — the
+    /// linear build, the streaming build and the flush — cannot come to disagree about it, and
+    /// each pairs it with the bitmap write that says which rows it touched.
     ///
     /// [Decision 0064]: ../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md
     pub fn or_render_placeholder(&self, ty: ScalarType) -> ScalarValue {

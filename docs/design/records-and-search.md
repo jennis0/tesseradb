@@ -141,16 +141,18 @@ filterable at no additional storage.
 
 **Refused at parse**, each naming itself per decision 0013: `render` on `keyword` or `text`
 (non-fixed-width — attrs §4.3's rule, unchanged); `render` with `multi = true` (decision 0039's
-fence, restated at §5); `index` on a rendered *number* until decision 0064's render half lands
-(§6.2 says why); `record` as a column name (it is the blob's namespace — review N10); and the
-category-specific refusals of attrs §4.3, all unchanged. `type = "utf8"` is refused with a message
-naming `keyword` and `text` and the difference.
+fence, restated at §5); `record` as a column name (it is the blob's namespace — review N10); and
+the category-specific refusals of attrs §4.3, all unchanged. `type = "utf8"` is refused with a
+message naming `keyword` and `text` and the difference.
 
-**One shipped capability regresses under that numeric refusal, loudly and deliberately** (review
-X3): a number declared `used_for = ["render", "filter"]` filters correctly today — 0064's filter
-half landed 2026-08-11 and the engine's fixtures exercise it — and under store-once the new
-surface refuses the combination until 0064's render half restores it. The migration sweep (§13)
-must name every schema this breaks; the restoration path is 0064's render half, not an exemption.
+**A rendered number was refused `index` for one epic, and is not any more.** Under store-once the
+hot column is the only copy, and it stores an absent number as the type's zero — so a range
+containing zero matched every item with no value, and the surface refused the combination rather
+than answer wrongly. Decision 0064's render half closes that on the server side: a presence bitmap
+beside the column, written by both builds, flush, merge and the fold, and read by the row-space
+route. Every fixed-width family is now filterable from the hot column. What 0064 still defers is
+the wire and the client — the points batch cannot say "absent", so a client draws an absent number
+at zero while the filter treats it as having no value, a narrowing disagreement recorded there.
 
 **Required:** `name`, `type`. Categories additionally require `width`, `listing`, `vocabulary`
 exactly as today — disclosure and migration controls do not default, and they remain meaningful at
@@ -250,11 +252,10 @@ beside the column; NaN matches nothing by IEEE comparison, with no rule written 
 and bit-sliced indexes remain declined for index §3's reasons — though §4.5's masked
 average-length is the aggregate argument index §3 reserved bit-slicing for, arriving on schedule.
 
-A rendered number or datetime additionally has the row-space route (§6.2) once 0064's render half
-lands; until then a rendered-only number stays unfilterable, refused naming that reason (§2 records
-the capability this walks back), because `ScalarValue::or_render_placeholder` stores absent as zero
-and a range containing zero would match every item with no value — the defect fixed on the entity
-path on 2026-08-11, which must not be reintroduced on the row path.
+A rendered number or datetime additionally has the row-space route (§6.2), its absence carried by
+0064's presence bitmap beside the hot column — without which `ScalarValue::or_render_placeholder`
+stores absent as zero and a range containing zero would match every item with no value — the
+defect fixed on the entity path on 2026-08-11, and closed on the row path by the same bitmap.
 
 ### 4.2 Categories
 
@@ -609,6 +610,13 @@ index §5.
 A column with `render = true` is filterable **over the request's own rows**, against the
 hot column in `columns.arrow`, producing `FilterRows::Viewport { rows, domain }` — a type that
 exists, is consumed by `EffectiveMask::with_filter`, and is exact over its domain (placement §2).
+**Every fixed-width family, and absence is what took the longest.** A category reads its absence
+from the code its vocabulary reserves; a number, a datetime and a bool read theirs from decision
+0064's presence bitmap beside the hot column, which is why they joined this route an epic later
+than categories did (§2). A string is never rendered — the hot column is a fixed-width slot per
+row, which is what makes it cheap enough to sit on the per-mark path — so `keyword` and `text` are
+filterable in entity space alone.
+
 **The built route costs 0.22–0.45 ns per viewport row** — invariant in corpus size, mask shape and
 coverage across 2.4M, 25M and 10⁸, and across viewports from 3×10⁵ rows to a whole slice
 ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md); *measured*). A 343,391-row viewport at 10⁸ costs 0.13–0.16 ms.
