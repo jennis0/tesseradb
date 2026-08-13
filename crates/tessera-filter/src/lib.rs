@@ -63,7 +63,7 @@ pub use record::{
 };
 pub use record_stack::{RecordExtentPaths, RecordStack};
 pub use values::{
-    take_scan_work, Access, Codes, Endpoint, Scalar, ScanWork, ValueColumn, PRESENCE_FILE,
+    take_scan_work, Access, CodeSet, Codes, Endpoint, Scalar, ScanWork, ValueColumn, PRESENCE_FILE,
     VALUES_FILE,
 };
 pub use values_writer::{write_value_column, ColumnKind, ValueColumnWriter};

@@ -306,22 +306,32 @@ order number, a hostname, a submitter. It replaces `utf8`, whose operators it ke
 not free** ([the retirement fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md), *measured* at 2.4M on real arXiv columns through both shipped
 implementations). Storage falls **2.16–3.56×**. `eq` improves up to 8.1×, `in` up to 5.3×,
 `prefix` up to 4.2× on a near-unique column, and all three are level to slightly better on a
-scattered candidate. **`contains` is slower everywhere it was measured — 1.8× on a scattered
-candidate to 82× on a contiguous one**, and the two costs have different shapes: the flat scan was
+scattered candidate. **`contains` is slower everywhere it was measured — 1.5× on a scattered
+candidate to 71× on a contiguous one**, and the two costs have different shapes: the flat scan was
 linear in the candidate and searched a run's concatenated bytes as one region, while the broad
 dictionary route is flat in the candidate and linear in the vocabulary. So the loss is largest
 exactly where the candidate is small, which is the per-keystroke cell, and smallest on a scattered
 whole-corpus one. At 10⁹ over a unique vocabulary that models as ~1.1 s against ~16 s.
 
 That band is the **shipped** one, and it took a second campaign to get it
-([`contains-recovery`](../evidence/memos/2026-08-13-contains-recovery.md)). The fence's own
-broad-route arm was a reimplementation whose substring searcher was hoisted out of the walk, where
-the shipped route constructed one per key; the tree was therefore **2.5–144×** when the fence ran,
-and hoisting the searcher — landed, `tessera_filter::KeyMatcher` — recovered 1.14–2.03× of the
-walk to reach the band above. ⊘ The **1.5–71×** the fence reports needs one further change that is
-not built: an ordinal bitset for the broad route's second half, measured at 64% of that route's
-cost. Nothing else about the fence's account changes; the routes always answered correctly, and
-every other operator's figures were unaffected.
+([`contains-recovery`](../evidence/memos/2026-08-13-contains-recovery.md)). The fence's own arms
+were reimplementations whose substring searchers were hoisted out of their loops, where the shipped
+routes constructed one per key and per candidate entity, and its best cell additionally used an
+ordinal bitset it flagged as bench-local. The tree was therefore **2.5–144×** when the fence ran.
+Three changes have since landed — `tessera_filter::KeyMatcher`, the narrow route's block walk, and
+the domain-sized ordinal table — and the shipped route now reaches the band the fence recorded.
+Nothing else about the fence's account changes; the routes always answered correctly, and every
+other operator's figures were unaffected.
+
+**The last of those three is a disclosure fix and belongs in §8's terms, not §6.4's.** Both routes
+ended by binary-searching a sorted list of matching ordinals per candidate slot, and that list's
+length is the number of dictionary keys carrying the substring — a corpus-wide count, including
+keys no visible entity carries, that a caller moves by choosing a fragment. Measured per candidate
+slot: 1.41 ns where five keys matched, 27.72 where 399,554 did. The traversal was identical
+throughout, so the scan-work harness could not see it. A table over the dictionary's ordinal domain
+is O(1) per slot and the same size whatever matched — 0.34–0.38 ns across that span — which is the
+`u8`/`u16` argument this file already makes for `in`, applied where the set's size stopped being
+the caller's own.
 
 The regression is a price this design accepts rather than one it hides: `contains` on a keyword is
 a substring predicate over values the format deliberately elides shared prefixes from, and the
@@ -762,7 +772,7 @@ ruling) and this design's 100 ms target. Measured constants; the 10⁹ multiplic
 | number range, contiguous candidate | scan | ~250–280 ms *(measured)* | 1 s |
 | keyword `eq`/`prefix`, contiguous, no postings | ordinal scan | ~250–280 ms *(modelled from measured constant)* | 1 s |
 | fixed-width scan, scattered 25% principal | scan | ~2.4 s *(measured at 10⁸ ×10)* | ÷ cores, measured 7.4–8.5× on twelve |
-| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | walk-with-search measured 15.4–26.6 ns/key at 2.4M → ~16–26 s at 10⁹ *(**extrapolation refused** — the dictionary fits this machine's L3 at the measured size and not at 10⁸ — `performance-suite.md` §5); **1.8–82× slower than the `utf8` scan it replaced**, ⊘ 1.5–71× once the broad route's ordinal test is a bitset ([the fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md), [the recovery](../evidence/memos/2026-08-13-contains-recovery.md))* | ÷ cores — blocks decode independently |
+| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | walk-with-search measured 15.4–26.6 ns/key at 2.4M → ~16–26 s at 10⁹ *(**extrapolation refused** — the dictionary fits this machine's L3 at the measured size and not at 10⁸ — `performance-suite.md` §5); **1.5–71× slower than the `utf8` scan it replaced** ([the fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md), [the recovery](../evidence/memos/2026-08-13-contains-recovery.md))* | ÷ cores — blocks decode independently |
 | phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(253–265 µs/block measured through the built reader; count result-bound)* | 100 ms |
 | phrase verify, common phrase | as above | unbounded — result-bound | known class |
 | CSR list scan, broad candidate | scan | ~2.7–10 s *(measured constants ×10⁹)* | **postings instead** |
@@ -1118,21 +1128,27 @@ edit at the named site, and an unlisted falsified claim is a spec contradiction 
 **2026-08-13 (r6) — the keyword family is built, and §4.3's `contains` band is corrected to the
 shipped one.** The dictionary, the ordinal column, both `contains` routes, the coalesce content
 guard and the fold are implemented; `utf8` is retired as a declared type and its flat column is
-deleted. The correction is what a second measurement campaign found: the retirement fence's
-broad-route arm hoisted its substring searcher where the shipped route built one per key, so
-r5's **1.5–71×** described neither the tree (2.5–144×) nor, after the hoist landed, what the tree
-now costs (**1.8–82×**) — it described the tree plus one further change that is still unbuilt.
-§4.3 and §6.4 carry the shipped band with the bitset marked ⊘, and the fence's own record carries
-the correction at the claim
-([`contains-recovery`](../evidence/memos/2026-08-13-contains-recovery.md), which also costs three
+deleted. The correction is what two follow-up campaigns and an adversarial review found: the
+retirement fence's arms hoisted substring searchers the shipped routes built per key and per
+candidate entity, and its best cell used a bench-local ordinal bitset — so r5's **1.5–71×**
+described the tree plus three changes, where the tree itself was **2.5–144×**. All three have since
+landed (`KeyMatcher`; the narrow route's deduplicated block walk; the domain-sized ordinal table),
+so the recorded band is now the shipped one rather than an aspiration.
+
+**The third of them is a disclosure fix.** The ordinal test was a binary search over the matching
+ordinals, whose count is a corpus-wide property of the needle against the vocabulary — 1.41 ns per
+candidate slot at five matching keys against 27.72 at 399,554, under a traversal that never varied
+and a work harness that therefore could not see it. §8's claim that a scan's work is a function of
+`(candidate, column)` alone was true of the dictionary walk and false of the scan after it; §4.3
+and §8 now state the table that makes it true of both.
+
+What remains open behind this revision is the crossover: it prices the narrow route at an upper
+bound now well above its typical cost, taking the broad route where the narrow one is 3.5× cheaper,
+and choosing better means reading the candidate's distinct ordinal count — an §8.2 admissibility
+question the owner has not ruled on
+([`contains-recovery`](../evidence/memos/2026-08-13-contains-recovery.md), which also costs two
 further levers and names the one — needle-dependent pruning of the walk — that needs a ruling
-rather than a patch). Two mechanisms did move, both inside §4.3's `contains` rule and both
-recovering discarded work: the broad route builds its substring searcher once rather than once per
-key, and the narrow route reads the blocks its candidate's ordinals occupy rather than probing a
-key per candidate entity — which also puts it inside the work harness the probe loop sat outside,
-since both routes now end in the same ordinal scan. The crossover's constant is unchanged and is
-now explicitly an upper bound; **what it costs to leave it there is measured and stated at the
-rule**, and moving it is the §8.2 question the fence raised.
+rather than a patch).
 
 **2026-08-12 (r5) — epic 1 is built, and §4.2's exemption narrows to its readers** (owner). The
 declaration surface, the record blob through its whole lifecycle, drill-down's assembly from the

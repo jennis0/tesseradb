@@ -163,8 +163,8 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 use tessera_filter::{
-    resolve_union, Codes, ColumnPostings, DictError, KeyMatcher, RecordExtentPaths, RecordStack,
-    RecordValue, SortedDict, ValueColumn,
+    resolve_union, CodeSet, Codes, ColumnPostings, DictError, KeyMatcher, RecordExtentPaths,
+    RecordStack, RecordValue, SortedDict, ValueColumn,
 };
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
@@ -1768,18 +1768,25 @@ const NO_SUCH_ORDINAL: u32 = u32::MAX;
 ///
 /// **Total on purpose, and this is the security-bearing shape.** There is deliberately no variant
 /// meaning *matches nothing, so do not scan*. A needle the layer does not hold becomes
-/// [`NO_SUCH_ORDINAL`]; a prefix no key carries becomes the sentinel *range*; a `contains` that
-/// matched no key becomes a one-element list holding the sentinel. Every arm of [`scan_ordinals`]
-/// then runs a scan over the whole candidate, so a dictionary miss costs what a hit costs — the
-/// rule records §4.3 states and per-point-attributes §3.8 requires. A future variant that skipped
-/// the scan would have to be added here *and* given an arm there, which is where a reader is most
-/// likely to see what it is for.
+/// [`NO_SUCH_ORDINAL`] and a prefix no key carries becomes the sentinel *range*. Every arm of
+/// [`scan_ordinals`] then runs a scan over the whole candidate, so a dictionary miss costs what a
+/// hit costs — the rule records §4.3 states and per-point-attributes §3.8 requires. A future
+/// variant that skipped the scan would have to be added here *and* given an arm there, which is
+/// where a reader is most likely to see what it is for.
+///
+/// **`contains` no longer arrives here**, by either route: it ends in
+/// [`ValueColumn::scan_ordinal_set`] over a table sized by the dictionary, where an empty table
+/// scans identically to a full one and the same rule therefore needs no sentinel to state it. The
+/// move was not for tidiness — a sorted list made the scan's per-slot cost `O(log k)` in the number
+/// of dictionary keys carrying the substring, which is a corpus-wide quantity and not one the work
+/// may depend on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OrdinalPredicate {
     /// One ordinal — `eq`, resolved.
     Eq(u32),
-    /// A list of ordinals — `in`, one entry per needle the caller named, and the ordinals the
-    /// broad `contains` route collected.
+    /// A list of ordinals — `in`, **one entry per needle the caller named** and nothing else.
+    /// `O(log k)` per slot is priced for that *k*; a set whose size is a corpus quantity belongs in
+    /// [`ValueColumn::scan_ordinal_set`] instead.
     In(Vec<u32>),
     /// A contiguous ordinal range, **inclusive at both ends** — what a prefix's dictionary range
     /// becomes, sortedness being the reason the dictionary is sorted.
@@ -2017,28 +2024,29 @@ fn contains_broad(
     needle: &str,
     candidate: &Bitmap,
 ) -> Result<Bitmap, DictError> {
-    let mut ordinals = Vec::new();
     // `SortedDict::walk` has no early exit by construction, so the walk's cost is the dictionary's
     // size and never the needle's selectivity. The matcher is built once outside it for the reason
     // [`KeyMatcher`] gives — a searcher constructed per key was measured at up to 47% of this
     // route — and hoisting it changes no work the walk does per key.
+    //
+    // Matches go straight into a table over the dictionary's ordinals rather than into a list.
+    // Two reasons, and the second is the load-bearing one. It bounds the allocation: a one-byte
+    // needle over a near-unique vocabulary matches most of it, and a `Vec<u32>` of that is four
+    // bytes per matching key where the table is an eighth of a bit per key whatever matched. And
+    // it makes the scan that follows cost the same per slot however many keys matched — see
+    // [`ValueColumn::scan_ordinal_set`], which is where the argument lives.
+    let mut matched = CodeSet::over_domain(dict.len().saturating_sub(1));
     let matcher = KeyMatcher::new(needle);
     dict.walk(|ordinal, key| {
         if matcher.matches(key) {
-            ordinals.push(ordinal);
+            matched.insert(ordinal);
         }
     })?;
-    // No key matched. The scan still runs, for the reason [`OrdinalPredicate`] gives — an empty
-    // list would leave `scan_in` with nothing to compare, which is correct, but the sentinel says
-    // *why* it is one element rather than none.
-    if ordinals.is_empty() {
-        ordinals.push(NO_SUCH_ORDINAL);
-    }
-    Ok(scan_ordinals(
-        values,
-        &OrdinalPredicate::In(ordinals),
-        candidate,
-    ))
+    // No key matched: an empty table, and the scan still runs over every candidate slot exactly as
+    // it does for a full one. The sentinel `OrdinalPredicate::In` needed to say this is not needed
+    // here — an empty domain-sized table already traverses identically — which is the rule stated
+    // in the structure rather than in a reserved value.
+    Ok(values.scan_ordinal_set(candidate, &matched))
 }
 
 /// The narrow route: read only the dictionary the candidate's own values occupy.
@@ -2085,22 +2093,16 @@ fn contains_narrow(
     wanted.dedup();
 
     let matcher = KeyMatcher::new(needle);
-    let mut matched = Vec::new();
+    let mut matched = CodeSet::over_domain(dict.len().saturating_sub(1));
     dict.walk_ordinals(&wanted, |ordinal, key| {
         if matcher.matches(key) {
-            matched.push(ordinal);
+            matched.insert(ordinal);
         }
     })?;
-    // No key the candidate carries matched. The scan still runs, for the reason
-    // [`OrdinalPredicate`] gives — the sentinel says why the list is one element rather than none.
-    if matched.is_empty() {
-        matched.push(NO_SUCH_ORDINAL);
-    }
-    Ok(scan_ordinals(
-        values,
-        &OrdinalPredicate::In(matched),
-        candidate,
-    ))
+    // The same table the broad route ends in, for the same reason: an empty one scans every
+    // candidate slot exactly as a full one does, so "no key the candidate carries matched" needs
+    // no sentinel to say it.
+    Ok(values.scan_ordinal_set(candidate, &matched))
 }
 
 /// Walk `candidate ∩ present` as `(slot0, count, entity0)` runs — a layer's values are addressed by
@@ -2912,6 +2914,42 @@ mod keyword_tests {
                     members(&candidate)
                 );
             }
+        }
+    }
+
+    /// **`contains`' ordinal test is sized by the dictionary, not by what matched.**
+    ///
+    /// The traversal counter cannot see this one: `runs` and `slots` were already equal across
+    /// needles, because both routes always scanned the whole candidate. What differed was the cost
+    /// *per slot* — a sorted list of matching ordinals is `O(log k)`, and for `contains` that *k*
+    /// is the number of dictionary keys carrying the substring: a corpus-wide count, including keys
+    /// no visible entity carries, that a caller can move by choosing a fragment. A table over the
+    /// ordinal domain is the same size and the same test whatever matched, which is what the three
+    /// needles below assert directly, since no counter can.
+    #[test]
+    fn contains_tests_ordinals_through_a_table_sized_by_the_dictionary() {
+        let keys: Vec<String> = (0..64).map(|i| format!("host-{i:03}.example")).collect();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let d = dict(&refs);
+
+        // Nothing, one key, and every key — the span a fragment-guessing caller would sweep.
+        for (needle, expected) in [("zzz", 0usize), ("host-007", 1), ("example", 64)] {
+            let mut matched = tessera_filter::CodeSet::over_domain(d.len() - 1);
+            let matcher = tessera_filter::KeyMatcher::new(needle);
+            let mut hits = 0usize;
+            d.walk(|ordinal, key| {
+                if matcher.matches(key) {
+                    matched.insert(ordinal);
+                    hits += 1;
+                }
+            })
+            .unwrap();
+            assert_eq!(hits, expected, "needle {needle:?}");
+            assert_eq!(
+                matched.domain(),
+                d.len() - 1,
+                "needle {needle:?}: the table is sized by the dictionary, whatever matched"
+            );
         }
     }
 

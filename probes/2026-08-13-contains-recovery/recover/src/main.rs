@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 use memchr::memmem;
-use tessera_filter::{SortedDict, SortedDictWriter, DEFAULT_RESTART_INTERVAL};
+use tessera_filter::{CodeSet, SortedDict, SortedDictWriter, DEFAULT_RESTART_INTERVAL};
 
 /// Needle lengths swept. The fence's claim is that the shipped walk's cost rises with this number
 /// and the decode's does not, so it is the axis that separates the two.
@@ -101,6 +101,7 @@ fn main() {
         );
         broad(&column, reps);
         narrow(&column, reps);
+        ordinal_test(&column, reps);
         println!();
     }
 }
@@ -333,6 +334,67 @@ fn narrow(column: &Column, reps: usize) {
             deduped.as_nanos() as f64 / n,
             walked.as_nanos() as f64 / n,
             shipped.as_nanos() as f64 / walked.as_nanos() as f64,
+        );
+    }
+}
+
+/// The `contains` routes' second stage: testing each candidate slot's ordinal against the matching
+/// set. Measured two ways over the same matches — a sorted list binary-searched per slot, which is
+/// what `ValueColumn::scan_in` does, and a table over the dictionary's ordinal domain, which is
+/// what `scan_ordinal_set` does. The scan's traversal is identical either way; only the per-slot
+/// test differs, and only the list's cost depends on how many keys matched.
+fn ordinal_test(column: &Column, reps: usize) {
+    println!("\n### ordinal test, ns per candidate slot (the test alone, not the traversal)");
+    println!("| needle | matching keys | sorted list | domain table | recovered |");
+    println!("|---|---|---|---|---|");
+    let quarter = column.present.len() / 4;
+    let candidate: Vec<u32> = column.present[..quarter].iter().map(|(_, o)| *o).collect();
+
+    for len in [3usize, 6, 9] {
+        let Some(needle) = column.needle(len) else { continue };
+        let finder = memmem::Finder::new(needle.as_bytes());
+        let mut list: Vec<u32> = Vec::new();
+        let mut table = CodeSet::over_domain(column.dict.len() - 1);
+        column
+            .dict
+            .walk(|ordinal, key| {
+                if finder.find(key.as_bytes()).is_some() {
+                    list.push(ordinal);
+                    table.insert(ordinal);
+                }
+            })
+            .unwrap();
+        list.sort_unstable();
+
+        let n = candidate.len() as f64;
+        let by_list = median(reps, || {
+            let t = Instant::now();
+            let mut hits = 0u64;
+            for o in &candidate {
+                if list.binary_search(o).is_ok() {
+                    hits += 1;
+                }
+            }
+            black_box(hits);
+            t.elapsed()
+        });
+        let by_table = median(reps, || {
+            let t = Instant::now();
+            let mut hits = 0u64;
+            for o in &candidate {
+                if table.contains(*o) {
+                    hits += 1;
+                }
+            }
+            black_box(hits);
+            t.elapsed()
+        });
+        println!(
+            "| {len} B | {} | {:.2} | {:.2} | **{:.2}×** |",
+            list.len(),
+            by_list.as_nanos() as f64 / n,
+            by_table.as_nanos() as f64 / n,
+            by_list.as_nanos() as f64 / by_table.as_nanos() as f64,
         );
     }
 }

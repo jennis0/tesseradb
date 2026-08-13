@@ -146,6 +146,36 @@ the broad route, whose cost is capped by the vocabulary. The price of that safet
 now costs 11.6 ms. Closing it needs a rule that reads the candidate's distinct ordinal count, which
 is the fence's stop-and-report A — **an §8.2 admissibility question, unruled, and not closed here.**
 
+### 4. The ordinal test was `O(log k)` in a corpus quantity, and the table that replaces it is flat
+
+Both `contains` routes end by testing each candidate slot's ordinal against the matching set.
+Assembled from `ValueColumn::scan_in` that is a binary search per slot, and its *k* is not the
+caller's — it is **the number of dictionary keys carrying the substring**, a corpus-wide count that
+includes keys no visible entity carries and that a caller moves by choosing a fragment. Ns per
+candidate slot, the test alone, 25% contiguous candidate (*measured*):
+
+| column | needle | matching keys | sorted list | domain table | recovered |
+|---|---|---|---|---|---|
+| `id` | 3 B | 197,128 | 13.53 | **0.34** | 39.3× |
+| `id` | 6 B | 1,080 | 7.53 | **0.37** | 20.3× |
+| `submitter` | 3 B | 444 | 5.41 | **0.38** | 14.3× |
+| `submitter` | 6 B | 5 | 1.41 | **0.37** | 3.8× |
+| `doi` | 3 B | 399,554 | 27.72 | **0.35** | 79.5× |
+| `doi` | 6 B | 234,025 | 20.29 | **0.35** | 57.7× |
+| `doi` | 9 B | 224,855 | 20.08 | **0.35** | 57.7× |
+
+**The list's cost moves 1.41 → 27.72 ns with the match count and nothing else; the table's is
+0.34–0.38 across the whole span.** On `submitter` the two needles differ only in how much of the
+vocabulary they hit — 444 keys against 5 — and cost 5.41 against 1.41 ns per slot, which over a
+600,000-entity candidate is 2.4 ms of difference readable from outside. That is a fragment
+statistic about the whole corpus, arriving in the timing of a request whose traversal was already
+identical: `take_scan_work` counts runs and slots, and those never differed. The table answers in
+O(1) per slot, is the same size whatever matched, and is what both routes now use.
+
+It is also 3.8–79× faster, which is the ordinary reading of the same change and the one the
+retirement fence reported (its bench-local bitset arm, 64% of the broad route's cost). The
+security reading was not noticed until this branch's adversarial review.
+
 ## What this does not measure
 
 - **Nothing at 10⁹, and nothing out of cache.** Every dictionary here fits in 32 MiB of L3 at 2.4M

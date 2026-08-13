@@ -1,4 +1,4 @@
-# Recovering keyword `contains`: two fixes landed, three levers costed, one ruling owed
+# Recovering keyword `contains`: three fixes landed, two levers costed, one ruling owed
 
 **Date:** 2026-08-13 · **Status:** Evidence memo — recommends, does not rule
 **Measurements:** [`probes/2026-08-13-contains-recovery/`](../../../probes/2026-08-13-contains-recovery/)
@@ -15,6 +15,18 @@ the whole walk (*measured*, three real columns, four needle lengths), and the wa
 route. The change is `KeyMatcher` in `tessera-filter`, used by both routes; it adds no dependency
 the crate did not already carry for the flat scan's region search, and the per-key test stays
 unconditional, so the route's work is the same function of `(candidate, column)` it was before.
+
+**Landed, the ordinal test both routes end in — and this one is a disclosure fix, not a speed
+one.** Assembled from `ValueColumn::scan_in`, it binary-searched a sorted list of matching ordinals
+per candidate slot, and that list's length is **the number of dictionary keys carrying the
+substring**: a corpus-wide count, including keys no visible entity carries, that a caller moves by
+choosing a fragment. Measured per candidate slot, the test alone: **1.41 ns when five keys matched
+and 27.72 when 399,554 did** — over a 600,000-entity candidate, milliseconds of difference readable
+from outside a request whose traversal was identical. `take_scan_work` counts runs and slots and
+could never see it. A table over the dictionary's ordinal domain answers in O(1) per slot and is
+the same size whatever matched: **0.34–0.38 ns across that whole span**, and 3.8–79× faster as a
+side effect. §8's claim that every scan's work "is a function of `(candidate, column)` and never of
+the value sought" was true of the walk and false of the scan after it; it is now true of both.
 
 **Landed, the narrow route.** It called `key_of` once per candidate *entity*: entities sharing a
 value probed the same ordinal repeatedly, and every probe decoded about half a restart block to
@@ -72,22 +84,14 @@ attached, which is the useful thing this campaign adds to it.
 
 Ordered by leverage against the cell each helps, with what each costs to build.
 
-**1. An ordinal-set test that is constant per slot** *(the fence's own stop-and-report B, measured,
-unactioned)*. The broad route's second stage hands `ValueColumn::scan_num_in` the 22,500 ordinals a
-substring matched, where its "O(log k) per slot" is priced for the eight a caller types. A dense
-bitset over the dictionary's ordinals answers in O(1) per slot: **63.88 → 38.86 ms** at 2.4M
-(*measured, bench-local*). This is the step from the table's second row to its third. Contained —
-one scan variant in `tessera-filter`, with the work-indistinguishability assertion the other scans
-already carry.
-
-**2. Parallelise the walk.** `decode_block` refuses a first entry with a non-zero shared prefix, so
+**1. Parallelise the walk.** `decode_block` refuses a first entry with a non-zero shared prefix, so
 every restart block decodes from empty and the blocks are **independent by construction** — the
 buffer the walk threads across them exists for the cross-block order check, not for decoding.
 Rayon is already the engine's compute pool. `÷ cores` is untested for this operator as for every
 other, and §6.4 already carries `÷ cores` as this row's verdict; the point here is that the
 structure permits it with no format change.
 
-**3. A per-session needle cache, if the interactive cell is the one that matters.** The broad
+**2. A per-session needle cache, if the interactive cell is the one that matters.** The broad
 route's matching-ordinal set is a function of `(dictionary, needle)` **alone** — it is computed
 before the candidate is consulted, so it is mask-independent and principal-independent. And matches
 are monotone in the needle: everything containing `abc` contains `ab`. A per-keystroke sequence can
@@ -120,12 +124,10 @@ handed, and those come from the candidate.
 
 ## Recommendation
 
-Lever 1 is the last of the fence's own findings left unactioned and is contained — take it next, on
-its own, since it is a change to the shared scan and wants the interleaved A/B discipline the
-alignment memo describes. Treat 2 as part of whatever answers §6.4's `÷ cores` for the family as a
-whole rather than for this operator alone. Hold 3 until there is a client typing into the surface,
-and hold the pruning question until then too — it will look much more attractive at that point,
-which is exactly when the ruling should already exist.
+Treat 1 as part of whatever answers §6.4's `÷ cores` for the family as a whole rather than for this
+operator alone. Hold 2 until there is a client typing into the surface, and hold the pruning
+question until then too — it will look much more attractive at that point, which is exactly when
+the ruling should already exist.
 
 **The route rule is the one thing that would benefit from a ruling sooner.** Its cost is now
 measured rather than hypothetical, and it is the difference between the narrow route's improvement

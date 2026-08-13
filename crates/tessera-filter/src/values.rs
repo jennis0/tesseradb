@@ -319,24 +319,54 @@ fn pack_run<T>(
 /// at construction — it can be carried by no entity, so it changes no answer — and dropping it
 /// costs nothing that a caller could time, because the table is built and consulted identically
 /// either way.
-struct CodeSet {
+pub struct CodeSet {
     bits: Vec<u64>,
+    domain: u32,
 }
 
 impl CodeSet {
     fn new(values: &[AttrLocalId], max: u32) -> Self {
-        let mut bits = vec![0u64; (max as usize / 64) + 1];
+        let mut set = CodeSet::over_domain(max);
         for v in values {
-            let code = v.raw();
-            if code <= max {
-                bits[code as usize / 64] |= 1 << (code % 64);
-            }
+            set.insert(v.raw());
         }
-        CodeSet { bits }
+        set
+    }
+
+    /// An empty table over `[0, max]`.
+    ///
+    /// **The size is the domain's and never the answer's**, which is the whole property: a set
+    /// naming one code and a set naming a million cost the same to build, to hold and to test. That
+    /// is what a sorted needle list cannot offer — its `O(log k)` per slot makes the scan's cost a
+    /// function of *k*, which for `contains` is the number of dictionary keys carrying the
+    /// substring: a corpus-wide quantity, counting values no visible entity carries, and therefore
+    /// one the per-slot work must not be a function of (records §8, and the same argument the `u8`
+    /// and `u16` arms of [`ValueColumn::scan_in`] already make).
+    pub fn over_domain(max: u32) -> Self {
+        CodeSet {
+            bits: vec![0u64; (max as usize / 64) + 1],
+            domain: max,
+        }
+    }
+
+    /// Add `code`. Silently ignores one outside the domain — the reserved `NO_SUCH_ORDINAL`
+    /// sentinel is exactly that, and an ordinal past the dictionary is a pair that disagrees, which
+    /// the dictionary read has already refused.
+    #[inline]
+    pub fn insert(&mut self, code: u32) {
+        if code <= self.domain {
+            self.bits[code as usize / 64] |= 1 << (code % 64);
+        }
+    }
+
+    /// The inclusive upper bound this table was built over. Carried so a caller can assert the
+    /// size is the domain's rather than the answer's.
+    pub fn domain(&self) -> u32 {
+        self.domain
     }
 
     #[inline]
-    fn contains(&self, code: u32) -> bool {
+    pub fn contains(&self, code: u32) -> bool {
         // The caller only ever passes a value read from a column of the width this was built for,
         // so the index is in range by construction; `get` keeps that a wrong answer rather than a
         // panic if that ever stops being true.
@@ -985,6 +1015,27 @@ impl ValueColumn {
             Codes::U16(v) => self.walk_typed(candidate, v, |x| u32::from(*x) == w),
             Codes::U32(v) => self.walk_typed(candidate, v, |x| *x == w),
             // Only a category has a code, and a category is one of the three widths above.
+            _ => Bitmap::new(),
+        }
+    }
+
+    /// Entities of `candidate` whose ordinal is in `set` — the `contains` routes' second stage.
+    ///
+    /// **Separate from [`Self::scan_in`] because the two have different callers and only one of
+    /// them may use a sorted list.** `scan_in` serves an `in` operand, where *k* is the number of
+    /// values the caller typed and `O(log k)` per slot is priced for eight of them. Both `contains`
+    /// routes hand their stage a set whose size is a property of the *corpus*: the broad route's is
+    /// every dictionary key carrying the substring, measured at 22,500 on one real column, and it
+    /// counts keys no visible entity carries. Testing that with a binary search would make the
+    /// scan's per-slot cost a function of the needle against the whole vocabulary — a fragment
+    /// statistic in the timing, which is the class records §4.3 refuses postings for. A table over
+    /// the ordinal domain answers in O(1) per slot and is the same size whatever matched.
+    ///
+    /// A layer whose codes are not `u32` is not a keyword layer; the fail-closed reading is that
+    /// nothing matches, as every other ordinal path here reads it.
+    pub fn scan_ordinal_set(&self, candidate: &Bitmap, set: &CodeSet) -> Bitmap {
+        match &self.codes {
+            Codes::U32(v) => self.walk_typed(candidate, v, |x| set.contains(*x)),
             _ => Bitmap::new(),
         }
     }
