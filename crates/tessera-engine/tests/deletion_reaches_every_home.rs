@@ -102,9 +102,12 @@ name  = "tag"
 type  = "keyword"
 index = true
 
+# Blob-resident: a type with neither placement key, so its only home is the record blob. The
+# type is `keyword` because `utf8` is retired as a declarable one — placement is orthogonal to
+# type, and a blob row stores the value's bytes whatever family declared it.
 [[attribute]]
 name = "note"
-type = "utf8"
+type = "keyword"
 "#;
 
 fn band_of(source: u64) -> &'static str {
