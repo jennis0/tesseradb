@@ -103,6 +103,11 @@ impl DeclaredScalar {
     pub fn wire_type(&self) -> ScalarType {
         match self.vocabulary {
             Some(_) => ScalarType::Utf8,
+            // A keyword is stored as an ordinal into its layer's dictionary and supplied as the
+            // value itself — the same split a category makes, for the same reason. The ordinal is
+            // a per-layer index internal (`records-and-search.md` §4.3): it is not stable across
+            // layers, so a caller could not name one even if the boundary let it.
+            None if self.arrow_type == ScalarType::Keyword => ScalarType::Utf8,
             None => self.arrow_type,
         }
     }

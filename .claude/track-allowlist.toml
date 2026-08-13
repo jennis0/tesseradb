@@ -21,17 +21,20 @@
 # a file a wave-1 track owned is not an overlap, because wave 2 branches from wave 1's merged
 # seam.
 
-# FROZEN for epic 1 (controller ruling 2026-08-12). The manifest is the seam commit and is
-# spent; the authz/spatial/wire/plugin crates are outside the epic (0064's render half is NOT
-# this epic — `or_render_placeholder` does not move); decisions and the two normative designs
-# change only through the owner; scripts are the checks themselves.
+# FROZEN (controller, 2026-08-12; narrowed 2026-08-13). The seams are spent; the authz, wire and
+# plugin crates are outside this work; decisions and the normative designs change only through the
+# owner; scripts are the checks themselves.
+#
+# `crates/tessera-spatial/*` came off the freeze when the keyword family needed a `ScalarType`
+# variant: the freeze was scoped to epic 1, where the spatial crate was genuinely outside the
+# work, and a stale freeze is worse than none — it refuses a legitimate change and teaches the
+# next reader that the list is noise rather than a decision.
 [frozen]
 paths = [
   "crates/tessera-store/src/manifest.rs",
   "crates/tessera-store/src/render_presence.rs",
   "crates/tessera-filter/src/dict.rs",
   "crates/tessera-authz/*",
-  "crates/tessera-spatial/*",
   "crates/tessera-wire/*",
   "crates/tessera-plugin/*",
   "docs/decisions/*",
