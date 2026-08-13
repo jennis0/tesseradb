@@ -233,8 +233,8 @@ covered**. The filter surface landed (decision 0062; contracts §3.2 r26), and
 which keeps it a second implementation: the engine reads `attrs/`, the oracle reads what the
 synthesised corpus was given, and the two meet only at the served surface (the same construction
 as the geometry input, §1). The mask catalogue's corpus gains two `filter`-only columns —
-a `per_viewer` category and a `utf8` string — deliberately **decorrelated** from the grant
-structure, a precondition the suite asserts rather than assumes, because a correlated fixture
+a `per_viewer` category and a string column (`utf8` then, `keyword` since that family replaced it) —
+deliberately **decorrelated** from the grant structure, a precondition the suite asserts rather than assumes, because a correlated fixture
 passes every cross-principal check while testing nothing. Surface §9's adversarial value shapes
 are partially planted: a hidden value, a hollow (declared, memberless) value, a single-member
 value; container-straddling membership comes free of the cycling values. Not planted: values
@@ -242,9 +242,11 @@ whose only member is deleted or suppressed (Rule S over filter counts — needs 
 machinery's private-bundle servers) and tier-straddling values (no attribute ingest exists).
 §4.4's I12 row — the frontier-depth form — is untouched and still blocked on the label service,
 with I3; the row's coverage claim names the distinction. One divergence is pinned as a strict
-xfail rather than resolved: a cross-family operator (`prefix` on a category, `in` on `utf8`)
-answers as an empty operand where `match` on the same surface refuses `422`, and no document
-rules the case — recorded in the test's docstring for an owner ruling.
+xfail rather than resolved: a cross-family operator (`prefix` on a category) answers as an empty
+operand where `match` on the same surface refuses `422`, and no document rules the case — recorded
+in the test's docstring for an owner ruling. The report's second case, `in` on a string column, was
+itself the bug: `in` is `eq` over a list rather than a category-only generalisation, so a string
+column takes it and it is no cross-family operator at all.
 
 **r8** (2026-08-06) applies decision
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md). Script 5 was

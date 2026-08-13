@@ -489,7 +489,7 @@ index      = true
 
 [[attribute]]
 name       = "notes"
-type       = "utf8"                   # neither flag: blob-resident, returned at drill-down alone
+type       = "keyword"                # neither flag: blob-resident, returned at drill-down alone
 ```
 
 ```
@@ -527,8 +527,13 @@ is that place.
   that filter from the hot column, which stores an absent value as zero, so an item with no value
   would match every range containing zero. `index` alone filters now, against an entity-space
   column that carries presence; `render` alone draws now;
-- `render` on `utf8` — a non-fixed-width type in the hot column. The refusal is of the *placement*,
-  not of the type: `index = true` puts the string in entity space and costs the hot column nothing;
+- `render` on `keyword`, the one declarable string family (`utf8` is retired as a declared type —
+  `records-and-search.md` §4.3). The refusal is of the *placement*, not of the type: `index = true`
+  puts the string in entity space and costs the hot column nothing. Its storage form *is*
+  fixed-width — a `u32` ordinal — so "not fixed-width" is not the argument. The argument is that the
+  hot column is served: a rendered keyword would put either the value's bytes in every row, at
+  0.93 GiB per byte per row per 10⁹, or an ordinal that is a position in one layer's dictionary and
+  an index internal that never crosses the trust boundary (**I10**);
 - `render_in` (⊘, §3.9);
 - `record` as a column name — `attrs/record/` is the record blob's namespace, so a column of that
   name would address the blob's files as its own;
