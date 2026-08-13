@@ -2849,17 +2849,10 @@ pub(crate) fn filter_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
-        // ⊘ **Text is excluded until its flush extent lands (#116).** A flushed batch's text
-        // reaches the record blob, so drill-down answers it; what lags is the *index*, so a
-        // `match` sees the base build's terms until the next fold rebuilds them. That is a bounded
-        // staleness rather than a lost value, and it is the same shape a keyword column had between
-        // its base build and its own flush track. Excluding it here is what keeps
-        // `flush::extent_column`'s refusal unreachable rather than a panic waiting for a
-        // declaration.
-        .filter(|(_, d)| {
-            crate::filter::owes_value_column(d, &manifest.vocabularies)
-                && d.arrow_type != tessera_spatial::tiler::ScalarType::Text
-        })
+        // **Text is not here, and `owes_value_column` is where that is decided** — it owes no value
+        // column, so there is no attribute extent for this pass to write. Its flush track is
+        // `text_schema_of`, whose extent is a dictionary and postings instead.
+        .filter(|(_, d)| crate::filter::owes_value_column(d, &manifest.vocabularies))
         .map(|(index, d)| crate::flush::FilterColumnSpec {
             index,
             name: d.name.clone(),
@@ -4607,6 +4600,12 @@ impl Executor {
                     .iter()
                     .any(|extent| extent.blocks == consumed.blocks)
             })
+            || !plan.text_extents.iter().all(|consumed| {
+                live_manifest
+                    .text_extents
+                    .iter()
+                    .any(|extent| extent.dict == consumed.dict)
+            })
         {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
@@ -4672,6 +4671,21 @@ impl Executor {
             .record_extents
             .iter()
             .filter(|extent| !consumed_records.contains(extent.blocks.as_str()))
+            .cloned()
+            .collect();
+        // The text extents, same shape again: the fold merged every one its snapshot named into
+        // the new base index, and what is carried is the flight's. Identified by the dictionary
+        // path, which is `seg_id`-derived and never reused — and which is also the half a reader
+        // cannot substitute, an extent's postings being positions in *its own* dictionary.
+        let consumed_texts: FxHashSet<&str> = plan
+            .text_extents
+            .iter()
+            .map(|extent| extent.dict.as_str())
+            .collect();
+        let carried_texts: Vec<tessera_store::manifest::TextExtent> = live_manifest
+            .text_extents
+            .iter()
+            .filter(|extent| !consumed_texts.contains(extent.dict.as_str()))
             .cloned()
             .collect();
 
@@ -4779,11 +4793,11 @@ impl Executor {
         published_overlay.retire(&executed);
 
         let mut segments_manifest = SegmentsManifest {
-            // ⊘ The fold rebuilds a text column's index whole from the surviving values (#117);
-            // until it does, the new prefix carries none and a `match` answers from the base the
-            // fold just wrote. Empty is the honest state, not a dropped extent — the fold's own
-            // inputs are gone with the prefix it consumed.
-            text_extents: Vec::new(),
+            // The flight's text extents, and the pass merged every other one into the new base
+            // index. A flush publishing during the fold indexed entities the new base does not
+            // hold, and dropping its entry would answer every `match` over that batch's prose with
+            // silence — the words are simply not in the base the fold wrote.
+            text_extents: carried_texts.clone(),
             // **Live, and untouched.** Deriving either from the fold's inputs moves the watermark
             // backwards past every post-snapshot entity, and composition treats an entity at or
             // above it as buffered rather than rowed — so the gap goes invisible to every principal
@@ -4920,6 +4934,14 @@ impl Executor {
             carried_rels.insert(extent.blocks.clone());
             carried_rels.insert(extent.hasrow.clone());
             carried_rels.insert(extent.directory.clone());
+        }
+        // All three files of every carried text extent, under the same rule: the dictionary and
+        // the postings are one record — an ordinal names a position in *this* dictionary — and the
+        // presence half is what stops an entity whose prose analysed to no terms reading as absent.
+        for extent in &carried_texts {
+            carried_rels.insert(extent.dict.clone());
+            carried_rels.insert(extent.postings.clone());
+            carried_rels.insert(extent.presence.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {

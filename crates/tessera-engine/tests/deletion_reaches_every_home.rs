@@ -108,6 +108,14 @@ index = true
 [[attribute]]
 name = "note"
 type = "keyword"
+
+# The only family with **two** homes at once: its prose is a blob row and its words are a token
+# dictionary plus postings over it. Both have to be reached, and by different passes.
+[[attribute]]
+name     = "prose"
+type     = "text"
+index    = true
+analyser = "unicode"
 "#;
 
 fn band_of(source: u64) -> &'static str {
@@ -152,6 +160,23 @@ fn note_of(source: u64) -> String {
     format!("the-prose-of-{source:05}")
 }
 
+/// The indexed prose. Two words every item carries and one word that separates them, so the fold's
+/// merge has both cases to get right: a term whose posting must lose one entity and keep the rest,
+/// and a term whose only carrier is deleted and which must leave the dictionary altogether.
+///
+/// The deleted item's own word sorts **after** every survivor's, deliberately the opposite way
+/// round from `tag_of`'s: a keyword's ordinals are stored per entity and a dropped first key
+/// recolours them, where a text ordinal is a position nothing outside its own postings names — so
+/// what this shape catches is different. A merge that emitted the term with an empty posting rather
+/// than dropping it leaves a dictionary one key too long, and every posting after it is then read
+/// against the wrong word.
+fn prose_of(source: u64) -> String {
+    if source == DELETED_SOURCE {
+        return "shared prose solitonlattice".to_string();
+    }
+    format!("shared prose group{}", source % 3)
+}
+
 fn write_points(path: &Path, n: u64) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -163,6 +188,7 @@ fn write_points(path: &Path, n: u64) {
         Field::new("score", DataType::Int32, true),
         Field::new("tag", DataType::Utf8, true),
         Field::new("note", DataType::Utf8, false),
+        Field::new("prose", DataType::Utf8, false),
     ]));
     let ids: Vec<u64> = (0..n).collect();
     let batch = RecordBatch::try_new(
@@ -190,6 +216,9 @@ fn write_points(path: &Path, n: u64) {
             )),
             Arc::new(StringArray::from(
                 ids.iter().map(|e| note_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| prose_of(*e)).collect::<Vec<_>>(),
             )),
         ],
     )
@@ -338,6 +367,9 @@ enum Home {
     CategoryPostings,
     /// A keyword column's dictionary, where a key whose only carrier was deleted must vanish.
     KeywordDictionary,
+    /// A text column's token index — the dictionary and the postings over it, which the fold
+    /// rebuilds by merging every layer and subtracting the deleted set.
+    TextIndex,
     /// The per-entity record blob: every field with neither key set (records §3).
     RecordBlob,
     /// The external-id binding, whose survival past a fold 409s a lawful re-ingest of the same key
@@ -348,13 +380,14 @@ enum Home {
 }
 
 impl Home {
-    const ALL: [Home; 9] = [
+    const ALL: [Home; 10] = [
         Home::Row,
         Home::RenderColumn,
         Home::RenderPresence,
         Home::ValueColumn,
         Home::CategoryPostings,
         Home::KeywordDictionary,
+        Home::TextIndex,
         Home::RecordBlob,
         Home::ExternalIdSidecar,
         Home::TermPostings,
@@ -396,6 +429,13 @@ impl Home {
             ],
             Home::CategoryPostings => vec![attrs.join("band/postings.arrow")],
             Home::KeywordDictionary => vec![attrs.join("tag").join(tessera_filter::DICT_FILE)],
+            // Both halves, because they are one record: a posting is a position in *this*
+            // dictionary, so a fold that rewrote one and carried the other forward answers every
+            // `match` from the wrong words with no symptom.
+            Home::TextIndex => vec![
+                attrs.join("prose").join(tessera_filter::DICT_FILE),
+                attrs.join("prose/postings.arrow"),
+            ],
             Home::RecordBlob => files_under(&attrs.join("record")),
             Home::ExternalIdSidecar => files_under(&partition.join("entities")),
             Home::TermPostings => vec![partition.join("terms/postings.arrow")],
@@ -515,6 +555,35 @@ fn keyword_dictionary(root: &Path) -> Vec<(u32, String)> {
     dict.walk(|ordinal, key| keys.push((ordinal, key.to_string())))
         .expect("the dictionary walks");
     keys
+}
+
+/// `Home::TextIndex`: every term the `prose` index holds, with the entities its posting names.
+///
+/// Read through the two artefacts together — `key_of` for the word, the posting at the same
+/// ordinal for its carriers — which is the pairing the whole family rests on and the one a fold
+/// that rewrote only one half would break.
+fn text_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
+    let dir = partition_dir(root).join("attrs/prose");
+    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+        .expect("the token dictionary opens");
+    let postings = tessera_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)
+        .expect("the token postings open");
+    assert_eq!(
+        dict.len(),
+        postings.record_count(),
+        "Home::TextIndex: the dictionary and the postings disagree about how many terms there are"
+    );
+    let mut out = BTreeMap::new();
+    dict.walk(|ordinal, key| {
+        out.insert(
+            key.to_string(),
+            postings
+                .entities(AttrLocalId::new(ordinal))
+                .expect("a posting reads"),
+        );
+    })
+    .expect("the token dictionary walks");
+    out
 }
 
 /// `Home::RecordBlob`: the blob's base, opened at the artefact — no mask, no overlay, no session.
@@ -669,6 +738,15 @@ fn a_deletion_reaches_every_home() {
             .iter()
             .any(|(_, key)| key == "m-sole-carrier"),
         "Home::KeywordDictionary"
+    );
+    let index = text_index(&root);
+    assert!(
+        index["solitonlattice"].contains(deleted.raw() as u32),
+        "Home::TextIndex (the sole-carried word)"
+    );
+    assert!(
+        index["shared"].contains(deleted.raw() as u32),
+        "Home::TextIndex (a word the survivors carry too)"
     );
     assert!(
         record_blob(&root).has_row(deleted.raw() as u32),
@@ -887,6 +965,48 @@ fn a_deletion_reaches_every_home() {
         }
     }
 
+    // Home::TextIndex — the merge and the subtraction, and the two failures are different.
+    //
+    // A term the deleted item shared keeps its posting and loses exactly that entity; a term it
+    // alone carried is not in the merged dictionary at all, so the word leaves the corpus with the
+    // document that used it. Checked as a whole map rather than key by key: what a merge gets
+    // wrong is the *pairing* — an emptied term left in place shifts every posting after it onto
+    // the wrong word — and only comparing the full term set against the survivors' own prose
+    // catches that.
+    let index = text_index(&root);
+    assert!(
+        !index.contains_key("solitonlattice"),
+        "Home::TextIndex: the deleted entity was the only carrier and its word survives: {:?}",
+        index.keys().collect::<Vec<_>>()
+    );
+    let mut expected: BTreeMap<String, croaring::Bitmap> = BTreeMap::new();
+    for (source, entity) in &entity_of_source {
+        if *source == DELETED_SOURCE {
+            continue;
+        }
+        for word in prose_of(*source).split(' ') {
+            expected
+                .entry(word.to_string())
+                .or_default()
+                .add(*entity as u32);
+        }
+    }
+    assert_eq!(
+        index.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>(),
+        "Home::TextIndex: the merged dictionary is not the survivors' vocabulary"
+    );
+    for (word, carriers) in &expected {
+        assert_eq!(
+            &index[word], carriers,
+            "Home::TextIndex: '{word}' names the wrong entities after the fold"
+        );
+    }
+    assert!(
+        index["shared"].contains(survivor_u32),
+        "Home::TextIndex: a suppressed entity's words folded through intact"
+    );
+
     // Home::RecordBlob — byte-absent, against the artefact's own bytes.
     //
     // The walk is the byte argument: `for_each_row` refuses any block whose rows do not tile it
@@ -915,12 +1035,20 @@ fn a_deletion_reaches_every_home() {
         let source = source_of_entity[&u64::from(entity)];
         assert_eq!(
             fields.len(),
-            1,
-            "Home::RecordBlob: source {source}'s row is not one blob-resident field"
+            2,
+            "Home::RecordBlob: source {source}'s row is not its two blob-resident fields"
         );
         assert_eq!(
             fields[0].value,
             tessera_filter::RecordValue::Utf8(note_of(source)),
+            "Home::RecordBlob: source {source}'s note"
+        );
+        // The text column's **other** home. Its words are in the token index above; its bytes are
+        // here, and a fold that reached one and not the other leaves the deleted item's prose
+        // readable through a drill-down while `match` no longer names it.
+        assert_eq!(
+            fields[1].value,
+            tessera_filter::RecordValue::Utf8(prose_of(source)),
             "Home::RecordBlob: source {source}'s prose"
         );
         walked += 1;

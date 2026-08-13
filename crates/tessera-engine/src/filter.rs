@@ -659,9 +659,12 @@ struct TextLayer {
     /// text that analyses to no terms — an empty string, a field of pure punctuation — carries a
     /// value and appears in no posting.
     ///
-    /// ⊘ Read by nobody yet. `match` unions across layers and needs no coverage, the layers being
-    /// disjoint by **I9**; this is here for the fold, which must know which entities a layer stood
-    /// for in order to rebuild without it (#117), and for the coverage check a coalesce would owe.
+    /// ⊘ Read by nobody yet, and **not by the fold either**: that pass rebuilds the base index by
+    /// merging the layers' postings and subtracting the deleted set, which needs no coverage.
+    /// `match` unions across layers and needs none either, the layers being disjoint by **I9**.
+    /// What it is here for is the coverage check a coalesce would owe, and the day a text column
+    /// gains an `exists` predicate — at which point the *base* owes a presence bitmap too, since it
+    /// carries none and the fold therefore writes none.
     #[allow(dead_code)]
     present: Bitmap,
     /// The manifest path that named this layer, or `None` for the base build's index — the identity
@@ -925,6 +928,15 @@ pub(crate) fn owes_value_column(
     scalar: &tessera_store::manifest::DeclaredScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> bool {
+    // **Text owes none, and that is the family's defining property rather than an exception to be
+    // remembered at each call site.** Every other indexed family stores one value per entity; a
+    // text field has many terms per entity and no per-entity slot at all, so its index is a token
+    // dictionary and postings over it and its value is a blob row. Every pass that iterates "the
+    // columns with a value column" — the flush's extent writer, the fold's merge — would otherwise
+    // reach for a `values.bin` that no writer has ever produced.
+    if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+        return false;
+    }
     scalar.index || listing_of(scalar, vocabularies) == Some(Listing::PerViewer)
 }
 
