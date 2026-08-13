@@ -452,21 +452,32 @@ boundary.
 
 ### 4.4 Text
 
-⊘ **Unbuilt; this section and §4.5 are the specification, and together they are the largest new
-mechanism in this design.** A `text` field is prose: matched by what it says, not by its bytes.
+**Partly built.** A `text` field is prose: matched by what it says, not by its bytes. The
+declaration, the analyser and the base build's token index are implemented; ⊘ the read route, the
+flush extent, the fold and exact phrase are not, and §4.5 remains specification throughout.
 
 **Storage is a token index; the values live in the record blob** (§3) whether or not the field is
 indexed — `index = true` adds only the per-layer token dictionary and hybrid postings (a singleton
 posting is a bare `u32`, measured 4.4× smaller on singleton-heavy vocabularies). Measured on real
-titles at three scales ([`string-storage`](../../probes/2026-08-12-string-storage/) arm 3): the
-index is **23.6 B/entity against the flat column's 83.6** — smaller than the column it replaces,
+titles at three scales ([`string-storage`](../../probes/2026-08-12-string-storage/) arm 3, whose accounting
+[`text-index-bytes`](../../probes/2026-08-13-text-index-bytes/) then confirmed through the shipped
+writers at 21.75–22.97 across three scales — the model was conservative by up to 8%): the
+index is **22.58 B/entity on disk against the flat column's 83.6** — smaller than the column it
+replaces,
 stable across a 9.6× scale range, because a head token's posting densifies as a tail token's
 spreads and the two cancel. With the blob record and its addressing beside it, **~59 GB at 10⁹
 against 83.6 GB flat** — the compressed value bytes (~31 GB) plus the blob's own offsets, has-row
 bitmap and directory (~4.4 GB; review B5's correction of an earlier ~55 GB that omitted the
-addressing) plus the index; the ~1.4× win stands. ⊘ **The 10⁹ figure is a linear extrapolation of
-a per-entity cost measured to 2.4M**; §11 gates promotion on extending it, and no ruling below
-depends on its exact value, only its sign.
+addressing) plus the index; the ~1.4× win stands.
+
+⊘ **Two limits on that sizing, and the second is not a scale caveat.** The 10⁹ figure is a linear
+extrapolation of a per-entity cost measured to 2.4M; §11 gates promotion on extending it, and no
+ruling below depends on its exact value, only its sign. And **every per-entity figure here is
+title-shaped**: an arXiv abstract is ~13× a title's bytes and its index measures **158.43 B/entity,
+7× a title's** ([`text-index-bytes`](../../probes/2026-08-13-text-index-bytes/)). The *ratio* to the
+flat column improves with length — 6.47× against 3.56×, because a longer document repeats more head
+tokens — but the absolute cost does not, so a corpus of abstracts sizes at ~158 GB of index at 10⁹
+rather than ~23. **The index scales with prose length, not with entity count alone.**
 
 **An analyser is a named, versioned pipeline, and a `text` column declares which one it uses**
 ([decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md), amending this
