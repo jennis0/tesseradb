@@ -257,7 +257,12 @@ impl ColumnBuf {
                 match ty {
                     $(ScalarType::$v => ColumnBuf::$v(Vec::new()),)*
                     ScalarType::Bool => ColumnBuf::Bool(Vec::new()),
-                    ScalarType::Utf8 => ColumnBuf::Utf8(Vec::new()),
+                    // **The whole render path treats a keyword as its bytes.** The dictionary and
+                    // the ordinal are the filter index's, not the hot column's, and `render` on a
+                    // keyword is refused at the declaration — so this arm is unreachable, and it
+                    // is stated with `utf8` rather than apart so that the segment writer's type
+                    // (`store::write::arrow_type_of`) and this reader cannot come to disagree.
+                    ScalarType::Utf8 | ScalarType::Keyword => ColumnBuf::Utf8(Vec::new()),
                 }
             };
         }
@@ -3498,7 +3503,10 @@ fn gather_tile_columns(
                         }
                         ColumnBuf::Bool(out)
                     }
-                    ScalarType::Utf8 => {
+                    // A keyword shares this arm for `ColumnBuf::empty`'s reason: rendered, it is
+                    // its bytes, and it is never rendered. A segment that carried anything else
+                    // under the name refuses here rather than being served.
+                    ScalarType::Utf8 | ScalarType::Keyword => {
                         let mut per_part = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {

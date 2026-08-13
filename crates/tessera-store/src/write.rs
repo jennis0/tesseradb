@@ -712,7 +712,12 @@ fn arrow_type_of(ty: ScalarType) -> DataType {
         // `None` for the timezone: these are instants, and a per-column zone would be a second
         // place a time's meaning is decided.
         ScalarType::TimestampUs => DataType::Timestamp(TimeUnit::Microsecond, None),
-        ScalarType::Utf8 => DataType::Utf8,
+        // **Unreachable, and `Utf8` rather than a panic.** `render` on either string type is
+        // refused at the declaration, so no keyword column reaches the hot column's schema. If one
+        // ever did, its rendered form would be the value's bytes — which is what
+        // `ScalarValue::or_render_placeholder` substitutes for it — never the ordinal, which is a
+        // per-layer index internal (records §4.3). The two must agree, so they are stated as one.
+        ScalarType::Utf8 | ScalarType::Keyword => DataType::Utf8,
     }
 }
 
@@ -862,7 +867,11 @@ impl ScalarColumnData {
                 match ty {
                     $(ScalarType::$v => ScalarColumnData::$v(Vec::with_capacity(capacity)),)*
                     ScalarType::Bool => ScalarColumnData::Bool(Vec::with_capacity(capacity)),
-                    ScalarType::Utf8 => ScalarColumnData::Utf8(Vec::with_capacity(capacity)),
+                    // A keyword renders as its bytes if it ever renders at all — see
+                    // `arrow_type_of`, which this must agree with.
+                    ScalarType::Utf8 | ScalarType::Keyword => {
+                        ScalarColumnData::Utf8(Vec::with_capacity(capacity))
+                    }
                 }
             };
         }

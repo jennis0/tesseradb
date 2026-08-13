@@ -359,7 +359,7 @@ impl Schema {
                         schema_error(format!(
                             "attribute '{}': unknown type '{other}'. Declarable types are \
                              bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
-                             timestamp_us, utf8 and category",
+                             timestamp_us, keyword, utf8 and category",
                             decl.name
                         ))
                     })?;
@@ -387,13 +387,25 @@ impl Schema {
                     // exactly the placement distinction §10.3 routes by. An earlier revision
                     // refused the type outright, which was right while the filter placement was
                     // unbuilt and became wrong when the value column landed.
-                    if ty == ScalarType::Utf8 && decl.render {
+                    //
+                    // **Both string types, and a `keyword` for the stronger of the two reasons.**
+                    // A `utf8` is refused because its width is the data's. A `keyword` has a
+                    // fixed-width storage form — the `u32` ordinal — and is refused anyway,
+                    // because the hot column is served: rendering one would put either the value's
+                    // bytes in every row, which is the `utf8` cost exactly, or its ordinal, which
+                    // is a position in one layer's dictionary that means nothing outside that
+                    // layer and is an index internal that never crosses the trust boundary
+                    // (records §4.3, **I10**). Neither is a colour a client can draw.
+                    if matches!(ty, ScalarType::Utf8 | ScalarType::Keyword) && decl.render {
                         return Err(schema_error(format!(
-                            "attribute '{}': `render` on `utf8` is refused \
-                             (per-point-attributes §4.3 — a non-fixed-width type in the hot \
-                             column). A per-row string is the vocabulary stored once per row; \
-                             declare a category, whose row cost is its width. `index = true` is \
-                             available and costs the hot column nothing",
+                            "attribute '{}': `render` on `{other}` is refused \
+                             (per-point-attributes §4.3 — the hot column is a fixed-width slot in \
+                             every row, and a string is not one). A per-row string is the \
+                             vocabulary stored once per row; a keyword's ordinal is fixed-width \
+                             but is a per-layer index internal that never leaves the server \
+                             (records §4.3). Declare a category, whose row cost is its width. \
+                             `index = true` is available for either and costs the hot column \
+                             nothing",
                             decl.name
                         )));
                     }
@@ -1196,17 +1208,39 @@ listing = "per_viewer"
         assert!(parse_str(SEVERITY).is_ok());
     }
 
-    /// §4.3: a non-fixed-width type in the hot column. The capability exists in the storage
-    /// layer — `ScalarType::Utf8` is writable — and is refused here, at the declaration.
+    /// §4.3: the hot column is a fixed-width slot per row, and neither string type is one. The
+    /// capability exists in the storage layer — `ScalarType::Utf8` is writable — and is refused
+    /// here, at the declaration.
+    ///
+    /// A `keyword` is refused by the same rule and for a stronger reason, which the message must
+    /// carry: its ordinal *is* fixed-width, so "not fixed-width" alone would be false of it, and a
+    /// reader who took that as the whole argument would see nothing wrong with rendering the
+    /// ordinal — which is a per-layer index internal crossing the trust boundary.
     #[test]
-    fn render_on_utf8_is_refused_at_the_declaration() {
-        let text = r#"
+    fn render_on_either_string_type_is_refused_at_the_declaration() {
+        for ty in ["utf8", "keyword"] {
+            let text = format!(
+                r#"
 [[attribute]]
 name = "title"
-type = "utf8"
+type = "{ty}"
 render = true
-"#;
-        assert!(err(text).contains("non-fixed-width"), "{}", err(text));
+"#
+            );
+            let message = err(&text);
+            assert!(message.contains("fixed-width slot"), "{ty}: {message}");
+            assert!(message.contains(ty), "{ty}: {message}");
+        }
+        assert!(
+            err(r#"
+[[attribute]]
+name = "title"
+type = "keyword"
+render = true
+"#)
+            .contains("never leaves the server"),
+            "a keyword's refusal must name the ordinal's confinement, not only the width"
+        );
     }
 
     /// A column may not take a combinator's name — refused at the build, not resolved at the
@@ -1227,21 +1261,42 @@ index = true
     }
 
     /// A string is refused from the **hot column**, not from the bundle: `index` puts it in
-    /// entity space, where it is read once per query rather than once per rendered mark. This
-    /// is the utf8 bridge — the type survives this surface under the new keys, its flat value
-    /// column and string scan unchanged; `keyword`/`text` replace it in their own epic
-    /// (records §4.3, §13).
+    /// entity space, where it is read once per query rather than once per rendered mark.
+    ///
+    /// Both string types parse, and `utf8`'s survival is the point of testing them together: its
+    /// retirement is its own change (records §13), so until then a schema may declare either and
+    /// the two store differently — a flat string column against a dictionary and an ordinal one.
     #[test]
-    fn an_index_only_string_is_accepted() {
+    fn an_index_only_string_is_accepted_in_either_type() {
+        for (ty, expect) in [("utf8", ScalarType::Utf8), ("keyword", ScalarType::Keyword)] {
+            let text = format!(
+                r#"
+[[attribute]]
+name = "title"
+type = "{ty}"
+index = true
+"#
+            );
+            let schema = parse_str(&text).unwrap_or_else(|e| panic!("{ty} must parse: {e}"));
+            assert!(schema.attributes[0].index, "{ty}");
+            assert_eq!(schema.attributes[0].ty, expect, "{ty}");
+            // Neither string type occupies a row slot, so neither moves the residency figure.
+            assert_eq!(schema.row_bits(), Some(0), "{ty}");
+        }
+    }
+
+    /// An unknown type names the whole declarable set, `keyword` included: the message is how an
+    /// author discovers the type exists.
+    #[test]
+    fn the_type_list_names_keyword() {
         let text = r#"
 [[attribute]]
 name = "title"
-type = "utf8"
+type = "keywords"
 index = true
 "#;
-        let schema = parse_str(text).expect("an index-only string parses");
-        assert!(schema.attributes[0].index);
-        assert_eq!(schema.attributes[0].ty, ScalarType::Utf8);
+        let message = err(text);
+        assert!(message.contains("keyword, utf8"), "{message}");
     }
 
     #[test]
