@@ -298,11 +298,28 @@ hazard needs an identity that outlives the artefact, and none exists (memo §6.1
 
 ### 4.3 Keywords
 
-⊘ **Unbuilt; this section is the specification.** A `keyword` is a short string with no vocabulary,
-matched exactly: an identifier, an order number, a hostname, a submitter. It replaces `utf8`, whose
-operators it keeps — `eq`, `in`, `prefix`, `contains` — with the same byte-exact semantics and a
-different cost profile: exact and prefix become fast; `contains` remains a scan and is priced
-honestly below.
+**Built.** A `keyword` is a short string with no vocabulary, matched exactly: an identifier, an
+order number, a hostname, a submitter. It replaces `utf8`, whose operators it keeps — `eq`, `in`,
+`prefix`, `contains` — with the same byte-exact semantics and a different cost profile.
+
+**The swap was measured against the column it replaced, before that column was deleted, and it is
+not free** ([the retirement fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md), *measured* at 2.4M on real arXiv columns through both shipped
+implementations). Storage falls **2.16–3.56×**. `eq` improves up to 8.1×, `in` up to 5.3×,
+`prefix` up to 4.2× on a near-unique column, and all three are level to slightly better on a
+scattered candidate. **`contains` is slower everywhere it was measured — 1.5× on a scattered
+candidate to 71× on a contiguous one**, and the two costs have different shapes: the flat scan was
+linear in the candidate and searched a run's concatenated bytes as one region, while the broad
+dictionary route is flat in the candidate and linear in the vocabulary. So the loss is largest
+exactly where the candidate is small, which is the per-keystroke cell, and smallest on a scattered
+whole-corpus one. At 10⁹ over a unique vocabulary that models as ~1.1 s against ~16 s.
+
+That is a price this design accepts rather than one it hides: `contains` on a keyword is a
+substring predicate over values the format deliberately elides shared prefixes from, and the
+alternative — keeping a flat copy of every string column so one operator stays fast — is the
+second copy §3's whole argument declines. What the measurement changes is that the price is now a
+figure rather than a hope, and §6.4 carries it. Two mitigations are known and unbuilt: an
+ordinal bitset for the broad route's second half (measured 64% of that route's cost, [the retirement fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md)), and
+the narrow route already taking the small-candidate case the loss is worst in.
 
 **Storage is a sorted dictionary plus an ordinal column, per layer.** Each layer — the base build
 and every extent — holds its own front-coded, lexicographically sorted dictionary of the distinct
@@ -724,7 +741,7 @@ ruling) and this design's 100 ms target. Measured constants; the 10⁹ multiplic
 | number range, contiguous candidate | scan | ~250–280 ms *(measured)* | 1 s |
 | keyword `eq`/`prefix`, contiguous, no postings | ordinal scan | ~250–280 ms *(modelled from measured constant)* | 1 s |
 | fixed-width scan, scattered 25% principal | scan | ~2.4 s *(measured at 10⁸ ×10)* | ÷ cores, measured 7.4–8.5× on twelve |
-| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | 11–19 s decode alone at 10⁹ *(per-key measured at 2.4M; **extrapolation refused** — the dictionary fits this machine's L3 at that size and does not at 10⁸, so this is a flag, not a figure — `performance-suite.md` §5)* | ÷ cores |
+| keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | walk-with-search measured 10.7–25.1 ns/key at 2.4M → ~16 s at 10⁹ *(**extrapolation refused** — the dictionary fits this machine's L3 at the measured size and not at 10⁸ — `performance-suite.md` §5); **1.5–71× slower than the `utf8` scan it replaced** ([the retirement fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md))* | ÷ cores |
 | phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(253–265 µs/block measured through the built reader; count result-bound)* | 100 ms |
 | phrase verify, common phrase | as above | unbounded — result-bound | known class |
 | CSR list scan, broad candidate | scan | ~2.7–10 s *(measured constants ×10⁹)* | **postings instead** |

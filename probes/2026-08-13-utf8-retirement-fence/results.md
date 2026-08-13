@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13 · **Machine:** WSL2 on Linux 6.18, AMD Ryzen 9 5900X (Zen 3, 12 cores, 32 MiB
 L3), 47 GB RAM, single-threaded · **Harness:**
-[`crates/tessera-bench/src/bin/utf8_retirement_fence.rs`](../../crates/tessera-bench/src/bin/utf8_retirement_fence.rs) ·
+Harness: `utf8_retirement_fence.rs`, deleted with the baseline it measured (closing note) ·
 **Corpus:** the three real arXiv columns prior campaigns used — `id` (near-unique), `submitter`
 (repeat-heavy), `doi` (sparse) — read as prefixes in snapshot order (= entity order,
 `probes/dataset.md` §5 rule 1) from the Kaggle snapshot (v296).
@@ -267,3 +267,24 @@ CARGO_INCREMENTAL=0 RUSTFLAGS="-C llvm-args=-align-all-functions=6" \
   --snapshot ~/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json \
   --limit 2400000 --repeat 5
 ```
+
+---
+
+## The harness is deleted, and this campaign cannot be re-run
+
+The harness under `crates/tessera-bench/src/bin/` was removed in the same change that merged
+this campaign. It measured the flat `utf8` column against the keyword family, and the flat column
+no longer exists — the retirement it priced deleted `Codes::Text`, `scan_text_eq`,
+`scan_text_prefix`, `scan_text_in` and `scan_text_contains`, which are the whole of the baseline
+half. A harness that cannot compile against the tree it lives in is not a harness, and keeping it
+would state that this comparison is reproducible when it is not.
+
+**That is the point of the fence rather than a defect in it.** The measurement existed precisely
+because there is exactly one moment at which it is possible: after both implementations exist and
+before one is deleted. The numbers above are the record, the raw output beside them is the
+evidence, and neither can be regenerated. Anything that wants to re-check them must first restore
+the flat column from history.
+
+What *is* reproducible is the keyword half alone — `probes/2026-08-13-keyword-dict/` measures the
+dictionary's own constants against nothing, and `performance-suite.md` specifies the arms that
+should carry those figures forward.

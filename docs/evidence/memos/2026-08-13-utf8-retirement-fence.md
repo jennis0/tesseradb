@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13 · **Status:** Evidence, not normative · **Machine:** WSL2 on Linux 6.18,
 AMD Ryzen 9 5900X (Zen 3, 12 cores, 32 MiB L3), 47 GB RAM, single-threaded · **Harness:**
-[`utf8_retirement_fence`](../../../crates/tessera-bench/src/bin/utf8_retirement_fence.rs) ·
+`utf8_retirement_fence.rs` (deleted with the baseline it measured — see the closing note) ·
 **Raw:** [`probes/2026-08-13-utf8-retirement-fence/`](../../../probes/2026-08-13-utf8-retirement-fence/)
 
 `records-and-search.md` §4.3 retires the flat `utf8` column and names the prices to be paid
