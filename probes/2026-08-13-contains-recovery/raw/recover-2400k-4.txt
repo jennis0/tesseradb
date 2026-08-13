@@ -1,0 +1,53 @@
+# contains recovery — 2400000 rows, restart interval 16, median of 3
+
+## id — 2400000 present of 2400000 rows, 2400000 distinct keys, 150000 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 197128 | 11.32 | 33.29 | 17.26 | **1.93×** |
+| 4 | 107455 | 11.32 | 29.78 | 16.50 | **1.80×** |
+| 6 | 1080 | 11.32 | 24.96 | 15.93 | **1.57×** |
+| 8 | 10 | 11.32 | 19.91 | 15.46 | **1.29×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | probe per entity | probe per distinct | block walk | recovered |
+|---|---|---|---|---|---|---|---|
+| 25% contiguous | 600000 | 600000 | 37500 | 72.0 | 75.1 | 19.5 | **3.69×** |
+| 25% stride-4 | 600000 | 600000 | 150000 | 60.4 | 62.5 | 37.1 | **1.63×** |
+
+## submitter — 2399904 present of 2400000 rows, 542489 distinct keys, 33906 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 444 | 18.16 | 44.61 | 26.60 | **1.68×** |
+| 4 | 284 | 18.16 | 44.31 | 26.01 | **1.70×** |
+| 6 | 5 | 18.16 | 42.70 | 26.00 | **1.64×** |
+| 8 | 2 | 18.16 | 38.49 | 25.04 | **1.54×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | probe per entity | probe per distinct | block walk | recovered |
+|---|---|---|---|---|---|---|---|
+| 25% contiguous | 599976 | 151821 | 32267 | 125.3 | 37.6 | 24.9 | **5.03×** |
+| 25% stride-4 | 599976 | 278380 | 33905 | 150.3 | 60.1 | 33.3 | **4.52×** |
+
+## doi — 1026531 present of 2400000 rows, 1024837 distinct keys, 64053 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 399554 | 12.75 | 20.49 | 18.01 | **1.14×** |
+| 4 | 286679 | 12.75 | 21.37 | 18.05 | **1.18×** |
+| 6 | 234025 | 12.75 | 23.19 | 19.15 | **1.21×** |
+| 8 | 224855 | 12.75 | 23.29 | 18.08 | **1.29×** |
+| 16 | 9055 | 12.75 | 38.75 | 19.06 | **2.03×** |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | probe per entity | probe per distinct | block walk | recovered |
+|---|---|---|---|---|---|---|---|
+| 25% contiguous | 256632 | 256144 | 22075 | 119.0 | 92.0 | 34.8 | **3.42×** |
+| 25% stride-4 | 256633 | 256518 | 63392 | 135.2 | 99.1 | 60.9 | **2.22×** |
+

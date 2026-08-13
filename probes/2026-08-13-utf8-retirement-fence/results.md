@@ -166,6 +166,15 @@ row should move to 25 s.
 this is not a channel about stored data — but it does mean the broad route's cost cannot be quoted
 as one number per column.
 
+> **Correction, 2026-08-13** ([`contains-recovery`](../2026-08-13-contains-recovery/results.md)):
+> the sentence above names the mechanism, and in doing so names the discrepancy — the shipped
+> broad route did not call `memmem`, it called `str::contains`, which builds a two-way searcher per
+> key. This harness's walk arm hoisted a searcher and so measured 1.14–2.03× *faster* than the tree
+> it stood for; four of its per-key cells match the later campaign's hoisted arm within 6% and none
+> matches its shipped arm. Every `contains` row in this campaign is a floor for the shipped route,
+> and the shipped band was **2.5–144×**, not 1.5–71×. The hoist has since landed, so these figures
+> now describe the tree.
+
 ### 5. Building the broad route out of `scan_num_in` costs it a further 64%
 
 The broad route yields a set of matching ordinals and then scans for them. Assembled from the

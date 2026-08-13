@@ -53,7 +53,7 @@ mod values_writer;
 
 pub use column::{resolve_union, ColumnPostings};
 pub use dict::{
-    write_sorted_dict, DictError, DictStats, SortedDict, SortedDictWriter,
+    write_sorted_dict, DictError, DictStats, KeyMatcher, SortedDict, SortedDictWriter,
     DEFAULT_RESTART_INTERVAL, DICT_FILE, DICT_FORMAT_VERSION,
 };
 pub use extent::{extent_paths, open_extent, write_extent, EXTENTS_DIR};

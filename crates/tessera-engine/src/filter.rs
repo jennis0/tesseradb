@@ -163,8 +163,8 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 use tessera_filter::{
-    resolve_union, Codes, ColumnPostings, DictError, RecordExtentPaths, RecordStack, RecordValue,
-    SortedDict, ValueColumn,
+    resolve_union, Codes, ColumnPostings, DictError, KeyMatcher, RecordExtentPaths, RecordStack,
+    RecordValue, SortedDict, ValueColumn,
 };
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
@@ -1883,13 +1883,28 @@ enum ContainsRoute {
 /// the honest extrapolation is 11–19 s single-threaded at 10⁹ before the search.
 const BROAD_KEY_NS: u64 = 15;
 
-/// Per-candidate cost of the narrow route's probe, in nanoseconds.
+/// Per-candidate **upper bound** on the narrow route's cost, in nanoseconds.
 ///
-/// 0.10 µs for one `SortedDict::key_of` at the restart interval the campaign chose — the bottom of
+/// 0.10 µs is one `SortedDict::key_of` at the restart interval the campaign chose — the bottom of
 /// records §4.3's *modelled* 0.1–0.3 µs band, and the figure that interval was chosen against
 /// (`tessera_filter::DEFAULT_RESTART_INTERVAL`). The substring search over one decoded key and the
 /// ordinal scan the broad route also pays per candidate entity (0.25–0.28 ns contiguous) both
 /// vanish beside it at this precision, so neither is carried separately.
+///
+/// **It is a bound and no longer the typical cost, and it is deliberately not lowered.** Since the
+/// route walks blocks rather than probing keys, what it pays per candidate entity depends on how
+/// that candidate's ordinals cluster: 19.5–60.9 ns measured across six real shapes at a 25%
+/// candidate (`2026-08-13-contains-recovery`), against ~100 for the worst case this constant has to
+/// cover — a small, scattered candidate over a unique vocabulary, where every entity opens its own
+/// block and nothing amortises. Pricing the route at its bound errs towards the broad route, whose
+/// cost is capped by the vocabulary where the narrow route's grows without limit in the candidate;
+/// pricing it at its typical cost would pick it in exactly the cell where it is worst.
+///
+/// ⊘ The price of that safety is real and now measured: on a contiguous 25% candidate over a
+/// unique column the rule takes the broad route at 41.1 ms where this one costs 11.7 ms. Closing
+/// that gap means a rule that consults the candidate's *distinct* ordinal count — a statistic about
+/// what the principal's own data contains — which is the fence's stop-and-report A and an §8.2
+/// admissibility question the owner has not ruled on. Not closed here.
 const NARROW_PROBE_NS: u64 = 100;
 
 /// Choose a `contains` route from **the candidate's cardinality and the layer's dictionary size,
@@ -1958,9 +1973,12 @@ fn contains_broad(
 ) -> Result<Bitmap, DictError> {
     let mut ordinals = Vec::new();
     // `SortedDict::walk` has no early exit by construction, so the walk's cost is the dictionary's
-    // size and never the needle's selectivity.
+    // size and never the needle's selectivity. The matcher is built once outside it for the reason
+    // [`KeyMatcher`] gives — a searcher constructed per key was measured at up to 47% of this
+    // route — and hoisting it changes no work the walk does per key.
+    let matcher = KeyMatcher::new(needle);
     dict.walk(|ordinal, key| {
-        if key.contains(needle) {
+        if matcher.matches(key) {
             ordinals.push(ordinal);
         }
     })?;
@@ -1977,10 +1995,27 @@ fn contains_broad(
     ))
 }
 
-/// The narrow route: one dictionary probe per candidate entity that carries a value.
+/// The narrow route: read only the dictionary the candidate's own values occupy.
 ///
-/// The probe is `SortedDict::key_of` into a scratch buffer the loop owns, so a candidate of ten
-/// million entities allocates once rather than ten million times.
+/// **The route reads the candidate's ordinals, not its entities.** Entities sharing a value name
+/// the same ordinal, and `SortedDict::key_of` decodes a whole block prefix to return one key — so
+/// probing per candidate entity paid `restart_interval / 2` discarded decodes for every entity,
+/// including the duplicates. Deduplicating first and handing the sorted result to
+/// `SortedDict::walk_ordinals` pays each *block* once instead: measured 2.1–3.4× from the
+/// deduplication alone on a repeat-heavy column, and modelled ~5.8–7.6× more from the block
+/// amortisation on a contiguous candidate ([`contains-recovery`](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)).
+///
+/// **The route now ends where the broad route ends** — one `OrdinalPredicate::In` scan over the
+/// candidate — and the two differ only in how the matching ordinal set is computed: from the whole
+/// dictionary, or from the blocks the candidate's own values sit in. That is what puts this route
+/// inside `tessera_filter::take_scan_work`, which the per-entity probe loop was outside: the
+/// keyword shape whose traversal no test could assert is now asserted by the same harness as every
+/// other.
+///
+/// The transient is one `u32` per candidate entity carrying a value. The crossover admits this
+/// route only below `0.15 × |dictionary|` candidate entities, so that allocation is at most
+/// **0.6 B per dictionary key** against a dictionary the same campaign measures at 4.15–9.61 B/key
+/// — a fraction of the artefact it is reading, not a second copy of it.
 fn contains_narrow(
     values: &ValueColumn,
     dict: &SortedDict,
@@ -1994,35 +2029,30 @@ fn contains_narrow(
         return Ok(Bitmap::new());
     };
     let present = values.present();
-    let mut scratch = Vec::new();
-    let mut hits = Bitmap::new();
-    let mut failure: Option<DictError> = None;
-    for_each_slot_run(
-        &present,
-        candidate,
-        ordinals.len(),
-        |slot0, count, entity0| {
-            for i in 0..count {
-                match dict.key_of(ordinals[slot0 + i], &mut scratch) {
-                    Ok(key) => {
-                        if key.contains(needle) {
-                            hits.add(entity0 + i as u32);
-                        }
-                    }
-                    // Recorded and the walk continues rather than returning here: the caller refuses
-                    // on it, so the result is discarded either way, and stopping early would make a
-                    // malformed dictionary's cost depend on where the damage sits.
-                    Err(e) => {
-                        failure.get_or_insert(e);
-                    }
-                }
-            }
-        },
-    );
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(hits),
+    let mut wanted: Vec<u32> = Vec::new();
+    for_each_slot_run(&present, candidate, ordinals.len(), |slot0, count, _| {
+        wanted.extend_from_slice(&ordinals[slot0..slot0 + count]);
+    });
+    wanted.sort_unstable();
+    wanted.dedup();
+
+    let matcher = KeyMatcher::new(needle);
+    let mut matched = Vec::new();
+    dict.walk_ordinals(&wanted, |ordinal, key| {
+        if matcher.matches(key) {
+            matched.push(ordinal);
+        }
+    })?;
+    // No key the candidate carries matched. The scan still runs, for the reason
+    // [`OrdinalPredicate`] gives — the sentinel says why the list is one element rather than none.
+    if matched.is_empty() {
+        matched.push(NO_SUCH_ORDINAL);
     }
+    Ok(scan_ordinals(
+        values,
+        &OrdinalPredicate::In(matched),
+        candidate,
+    ))
 }
 
 /// Walk `candidate ∩ present` as `(slot0, count, entity0)` runs — a layer's values are addressed by
@@ -2040,8 +2070,10 @@ fn contains_narrow(
 /// gives every slot by arithmetic at O(runs).
 ///
 /// Being a second copy, this walk is **not** seen by `tessera_filter::take_scan_work`, which counts
-/// the scan's own traversal. The narrow route is therefore the one keyword shape whose work no test
-/// asserts; the broad route ends in an ordinal scan and is asserted there.
+/// the scan's own traversal. What it collects is a set of ordinals, not an answer: both `contains`
+/// routes end in one `OrdinalPredicate::In` scan over the candidate, and it is that scan the
+/// harness counts. So the traversal this function performs is uncounted, and the traversal that
+/// decides the answer is asserted for both routes alike.
 fn for_each_slot_run(
     present: &Bitmap,
     candidate: &Bitmap,
@@ -2832,6 +2864,47 @@ mod keyword_tests {
                 );
             }
         }
+    }
+
+    /// **The two routes traverse alike**, and not merely answer alike. They differ in how the
+    /// matching ordinal set is found — every key in the dictionary, or only the blocks holding the
+    /// candidate's own values — and not at all in the scan that turns that set into an answer. So
+    /// whichever the crossover picks, the traversal `take_scan_work` counts is the same one, and
+    /// the narrow route is no longer the one keyword shape sitting outside that harness.
+    ///
+    /// This is what makes the crossover a *cost* choice with nothing else riding on it: a route
+    /// rule that changed the observable work would be choosing a disclosure profile as well as a
+    /// price.
+    #[test]
+    fn the_two_contains_routes_traverse_alike() {
+        let d = dict(&["arxiv/0001", "arxiv/1001", "bio/0001", "cs/0003", "math/0001"]);
+        let entities = [1u32, 2, 5, 9, 40, 41, 100_000];
+        let ordinals = [0u32, 3, 1, 4, 2, 0, 3];
+        let values = partial(&entities, &ordinals);
+        let mut compared = 0;
+        for candidate in [set(&entities), set(&[1, 41, 100_000]), set(&[5]), set(&[7, 8])] {
+            for needle in ["0001", "arxiv", "zzz", "/", "math/0001", ""] {
+                let _ = take_scan_work();
+                let broad = contains_broad(&values, &d, needle, &candidate).unwrap();
+                let broad_work = take_scan_work();
+                let narrow = contains_narrow(&values, &d, needle, &candidate).unwrap();
+                let narrow_work = take_scan_work();
+                assert_eq!(members(&broad), members(&narrow), "{needle:?} answers differ");
+                assert_eq!(
+                    broad_work, narrow_work,
+                    "{needle:?} over {:?}: the routes traversed differently",
+                    members(&candidate)
+                );
+                if broad_work.runs > 0 && broad_work.slots > 0 {
+                    compared += 1;
+                }
+            }
+        }
+        assert!(
+            compared > 0,
+            "every comparison traversed nothing, so they all held vacuously. A --release build is \
+             the ordinary cause — the counter is compiled under debug_assertions"
+        );
     }
 
     /// The routes agree on a universal column too, where the entity id is the slot and the run

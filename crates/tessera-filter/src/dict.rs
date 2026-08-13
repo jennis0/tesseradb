@@ -2,11 +2,10 @@
 //! writer that appends them and the fail-closed reader that searches them
 //! (`records-and-search.md` §4.3).
 //!
-//! ⊘ **The seam, ahead of everything that uses it.** No producer and no consumer exists yet: the
-//! base build and flush will write this file, the read route will resolve needles against it, the
-//! coalesce will merge two of them and the fold will rebuild one (records §7). Nothing in the
-//! engine reads a dictionary today, so every operator below is exercised by this crate's tests
-//! alone.
+//! **Built, with all four consumers.** The base build and flush write this file, the read route
+//! resolves needles against it, the coalesce merges two under the content guard §7 requires, and
+//! the fold rebuilds one (records §7). This crate's own tests still stand alone from those
+//! consumers — they are the format's, not the family's.
 //!
 //! # Never served, and the ordinals are not durable
 //!
@@ -74,20 +73,25 @@
 //! the column this replaces. Front coding elides shared **bytes**, which may split a multi-byte
 //! code point; only the reassembled key is validated as UTF-8, and it is validated on every decode.
 //!
-//! # The four operations, and what they cost
+//! # The five operations, and what they cost
 //!
 //! [`SortedDict::resolve`] and [`SortedDict::prefix_range`] binary-search the restart keys and then
 //! decode sequentially inside one block: `O(log block_count)` slice comparisons plus at most `K`
 //! decodes. [`SortedDict::key_of`] needs no search at all — the ordinal names its block — and
-//! decodes at most `K` entries into a caller-owned scratch buffer, which is what keeps the narrow
-//! `contains` route (one dictionary probe per candidate entity) free of a per-probe allocation.
+//! decodes at most `K` entries into a caller-owned scratch buffer.
 //! [`SortedDict::walk`] decodes every key in order and is the broad `contains` route's whole
-//! access pattern.
+//! access pattern. [`SortedDict::walk_ordinals`] is the narrow route's: given ascending ordinals it
+//! decodes each block holding one exactly once, which is `key_of` per ordinal with the `K/2`
+//! discarded decodes per probe removed — the difference between paying per candidate *entity* and
+//! paying per *block the candidate's values occupy*.
 //!
 //! **`walk` has no early exit, deliberately.** Front coding elides shared prefixes, so a substring
 //! can span an elided prefix and every key must be decoded and searched — records §4.3 says so —
 //! and the absence of an exit is also what keeps the broad route's work a function of
-//! `(candidate, column)` and never of the needle. The lookups are not constant-time in the same
+//! `(candidate, column)` and never of the needle. `walk_ordinals` stops at the last wanted ordinal
+//! in each block, which is the same property: what it reads is fixed by the ordinals it was handed,
+//! and those come from the candidate rather than from the needle. The lookups are not constant-time
+//! in the same
 //! way: `resolve` decodes a needle-dependent number of entries within its block, a handful of
 //! nanoseconds either way. That does not open the channel per-point-attributes §3.8 closes, because
 //! §4.3's rule is that **an unresolved needle still scans** — the millisecond-scale work that
@@ -444,6 +448,48 @@ impl Deref for DictBytes {
     }
 }
 
+/// A needle prepared once for the many keys a `contains` route tests it against.
+///
+/// **The preparation is the point.** Front coding makes a substring search a per-key loop rather
+/// than a scan of the file's bytes — a match can span an elided prefix — so the broad `contains`
+/// route runs one search per dictionary key and the narrow route one per candidate entity. Written
+/// as `key.contains(needle)`, each of those constructs a two-way searcher from the needle and
+/// discards it, and at a few tens of bytes per key the construction is most of the work:
+/// `2026-08-13-contains-recovery` measures the shipped walk at 19.91–44.09 ns per key against
+/// 15.42–26.57 with the searcher hoisted, and shows the shipped cost climbing with the needle's
+/// length (`doi`: 19.91 → 39.06 ns from a 3-byte needle to a 16-byte one) where the hoisted cost
+/// stays flat (17.66 → 18.84). That climb is what the retirement fence saw and could not explain.
+///
+/// The test itself is unconditional, so hoisting changes no work the route does per key: a
+/// dictionary walk still reads every key whatever the needle is.
+pub struct KeyMatcher<'n> {
+    finder: memchr::memmem::Finder<'n>,
+}
+
+impl<'n> KeyMatcher<'n> {
+    /// Prepare `needle`. An empty needle matches every key, which is the `contains` contract's own
+    /// reading and what `Finder` already answers.
+    pub fn new(needle: &'n str) -> Self {
+        KeyMatcher {
+            finder: memchr::memmem::Finder::new(needle.as_bytes()),
+        }
+    }
+
+    /// Whether `key` contains the needle — the same answer as `str::contains`, asserted by
+    /// `agrees_with_str_contains`.
+    pub fn matches(&self, key: &str) -> bool {
+        self.finder.find(key.as_bytes()).is_some()
+    }
+}
+
+impl fmt::Debug for KeyMatcher<'_> {
+    /// The needle is a principal's own query text. It is not printed, so a `Debug` of anything
+    /// holding a matcher cannot put it in a log.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyMatcher(..)")
+    }
+}
+
 /// One layer's front-coded sorted dictionary, opened for reading.
 ///
 /// Open validates what it can in constant time — both magics, the version, that the file's length
@@ -735,6 +781,92 @@ impl SortedDict {
             if let Some(e) = error.take() {
                 return Err(e);
             }
+        }
+        Ok(())
+    }
+
+    /// Visit the keys at `wanted` — **strictly ascending ordinals** — decoding each block that
+    /// holds one exactly once.
+    ///
+    /// **This is [`Self::key_of`] amortised, and the amortisation is the point.** A probe decodes
+    /// its ordinal's whole block prefix and returns one key, so `restart_interval / 2` decodes are
+    /// discarded per probe on average; the narrow `contains` route paid that per *candidate
+    /// entity*. Given the candidate's ordinals sorted and deduplicated, this decodes each needed
+    /// block once and emits every wanted key in it —
+    /// `2026-08-13-contains-recovery` models the difference at ~5.8× on a contiguous candidate
+    /// over a unique column and ~7.6× over a repeat-heavy one, and at ~1.5× on a scattered one,
+    /// where a candidate touches nearly every block and this degenerates to [`Self::walk`].
+    ///
+    /// Refusing a list that does not ascend strictly is not fastidiousness: the block grouping and
+    /// the per-block cursor both assume it, and a duplicate or a step backwards would silently skip
+    /// keys rather than answer wrongly in a way the caller could see.
+    ///
+    /// Like `key_of` and unlike [`Self::walk`], this checks ordering *within* the blocks it opens
+    /// and across the ones it happens to visit in sequence — never across the blocks it skips. The
+    /// exhaustive pass is still [`Self::self_check`].
+    pub fn walk_ordinals(
+        &self,
+        wanted: &[u32],
+        mut f: impl FnMut(u32, &str),
+    ) -> Result<(), DictError> {
+        let mut key = Vec::new();
+        let mut error: Option<DictError> = None;
+        let mut i = 0usize;
+        while i < wanted.len() {
+            let first = wanted[i];
+            if first >= self.key_count {
+                return Err(DictError::OrdinalOutOfRange {
+                    ordinal: first,
+                    len: self.key_count,
+                });
+            }
+            let block = first / self.restart_interval;
+            // The run of wanted ordinals landing in this block, checking the caller's ordering as
+            // it goes — every adjacent pair is compared exactly once, here or at the next block.
+            let mut j = i + 1;
+            while j < wanted.len() {
+                if wanted[j] <= wanted[j - 1] {
+                    return Err(malformed(format!(
+                        "ordinal {} follows {} in the requested list, which must ascend strictly",
+                        wanted[j],
+                        wanted[j - 1]
+                    )));
+                }
+                if wanted[j] / self.restart_interval != block {
+                    break;
+                }
+                j += 1;
+            }
+            let last = wanted[j - 1];
+            let mut at = i;
+            self.decode_block(block, &mut key, &mut |ordinal, bytes| {
+                if at < j && ordinal == wanted[at] {
+                    match std::str::from_utf8(bytes) {
+                        Ok(s) => {
+                            f(ordinal, s);
+                            at += 1;
+                        }
+                        Err(e) => {
+                            error = Some(malformed(format!(
+                                "the key at ordinal {ordinal} is not valid UTF-8: {e}"
+                            )));
+                            return false;
+                        }
+                    }
+                }
+                // Stop at the last wanted ordinal in this block rather than decoding its tail.
+                ordinal < last
+            })?;
+            if let Some(e) = error.take() {
+                return Err(e);
+            }
+            if at != j {
+                return Err(malformed(format!(
+                    "ordinal {} is not in block {block}, which the restart interval places it in",
+                    wanted[at]
+                )));
+            }
+            i = j;
         }
         Ok(())
     }

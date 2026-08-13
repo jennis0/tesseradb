@@ -1,0 +1,21 @@
+[package]
+name = "recover"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: not a member of the repo workspace, for the reason `dictbytes` gives — the gate's
+# `cargo test --workspace` should never build a probe harness.
+[workspace]
+
+[dependencies]
+# **The shipped dictionary**, so what is timed is the format's own decoder and not a model of it.
+tessera-filter = { path = "../../../crates/tessera-filter" }
+# The candidate arm for the hoisted searcher. Already a direct dependency of `tessera-filter` for
+# `scan_text_contains`'s region search, so this arm proposes no new dependency for the engine —
+# only moving one that the flat scan already carried.
+memchr = "2"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+debug = false

@@ -1,0 +1,47 @@
+# contains recovery — 2400000 rows, restart interval 16, median of 3
+
+## id — 2400000 present of 2400000 rows, 2400000 distinct keys, 150000 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 197128 | 11.00 | 32.10 | 16.98 | **1.89×** |
+| 8 | 10 | 11.00 | 19.83 | 15.42 | **1.29×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped | sorted distinct | recovered |
+|---|---|---|---|---|---|---|
+| 25% contiguous | 600000 | 600000 | 37500 | 72.9 | 74.9 | **0.97×** |
+| 25% stride-4 | 600000 | 600000 | 150000 | 62.0 | 63.2 | **0.98×** |
+
+## submitter — 2399904 present of 2400000 rows, 542489 distinct keys, 33906 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 444 | 18.13 | 44.09 | 26.57 | **1.66×** |
+| 8 | 2 | 18.13 | 38.15 | 25.43 | **1.50×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped | sorted distinct | recovered |
+|---|---|---|---|---|---|---|
+| 25% contiguous | 599976 | 151821 | 32267 | 127.6 | 37.6 | **3.39×** |
+| 25% stride-4 | 599976 | 278380 | 33905 | 125.8 | 59.3 | **2.12×** |
+
+## doi — 1026531 present of 2400000 rows, 1024837 distinct keys, 64053 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 399554 | 12.53 | 19.91 | 17.66 | **1.13×** |
+| 8 | 224855 | 12.53 | 22.67 | 17.67 | **1.28×** |
+| 16 | 9055 | 12.53 | 39.06 | 18.84 | **2.07×** |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped | sorted distinct | recovered |
+|---|---|---|---|---|---|---|
+| 25% contiguous | 256632 | 256144 | 22075 | 101.5 | 89.8 | **1.13×** |
+| 25% stride-4 | 256633 | 256518 | 63392 | 112.4 | 95.4 | **1.18×** |
+

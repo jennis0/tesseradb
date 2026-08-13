@@ -9,7 +9,7 @@
 use std::io::Write;
 
 use tessera_filter::{
-    write_sorted_dict, Access, DictError, SortedDict, SortedDictWriter, DICT_FILE,
+    write_sorted_dict, Access, DictError, KeyMatcher, SortedDict, SortedDictWriter, DICT_FILE,
     DICT_FORMAT_VERSION,
 };
 
@@ -646,4 +646,160 @@ fn a_short_file_refuses_before_it_is_mapped() {
     // mapping outright.
     std::fs::write(&path, b"").unwrap();
     assert!(SortedDict::open(&path, Access::Mapped).is_err());
+}
+
+/// [`KeyMatcher`] is a substitution for `str::contains` inside the `contains` routes, so what it
+/// owes is *the same answer*, not a similar one — the two are compared over every pair of a key
+/// set and a needle set chosen for the cases a byte-level searcher gets wrong: a needle longer
+/// than the key, a needle that is the whole key, overlapping repeats, a multi-byte character split
+/// down the middle of the needle, and the empty needle every key contains.
+#[test]
+fn a_key_matcher_agrees_with_str_contains() {
+    let keys = [
+        "", "a", "aa", "aaa", "abcabcabc", "banana", "café", "naïve café", "日本語のテキスト",
+        "2401.00042", "\u{1f600}emoji", "a\u{0}b",
+    ];
+    let needles = [
+        "", "a", "aa", "aaa", "abc", "cab", "ana", "anana", "banana", "bananas", "é", " café",
+        "日本", "語の", "\u{1f600}", "\u{0}", "zzz", "2401.00042", "2401.000420",
+    ];
+    for needle in needles {
+        let matcher = KeyMatcher::new(needle);
+        for key in keys {
+            assert_eq!(
+                matcher.matches(key),
+                key.contains(needle),
+                "{key:?} contains {needle:?}"
+            );
+        }
+    }
+}
+
+/// The same agreement through a whole dictionary walk, which is how the broad `contains` route
+/// uses it: the matcher is built once and the ordinals it selects must be the ones the per-key
+/// `str::contains` selects.
+#[test]
+fn a_matcher_selects_the_same_ordinals_as_a_per_key_search() {
+    let keys: Vec<String> = (0..200).map(|i| format!("dept-{i:04}-of-{}", i % 7)).collect();
+    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let dict = open(&refs, 16);
+    for needle in ["", "dept", "-of-3", "0042", "0199", "zzz", "dept-0000-of-0"] {
+        let matcher = KeyMatcher::new(needle);
+        let mut hoisted = Vec::new();
+        dict.walk(|o, key| {
+            if matcher.matches(key) {
+                hoisted.push(o);
+            }
+        })
+        .unwrap();
+        let mut per_key = Vec::new();
+        dict.walk(|o, key| {
+            if key.contains(needle) {
+                per_key.push(o);
+            }
+        })
+        .unwrap();
+        assert_eq!(hoisted, per_key, "needle {needle:?}");
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// The block-restricted walk
+
+/// [`SortedDict::walk_ordinals`] is [`SortedDict::key_of`] amortised over a block, so what it owes
+/// is *the same keys in the same order*. Compared against probing each ordinal separately, over
+/// subsets chosen for the block-grouping cases: every ordinal, alternating ones, a stride coprime
+/// with every interval tried, the boundaries of the first and last blocks, three inside one block,
+/// a single key, and none at all.
+#[test]
+fn walk_ordinals_agrees_with_probing_each_key() {
+    let keys: Vec<String> = (0..200).map(|i| format!("key-{i:04}")).collect();
+    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let subsets: [Vec<u32>; 8] = [
+        vec![],
+        vec![0],
+        vec![199],
+        (0..200).collect(),
+        (0..200).step_by(2).collect(),
+        (0..200).step_by(17).collect(),
+        vec![0, 1, 15, 16, 17, 31, 32, 199],
+        vec![95, 96, 97],
+    ];
+    for interval in [1, 2, 16, 64, 256] {
+        let dict = open(&refs, interval);
+        for wanted in &subsets {
+            let mut seen: Vec<(u32, String)> = Vec::new();
+            dict.walk_ordinals(wanted, |ordinal, key| seen.push((ordinal, key.to_string())))
+                .unwrap();
+            let mut scratch = Vec::new();
+            let probed: Vec<(u32, String)> = wanted
+                .iter()
+                .map(|&o| (o, dict.key_of(o, &mut scratch).unwrap().to_string()))
+                .collect();
+            assert_eq!(seen, probed, "interval {interval}, {} wanted", wanted.len());
+        }
+    }
+}
+
+/// A list that does not ascend strictly is refused rather than silently under-answered: the block
+/// grouping and the per-block cursor both assume it, and a duplicate or a step backwards would
+/// skip keys the caller asked for.
+#[test]
+fn walk_ordinals_refuses_a_list_that_does_not_ascend() {
+    let dict = open(&["a", "b", "c", "d"], 2);
+    for bad in [vec![1, 1], vec![2, 1], vec![0, 3, 2], vec![3, 0]] {
+        let detail = malformed(dict.walk_ordinals(&bad, |_, _| {}));
+        assert!(detail.contains("ascend strictly"), "{bad:?}: {detail}");
+    }
+}
+
+/// An ordinal past the end takes the variant that names a *pair* that disagrees — an ordinal
+/// column read against the wrong layer's dictionary — and not the one that means this file is
+/// damaged. Both the first position and a later one, since the bound is checked per block group.
+#[test]
+fn walk_ordinals_refuses_an_ordinal_past_the_end() {
+    let dict = open(&["a", "b", "c", "d"], 2);
+    for wanted in [vec![4], vec![0, 9], vec![0, 1, 2, 3, 4]] {
+        assert!(
+            matches!(
+                dict.walk_ordinals(&wanted, |_, _| {}),
+                Err(DictError::OrdinalOutOfRange { len: 4, .. })
+            ),
+            "{wanted:?}"
+        );
+    }
+}
+
+/// A damaged block refuses when the walk opens it — **and only then**, which is the honest reading
+/// of a restricted walk and the reason [`SortedDict::self_check`] remains the exhaustive pass. It
+/// has exactly `key_of`'s reach: a caller asking for keys in intact blocks gets them, and a caller
+/// whose ordinals land in the damaged one is refused rather than answered.
+#[test]
+fn walk_ordinals_refuses_a_damaged_block_and_no_other() {
+    let good = build(&["aa", "ab", "ba", "bb"], 2);
+    let layout = Layout::of(&good);
+    let block1 = u64::from_le_bytes(
+        good[layout.restarts_at + 8..layout.restarts_at + 16]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let mut doctored = good.clone();
+    assert_eq!(doctored[layout.blocks_at + block1], 0, "a restart shares nothing");
+    doctored[layout.blocks_at + block1] = 1;
+    let dict = SortedDict::from_vec(doctored).unwrap();
+
+    // Block 0 is intact, so the keys in it are still answerable.
+    let mut seen = Vec::new();
+    dict.walk_ordinals(&[0, 1], |o, key| seen.push((o, key.to_string())))
+        .unwrap();
+    assert_eq!(seen, vec![(0, "aa".to_string()), (1, "ab".to_string())]);
+
+    // Any list reaching block 1 refuses, whether or not it also names an intact block.
+    for wanted in [vec![2], vec![3], vec![0, 2]] {
+        assert!(
+            malformed(dict.walk_ordinals(&wanted, |_, _| {})).contains("restart shares nothing"),
+            "{wanted:?}"
+        );
+    }
+    assert!(dict.self_check().is_err(), "the exhaustive pass refuses it");
 }

@@ -75,6 +75,15 @@ corpus range and varying with the *needle's length* rather than with what it mat
 campaign's 11.0–18.8 ns/key is decode alone; the gap is the search it omitted. At 10⁹ keys that is
 **11–25 s single-threaded** (*modelled*).
 
+> **Correction, 2026-08-13** ([`contains-recovery`](2026-08-13-contains-recovery.md)): these
+> figures are this harness's own walk, which hoisted its substring searcher, and **not the walk the
+> engine shipped**, which constructed one per key via `str::contains` and cost 1.14–2.03× more. The
+> needle-length dependence above is that construction, not `memmem`'s skip distance. Every
+> `contains` figure in this campaign is therefore a floor for the tree as it stood — the band in
+> result 1 was **2.5–144×** shipped, not 1.5–71× — and the answers were never affected, since each
+> arm was asserted bitmap-equal before timing. The hoist has since landed, which brings the shipped
+> route to what this campaign measured.
+
 **7. Assembling the broad route from `scan_num_in` costs it a further 64%.** Its "O(log k) per slot"
 is priced for the eight values a caller types; broad `contains` hands it 22,500 matching ordinals.
 At 2.4M, whole-corpus contiguous candidate on `id`: **63.88 ms through `scan_num_in` against 38.86
