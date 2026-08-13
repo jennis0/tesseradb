@@ -23,7 +23,7 @@ entity-space artefact and nothing on the write side. The type it produces alread
 with it, all from the placement memo's measured design:
 
 - **`render = true` makes a fixed-width column filterable** — categories now; numbers and
-  datetimes when decision 0064's render half lands, and refused until then, because the hot
+  datetimes — admitted since decision 0064's presence bitmap landed, and refused before it, because the hot
   column stores an absent number as zero and a range containing zero would match every item
   with no value.
 - **The route rule** where a column affords both routes: row space while

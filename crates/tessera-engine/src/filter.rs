@@ -1936,7 +1936,7 @@ const BROAD_KEY_NS: u64 = 15;
 ///
 /// **It is a bound and no longer the typical cost, and it is deliberately not lowered.** Since the
 /// route walks blocks rather than probing keys, what it pays per candidate entity depends on how
-/// that candidate's ordinals cluster: 19.5–60.9 ns measured across six real shapes at a 25%
+/// that candidate's ordinals cluster: 19.4–59.8 ns measured across six real shapes at a 25%
 /// candidate (`2026-08-13-contains-recovery`), against ~100 for the worst case this constant has to
 /// cover — a small, scattered candidate over a unique vocabulary, where every entity opens its own
 /// block and nothing amortises. Pricing the route at its bound errs towards the broad route, whose
@@ -1944,7 +1944,7 @@ const BROAD_KEY_NS: u64 = 15;
 /// pricing it at its typical cost would pick it in exactly the cell where it is worst.
 ///
 /// ⊘ The price of that safety is real and now measured: on a contiguous 25% candidate over a
-/// unique column the rule takes the broad route at 41.1 ms where this one costs 11.7 ms. Closing
+/// unique column the rule takes the broad route at 41.1 ms where this one costs 11.6 ms. Closing
 /// that gap means a rule that consults the candidate's *distinct* ordinal count — a statistic about
 /// what the principal's own data contains — which is the fence's stop-and-report A and an §8.2
 /// admissibility question the owner has not ruled on. Not closed here.
@@ -1973,10 +1973,13 @@ fn contains_route(candidate_entities: u64, dictionary_keys: u64) -> ContainsRout
 
 /// `contains` against one keyword layer, by whichever route [`contains_route`] names.
 ///
-/// ⊘ **The crossover's constants are measured but the routes are not benched against each other,
-/// nor against the flat `utf8` scan they replace.** That comparison is the epic's own barrier
-/// before the flat scan is retired; until it is run, the constants above are the whole calibration
-/// and either route answers correctly whichever is chosen.
+/// **The routes are benched against each other and against the flat `utf8` scan they replaced**,
+    /// in the one window where both formats existed
+    /// ([the fence](../../../docs/evidence/memos/2026-08-13-utf8-retirement-fence.md)) and again
+    /// after both routes were repaired
+    /// ([the recovery](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)). The
+    /// crossover's constants above are calibration; either route answers correctly whichever is
+    /// chosen.
 fn keyword_contains(
     values: &ValueColumn,
     dict: &SortedDict,
@@ -2044,9 +2047,11 @@ fn contains_broad(
 /// the same ordinal, and `SortedDict::key_of` decodes a whole block prefix to return one key — so
 /// probing per candidate entity paid `restart_interval / 2` discarded decodes for every entity,
 /// including the duplicates. Deduplicating first and handing the sorted result to
-/// `SortedDict::walk_ordinals` pays each *block* once instead: measured 2.1–3.4× from the
-/// deduplication alone on a repeat-heavy column, and modelled ~5.8–7.6× more from the block
-/// amortisation on a contiguous candidate ([`contains-recovery`](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)).
+/// `SortedDict::walk_ordinals` pays each *block* once instead. The whole replacement — the
+/// deduplication, the block walk and [`KeyMatcher`] — measures **1.91–6.05×** the probe-per-entity
+/// loop across six real shapes, best where the candidate is contiguous or its column repeats and
+/// worst where it is scattered over a unique vocabulary
+/// ([`contains-recovery`](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)).
 ///
 /// **The route now ends where the broad route ends** — one `OrdinalPredicate::In` scan over the
 /// candidate — and the two differ only in how the matching ordinal set is computed: from the whole

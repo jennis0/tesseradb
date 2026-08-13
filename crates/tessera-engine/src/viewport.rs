@@ -957,7 +957,7 @@ impl Engine {
 /// key — code 0, the absent sentinel, resolving to absence — and every other family as stored.
 ///
 /// A rendered *number*'s absence is still stored as the type's zero (`or_render_placeholder`;
-/// decision 0064's render half open), so a numeric zero here may be a real zero or an absence —
+/// 0064's wire half being deferred), so a numeric zero here may be a real zero or an absence —
 /// the row cannot say which, and this reports the stored value rather than inventing a rule. The
 /// entity-space and blob homes do not share the ambiguity.
 fn row_field_out(

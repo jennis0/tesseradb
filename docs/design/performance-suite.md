@@ -425,10 +425,12 @@ swing** — and nothing in between. Every per-row and per-entity constant on thi
 compute-bound loop of exactly the affected kind. Two consequences bind every figure in this suite:
 
 - **Every cell declares its alignment state.** Either the binary was built with function alignment
-  pinned, or the figure is reported as the bimodal pair rather than as a point. ⊘ The pinning flag
-  is verified to work on the probe binary and has **not** been applied to the workspace profile or
-  re-run against `tessera-server`; that is perf §10's first question, and until it is ruled the
-  suite reports pairs.
+  pinned, or the figure is reported as the bimodal pair rather than as a point. The flag is now in
+  the tree — `.cargo/config.toml` sets `-C llvm-args=-align-all-functions=6` for the workspace —
+  having been claimed by `filter-index.md` §2.2 for two days while excluded from git by a per-clone
+  `.git/info/exclude` rule, so every measurement taken before 2026-08-13 was unpinned whatever its
+  cell said. ⊘ It has still not been re-run against `tessera-server`, which is the half of §10's
+  first question that remains open.
 - **An unpinned scan-surface cell is excluded from gating rather than gated with a wider band.**
   G1's +15% is meaningless against a constant that is bimodal at ±65%, and widening the band to
   ~70% would hide every regression worth catching. The cell carries an `alignment_unpinned` flag
@@ -547,9 +549,11 @@ is the per-PR gate with a worse schedule, and the same is true here.
 
 Four, each rulable without opening a source file.
 
-1. **Is function alignment pinned in the workspace profile?** Today the workspace sets no alignment
-   flag, so every scan constant in this corpus is one draw from a bimodal distribution and *not
-   known to be the good draw*. `-C llvm-args=-align-all-functions=6` was measured to remove the
+1. **Is function alignment pinned in the workspace profile?** *Answered in part on 2026-08-13:*
+   `.cargo/config.toml` now sets it, so constants measured after that date are pinned; every
+   constant in this corpus measured before it is one draw from a bimodal distribution and *not
+   known to be the good draw*, the file having been claimed by the corpus but excluded from git.
+   What remains of the question is `tessera-server`. `-C llvm-args=-align-all-functions=6` was measured to remove the
    sensitivity at no measurable baseline cost and a 0.14% binary growth, but only on a probe binary
    — the memo that established it says applying it to the workspace profile is an owner decision.
    **Recommendation: pin it**, and re-run one arm against `tessera-server`'s own link to confirm the

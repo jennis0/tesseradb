@@ -211,8 +211,8 @@ fn broad(column: &Column, reps: usize) {
 /// which is where the narrow route's 0.07–0.15 µs sits.
 fn narrow(column: &Column, reps: usize) {
     println!("\n### narrow probe, ns per candidate entity (dictionary work only)");
-    println!("| candidate | entities | distinct ordinals | blocks touched | probe per entity | probe per distinct | block walk | recovered |");
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("| candidate | entities | distinct ordinals | blocks touched | shipped probe | hoisted probe | probe per distinct | block walk | recovered |");
+    println!("|---|---|---|---|---|---|---|---|---|");
     let Some(needle) = column.needle(3) else { return };
     let finder = memmem::Finder::new(needle.as_bytes());
     let interval = column.dict.restart_interval();
@@ -257,7 +257,26 @@ fn narrow(column: &Column, reps: usize) {
         assert_eq!(shipped_hits, walk_hits, "the block walk answers differently");
 
         let n = candidate.len() as f64;
+        // **The route as it actually shipped**: `key_of` per candidate entity *and*
+        // `str::contains`, which builds a two-way searcher per entity. Writing this arm with a
+        // hoisted `Finder` — as the retirement fence's `narrow_contains` did, and as the first
+        // run of this campaign did — measures a route that never existed and understates what the
+        // replacement recovers.
         let shipped = median(reps, || {
+            let mut scratch = Vec::new();
+            let t = Instant::now();
+            let mut hits = 0u64;
+            for (_, ordinal) in &candidate {
+                let key = column.dict.key_of(*ordinal, &mut scratch).unwrap();
+                if key.contains(needle.as_str()) {
+                    hits += 1;
+                }
+            }
+            black_box(hits);
+            t.elapsed()
+        });
+        // The same loop with the searcher hoisted — the fence's arm, kept so the two are separable.
+        let hoisted_probe = median(reps, || {
             let mut scratch = Vec::new();
             let t = Instant::now();
             let mut hits = 0u64;
@@ -305,11 +324,12 @@ fn narrow(column: &Column, reps: usize) {
             t.elapsed()
         });
         println!(
-            "| {shape} | {} | {} | {} | {:.1} | {:.1} | {:.1} | **{:.2}×** |",
+            "| {shape} | {} | {} | {} | {:.1} | {:.1} | {:.1} | {:.1} | **{:.2}×** |",
             candidate.len(),
             distinct.len(),
             blocks.len(),
             shipped.as_nanos() as f64 / n,
+            hoisted_probe.as_nanos() as f64 / n,
             deduped.as_nanos() as f64 / n,
             walked.as_nanos() as f64 / n,
             shipped.as_nanos() as f64 / walked.as_nanos() as f64,

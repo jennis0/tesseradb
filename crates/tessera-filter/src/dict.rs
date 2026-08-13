@@ -793,9 +793,10 @@ impl SortedDict {
     /// discarded per probe on average; the narrow `contains` route paid that per *candidate
     /// entity*. Given the candidate's ordinals sorted and deduplicated, this decodes each needed
     /// block once and emits every wanted key in it —
-    /// `2026-08-13-contains-recovery` models the difference at ~5.8× on a contiguous candidate
-    /// over a unique column and ~7.6× over a repeat-heavy one, and at ~1.5× on a scattered one,
-    /// where a candidate touches nearly every block and this degenerates to [`Self::walk`].
+    /// `2026-08-13-contains-recovery` measures the whole replacement — this plus deduplication
+    /// plus a hoisted searcher — at **1.91–6.05×** the probe-per-entity loop across six real
+    /// shapes, best on a contiguous candidate and worst on a scattered one, where the candidate
+    /// touches nearly every block and this degenerates to [`Self::walk`].
     ///
     /// Refusing a list that does not ascend strictly is not fastidiousness: the block grouping and
     /// the per-block cursor both assume it, and a duplicate or a step backwards would silently skip

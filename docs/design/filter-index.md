@@ -58,7 +58,7 @@ flags say, because that disclosure control is membership-derived (§2.3). A colu
 and it is no operand at all (records §3). And a **rendered category** is filterable over the
 request's own rows against the hot column, which is a second evaluation space rather than a second
 artefact: decision 0068's operand kind, owned by surface §4 and records §6.2. A rendered *number*
-is not filterable at all — refused at parse until decision 0064's render half lands, the hot column
+is filterable, decision 0064's presence bitmap beside the hot column having removed the reason it was refused at parse — without it the row route reads absence out of a hot column that stores it as the type's zero. The hot column
 storing an absent value as zero (records §6.2).
 
 **The entity-ordered value column is the record; every accelerator is derived from it.** That is the

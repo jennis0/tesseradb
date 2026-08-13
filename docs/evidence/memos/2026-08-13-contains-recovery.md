@@ -20,7 +20,7 @@ unconditional, so the route's work is the same function of `(candidate, column)`
 value probed the same ordinal repeatedly, and every probe decoded about half a restart block to
 return one key. It now deduplicates the candidate's ordinals and hands them to a new
 `SortedDict::walk_ordinals`, which decodes each block holding a wanted ordinal exactly once —
-**1.63× to 5.03×, measured on all six shapes tried**, and never worse than the probe loop it
+**1.91× to 6.05×, measured on all six shapes tried**, and never worse than the probe loop it
 replaces, since a candidate with no duplicates whose ordinals share no block decodes exactly what
 `key_of` decoded.
 
@@ -51,15 +51,15 @@ change to state the shipped band and mark the third row as what the bitset reach
 
 **The broad route costs Ω(|dictionary|); the flat scan cost O(|candidate|).** No constant-factor
 work closes that where the candidate is small, which is the per-keystroke cell and the one the
-regression is worst in. Only the **narrow** route has the right shape there, and it is now 19.5–60.9
-ns per candidate entity where it was 60–150, against the flat scan's 0.9–14.5.
+regression is worst in. Only the **narrow** route has the right shape there, and it is now 19.4–59.8
+ns per candidate entity where it was 75–158, against the flat scan's 0.9–14.5.
 
 **Which surfaces a miscalibration the change created.** The crossover prices the narrow route at
 `NARROW_PROBE_NS = 100`, one `key_of` per candidate entity. That is still the correct *upper* bound
 — a small scattered candidate over a unique vocabulary opens a block per entity and amortises
 nothing — but it is now far above the typical cost, so the rule takes the broad route in cells where
 the narrow one would win. Measured: on `id`'s contiguous 25% candidate the rule chooses broad at
-41.1 ms where narrow now costs 11.7 ms, a **3.5×** loss to the route rule alone.
+41.1 ms where narrow now costs 11.6 ms, a **3.5×** loss to the route rule alone.
 
 I have left the constant at 100 and documented why. Lowering it errs the other way, and the fence's
 argument for which direction to err in still holds: the broad route's cost is capped by the
@@ -131,6 +131,21 @@ which is exactly when the ruling should already exist.
 measured rather than hypothetical, and it is the difference between the narrow route's improvement
 reaching a request and sitting behind a constant chosen for a route that no longer behaves that
 way.
+
+## A correction this memo owes about itself
+
+The campaign's first four runs measured the narrow route's baseline with a **hoisted** searcher —
+the fence's `narrow_contains`, not the route the engine shipped. That is the same defect this memo
+reports in the fence, committed in the report of it, and it understated the recovery (1.63–5.03×
+where the shipped comparison gives 1.91–6.05×). Two further corrections follow from it: the fence
+harness is **not** unreadable — it is at
+`7a24315:crates/tessera-bench/src/bin/utf8_retirement_fence.rs`, and reading it confirms both arms
+hoisted rather than only the broad one this memo inferred; and the inference-from-figures method
+this memo used, while it reached the right conclusion on the broad route, missed the narrow one.
+
+Both were found by an adversarial review of this campaign rather than by the campaign. The general
+lesson is the fence's, restated against itself: **a benchmark arm must call the shipped function or
+say in the record that it does not.**
 
 ## What this does not measure
 

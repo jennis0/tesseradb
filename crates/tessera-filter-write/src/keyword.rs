@@ -2,14 +2,12 @@
 //! ordinal remap, and the fold's rebuild of the dictionary from the values that survive
 //! (`records-and-search.md` §7; `filter-index.md` §5.2 for the coalesce, §6.2 for the fold).
 //!
-//! ⊘ **Nothing calls either pass yet**, and there are two separate reasons rather than one. No
-//! producer writes a keyword layer: the base build and the flush that will are a parallel track's,
-//! so both passes are exercised by this module's tests over layers built in process from the two
-//! libraries they consume. And the engine's coalesce declines a column whose layers carry
-//! dictionaries — not for want of this merge but because the live generation's composition carries
-//! a layer's *values* alone, so a coalesced extent could not swap in beside its own dictionary
-//! (`crate::coalesce_attr_extents`'s caller states it at the selection). Until that seam exists a
-//! keyword column's extents wait for the fold, which is a bounded steady state and not a leak.
+//! **The fold's pass is live; the coalesce's is not, and the reason is the engine's, not this
+//! module's.** `fold_keyword_column` is called from the engine's fold, over layers the base build
+//! and the flush both write. The engine's coalesce still declines a column whose layers carry
+//! dictionaries — ⊘ not for want of this merge but because that seam does not exist yet — so
+//! `coalesce_keyword_extents` is exercised by this module's tests alone, and a keyword column's
+//! extents wait for the fold, which is a bounded steady state and not a leak.
 //!
 //! # This merge changes the bytes, and that is a different correctness shape
 //!

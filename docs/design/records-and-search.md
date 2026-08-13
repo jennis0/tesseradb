@@ -387,14 +387,14 @@ unioned — disjoint by I9, exactly as every layered scan composes today (index 
   it. Divided by cores, and milliseconds on repeat-heavy vocabularies; §11 item 4's harness owes
   the figure at scale, and **2–10 s must not be quoted as measured**.
   **Narrow candidate**: take the candidate's own ordinals, deduplicated and ascending, and decode
-  each dictionary block holding one exactly once — **19.5–60.9 ns per candidate entity measured**,
-  where a probe per entity cost 60–150 for the `restart_interval / 2` decodes it discarded. The
+  each dictionary block holding one exactly once — **19.4–59.8 ns per candidate entity measured**,
+  where a probe per entity cost 75–158 for the `restart_interval / 2` decodes it discarded. The
   crossover compares the candidate's cardinality against the dictionary's size — the principal's
   own quantity against a schema-derived one, the same admissible class as placement §3's route
   rule — and prices the narrow route at its **upper** bound rather than its typical cost, which
   errs towards the route whose cost the vocabulary caps. ⊘ That safety is now priced: on a
   contiguous quarter-corpus candidate over a unique column the rule takes the broad route at 41.1 ms
-  where the narrow one costs 11.7. A rule that chose better would read the candidate's *distinct*
+  where the narrow one costs 11.6. A rule that chose better would read the candidate's *distinct*
   ordinal count, which is §8.2's admissibility question and unruled. Substring keeps meaning
   substring, which is the identifier case's requirement and what `text` deliberately does not
   preserve (§4.4).
@@ -707,8 +707,9 @@ a format change — rather than every deployment paying for the possibility now 
 shape).
 
 Two bounds inherited from placement §2.1, whose third — the membership question — is what §4.2's
-exemption answers: the route is per slice; and a rendered **number** stays outside it until 0064's
-render half lands, because the hot column cannot express absence (§4.1, §2). The composition rule
+exemption answers: the route is per slice; and a rendered **number** joined it with 0064's presence
+bitmap, which is what lets the row scan tell an absence from the type's zero — without it the hot
+column cannot express absence at all (§4.1, §2). The composition rule
 when a tree names both kinds: evaluate the entity-space sub-tree, cross it once by surface §4's
 measured rule, evaluate the row-space leaves over the crossing domain, combine in row space
 (placement §2.2).

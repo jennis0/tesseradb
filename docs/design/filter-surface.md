@@ -517,7 +517,7 @@ descending its nodes *against the mask*.
 
 | Surface | What changes |
 |---|---|
-| `/v1/meta` | `filter_operands` stops being an empty list and enumerates each filterable column with its family's operator names: every column declared `index = true`, **plus every rendered category**, whose leaf is answered over the request's own rows (decision 0068). A rendered number is absent, being refused at the schema parse until decision 0064's render half lands; a blob-resident column is absent because it is no operand at all. One predicate serves this list and the viewport's parse gate, so a client is never published a surface its requests are not held to |
+| `/v1/meta` | `filter_operands` stops being an empty list and enumerates each filterable column with its family's operator names: every column declared `index = true`, **plus every rendered category**, whose leaf is answered over the request's own rows (decision 0068). A rendered **number** is present too: decision 0064's presence bitmap beside the hot column is what lets the row scan tell an absence from a stored zero, so the combination is no longer refused at the schema. A blob-resident column is absent because it is no operand at all. One predicate serves this list and the viewport's parse gate, so a client is never published a surface its requests are not held to |
 | Viewport request | Carries operands, composing with either viewport form — a bounding box or an explicit tile list, which the request already validates as an exactly-one-of pair. Operands extend that validation rather than sitting beside a bbox check. A filter naming an invisible or nonexistent value contributes an empty operand (§2.1) |
 | Viewport response | The two-layer form of §8.5 — see below |
 | `/v1/categories` | Gains the per-viewer gate it is currently refused for (§7) |
@@ -693,7 +693,7 @@ the request's own domain, which a rendered column's leaf resolves to, and §6 re
 therefore publishes: the columns declared `index = true`, plus every **rendered category**. §5.1's
 composed-verdict rule binds the new leaf exactly as it binds a scan, and is stated at §2 so the
 route that would be convenient to exempt is not. Nothing else moved — a rendered *number* is not an
-operand at all, refused at the schema parse until decision 0064's render half lands.
+operand at all. A rendered number is an operand — 0064's presence bitmap makes its row scan able to distinguish absence from the type's zero — and only the *wire* half of 0064, how a client is told a rendered value is absent, is still deferred.
 
 **2026-08-08 (r3, third pass) — §5–§8 re-read against the artefact, and two registered channels
 withdrawn.** §5.1's *rule* survives — a filter is applied above composition, per range, never folded into

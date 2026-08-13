@@ -14,9 +14,9 @@ block per candidate entity to keep one key of it — and both fixes have landed.
 that the fence itself was not measuring the code the engine shipped.
 
 Every arm is asserted to select exactly the ordinals the arm it replaces selects, before either is
-timed. Figures are the median of three timings inside one process; the tables reproduce across four
-whole-process runs to within 3% (`raw/recover-2400k-{1,2,3,4}.txt` — runs 1–3 predate the block
-walk arm).
+timed. Figures are the median of three timings inside one process; the broad tables reproduce
+across five whole-process runs to within 3% (`raw/recover-2400k-{1..5}.txt`). Runs 1–3 predate the
+block-walk arm and runs 1–4 predate the shipped-probe arm — see the correction in result 3.
 
 ## Results
 
@@ -71,10 +71,16 @@ the fence's per-key walk figures against both arms of this campaign says which o
 
 **Four comparable cells, four matches to the hoisted arm within 6%, and four misses against the
 shipped arm by 1.14–2.03×.** The fence's broad-route arm was a reimplementation that hoisted its
-searcher, and the shipped route it stood for was slower than the number recorded. The harness was
-deleted with the baseline it measured, so this is inference from the figures and the prose, not
-from reading it — but the figures agree on every cell that can be compared, and the mechanism is
-named in the fence's own sentence.
+searcher, and the shipped route it stood for was slower than the number recorded.
+
+**Confirmed by reading it.** The harness was deleted from the working tree with the baseline it
+measured, and this campaign first reported the above as inference from the figures and the prose.
+That was wrong: git holds it, at `7a24315:crates/tessera-bench/src/bin/utf8_retirement_fence.rs`.
+`broad_ordinals` opens `let finder = memchr::memmem::Finder::new(needle.as_bytes());` outside
+`dict.walk`, and `narrow_contains` opens the same outside its probe loop — so **both** fence arms
+hoisted, where the shipped routes built a searcher per key and per candidate entity respectively.
+A deleted file in a repository is not an unreadable one, and reading it would also have caught the
+narrow arm, which the inference missed (see the correction to result 3).
 
 Correctness is unaffected: the fence asserted every keyword route bitmap-equal to the flat scan
 before timing, and a reimplemented walk that selects the same ordinals passes that check. What was
@@ -93,40 +99,51 @@ The last row is the band `records-and-search.md` §4.3 records. It is the cost o
 **not built**: the fence flags its bitset arm as bench-local, and its walk arm was hoisted. The
 design's figure was therefore a floor for two changes rather than a measurement of the tree.
 
-### 3. The narrow route probed the same key many times, and reading blocks instead recovers 1.6–5.0×
+### 3. The narrow route probed the same key many times, and reading blocks instead recovers 1.9–6.1×
 
-`contains_narrow` called `key_of` once per candidate **entity**. Two costs compound there: entities
-sharing a value probe the same ordinal repeatedly, and every probe decodes from its block's restart
-point and discards about `restart_interval / 2` keys. Deduplicating removes the first; handing the
-sorted result to `SortedDict::walk_ordinals`, which decodes each needed block once, removes the
-second. Ns per candidate entity, dictionary work only (*measured*):
+`contains_narrow` called `key_of` once per candidate **entity** and searched each returned key with
+`str::contains`. Three costs compound: entities sharing a value probe the same ordinal repeatedly,
+every probe decodes from its block's restart point and discards about `restart_interval / 2` keys,
+and every search builds its own two-way searcher. Deduplicating removes the first, handing the
+sorted result to `SortedDict::walk_ordinals` removes the second, and `KeyMatcher` removes the third.
+Ns per candidate entity, dictionary work only (*measured*):
 
-| column | candidate | entities | distinct ordinals | blocks touched | probe per entity | probe per distinct | **block walk** | recovered |
-|---|---|---|---|---|---|---|---|---|
-| `id` | 25% contiguous | 600,000 | 600,000 | 37,500 of 150,000 | 72.0 | 75.1 | **19.5** | 3.69× |
-| `id` | 25% stride-4 | 600,000 | 600,000 | 150,000 of 150,000 | 60.4 | 62.5 | **37.1** | 1.63× |
-| `submitter` | 25% contiguous | 599,976 | 151,821 | 32,267 of 33,906 | 125.3 | 37.6 | **24.9** | 5.03× |
-| `submitter` | 25% stride-4 | 599,976 | 278,380 | 33,905 of 33,906 | 150.3 | 60.1 | **33.3** | 4.52× |
-| `doi` | 25% contiguous | 256,632 | 256,144 | 22,075 of 64,053 | 119.0 | 92.0 | **34.8** | 3.42× |
-| `doi` | 25% stride-4 | 256,633 | 256,518 | 63,392 of 64,053 | 135.2 | 99.1 | **60.9** | 2.22× |
+| column | candidate | entities | distinct ordinals | blocks touched | **shipped probe** | hoisted probe | probe per distinct | **block walk** | recovered |
+|---|---|---|---|---|---|---|---|---|---|
+| `id` | 25% contiguous | 600,000 | 600,000 | 37,500 of 150,000 | 83.5 | 72.4 | 75.3 | **19.4** | 4.30× |
+| `id` | 25% stride-4 | 600,000 | 600,000 | 150,000 of 150,000 | 74.5 | 60.7 | 62.6 | **37.1** | 2.01× |
+| `submitter` | 25% contiguous | 599,976 | 151,821 | 32,267 of 33,906 | 157.6 | 147.6 | 38.3 | **26.0** | 6.05× |
+| `submitter` | 25% stride-4 | 599,976 | 278,380 | 33,905 of 33,906 | 145.1 | 165.2 | 60.7 | **33.3** | 4.35× |
+| `doi` | 25% contiguous | 256,632 | 256,144 | 22,075 of 64,053 | 118.0 | 116.9 | 91.0 | **35.1** | 3.36× |
+| `doi` | 25% stride-4 | 256,633 | 256,518 | 63,392 of 64,053 | 114.5 | 115.4 | 96.9 | **59.8** | 1.91× |
 
-**Every cell improves, and the two halves do different work.** Deduplication is the whole gain on
+**Every cell improves, and the three parts do different work.** Deduplication is the whole gain on
 `submitter`, whose candidate carries 151,821 distinct values across 599,976 entities, and nothing at
-all on the near-unique `id` and `doi` — the middle column moves only where duplicates exist. The
-block walk is what improves the near-unique columns, and it improves them most where the candidate
-is contiguous and its blocks are dense: `id` contiguous touches 37,500 blocks for 600,000 ordinals
-and recovers 3.69×, where `id` stride-4 touches every block in the dictionary and recovers 1.63×.
+all on the near-unique `id` and `doi`. The block walk is what improves the near-unique columns, and
+most where the candidate is contiguous and its blocks dense: `id` contiguous touches 37,500 blocks
+for 600,000 ordinals and recovers 4.30×, where `id` stride-4 touches every block in the dictionary
+and recovers 2.01×. The searcher hoist is worth only 1.00–1.15× here — block decode dominates a
+probe as it does not dominate a walk — and on `submitter` stride-4 the hoisted arm measures
+*slower* than the shipped one (165.2 against 145.1), which is this campaign's one cell where the
+two orderings invert and is reported rather than smoothed.
 
-The route is therefore **never worse than the probe loop it replaces**, up to the sort — a candidate
-with no duplicates whose ordinals share no block decodes exactly what `key_of` decoded — and up to
-5× better where either property holds.
+The route is **never worse than the probe loop it replaces**, up to the sort: a candidate with no
+duplicates whose ordinals share no block decodes exactly what `key_of` decoded.
+
+> **Correction, 2026-08-13.** The first four runs of this campaign measured the "shipped probe"
+> column with a **hoisted** searcher, which is the retirement fence's `narrow_contains` and not the
+> route the engine shipped — the same defect this campaign was commissioned to report in the fence
+> (result 2), repeated in the report of it. `raw/recover-2400k-{1,2,3,4}.txt` carry the understated
+> baseline and a 1.63–5.03× band; `raw/recover-2400k-5.txt` adds the genuinely shipped arm and both
+> columns above. The error was conservative — it understated what the replacement recovers — and it
+> was found by an adversarial review of this campaign, not by the campaign.
 
 **This makes the crossover's constant a bound rather than an estimate.** `NARROW_PROBE_NS = 100`
-priced one `key_of` per candidate entity; the route now costs 19.5–60.9 ns per entity across these
+priced one `key_of` per candidate entity; the route now costs 19.4–59.8 ns per entity across these
 six shapes and still ~100 in the worst case the constant must cover. Keeping it at 100 errs towards
 the broad route, whose cost is capped by the vocabulary. The price of that safety is measured: on
 `id`'s contiguous 25% candidate the rule takes the broad route at 41.1 ms where the narrow route
-now costs 11.7 ms. Closing it needs a rule that reads the candidate's distinct ordinal count, which
+now costs 11.6 ms. Closing it needs a rule that reads the candidate's distinct ordinal count, which
 is the fence's stop-and-report A — **an §8.2 admissibility question, unruled, and not closed here.**
 
 ## What this does not measure

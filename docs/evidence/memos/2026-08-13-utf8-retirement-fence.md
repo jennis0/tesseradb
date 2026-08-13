@@ -1,4 +1,9 @@
-# Retiring `utf8` measured: `contains` gets 1.5–71× slower, everything else gets faster, and the crossover holds
+# Retiring `utf8` measured: `contains` gets much slower, everything else gets faster, and the crossover holds
+
+> **Read the correction at result 6 before quoting any `contains` figure below.** Every one of them
+> is the cost of a route assembled in this harness — with a hoisted substring searcher, and for the
+> headline band a bench-local ordinal bitset — and not of the route the engine shipped, which was
+> slower. `records-and-search.md` §4.3 carries the corrected bands.
 
 **Date:** 2026-08-13 · **Status:** Evidence, not normative · **Machine:** WSL2 on Linux 6.18,
 AMD Ryzen 9 5900X (Zen 3, 12 cores, 32 MiB L3), 47 GB RAM, single-threaded · **Harness:**
@@ -14,8 +19,10 @@ was timed.
 
 ## Results
 
-**1. `contains` is slower under the keyword family on every shape measured — 1.5× to 71×, and the
-worst case is the interactive one.** Best keyword route against the flat scan, 25% candidate at
+**1. `contains` is slower under the keyword family on every shape measured — 1.5× to 71× for the
+*best assembled* route, and the worst case is the interactive one.** ⊘ That band is `broad: +bitset`
+in every cell, and the bitset is bench-local (result 5); the shipped band was 2.5–144× and is now
+1.8–82× (see the correction at result 6). Best keyword route against the flat scan, 25% candidate at
 2.4M (*measured*): `id` contiguous 0.55 ms → 39.03 ms (**71×**), `submitter` contiguous 0.50 →
 14.11 (**28×**), `doi` contiguous 6.68 → 23.91 (3.6×), and the three scattered candidates 1.5–4.9×.
 The flat scan wins in every cell of both scales, including every point of the crossover sweep.
@@ -78,11 +85,16 @@ campaign's 11.0–18.8 ns/key is decode alone; the gap is the search it omitted.
 > **Correction, 2026-08-13** ([`contains-recovery`](2026-08-13-contains-recovery.md)): these
 > figures are this harness's own walk, which hoisted its substring searcher, and **not the walk the
 > engine shipped**, which constructed one per key via `str::contains` and cost 1.14–2.03× more. The
-> needle-length dependence above is that construction, not `memmem`'s skip distance. Every
-> `contains` figure in this campaign is therefore a floor for the tree as it stood — the band in
-> result 1 was **2.5–144×** shipped, not 1.5–71× — and the answers were never affected, since each
-> arm was asserted bitmap-equal before timing. The hoist has since landed, which brings the shipped
-> route to what this campaign measured.
+> needle-length dependence above is that construction, not `memmem`'s skip distance. The same
+> applies to `narrow_contains`, which hoisted a searcher the shipped narrow route built per
+> candidate entity: **both** arms measured a faster route than the tree carried. Answers were never
+> affected, since each arm was asserted bitmap-equal before timing.
+>
+> Every `contains` figure in this campaign is therefore a floor for the tree as it stood, and
+> result 1's band was **2.5–144×** shipped rather than 1.5–71×. Both hoists have since landed; that
+> alone brings the shipped route to **1.8–82×**, and **the 1.5–71× quoted in this campaign's title
+> and in result 1 additionally requires the ordinal bitset of result 5, which is not built**. This
+> memo's own headline therefore prices a route that exists in neither form.
 
 **7. Assembling the broad route from `scan_num_in` costs it a further 64%.** Its "O(log k) per slot"
 is priced for the eight values a caller types; broad `contains` hands it 22,500 matching ordinals.

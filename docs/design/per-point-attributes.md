@@ -704,7 +704,7 @@ disclosure controls. `inspect` disappears as a placement and not as a capability
 per-interaction cadence is the record blob's, so there is nothing left to opt into. Three claims
 were false against the parser and are now marked at the site: `render_in` is refused rather than
 defaulted (§3.9), `listing = "public"` on a discovered vocabulary warns rather than refuses (§4.3),
-and `index` on a **rendered** number or datetime is refused until decision 0064's render half lands
+and `index` on a **rendered** number or datetime is admitted, decision 0064's presence bitmap beside the hot column being what the row route needs to tell an absence from a stored zero
 (§4.3) — a combination that worked under the old surface, walked back deliberately, since
 store-once would answer that filter from a hot column storing absence as zero. No rule of this
 design changed.
