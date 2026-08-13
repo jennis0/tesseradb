@@ -224,3 +224,20 @@ paths = [
   "crates/tessera-engine/tests/fold.rs",
   "crates/tessera-engine/tests/merge.rs",
 ]
+
+# Epic 2's tail, dispatched 2026-08-13. `kwsent` owns the work-indistinguishability counter and
+# its test (#109); `kwconf` owns the conformance fixture and catalogue (#110). The `utf8`
+# retirement (#111) is a barrier and the controller's, after both are green.
+[track.kwsent]
+paths = [
+  "crates/tessera-filter/src/values.rs",
+  "crates/tessera-filter/src/lib.rs",
+  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/tests/filtering.rs",
+]
+
+[track.kwconf]
+paths = [
+  "reference/*",
+  "conformance/*",
+]
