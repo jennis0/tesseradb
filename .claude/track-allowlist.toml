@@ -241,3 +241,28 @@ paths = [
   "reference/*",
   "conformance/*",
 ]
+
+# Epic 2's barrier (#111), dispatched 2026-08-13 alongside the fence measurement. Wide by
+# necessity: retiring a declared type touches every layer that named it. Disjoint from
+# `[track.bench]`, which owns the fence and shares no path.
+[track.retire]
+paths = [
+  "crates/tessera-filter/src/*",
+  "crates/tessera-filter/tests/*",
+  "crates/tessera-filter-write/*",
+  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-build/src/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-spatial/src/tiler.rs",
+  "crates/tessera-store/src/*",
+  "reference/*",
+  "conformance/*",
+  "docs/design/filter-index.md",
+  "docs/design/filter-surface.md",
+  "docs/design/contracts.md",
+  "docs/design/conformance.md",
+  "docs/design/per-point-attributes.md",
+]
