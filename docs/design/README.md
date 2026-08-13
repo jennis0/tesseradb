@@ -69,6 +69,11 @@ Then, depending on what you are after:
   per-flush extent with its coalesce and the fold's attribute pass, and a conformance differential
   that covers I12's mask half. Lists and `match` are not.
 - **How any of it is checked.** [`conformance.md`](conformance.md).
+- **How fast it is, and how that is known.** [`measurement.md`](measurement.md) owns the benchmark
+  suite's axes, denominators and reporting conventions;
+  [`performance-suite.md`](performance-suite.md) applies them to the per-item surface — what the
+  record blob, the row-space route and the keyword family must measure, and what fails when a
+  budget is crossed.
 - **How a client talks to it.** [`client-interaction.md`](client-interaction.md) and its children.
 
 Supporting evidence — the prior-art survey behind "no existing technology can replace this build",
@@ -103,6 +108,7 @@ architecture design.
 | [`filter-surface.md`](filter-surface.md) | Provisional | What a query does with that artefact: operand evaluation under the composed candidate, boolean composition, the entity→row step, and the counts a filter may produce. **Built** through `/v1/viewport`'s `filters` and `/v1/meta`'s operand list. §4's shared projection cache is superseded and retained only as a record |
 | [`records-and-search.md`](records-and-search.md) | Provisional | The general per-item data model: five type families (number, datetime, category, keyword, text), the `type`/`render`/`index`/`multi` declaration that replaced the placement set, the three-home storage rule with the record blob, the keyword and text index mechanisms, the icu4x analyser, staged masked scoring and phrase, and multi-valued fields. **Its first epic is built** — the declaration, the record blob and the render-column route (§2, §3, §6.2); the keyword and text families, multi-value and scoring are not, in that order (§13). r5 2026-08-12, reviewed once, all findings dispositioned and **all rulings made** (decisions 0067–0069) |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
+| [`performance-suite.md`](performance-suite.md) | Provisional | The per-item surface's performance suite: `records-and-search.md` §6.4's budget table as the index, the read and write arms that discharge it, layer count as an axis, and the gates. **Nothing in it is built**, and its audit finds two of §6.4's eleven rows carrying an engine-level figure, none carrying one at 10⁹ |
 | [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
 | [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |
 | [`inventory.md`](inventory.md)(inventory.md) | Generated | Every invariant and leak-register row, so a change to either is a one-line diff |
