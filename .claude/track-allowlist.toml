@@ -173,9 +173,15 @@ paths = [
 
 # Epic 2 (#85), the keyword family — dispatched 2026-08-13. `dict` builds the seam every other
 # track consumes: the front-coded dictionary's format, writer and reader.
+# `probes/*` is here as well as in `[track.bench]`, and the overlap is deliberate: a probe
+# campaign is the record of a measurement, and the track that takes the measurement is the one
+# that must be able to commit it. `[shared]` would be wrong — it would permit every track — and
+# the alternative, a measurement landing through the controller, is how a figure comes to be
+# quoted without its raw output (controller, 2026-08-13, on the dict track's report).
 [track.dict]
 paths = [
   "crates/tessera-filter/src/dict.rs",
   "crates/tessera-filter/src/lib.rs",
   "crates/tessera-filter/tests/*",
+  "probes/*",
 ]
