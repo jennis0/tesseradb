@@ -1,0 +1,21 @@
+[package]
+name = "dictbytes"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: not a member of the repo workspace, for the reason `layoutprobe` gives — the gate's
+# `cargo test --workspace` should never build a probe harness.
+[workspace]
+
+[dependencies]
+# **The shipped dictionary**, so the bytes reported are the format's own and not a model of it.
+# That is the whole point of this campaign: `2026-08-12-keyword-and-list-storage` charged no suffix
+# lengths and no restart offsets, so its figure is a floor for something that cannot be decoded.
+tessera-filter = { path = "../../../crates/tessera-filter" }
+# The snapshot is JSON lines and the parent campaign read it with `json.loads`; parsing it the same
+# way keeps the two columns comparable rather than differing by an escape rule.
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+debug = false
