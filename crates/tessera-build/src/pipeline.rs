@@ -123,6 +123,7 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+use croaring::Bitmap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -1259,6 +1260,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     fsync_file(&row_entity_path)?;
 
     let columns_path = segment_dir.join("columns.arrow");
+    let mut presence_paths: Vec<PathBuf> = Vec::new();
     {
         // Built and released one column at a time: the record batch itself is the largest thing
         // this build ever holds, so nothing that can be dropped first is kept alongside it.
@@ -1302,9 +1304,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
         // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
         // geometry's 8) the tail is the smaller term either way.
-        let scalars = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
+        let tail = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
         drop(entity_row);
-        write_columns(&columns_path, tessera_row, residual_row, scalars)
+        for (column, rows) in tail.presence {
+            if let Some(path) =
+                tessera_store::flush::write_render_presence(&segment_dir, &column, rows, n as u32)
+                    .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
+            {
+                presence_paths.push(path);
+            }
+        }
+        write_columns(&columns_path, tessera_row, residual_row, tail.columns)
             .map_err(|e| BuildError::io(&columns_path, e))?;
     }
     fsync_file(&columns_path)?;
@@ -1324,6 +1334,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
+    other_paths.extend(presence_paths);
     let report = write_manifests(
         args,
         &BundleFiles {
@@ -1955,7 +1966,8 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
     }
 }
 
-/// Permute the entity-major columns into **row order**, ready for `write_columns`.
+/// Permute the entity-major columns into **row order**, ready for `write_columns`, and record
+/// which rows carry a value.
 ///
 /// `entity_row[r]` is the entity whose values row `r` carries — the same permutation
 /// `residual_row` and `tessera_row` are built through, applied to the same arrays, so a row's
@@ -1964,7 +1976,8 @@ fn permute_attribute_tail(
     schema: &crate::schema::Schema,
     by_entity: Vec<Vec<ScalarValue>>,
     entity_row: &[u32],
-) -> Result<Vec<(String, ScalarColumnData)>> {
+) -> Result<AttributeTail> {
+    let mut presence = Vec::new();
     let mut out = Vec::with_capacity(by_entity.len());
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
         // **The tail is exactly the render columns.** An `index`-only column is entity-space and
@@ -1974,12 +1987,16 @@ fn permute_attribute_tail(
         if !attribute.render {
             continue;
         }
+        // Taken before the substitution below, which is what erases the distinction: the column
+        // itself stays non-nullable (contracts R4) and an absent value is written as the type's
+        // zero, and this is what says that zero means nothing.
+        if let Some(rows) = render_presence_of(entity_row.iter().map(|&e| &values[e as usize])) {
+            presence.push((attribute.name.clone(), rows));
+        }
         let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
         for &entity in entity_row {
             column
                 .push(
-                    // A render column is non-nullable, so an absent value is drawn at the type's
-                    // zero until decision 0064's render half lands — see `or_render_placeholder`.
                     values[entity as usize].or_render_placeholder(attribute.ty),
                     &attribute.name,
                 )
@@ -1987,7 +2004,45 @@ fn permute_attribute_tail(
         }
         out.push((attribute.name.clone(), column));
     }
-    Ok(out)
+    Ok(AttributeTail {
+        columns: out,
+        presence,
+    })
+}
+
+/// A segment's attribute tail: the columns `write_columns` takes, and the presence bitmaps that go
+/// beside them (decision 0064) — one per render column that has an absence, in row order.
+struct AttributeTail {
+    columns: Vec<(String, ScalarColumnData)>,
+    presence: Vec<(String, Bitmap)>,
+}
+
+/// Which rows of one render column carry a value, from that column's values **in row order** —
+/// `None` where every row does, which is the case that writes no file (decision 0064).
+///
+/// **`ScalarValue::Null` names exactly the columns that owe a bitmap, so this needs no schema.**
+/// The two families with an in-band way to say "nothing" never produce one here: a category's
+/// missing key resolves to the reserved code 0 its vocabulary keeps out of the value space, at the
+/// points file (`BatchColumn::value`) and at the ingest plane alike, and `render` on `utf8` is
+/// refused at schema parse. What is left is the numeric family, every bit pattern of which is a
+/// legal value.
+///
+/// Shared by the streaming and linear builds because they hold their values in different shapes
+/// but must write the same bytes — the property `tests/build_equivalence.rs` exists to hold them
+/// to.
+pub(crate) fn render_presence_of<'a>(
+    values: impl IntoIterator<Item = &'a ScalarValue>,
+) -> Option<Bitmap> {
+    let mut present = Bitmap::new();
+    let mut any_absent = false;
+    for (row, value) in values.into_iter().enumerate() {
+        if matches!(value, ScalarValue::Null) {
+            any_absent = true;
+        } else {
+            present.add(row as u32);
+        }
+    }
+    any_absent.then_some(present)
 }
 
 /// The selected source ids, in scan order (which is **no particular order** — the decode is
