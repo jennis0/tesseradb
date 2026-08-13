@@ -1,0 +1,23 @@
+# Function starts pinned to 64 bytes, which closes a measured channel rather than tuning one.
+#
+# `2026-08-11-scan-constant-sensitivity` measured byte-identical scan code at **either ~0.27 ns
+# per row or ~0.42–0.44 ns and nothing between**, decided by nothing but where the linker happened
+# to place the function: two of the four 16-byte residues land on each. An unlucky link cost 65%
+# more. `filter-index.md` §2.2 records the whole finding and states this flag as the closure —
+# unpinned, the scan's twenty-six `pack_run` monomorphisations sit across all four residues, eight
+# of them on the slow pair; pinned, all twenty-six sit on the fast one.
+#
+# **The claim was in the corpus and the file was not in the repository.** `filter-index.md` has
+# said "the channel is closed at the build ... in `.cargo/config.toml`" since that measurement, and
+# no such file was ever committed — so every checkout but the one it was written on has been
+# measuring unpinned constants while the design said otherwise. Found by the `utf8` retirement
+# fence (2026-08-13), which set the flag through `RUSTFLAGS` to get a reproducible number and
+# reported the absence.
+#
+# Costs, from the same memo: no measurable baseline regression against `codegen-units = 1`'s ~15%,
+# and +0.14% binary size. What it does **not** buy is immunity to the scan's own edits — a change
+# to `values.rs` or `pack.rs` still relocates those blocks, so anything touching the hot files
+# still needs the interleaved A/B discipline the memo describes. What no longer needs it is
+# everything else.
+[build]
+rustflags = ["-C", "llvm-args=-align-all-functions=6"]
