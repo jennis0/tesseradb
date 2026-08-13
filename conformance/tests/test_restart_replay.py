@@ -186,6 +186,10 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
             pa.field("title", pa.utf8()),
+            # The keyword column, supplied as its value: the ordinal is the flush's to assign
+            # against its own extent's dictionary (records §4.3). Inert here — nothing in this
+            # module filters — and required for the same positional reason as the rest.
+            pa.field("submitter", pa.utf8()),
             # The render-only category and the blob-resident pair, declared by the catalogue
             # since 2026-08-12 — required for the same positional reason, inert for the same
             # reason (the flush-side blob extent is unbuilt, records §7 ⊘).
@@ -204,6 +208,7 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.array(["alpha"] * len(external_ids), type=pa.utf8()),
             pa.array(["red"] * len(external_ids), type=pa.utf8()),
             pa.array([f"ingested-{i}" for i in range(len(external_ids))], type=pa.utf8()),
+            pa.array([f"relay-restart-{i}" for i in range(len(external_ids))], type=pa.utf8()),
             pa.array(["north"] * len(external_ids), type=pa.utf8()),
             pa.array(
                 [f"ingested-note-{i}" for i in range(len(external_ids))], type=pa.utf8()

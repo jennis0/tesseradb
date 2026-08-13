@@ -63,14 +63,14 @@ def catalogue_bundle(catalogue_bundle_root: Path):
 def catalogue_filter_columns():
     """The catalogue's filter columns as the **fixture** planted them — the filter oracle's input.
 
-    Built from `oracle.catalogue`'s pure generation functions (`department_of`, `title_of`) and
-    the declaration's own key→code pinning, never from the bundle's `attrs/` artefact: the
-    differential's independence is that the oracle knows what each entity was *given* while the
-    engine serves what the build *stored* (see `oracle/filters.py`'s module doc). Entity id ==
-    source id for this corpus, an equality `verify()` re-derives rather than assumes.
+    Built from `oracle.catalogue`'s pure generation functions (`department_of`, `title_of`,
+    `submitter_of`) and the declaration's own key→code pinning, never from the bundle's `attrs/`
+    artefact: the differential's independence is that the oracle knows what each entity was *given*
+    while the engine serves what the build *stored* (see `oracle/filters.py`'s module doc). Entity
+    id == source id for this corpus, an equality `verify()` re-derives rather than assumes.
     """
     from oracle import catalogue as cat  # noqa: PLC0415
-    from oracle.filters import CategoryColumn, StringColumn  # noqa: PLC0415
+    from oracle.filters import CategoryColumn, KeywordColumn, StringColumn  # noqa: PLC0415
 
     return {
         "department": CategoryColumn(
@@ -93,6 +93,15 @@ def catalogue_filter_columns():
         "title": StringColumn(
             values={
                 e: text for e in range(cat.N_ITEMS) if (text := cat.title_of(e)) is not None
+            }
+        ),
+        # The keyword column. Its values arrive here exactly as every other column's do — the
+        # strings the fixture planted — and deliberately not as a dictionary and an ordinal per
+        # entity, which is what the engine holds and what the oracle must not learn (records §10;
+        # `oracle.filters.KeywordColumn`'s docstring argues it at the class).
+        "submitter": KeywordColumn(
+            values={
+                e: key for e in range(cat.N_ITEMS) if (key := cat.submitter_of(e)) is not None
             }
         ),
     }
