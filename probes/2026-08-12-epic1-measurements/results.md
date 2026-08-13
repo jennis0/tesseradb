@@ -92,21 +92,31 @@ monomorphic compare over a slice (`scan_run`/`run_matching`):
 | 343,391-row viewport, 10⁸ | 2.462 ns/row (0.845 ms) | 0.376 ns/row (0.129 ms) | **6.5×** |
 | whole slice, 10⁸, selective | 2.390 ns/row (238.95 ms) | 0.220 ns/row (22.02 ms) | **10.9×** |
 | whole slice, 10⁸, broad | 2.532 ns/row (253.15 ms) | 0.299 ns/row (29.87 ms) | **8.5×** |
-| whole slice, 10⁸, 12 threads | 33–38 ms | **3.6–4.7 ms** | ~8× |
+| whole slice, 10⁸, 12 threads | 33–38 ms | **3.2–5.3 ms** | 7.2–10.1× |
 
-*A/B in one session on one binary pair, `git stash` between them, same fixtures, `--repeat 3`.
-Raw: `run-row-route-100000000-hoisted.txt`, and `-2422486-`/`-25000000-` for the other scales.*
+*A/B in one session on one binary pair, `git stash` between them, same fixtures, `--repeat 3`. Raw
+for the "after" column: `run-row-route-100000000-hoisted.txt`, and `-2422486-`/`-25000000-` for the
+other scales — the last row is the coarse block's four cells (both columns, both values), paired
+against the same four before, and none is dropped; the viewport block's own whole-slice cells at
+12 threads run 3.55–5.67 ms. **⊘ The "before" run's output was not saved**, so only that row's is
+reproducible (`run-row-route-100000000.txt`'s coarse block, 32.9–38.5 ms). The other three cells are
+this session's own: the earlier campaign measures the same pre-hoist code on the same fixtures at
+2.70 ns/row (0.927 ms), 2.804 (280.4 ms) and 2.993 (299.3 ms), which would make the ratios 7.2×,
+13.1× and 10.5×. The order is the same either way; treat the first three "before" cells as this
+session's and not as citable figures.*
 
-**The constant is now 0.22–0.45 ns per row across 2.4M, 25M and 10⁸** — at or below the standalone
-probe's own 0.48–0.73, which is what the diagnosis predicted: the probe measured a monomorphic
-compare and the engine had been running a polymorphic one. The invariance in corpus and viewport
-size is unchanged.
+**The constant is now 0.22–0.46 ns per row for domains of ~3×10⁵ rows and up**, across 2.4M, 25M
+and 10⁸ — at or below the standalone probe's own 0.48–0.73, which is what the diagnosis predicted:
+the probe measured a monomorphic compare and the engine had been running a polymorphic one. The
+invariance in corpus and viewport size is unchanged **above that bound and not below it**: the
+2.4M fixture's 139,920-row viewport measures 0.62–0.66 ns/row and its 3,504-row one 15.3–15.9,
+which is the fixed floor below, not a different constant.
 
-Two consequences worth stating. The **coarse-zoom whole-slice cell now costs 22–30 ms
-single-threaded at 10⁸** against 239–299 ms before, so it is inside the 100 ms interaction target
+Two consequences worth stating. The **coarse-zoom whole-slice cell now costs 21–29 ms
+single-threaded at 10⁸** against 280–299 ms before, so it is inside the 100 ms interaction target
 *without* the tile sweep's parallelism rather than only with it. And the **fixed floor is
-unchanged** — a 3,504-row viewport still measures 15.6 ns/row, bitmap setup amortised over too few
-rows — so the small-viewport observation in this campaign's §2 stands as written.
+unchanged** — a 3,504-row viewport still measures 15.3–15.9 ns/row, bitmap setup amortised over too
+few rows — so the small-viewport observation in this campaign's §2 stands as written.
 
 Not measured here: whether the compare vectorises (the diagnosis says the loop can now be
 vectorised; whether LLVM does it under a data-dependent push is unchecked), and the `i64` case,

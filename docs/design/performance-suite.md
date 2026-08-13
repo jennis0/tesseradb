@@ -115,14 +115,14 @@ off the design and its cited evidence.
 
 | §6.4 row | today's mark | provenance | level | scale | discharged by |
 |---|---|---|---|---|---|
-| 1 category/keyword `eq`, selective | measured | index §2.3's postings arms; the category half also 15–26 µs on built code | component (+ engine, category) | 10⁹ probe / 10⁸ engine | `filter`, category now; keyword waits on 0067's postings |
+| 1 category/keyword `eq`, selective | measured, category half only | index §2.3's postings arms; the category half also 20–54 µs on built code (147–249 µs on a broad value) | component (+ engine, category) | 10⁹ probe / 10⁸ engine | `filter`, category now; keyword waits on 0067's postings, which nothing emits |
 | 2 text `match`, common tokens | modelled | none — family unbuilt | — | — | **nothing** (perf §2.3) |
-| 3 any viewport-bounded filter | probe-measured / modelled | 0.89–1.05 ms measured on built code, 1–2 byte codes only | engine | 10⁸ | `filter`, over width and run count (perf §3.3) |
+| 3 any viewport-bounded filter | probe-measured / modelled | 0.13–0.16 ms measured on built code for a 343,391-row viewport at 10⁸, 1–2 byte codes only (0.89–1.05 ms before the per-run hoist) | engine | 10⁸ | `filter`, over width and run count (perf §3.3) |
 | 4 number range, contiguous | measured | index §2.2's constant × 10⁹, layout-conditioned | component | 10⁸→10⁹ | `filter`, engine level, alignment declared |
 | 5 keyword `eq`/`prefix`, no postings | modelled from a measured constant | index §2.2's fixed-width constant; family unbuilt | component | 10⁸ | `filter`, once the ordinal scan lands; fence first |
 | 6 fixed-width scan, scattered 25% | measured at 10⁸ ×10 | index §2.2's scattered constant | component | 10⁸ ×10 | `filter` at 10⁸; the ×10 stays modelled to the 10⁹ tier |
 | 7 keyword `contains`, broad | per-key at 2.4M, extrapolated ×400 | the dictionary campaign, which flags it | component | 2.4M | the promoted dictionary arm at ≥10⁸ keys — **extrapolation refused** (perf §5) |
-| 8 phrase verify, selective | 169 µs/block measured | **stale**: the built reader measures 253–265 µs | component | 2.4M | `record` for the block half; phrase waits on text |
+| 8 phrase verify, selective | 236–270 µs/block measured | corrected in §6.4 on 2026-08-13; the 169 µs it used to quote was a decompression rate | component | 2.4M | `record` for the block half; phrase waits on text |
 | 9 phrase verify, common | unbounded, result-bound | — | — | — | not a figure; the suite reports the class boundary (perf §3.4) |
 | 10 CSR list scan, broad | measured constants ×10⁹ | index §2.2; lists unbuilt | component | — | waits on records §13 item 4 |
 | 11 unselective predicate | measured, result-bound | index §2.2's 3.4–6.0 s and its three-term decomposition | component | 10⁹ | `filter` confirms the decomposition survives in the engine; the gap is not closed |
@@ -156,17 +156,20 @@ job there is to report the **class boundary** — the result cardinality at whic
 budget — so an operator can recognise the shape, not to publish a latency that depends on the
 question asked.
 
-**Two figures §6.4 carries that its own evidence has moved past**, listed because an unlisted
-falsified claim is the kind someone later "fixes" in the wrong direction:
+**Two figures §6.4 carried that its own evidence had moved past.** Both are kept here because the
+class is what this audit found, and because an unlisted falsified claim is the kind someone later
+"fixes" in the wrong direction:
 
-- Row 8 quotes **169 µs/block measured**. Through the built reader a random single-row blob read
-  measures **253–265 µs**; the 169 µs was a decompression rate, not a read latency, and §3 has
-  already been re-marked while §6.4 has not.
-- The `÷ cores` in the "meets" column of rows 6 and 7 is **refuted as shorthand**: the measured
-  divisor is 7.4–8.5× on twelve cores at 10⁸ and 2.8–3.6× at 2.4M. A parallel remedy is a measured
-  divisor at the scale claimed or it is not a remedy.
+- Row 8's **169 µs/block** was a decompression rate, not a read latency. Through the built reader a
+  random single-row blob read measures **236–270 µs**, and §6.4 now carries the reader's figure.
+- The `÷ cores` in the "meets" column is **refuted as shorthand**: the measured divisor is 7.4–8.5×
+  on twelve cores at 10⁸ and 2.8–3.6× at 2.4M. Row 6 names it; **row 7 still reads a bare
+  `÷ cores`**, and needs a divisor of its own rather than row 6's — its axis is the dictionary
+  walk's blocks, not the scan's chunks. A parallel remedy is a measured divisor at the scale
+  claimed or it is not a remedy.
 
-Both are amendments §6.4 owes; neither is made here, this document owning no part of that file.
+Row 7's is the amendment §6.4 still owes; it is not made here, this document owning no part of that
+file.
 
 ---
 
@@ -235,7 +238,7 @@ the same construction `crates/tessera-engine/tests/soak.rs` already uses, where 
 two segments with maintenance running and one per flush with it stopped. Synthesised extents make
 this a nightly-affordable cell; a real soak is a release campaign (perf §8).
 
-### 3.3 The row route: eleven widths built, two measured, presence never
+### 3.3 The row route: twelve widths built, two measured, presence never
 
 The row-space route is built for every fixed width — `Bool`, `U8`…`U64`, `I8`…`I64`, `F32`, `F64`,
 `TimestampUs` — refusing anything else as a malformed bundle. **Every published constant for it was
@@ -258,8 +261,8 @@ principal for whom this is not free.
 Hence two axes rather than one: **width**, because the built surface is four times wider than the
 measured one; and **run count held apart from row count**, because that is where the presence
 intersection and the per-run predicate hoist both land. The hoist is the other reason: deciding the
-width and the predicate once per contiguous run is what recovered 6.5–10.9× and produced the
-0.22–0.45 ns constant, so a domain of very short runs pays that decision more often and the
+width and the predicate once per contiguous run is what recovered 6.5–10.9× (⊘ the A/B's *before* column was not saved; the same pre-hoist code measured in the earlier campaign gives 7.2–13.1×, so the published ratio is the conservative one — `probes/2026-08-12-epic1-measurements/`) and produced the
+0.22–0.46 ns constant, so a domain of very short runs pays that decision more often and the
 constant should degrade toward the pre-hoist 2.5–3.4 ns. ⊘ Modelled — the run-count sweep is what
 would show where between the two it lands.
 
@@ -476,8 +479,9 @@ added, and they fail different things:
 
 **G7 is the gate that turns this suite from a dashboard into a gate**, and it is nearly free. §6.4
 is prose today, so a row can read *measured* indefinitely after the measurement that justified it
-was superseded — which is how row 8 still quotes 169 µs against a built reader that measures
-253–265 µs. Making the table a checked artefact means the marking cannot rot silently. It fails the
+was superseded — which is how row 8 came to quote 169 µs against a built reader measuring
+236–270 µs, and how row 7's `÷ cores` still stands against a divisor measured at 7.4–8.5× on twelve.
+Making the table a checked artefact means the marking cannot rot silently. It fails the
 documentation rather than the build, which is the correct target: the code is not wrong, the claim
 about it is.
 
@@ -590,14 +594,15 @@ The draft's spine is the audit in perf §2.2, taken by reading §6.4's eleven ro
 evidence each cites. Three findings came out of that reading rather than out of the brief, and each
 is the reason a section exists: the corpus does not distinguish a constant timed at a library entry
 point from one taken through the engine, while §6.4's budgets are request budgets (perf §2.1); the
-row-space route is built for eleven fixed widths and measured on two, with decision 0064's presence
+row-space route is built for twelve fixed widths and measured on two, with decision 0064's presence
 bitmap — whose cost lands per run and per segment rather than per row — never timed at all
 (perf §3.3); and records §7's text-fold model has exactly one assumed term, the compression rate,
 which is measurable today on the shipped blob writer without the text family existing (perf §4.4).
 
 Two stale figures in §6.4 are recorded in perf §2.3 rather than corrected, this document owning no
-part of that file: row 8's 169 µs/block against the built reader's measured 253–265 µs, and the
-`÷ cores` shorthand against a measured 7.4–8.5× on twelve.
+part of that file. §6.4 has since taken both corrections but one: row 8 carries the built reader's
+236–270 µs/block and row 6 the measured 7.4–8.5× divisor, while **row 7's bare `÷ cores` stands**.
+Perf §2.3 keeps the pair because the class is the audit's finding, not either figure.
 
 One expectation is carried as a falsifiable hypothesis rather than as a claim, because the corpus
 has been wrong about a neighbouring one: scan work invariant in layer count, setup linear in it

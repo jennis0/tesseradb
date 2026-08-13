@@ -64,17 +64,22 @@ decides whether the entity-space copy can be dropped outright or only bypassed:
 | scattered | 25% | 0.1% | 206.55 | **42.32** | 80.37 | R, 4.9× |
 | scattered | 25% | 25% | 434.41 | 267.06 | **82.08** | R, 5.3× |
 
-*ms at 10⁸: 4,096 tile counts over the whole slice. Every cell is linear from 10⁷ to 10⁸ (10.2–10.3×
-per decade), so the 10⁹ figures are ten times these — **modelled, not measured**.*
+*ms at 10⁸: 4,096 tile counts over the whole slice. The 10⁹ figures below are ten times these —
+**modelled, not measured**, and the ×10 is the routes' shape rather than a measured linearity. Over
+10⁷→10⁸ the per-decade factor across these eighteen cells runs **4.83× to 30.2×**: tightest on
+R-dense (8.69–10.22×, the route whose domain is the corpus by construction), 4.83–12.92× on E-total,
+and loosest where a fixed setup cost dominates the 10⁷ cell rather than the work does — R-masked at
+1% coverage measures 16.8× and 30.2×, from 1.02 ms and 0.56 ms bases. Read the ×10 as the asymptote
+these approach from either side, not as a fit.*
 
 The entity route wins where its scan is cheap and its result small — a contiguous mask, low coverage,
 a selective predicate. The render route wins where the entity route's two corpus-scale terms bite: a
 scattered principal (its scan is 35× dearer per candidate) or a broad predicate (its projection costs
 144–151 ms of the total). **At 10⁹ both are at or over `filter-index.md` §2.2's 0.5–1 s filter
-budget in their bad cells** — 0.4–2.6 s modelled for the render route, 0.06–4.3 s for the entity one —
+budget in their bad cells** — 0.4–2.6 s modelled for the render route, 0.006–4.3 s for the entity one —
 so this is a cell that needs the parallelism neither arm used, whichever route serves it.
 
-### 3. A list column: postings win every timing cell, and the storage ranking inverts
+### 3. A list column: postings win every timing cell but one, and the storage ranking inverts
 
 The two shapes are decision 0039's own corpus measurements — `categories` (176 distinct, mean 1.72)
 and `surnames` (404,104 distinct, mean 4.54, 138,861 singletons) — modelled as (mean 2, domain 200)
@@ -90,6 +95,12 @@ and (mean 5, domain 400,000) with a quadratically skewed vocabulary.
 | **CSR**, mean 5 / 400k | 10.8 | 10.3 | 87.2 | 17.1 |
 | **postings**, mean 5 / 400k | **6.24** | **0.21** | **6.26** | **0.30** |
 | **pairs**, mean 5 / 400k | 13.5 | 12.8 | 483.9 | 71.4 |
+
+**Against CSR the postings span 0.86× to 57.0×**, paired cell by cell, and the low end is a real
+loss rather than a rounding: on a contiguous 1% candidate at the small dense vocabulary CSR costs
+8.7 ns against the postings' 10.08. That is the one losing cell of eight; the other seven run
+1.73× (contiguous 1%, large sparse vocabulary) to 57.0× (scattered 25%, same). "10–40×" describes
+neither end.
 
 Constants hold from 10⁷ to 10⁸. `all_of` and `none_of` rank identically; CSR's `none_of` costs
 ~1.4× its `any_of` (every value must be examined, none can short-circuit), and postings answer
@@ -139,7 +150,8 @@ values that already exists. A rendered column declared filterable today pays bot
   single-valued design's own rule (the flat column is the record, every accelerator is derived from
   it) extended without amendment, and the measurements support both halves: CSR alone is 8–14 ns per
   candidate entity contiguous, which is the *string* column's budget class rather than the fixed-width
-  one, and postings recover 10–40× where a vocabulary exists to key them on.
+  one, and postings recover **up to 57× where a vocabulary exists to key them on — in seven of the
+  eight cells, losing the eighth at 0.86×** (contiguous 1%, small dense vocabulary).
 
 ## What this does not settle
 

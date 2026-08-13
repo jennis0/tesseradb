@@ -32,8 +32,9 @@ the two routes swap places: a whole-slice filtered count over a contiguous low-c
 replacement.
 
 **A list column wants the shape the single-valued design already has** — a flat CSR value column as
-the record, per-value postings derived on top for a category. Postings win every timing cell by
-10–40×, and the *storage* ranking inverts with the vocabulary: 3.8 B/entity against CSR's 11.9 for a
+the record, per-value postings derived on top for a category. Postings win seven of the eight timing
+cells, by **1.7–57×**, and lose the eighth — a contiguous 1% candidate at a small dense vocabulary,
+where CSR costs 8.7 ns against their 10.08. The *storage* ranking inverts with the vocabulary: 3.8 B/entity against CSR's 11.9 for a
 `categories`-shaped column, but 32.3 against 24.0 for a `surnames`-shaped one, where 400,000 bitmaps
 with a singleton tail have no repetition to amortise. Explicit `(entity, value)` pairs are never
 optimal on either axis, at any shape measured.
@@ -174,8 +175,9 @@ measurements behind each are in §1.
 4. **`multi = true` for `filter` only** (§4). *Recommend as stated* — 0039 already fixes what this
    may not do; the ruling wanted is that lifting the parse refusal is in scope at all.
 5. **A list's addressing**: CSR flat column plus derived category postings. *Recommend as stated.* The
-   alternative worth naming is postings-*only* for categories, which is 3.1× smaller and 10–40×
-   faster on a `categories`-shaped column — and abandons the rule that the flat column is the record,
+   alternative worth naming is postings-*only* for categories, which is 3.1× smaller and 5–23×
+   faster on a `categories`-shaped column in three of its four candidate shapes — 0.86× in the fourth,
+   the contiguous 1% cell — and abandons the rule that the flat column is the record,
    which is what makes the artefact self-retiring, keeps the oracle's relation, and leaves `per_viewer`
    a scan route to take.
 6. **An empty list at ingest.** *Recommend: an empty list is absent* — the entity carries no value and

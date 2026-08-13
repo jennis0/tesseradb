@@ -241,12 +241,15 @@ value; container-straddling membership comes free of the cycling values. Not pla
 whose only member is deleted or suppressed (Rule S over filter counts — needs the overlay
 machinery's private-bundle servers) and tier-straddling values (no attribute ingest exists).
 §4.4's I12 row — the frontier-depth form — is untouched and still blocked on the label service,
-with I3; the row's coverage claim names the distinction. One divergence is pinned as a strict
-xfail rather than resolved: a cross-family operator (`prefix` on a category) answers as an empty
-operand where `match` on the same surface refuses `422`, and no document rules the case — recorded
-in the test's docstring for an owner ruling. The report's second case, `in` on a string column, was
-itself the bug: `in` is `eq` over a list rather than a category-only generalisation, so a string
-column takes it and it is no cross-family operator at all.
+with I3; the row's coverage claim names the distinction. One divergence was recorded when this
+suite was written and is now resolved rather than pinned: a cross-family operator (`prefix` or
+`contains` on a category) answered as an empty operand where `match` on the same surface refused
+`422`. Contracts §3.2 rules it — an unknown column and an operator outside the column's family are
+both `422`, an unknown *value* is an empty operand, the split being which side of the trust
+boundary the fact lives on — and the differential asserts the `422` rather than carrying an xfail.
+The report's second case, `in` on a string column, was itself the bug: `in` is `eq` over a list
+rather than a category-only generalisation, so a string column takes it and it is no cross-family
+operator at all.
 
 **r8** (2026-08-06) applies decision
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md). Script 5 was

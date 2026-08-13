@@ -11,12 +11,13 @@ the way the server does — by raising, never by evaluating a guess.
 
 ## What makes this a second implementation rather than a transcription
 
-The engine evaluates a filter against the bundle's `attrs/<column>/` artefact — a flat value
-column scanned under the candidate mask, with derived Roaring postings accelerating the category
-case (filter-index §2). This module never opens that artefact. Its attribute values come from the
-**fixture's own generation functions**: the conformance corpus is synthesised from a seed, so the
-fixture knows what value every entity was *given*, upstream of what the build *stored*. The two
-derivations meet only at the served surface, which is what makes agreement a differential — a
+The engine evaluates a filter against the bundle's `attrs/<column>/` artefact — a value column
+scanned under the candidate mask, which for a `keyword` holds `u32` ordinals into that layer's own
+sorted dictionary rather than the strings themselves, with derived Roaring postings accelerating
+the category case (filter-index §2). This module never opens that artefact. Its attribute values
+come from the **fixture's own generation functions**: the conformance corpus is synthesised from a
+seed, so the fixture knows what value every entity was *given*, upstream of what the build
+*stored*. The two derivations meet only at the served surface, which is what makes agreement a differential — a
 build that wrote the wrong value into `attrs/` and then served consistently by its own wrong
 bytes disagrees with this oracle rather than being agreed with. (filter-index §9 offers the value
 column itself as the conformance relation; taking the fixture's inputs instead is strictly

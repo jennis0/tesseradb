@@ -12,13 +12,14 @@ measured is named rather than filled in.
 
 > **Superseded in part, same day — the row route's constant.** Result 2 below measured the route
 > as it stood; the cause of its 4.8× gap turned out to be per-row type dispatch in `scan_rows`,
-> and hoisting that out of the row loop moved the constant to **0.22–0.45 ns per row** (a 6.5–10.9×
-> A/B, in
+> and hoisting that out of the row loop moved the constant to **0.22–0.46 ns per row** at domains
+> of ~3×10⁵ rows and up (a 6.5–10.9× A/B, in
 > [`probes/2026-08-12-epic1-measurements/results.md`](../../../probes/2026-08-12-epic1-measurements/results.md)'s
 > follow-up section). Results 2 and 3's *figures* are therefore the pre-optimisation code's; their
 > *findings* — the invariance, the fixed floor, the width-insensitivity that identified the cause,
-> and result 4's refutation of the probe's ratio — all stand. Nothing below is edited; this note
-> says which numbers the shipped code has since moved past.
+> and result 4's refutation of the probe's ratio — all stand. Nothing below is edited except where
+> a figure disagreed with the raw file it was read from: the blob read's µs/read column, and result
+> 4's attribution of the postings route's `filter_eval_ns`. Both are marked at the site.
 
 ## Results
 
@@ -47,7 +48,7 @@ inside the O(1 s) budget only because the route runs inside the tile sweep's ray
 10⁸, and in the coarse cell the sign reverses.** This is not a measurement that came out
 differently; it is a comparison the built system does not offer. The probe's entity side is
 `ValueColumn::scan_eq`, and the built engine answers an indexed category from its **derived
-postings** (0063) — 15–26 µs at 10⁸, which no per-entity scan could be. On a 343,391-row viewport
+postings** (0063) — 20–54 µs at 10⁸ on the selective values, which no per-entity scan could be. On a 343,391-row viewport
 at 10⁸ the row route costs 0.91–0.95 ms against the entity route's 0.60–2.36 ms (*measured*): paired
 per value it wins by 1.6–2.6× on the broader ones and loses by 1.5–1.6× on the selective ones. At the coarse-zoom cell
 the entity route is **100–450× faster** (0.66–2.72 ms against 280–299 ms). §6.2 should stop
@@ -55,8 +56,8 @@ quoting the probe's ratio as the built route's advantage.
 
 **5. Two figures nobody asked for, both load-bearing.** The blob's addressing costs **4.13 B per
 has-row entity** and is shape-independent (*measured*) — which confirms the ~4.0 B implied by §3's
-N7 arithmetic. And a random single-row blob read costs **253–265 µs against §3's quoted 169 µs**
-(*measured*), 1.5× — consistent with a 256 KiB block decompressing at the string-storage probe's
+N7 arithmetic. And a random single-row blob read costs **236–270 µs against §3's quoted 169 µs**
+(*measured*), 1.4–1.6× — consistent with a 256 KiB block decompressing at the string-storage probe's
 own 1.5 GB/s, so the quoted figure was optimistic rather than the reader being slow.
 
 ### What the design owes, exactly
@@ -66,7 +67,7 @@ The design file is frozen to this track; these are the re-markings it owes.
 | § | claim today | owed |
 |---|---|---|
 | §3 | "a shared-context row of mixed fields is *assumed* to compress at least as well, not measured" | **measured**: 3.00× mixed against a 2.54× title control, both through the shipped writer |
-| §3 | "169 µs for a random single-value read" | **253–265 µs measured** through the built reader; the 169 µs is the probe's, not this format's |
+| §3 | "169 µs for a random single-value read" | **236–270 µs measured** through the built reader; the 169 µs is the probe's, not this format's |
 | §3 | the N7 arithmetic's implied ~4.0 B addressing | **4.13 B/entity measured**, shape-independent |
 | §6.2 | "The probe measured 0.48–0.73 ns per viewport row" | keep as the probe's; add **2.5–3.4 ns measured on the built route**, invariance confirmed |
 | §6.2 | "7–1,269× over the entity route at 10⁸" | **refuted for a category**: 0.63–2.58× measured at 10⁸ on a 343,391-row viewport, and the entity route is 100–450× faster in the coarse cell. The engine answers an indexed category from postings, not the scan the probe timed |
@@ -87,12 +88,14 @@ entities, every one carrying a row.
 
 | shape | fields | source B/e | framed B/e | blocks | **format ratio** | source ratio | B/e, all three files | µs/read |
 |---|---|---|---|---|---|---|---|---|
-| `title` (control) | 1 `utf8` | 75.56 | 90.56 | 830 | **2.54** | 2.12 | 39.78 | 264.9 |
-| `mixed` | 8 `utf8` + 6 fixed | 244.02 | 314.87 | 2,885 | **3.00** | 2.33 | 109.00 | 253.2 |
-| `mixed` + abstract | + 1 `utf8` | 1,262.46 | 1,340.31 | 12,306 | **2.74** | 2.58 | 492.73 | 258.0 |
+| `title` (control) | 1 `utf8` | 75.56 | 90.56 | 830 | **2.54** | 2.12 | 39.78 | 270.1 |
+| `mixed` | 8 `utf8` + 6 fixed | 244.02 | 314.87 | 2,885 | **3.00** | 2.33 | 109.00 | 235.8 |
+| `mixed` + abstract | + 1 `utf8` | 1,262.46 | 1,340.31 | 12,306 | **2.74** | 2.58 | 492.73 | 265.7 |
 
 *Format ratio is framed row bytes ÷ `blocks.bin` — what the compressor achieved on what the format
-handed it. Source ratio divides by the raw value bytes instead, so framing is counted as a cost.*
+handed it. Source ratio divides by the raw value bytes instead, so framing is counted as a cost.
+The µs/read column is `run-record-blob.txt`'s; an earlier draft of this memo carried 264.9 / 253.2 /
+258.0, which are in no saved run and gave the "253–265 µs" the design quoted for a day.*
 
 **The control is what makes this a comparison.** Quoting `mixed` against 2.44 directly would
 compare things differing in more than the row shape: the probe compressed a column that carried an
@@ -118,8 +121,10 @@ has-row bitmap is 527 B for a universal set. On the `title` shape that addressin
 blob's total cost, which is the regime §3's N7 note is about — a near-sequential `id` whose
 compressed content is under a byte per entity pays essentially all of its cost here.
 
-**⊘ The read is slower than §3 quotes.** 253–265 µs per random single-row read against the quoted
-169 µs. The arithmetic is unsurprising once stated — 256 KiB at the string-storage probe's measured
+**⊘ The read is slower than §3 quotes.** 236–270 µs per random single-row read against the quoted
+169 µs, and the ordering across the three shapes is not the block sizes' — the 235.8 µs cell is the
+`mixed` row, whose blocks are the middle size, so what varies over this span is not row shape. The
+arithmetic is unsurprising once stated — 256 KiB at the string-storage probe's measured
 1.5–1.7 GB/s is 150–175 µs, and the built reader adds the file read, the directory binary search
 and the row decode on top — so this is the 169 µs figure having been a decompression rate rather
 than a read latency, not a defect in the reader. It stays comfortably inside §10.3's
@@ -240,9 +245,12 @@ reason is structural rather than a wrong constant.**
 `ValueColumn::scan_eq` walking the candidate entity by entity. The engine, for a category column
 carrying `index = true`, answers `eq` by intersecting the column's **derived postings** with the
 composed candidate (0063; `filter.rs`'s module header states it). Measured on the both-placement
-fixture at 10⁸ items, `filter_eval_ns` for that route is **15–26 µs** at the selective values and
+fixture at 10⁸ items, `filter_eval_ns` for that route is **20–54 µs** at the selective values and
 147–249 µs at the broad one — hundreds of picoseconds per corpus entity, which no per-entity scan
-could be. The 7–1,269× compares the row route against a route the engine does not take.
+could be. (The 15–26 µs an earlier reading of this table quoted is the **row** route's `filter_eval_ns`
+in the same block, which on that route is only the routing and not the scan — the two columns mean
+different things per route, as the raw file's own footer says.) The 7–1,269× compares the row route
+against a route the engine does not take.
 
 **The rule will not hold both operands still, so the comparison is two measurements.** 0068 routes
 row-space while `rows_in_ranges ≤ |M_auth|`, so the route is a function of exactly the two

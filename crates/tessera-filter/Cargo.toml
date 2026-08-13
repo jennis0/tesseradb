@@ -19,13 +19,15 @@ arrow.workspace = true
 # The value column is mapped rather than read: at 10⁹ it is 1 GB per byte of declared width per
 # column, and a generation opens every declared column at once. See `values::read_values`.
 memmap2 = { workspace = true }
-# **For the substring region search only** (`values::scan_text_contains`). A contiguous run's values
-# are adjacent bytes, so `contains` searches the whole region at SIMD throughput instead of scanning
-# each value — measured 11.4 → 1.7 ns per candidate entity on a broad candidate, which is what takes
-# that predicate inside the filter budget at 10⁹. Already in the tree transitively (arrow →
-# arrow-string → regex → aho-corasick), so this declares a dependency the build already carries
-# rather than admitting a new one; writing the search by hand was measured *slower* than the scalar
-# loop it replaces (probes/2026-08-08-filter-layout, arm 12).
+# **For `contains`' substring search only** (`dict::KeyMatcher`). The needle's searcher is built
+# once and reused across every dictionary key the walk decodes and every candidate slot the probe
+# reads; `str::contains(&str)` constructs a two-way searcher on every call, which the walk pays per
+# key against a haystack of a few tens of bytes — measured 1.14–2.03× of the whole per-key cost at
+# 2.4M, and the swing was in *both* directions with needle length, which is a searcher's setup and
+# not a property of the corpus (probes/2026-08-13-contains-recovery, arm 1). Already in the tree
+# transitively (arrow → arrow-string → regex → aho-corasick), so this declares a dependency the
+# build already carries rather than admitting a new one; writing the search by hand was measured
+# *slower* than the scalar loop it replaces (probes/2026-08-08-filter-layout, arm 12).
 memchr = "2"
 # The record blob's blocks are whole-row zstd frames (records-and-search §3): drill-down is one
 # block read and one decompress, and the fail-closed reader checks the decompressed length

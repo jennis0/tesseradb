@@ -1,11 +1,12 @@
 # Records and search — design
 
-**Date:** 2026-08-12 (r5 — reviewed once, every ruling made, and epic 1 built; Appendix R)
+**Date:** 2026-08-13 (r6 — the keyword family built, and §4.3's `contains` band corrected to the
+shipped one; Appendix R)
 **Status:** **Provisional — nothing remains open; promotion awaits only the §13 amendments pass,
-which is an editing round rather than a decision.** Its **first epic is built** — §2's
+which is an editing round rather than a decision.** Its **first two epics are built** — §2's
 declaration, §3's record blob through the whole lifecycle, drill-down's assembly from the three
-homes, and §6.2's row-space route; every other mechanism below is ⊘ unless it names an existing
-one. The adversarial review
+homes, §6.2's row-space route, and §4.3's keyword family in place of the deleted `utf8` column;
+every other mechanism below is ⊘ unless it names an existing one. The adversarial review
 ([`2026-08-12-records-and-search-review.md`](../evidence/memos/2026-08-12-records-and-search-review.md))
 found the security argument sound, the read-side cost argument sound with figure corrections, and
 the seams not yet survivable; every finding was applied per its recommendation, and the six
@@ -17,11 +18,17 @@ then-open rulings were made the same day (owner, 2026-08-12 — §12, and decisi
 claims and the large dataset tiers, not the work's start. The evidence base is
 [`2026-08-12-record-and-searchability.md`](../evidence/memos/2026-08-12-record-and-searchability.md)
 (cited as **memo §n**), [`2026-08-12-filter-placement.md`](../evidence/memos/2026-08-12-filter-placement.md)
-(**placement §n**), and four probe campaigns:
+(**placement §n**), and seven probe campaigns — four taken for the draft:
 [`2026-08-12-string-storage/`](../../probes/2026-08-12-string-storage/),
 [`2026-08-12-filter-placement/`](../../probes/2026-08-12-filter-placement/),
 [`2026-08-12-keyword-and-list-storage/`](../../probes/2026-08-12-keyword-and-list-storage/),
-[`2026-08-12-phrase-cost/`](../../probes/2026-08-12-phrase-cost/).
+[`2026-08-12-phrase-cost/`](../../probes/2026-08-12-phrase-cost/) — and three taken against built
+code, which is where §4.3's and §6.4's shipped figures come from:
+[`2026-08-12-epic1-measurements/`](../../probes/2026-08-12-epic1-measurements/),
+[`2026-08-13-keyword-dict/`](../../probes/2026-08-13-keyword-dict/),
+[`2026-08-13-contains-recovery/`](../../probes/2026-08-13-contains-recovery/), with the `utf8`
+retirement fence ([its memo](../evidence/memos/2026-08-13-utf8-retirement-fence.md)) as the
+baseline the last two measure against.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §8.2–§8.3, §10.3;
 [`filter-index.md`](filter-index.md) §1–§2, §5–§6 (**index §n**);
 [`filter-surface.md`](filter-surface.md) §2, §4–§5, §7 (**surface §n**);
@@ -90,7 +97,7 @@ The families, and where each mechanism stands:
 | **number** | native flat column + presence | masked scan: `eq`, `in`, `range` | the column itself | scan **built** |
 | **datetime** | `timestamp_us` (`i64`) flat column + presence | masked scan: `eq`, `in`, `range` | the column itself | scan **built** |
 | **category** | code column + vocabulary + derived postings — **always** (§4.2) | scan; postings per decision 0063 | the column + vocabulary | **built** |
-| **keyword** | sorted per-layer dictionary + `u32` ordinal column | dictionary resolve → fixed-width scan; postings for the privileged tail | dictionary + ordinals | ⊘ unbuilt (§4.3) |
+| **keyword** | sorted per-layer dictionary + `u32` ordinal column | dictionary resolve → fixed-width scan; ⊘ postings for the privileged tail | dictionary + ordinals | dictionary, ordinals and every operator **built**; ⊘ **no producer emits keyword postings**, so `eq` is the ordinal scan (§4.3, §6.1) |
 | **text** | token dictionary + per-token postings | `match` (+ m-of-n) over token postings | its rows in the record blob | ⊘ unbuilt (§4.4) |
 
 An unindexed, unrendered field of any family but category lives in the record blob and has no
@@ -185,9 +192,10 @@ compact self-describing row — field tag, then the typed value; a `multi` field
 length-prefixed list — rows concatenated in entity order, cut into zstd-compressed blocks with a
 **256 KiB target**, chosen at the string-storage probe's 2.44× point
 ([`string-storage`](../../probes/2026-08-12-string-storage/) arm 1). Through the built writer and
-reader the shipped format measures **3.00× on a mixed row at 253–265 µs per random single-row
+reader the shipped format measures **3.00× on a mixed row at 236–270 µs per random single-row
 read** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)); the probe's 169 µs was optimistic for a 256 KiB block rather than the reader being
-slow. **A row never splits across
+slow, and the spread across the three row shapes is not ordered by row size, so it is the block
+read and not the row that the figure is about. **A row never splits across
 blocks**: a block holds one or more whole rows, and a row larger than the target gets an oversized
 block of its own — the target is a target, not a cap.
 
@@ -357,10 +365,12 @@ arXiv columns through the shipped writer) — against the ~2.2–3.9× this mode
 under at both ends, and the sign is safe everywhere. The model's "~1–2 B/key more" holds for the
 two identifier columns and is exceeded by `doi` at +2.9, the excess being the prefix elision a
 block's first key gives up; it therefore scales with how much neighbouring keys share, which is
-the one direction the model did not carry. The per-key figure is also shape-scoped:
-2–4 B/key holds for the two identifier columns, while `submitter` measures **7.5 B/key** (1.7
-B/entity over 542,489 distinct in 2.4M) — repeat-heavy columns pay more per key and far less per
-entity. The postings-plus-compressed-record layout that is right for prose was measured **wrong**
+the one direction the model did not carry. The per-key figure is also shape-scoped, and it is the
+**built** format's at the shipped restart interval of 16 rather than the probe's floor: `id`
+measures **4.15 B/key**, `doi` **6.60**, and `submitter` **9.61** (2.2 B/entity over 542,489
+distinct in 2.4M) — repeat-heavy columns pay more per key and far less per entity. The floor's own
+2.11 / 3.70 / 7.62 must not be quoted as the format's cost (review N3); every figure in this
+paragraph is the writer's. The postings-plus-compressed-record layout that is right for prose was measured **wrong**
 here — worse than the flat column on the repeat-heavy shape — which is why keyword and text are
 two families and not one. ⊘ One further caveat: the figures are arXiv-shaped; a prefix-free key
 set (UUIDs) front-codes to nearly its raw bytes, and the layout then merely ties the flat column.
@@ -556,7 +566,8 @@ calibrated by construction. So:
 
 - **v1 is verify-against-the-record**: AND the phrase tokens' postings inside the candidate, then
   decompress the survivors' blob blocks and check adjacency there — zero storage, exact, and
-  result-bound: 169 µs per block on selective phrases, unbounded on `"of the"`, which is the same
+  result-bound: 236–270 µs per block on selective phrases (§3 — the built reader's figure; the
+  phrase probe's 169 µs was a decompression rate), unbounded on `"of the"`, which is the same
   accepted class as index §2.2's unselective predicates. Survivors are inside the composed
   candidate by construction (§6), so the verify reads nothing a filter result would not.
 - **Token-bigram terms are refuted**, and recorded so the idea is not re-derived: the pair
@@ -655,9 +666,12 @@ of a statistic about what the principal's data contains (§8.2).
 
 The masked scan serves every family as §4 specifies: fixed-width constants for numbers, datetimes,
 categories and keyword ordinals; CSR constants for lists; the dictionary walk or per-candidate
-probe for keyword `contains`. The postings serve categories under 0063, and keyword/text terms
-under 0067 (whole-value operators only, §4.3). Per layer, unioned, disjoint by I9 — unchanged from
-index §5.
+probe for keyword `contains`. The postings serve categories under 0063. ⊘ **Keyword and text term
+postings are specified and unbuilt**: 0067 admits them for whole-value operators only (§4.3), and
+no producer emits one — the manifest's per-layer postings slot is written by nobody, and the build
+derives postings for the vocabulary-bearing family alone. So a keyword `eq` is answered by the
+dictionary resolve and the ordinal scan, and text has no route at all. Per layer, unioned, disjoint
+by I9 — unchanged from index §5.
 
 ### 6.2 Row space: the render column is filterable
 
@@ -671,27 +685,40 @@ than categories did (§2). A string is never rendered — the hot column is a fi
 row, which is what makes it cheap enough to sit on the per-mark path — so `keyword` and `text` are
 filterable in entity space alone.
 
-**The built route costs 0.22–0.45 ns per viewport row** — invariant in corpus size, mask shape and
-coverage across 2.4M, 25M and 10⁸, and across viewports from 3×10⁵ rows to a whole slice
+**Over a category's codes the built route costs 0.22–0.46 ns per viewport row** — invariant in
+corpus size, mask shape and coverage across 2.4M, 25M and 10⁸, and across viewports from 3×10⁵ rows
+to a whole slice
 ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md); *measured*). A 343,391-row viewport at 10⁸ costs 0.13–0.16 ms.
+
+⊘ **Every constant in this section is a 1- or 2-byte category column's, and none may be carried
+onto a rendered number.** The route is built for all twelve fixed widths; it has been measured on
+`u8` and `u16` codes alone, and the memo that took the constants says so in terms. At 10⁹ an `i64`
+column is 8 GB against a `u8`'s 1 GB, and the one width comparison available — `u16` within a few
+percent of `u8`, in both directions — establishes only that the scan is not bandwidth-bound at one
+and two bytes on this machine. Decision 0064's presence bitmap, which is what let numbers,
+datetimes and bools join the route at all, has never been timed either; its cost lands per run and
+per segment rather than per row, so a sweep that varies rows while holding the run count still
+cannot see it. `performance-suite.md` §3.3 owns the arm that closes both gaps.
 
 **That constant is the loop's shape, not the column's, and it was found by measuring.** As first
 built the scan resolved the segment and matched both the code width and the predicate *per row*,
 which measured 2.5–3.4 ns — 4.8× the standalone probe's 0.48–0.73 and, tellingly, **insensitive to
 the code width**, which a loop bound by moving one or two bytes per row could not be. Deciding the
 width and the predicate once per contiguous run leaves a monomorphic compare over a slice and
-recovers 6.5–10.9×. The lesson generalises past this route: in a per-row loop over the hot column,
+recovers 6.5–10.9× (⊘ the A/B's *before* column was not saved; the same pre-hoist code measured in the earlier campaign gives 7.2–13.1×, so the published ratio is the conservative one — `probes/2026-08-12-epic1-measurements/`). The lesson generalises past this route: in a per-row loop over the hot column,
 an enum matched inside the loop costs more than the comparison it guards.
 
 A **fixed floor of tens of microseconds** survives the change — bitmap setup, and rayon fan-out on
 the parallel path — so below roughly 10⁵ rows in the domain the per-row figure rises and the
-parallel path is slower than the serial one. It is a fraction of a millisecond and inside §6.4's
+parallel path is slower than the serial one. That is where the constant above stops holding: a
+139,920-row viewport measures 0.62–0.66 ns per row and a 3,504-row one 15.3–15.9, which is the
+floor divided by the rows, not a second constant. It is a fraction of a millisecond and inside §6.4's
 budget, but it is the shape a per-keystroke filter over a small viewport takes.
 
 **The probe's 7–1,269× advantage over the entity route is refuted for a category, and the reason
 matters more than the number.** The probe timed the entity side as a per-entity value-column
-scan; the built engine answers an indexed category from its **derived postings** (0063) in 15–26 µs
-at 10⁸, which no scan can approach. Paired per value at a viewport the row route measures
+scan; the built engine answers an indexed category from its **derived postings** (0063) in 20–54 µs
+at 10⁸ on the selective values and 147–249 µs on the broad ones, which no scan can approach. Paired per value at a viewport the row route measures
 0.09–0.27× the entity route's cost once the loop above is hoisted — it now wins at every viewport
 shape measured — while **in the coarse-zoom cell the entity route is still 8–45× faster**
 ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md); *measured*). So the row
@@ -704,14 +731,17 @@ than the probe's — see the note at its statement.
 **No entity-space copy is stored for a rendered number or datetime.** This is the store-once rule,
 scoped by §4.2's category exemption to the families it can safely reach (review B1): the hot
 column serves the viewport route above, and the coarse-zoom cell — where the view is the corpus
-and the row-space route degenerates to a whole-slice scan — is served by that scan, **measured 22–30 ms at 10⁸
-single-threaded and 3.6–4.7 ms on twelve cores** ([the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md)) — inside the 100 ms interaction target
-without the sweep's parallelism rather than only with it — and **modelled 0.22–0.30 s serial /
-36–47 ms parallel at 10⁹** on a constant flat within 10% from 25M to 10⁸, running inside the tile
+and the row-space route degenerates to a whole-slice scan — is served by that scan, **measured
+21–29 ms at 10⁸ single-threaded and 3.2–5.3 ms on twelve cores** (both columns and both values, at
+the same 1- and 2-byte widths the caveat above scopes; [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md)) — inside the 100 ms interaction target
+without the sweep's parallelism rather than only with it — and **modelled 0.21–0.29 s serial /
+32–53 ms parallel at 10⁹** on a constant flat within 10% from 25M to 10⁸, running inside the tile
 sweep's existing
-parallelism. That is over the 100 ms target and inside the O(1 s) budget only with the parallelism
-the sweep already has; the alternative is a second copy of every rendered column, and placement
-§1's coarse-zoom result shows *neither* route dominating that cell. A future non-viewport filter
+parallelism. At 10⁹ that is over the 100 ms target serially and inside the O(1 s) budget without
+help; the sweep's parallelism brings it under the target as well. Before the per-run hoist the same
+cell modelled 2.8–3.0 s serial and was inside O(1 s) *only* with that parallelism — which is the
+state the alternative was weighed against, and the alternative is a second copy of every rendered
+column. Placement §1's coarse-zoom result shows *neither* route dominating that cell. A future non-viewport filter
 surface that needs entity space for a rendered number derives the column then — a build pass, not
 a format change — rather than every deployment paying for the possibility now (decision 0048's
 shape).
@@ -744,10 +774,12 @@ case the operand exists for — is unaffected either way, having no alternative 
 ### 6.3 The aggregate surface, and the row-bounded string route
 
 Coarse-zoom counts, densities and legends are the product, and I2 requires each computable from
-inside `M_auth` alone. For every scanned family the scan serves them (that is what it is for); for
-text only the postings can (§4.4), and for keywords the postings close the one scan cell over
-budget (0067). Nothing new is owed here — a term lookup lands in the same `postings ∩ candidate`
-construction the category accelerator already takes.
+inside `M_auth` alone. For every scanned family the scan serves them (that is what it is for); ⊘ for
+text only the postings can (§4.4), and ⊘ for keywords the postings would close the one scan cell
+over budget (0067). Neither posting exists (§6.1), so text has no aggregate surface today and a
+keyword's broad `contains` is priced at the dictionary walk §6.4 carries. Nothing new is owed in
+mechanism — a term lookup lands in the same `postings ∩ candidate` construction the category
+accelerator already takes — but nothing produces the postings it would land in.
 
 ⊘ The **row-bounded string route** (memo §6) is the interactive complement, worth building whether
 or not the postings land: a viewport's rows reach their entities through `row-entity.u32`
@@ -766,14 +798,14 @@ ruling) and this design's 100 ms target. Measured constants; the 10⁹ multiplic
 
 | operator × shape | route | cost at 10⁹ | meets |
 |---|---|---|---|
-| category / keyword `eq`, selective | postings (0063, 0067) | 0.13–49.5 ms *(measured)* | 100 ms |
+| category `eq`, selective (⊘ **a keyword `eq` has no postings** — nothing emits them, so the ordinal-scan row below serves it — §6.1) | postings (0063; 0067's are unbuilt) | 0.13–49.5 ms *(measured — the **category** alone)* | 100 ms |
 | text `match` / m-of-n, common tokens | postings | tens–hundreds of ms *(modelled; §11 gates it)* | 1 s |
 | any viewport-bounded filter | row space (§6.2, §6.3) | ≲ 1–33 ms *(probe-measured / modelled — N4's caveat)* | 100 ms |
 | number range, contiguous candidate | scan | ~250–280 ms *(measured)* | 1 s |
 | keyword `eq`/`prefix`, contiguous, no postings | ordinal scan | ~250–280 ms *(modelled from measured constant)* | 1 s |
 | fixed-width scan, scattered 25% principal | scan | ~2.4 s *(measured at 10⁸ ×10)* | ÷ cores, measured 7.4–8.5× on twelve |
 | keyword `contains`, unique vocabulary, broad candidate | per-key dictionary walk + scan | walk-with-search measured 15.4–26.6 ns/key at 2.4M → ~16–26 s at 10⁹ *(**extrapolation refused** — the dictionary fits this machine's L3 at the measured size and not at 10⁸ — `performance-suite.md` §5); **1.5–71× slower than the `utf8` scan it replaced** ([the fence](../evidence/memos/2026-08-13-utf8-retirement-fence.md), [the recovery](../evidence/memos/2026-08-13-contains-recovery.md))* | ÷ cores — blocks decode independently |
-| phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(253–265 µs/block measured through the built reader; count result-bound)* | 100 ms |
+| phrase verify, selective phrase | postings ∩ + blob reads | ~ms–100 ms *(236–270 µs/block measured through the built reader; count result-bound)* | 100 ms |
 | phrase verify, common phrase | as above | unbounded — result-bound | known class |
 | CSR list scan, broad candidate | scan | ~2.7–10 s *(measured constants ×10⁹)* | **postings instead** |
 | unselective predicate (matches ≥25% of corpus) | any | 3.4–6 s *(measured; result-bound — index §2.2)* | known gap, unchanged |
@@ -1014,10 +1046,15 @@ epic's start**. Item 1 populates the ruled row. Items 4–6 are owed but do not 
 5. **Retrieval quality under our analyser** — coverage-AND against m-of-n against mask-local BM25
    on a labelled collection (BEIR SciFact / TREC-COVID scale) — before the scoring stage of §4.5
    is built, so the cap-selection gain is measured rather than imported from the literature.
-6. Residuals, named so they are not lost: arm-3 list *timing* on real skew (storage is settled);
-   the coarse-zoom row-space scan under the sweep's real parallelism (§6.2); the built row-space
-   route's constants against the probe's (review N4); and the blob's mixed-row compression ratio
-   (§3's assumption).
+6. Residuals. Three of the four are discharged by
+   [the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md):
+   the blob's mixed-row compression ratio (§3's assumption — measured 3.00× against a 2.54×
+   control), the built row-space route's constants against the probe's (review N4 — measured, and
+   the probe's ratio refuted), and the coarse-zoom row-space scan under the sweep's real
+   parallelism (§6.2 — measured at 10⁸, modelled to 10⁹). **What remains owed is arm-3 list
+   *timing* on real skew** (storage is settled), and the two gaps the same campaign opened: the
+   route's constants at a width above two bytes, and decision 0064's presence bitmap, neither of
+   which has ever been timed (§6.2; `performance-suite.md` §3.3 owns both arms).
 7. **The write side at scale** (review B4): keyword and text coalesce and fold throughput —
    dictionary merge and remap rate, blob rewrite through zstd, postings merge at container rate —
    against §7's modelled figures, at the 25M tier and extrapolated with the same honesty the read
@@ -1097,29 +1134,36 @@ arguments all keep their sign through §5's positivity; I9 is what makes every l
 disjoint; and the two removal rules are untouched at §7. The two architecture amendments are ruled — decisions 0068 (§8.2's second operand kind)
 and 0069 (§8.3's sharpening) — and land in the amendments pass below.
 
-**Amendments this design owes elsewhere on promotion** (review B8 — none made here; each is one
-edit at the named site, and an unlisted falsified claim is a spec contradiction someone later
-"fixes" in the wrong direction):
+**Amendments this design owes elsewhere on promotion** (review B8). Each is one edit at the named
+site, and an unlisted falsified claim is a spec contradiction someone later "fixes" in the wrong
+direction — so the ones an epic has already falsified are made as it lands rather than held for
+promotion, and each bullet says where it stands. **The architecture's three are the whole of what
+is still owed**; everything below them is made or is waiting on machinery that does not exist yet.
 
-- **architecture §8.2–§8.3** — the ruled second operand kind (decision 0068) and the ruled
+- **⊘ architecture §8.2–§8.3** — the ruled second operand kind (decision 0068) and the ruled
   sharpening (decision 0069), and §8.3's text paragraph:
-  `utf8` → `keyword`/`text` with their operators.
-- **architecture §10.3** — the routing-rule sentence gains the three-home rule and `index`; the
+  `utf8` → `keyword`/`text` with their operators. **Owed.**
+- **⊘ architecture §10.3** — the routing-rule sentence gains the three-home rule and `index`; the
   "single adopted store" intention is superseded for per-interaction metadata by the record blob
-  (vectors stay).
-- **architecture Appendix C** — 0067's row (both figures, both possession bounds — §8), and the
+  (vectors stay). **Owed.**
+- **⊘ architecture Appendix C** — 0067's row (both figures, both possession bounds — §8), and the
   blob drill-down timing note (review X1). **Appendix A** — the new artefacts join the sizing
-  tables.
-- **per-point-attributes §2, §4** — the `used_for` surface, the refusal list (`multi = true` "at
-  all" lifts to non-render), and the example schema, rewritten to §2's declaration.
-- **filter-index §1, §2.6, §5, §5.2, §6.2** — "declared `used_for = "filter"`"; the family table's
-  String/utf8 row; "no dictionary, so no promotion and no resolver" scoped to the read side's
-  shared structure; the lists-excluded markers lifted when §5's addressing lands.
-- **filter-surface §2, §6** — the operand table and `/v1/meta`'s `filter_operands` gain the new
-  families and lose `utf8`.
-- **contracts §2.2, §2.4, §2.6, §3.2, §3.4** — `arrow_type` and the wire family `"string"`
-  (asserted today by the conformance differential), the schema fields, the new files and manifest
-  lists (`record_extents`, the atomic layer record — §7), and the ingest wire for lists.
+  tables. **Owed**, and 0067's row waits on a first implementation by the ruling's own condition.
+- **per-point-attributes §2, §4** — **made**: the `used_for` surface and the example schema are
+  rewritten to §2's declaration, and the refusal list carries the `render` reason that is true of
+  an ordinal. The `multi = true` refusal itself stays until §13 item 4 lifts it.
+- **filter-index §1, §2.2, §2.6, §5** — **made** with the keyword epic: the family table names the
+  dictionary-and-ordinal pair, §2.2's per-candidate text table is replaced by what a string scan
+  now costs, and "no dictionary, so no promotion and no resolver" is scoped to the *shared*
+  structure it was always about. **§5.2 and §6.2's lists-excluded markers stay** until §5's
+  addressing lands.
+- **filter-surface §2, §6** — **made, and §2 needed no edit**: that file names no family by type,
+  and `/v1/meta`'s `filter_operands` already carries the new families and decision 0068's rendered
+  operands.
+- **contracts §2.2, §2.4, §2.6, §3.2, §3.4** — **made** for the record blob and the keyword family:
+  `arrow_type` names `keyword`, §2.4 and §2.6 carry `record_extents` and the narrowed render tail,
+  and §3.2's operators-by-family paragraph follows. **The ingest wire for lists stays owed** with
+  §5's addressing.
 
 ---
 
