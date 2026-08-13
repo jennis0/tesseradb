@@ -71,6 +71,13 @@
 //! early return out: it is total, it has no "matches nothing, so skip the scan" variant, and every
 //! arm of [`scan_ordinals`] runs a scan.
 //!
+//! The shape is not the whole assurance, because a short circuit can be added above it and still
+//! answer correctly. So the rule is also **asserted in work**: `keyword_tests` compares the slots a
+//! resolving needle traverses against a non-resolving one over the same candidate and layers, which
+//! records §10 names as the conformance suite's one deliberate work assertion. It catches the
+//! version no answer-level test can — a resolve that skips a layer whose dictionary does not hold
+//! the needle, which returns exactly the right entities for less work.
+//!
 //! **`contains` has two routes and a crossover that reads no data.** The broad route walks the
 //! dictionary, decodes and substring-searches **every** key whatever the needle — front coding
 //! elides shared prefixes, so a substring can span an elided one — and scans for the ordinals it
@@ -2219,7 +2226,7 @@ mod keyword_tests {
     //! and is not here.
 
     use super::*;
-    use tessera_filter::SortedDictWriter;
+    use tessera_filter::{take_scan_work, ScanWork, SortedDictWriter};
 
     /// A dictionary over already-sorted distinct keys, read back from memory.
     fn dict(keys: &[&str]) -> Arc<SortedDict> {
@@ -2404,6 +2411,277 @@ mod keyword_tests {
             keyword_ordinals(&d, &FilterOperand::NumEquals(Scalar::Int(3))).unwrap(),
             OrdinalPredicate::Eq(NO_SUCH_ORDINAL)
         );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The sentinel rule, asserted in work
+    // -------------------------------------------------------------------------------------
+    //
+    // The tests above pin what a miss *is* — the reserved ordinal, the sentinel range — and what a
+    // scan for it *answers*. These pin what it **costs**, which is the property records §4.3 states
+    // and per-point-attributes §3.8 requires: a needle no dictionary holds must be indistinguishable
+    // from one every dictionary holds in work, not merely in outcome. Records §10 names this as the
+    // conformance suite's one deliberate work assertion, "the one place a work assertion is the test,
+    // because the rule exists for it".
+    //
+    // **The unit is traversed slots and runs, never elapsed time.** A stopwatch assertion would be
+    // flaky in exactly the direction that lets the channel reopen — it goes green on a loaded
+    // machine — so what is compared is the count `tessera_filter::take_scan_work` reports, which is
+    // zero for a scan that did not happen and identical for two that ran to completion over the same
+    // candidate. That module's header argues where the counter sits and what it costs when tests are
+    // not running.
+    //
+    // Each of these routes through [`FilterColumns::resolve`] rather than through `scan_ordinals`,
+    // because the early return this is guarding against has more than one place to hide: the resolve,
+    // the predicate, the scan, and — the one no answer-level test can see — the per-layer loop.
+
+    /// The work one operand costs over `column`, and the entities it returns.
+    ///
+    /// The counter is taken *before* the resolve as well as after, so what comes back is this
+    /// resolve's own traversal rather than it plus whatever the assertion before it left behind.
+    fn work_of(
+        columns: &FilterColumns,
+        column: &str,
+        operand: &FilterOperand,
+        candidate: &Bitmap,
+    ) -> (ScanWork, Vec<u32>) {
+        let _ = take_scan_work();
+        let out = columns
+            .resolve(column, operand, candidate)
+            .expect("a declared keyword column resolves");
+        (take_scan_work(), members(&out))
+    }
+
+    /// Every operand in `ops` traverses exactly what the first one does — **and the first traverses
+    /// something**, which is what stops the equality holding vacuously if the scan were removed
+    /// altogether rather than merely short-circuited for the sentinel.
+    fn traverse_alike(
+        columns: &FilterColumns,
+        column: &str,
+        candidate: &Bitmap,
+        ops: &[(&str, FilterOperand)],
+    ) {
+        let (first, rest) = ops.split_first().expect("at least one operand to compare");
+        let (baseline, _) = work_of(columns, column, &first.1, candidate);
+        assert!(
+            baseline.runs > 0 && baseline.slots > 0,
+            "{}: the scan traversed nothing, so the comparisons below would hold vacuously. A \
+             --release build is the ordinary cause — the counter is compiled under debug_assertions \
+             (tessera_filter::take_scan_work)",
+            first.0
+        );
+        for (label, operand) in rest {
+            let (work, _) = work_of(columns, column, operand, candidate);
+            assert_eq!(
+                work, baseline,
+                "{label} traversed differently from {}: the two must cost the same",
+                first.0
+            );
+        }
+    }
+
+    /// **`eq` costs the same whether or not the needle exists.** The three needles below are a key
+    /// the layer holds, a key sorting after every key it holds, and one sorting before all of them —
+    /// so a short circuit reached by any of the resolve's paths shows up as a shorter traversal.
+    #[test]
+    fn eq_traverses_alike_whether_or_not_the_needle_resolves() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                universal(&[0, 1, 0, 2]),
+                dict(&["alpha", "beta", "gamma"]),
+            )],
+        );
+        let candidate = set(&[0, 1, 2, 3]);
+        // The held needle really does match, so the equality below is two scans that found
+        // different things, not two that found nothing.
+        let (_, held) = work_of(&columns, "sub", &eq("beta"), &candidate);
+        assert_eq!(held, vec![1]);
+        let (_, absent) = work_of(&columns, "sub", &eq("delta"), &candidate);
+        assert!(absent.is_empty(), "no entity carries delta");
+
+        traverse_alike(
+            &columns,
+            "sub",
+            &candidate,
+            &[
+                ("a needle the dictionary holds", eq("beta")),
+                ("a needle no dictionary holds", eq("delta")),
+                ("a needle sorting below every key", eq("aa")),
+            ],
+        );
+    }
+
+    /// **The shape a flush produces: layers that disagree about a key.** `alpha` is in the base's
+    /// dictionary and not the extent's, `gamma` in the extent's and not the base's, `delta` in
+    /// neither — and all three must scan both layers in full.
+    ///
+    /// This is the case a naive early return optimises and no answer-level test can catch: skipping
+    /// a layer whose dictionary does not resolve the needle returns exactly the right entities, from
+    /// exactly the layers that could hold them, for less work — which is the channel, and is why
+    /// these route through [`FilterColumns::resolve`] rather than through one layer's scan.
+    #[test]
+    fn eq_traverses_alike_where_the_layers_disagree() {
+        let columns = keyword_column(
+            "sub",
+            vec![
+                // Base: alpha = 0, beta = 1, over entities 0..3.
+                (None, universal(&[0, 1, 0]), dict(&["alpha", "beta"])),
+                // Extent: beta = 0, gamma = 1, over entities 10 and 11.
+                (
+                    Some("extents/f1.arrow"),
+                    partial(&[10, 11], &[1, 0]),
+                    dict(&["beta", "gamma"]),
+                ),
+            ],
+        );
+        let candidate = set(&[0, 1, 2, 10, 11]);
+        for (needle, expected) in [
+            ("alpha", vec![0, 2]),
+            ("gamma", vec![10]),
+            ("beta", vec![1, 11]),
+            ("delta", vec![]),
+        ] {
+            let (_, out) = work_of(&columns, "sub", &eq(needle), &candidate);
+            assert_eq!(out, expected, "{needle} over both layers");
+        }
+
+        traverse_alike(
+            &columns,
+            "sub",
+            &candidate,
+            &[
+                ("a needle both layers hold", eq("beta")),
+                ("a needle only the base holds", eq("alpha")),
+                ("a needle only the extent holds", eq("gamma")),
+                ("a needle neither holds", eq("delta")),
+            ],
+        );
+    }
+
+    /// **A prefix nothing carries costs what a prefix everything carries costs**, including the
+    /// prefix that sorts below every key.
+    ///
+    /// That last one is the case [`OrdinalPredicate::Range`]'s inclusive bound exists for: as a
+    /// half-open `0..0` it narrows to an upper bound of −1, which the range scan finds
+    /// unrepresentable and answers *without scanning*. `zeta` sorts above every key and `alphabet`
+    /// falls inside the dictionary while matching no key, so all three empty shapes are here.
+    #[test]
+    fn a_prefix_matching_nothing_traverses_what_a_matching_prefix_does() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                universal(&[0, 1, 2, 0]),
+                dict(&["alpha", "alpine", "beta"]),
+            )],
+        );
+        let candidate = set(&[0, 1, 2, 3]);
+        let (_, matched) = work_of(&columns, "sub", &prefix("alp"), &candidate);
+        assert_eq!(matched, vec![0, 1, 3]);
+
+        traverse_alike(
+            &columns,
+            "sub",
+            &candidate,
+            &[
+                ("a prefix two keys carry", prefix("alp")),
+                ("a prefix sorting below every key", prefix("aa")),
+                ("a prefix sorting above every key", prefix("zeta")),
+                (
+                    "a prefix inside the dictionary that no key carries",
+                    prefix("alphabet"),
+                ),
+            ],
+        );
+    }
+
+    /// **An `in` set costs the same however many of its needles resolve.** The three sets below name
+    /// three needles each — the operand's own length held equal, because the per-slot search is
+    /// `O(log k)` in *k*, the caller's own quantity, and it is the traversal rather than *k* that
+    /// must not vary with what the corpus holds.
+    #[test]
+    fn an_in_set_traverses_alike_however_many_needles_resolve() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                universal(&[0, 1, 2, 1]),
+                dict(&["alpha", "beta", "gamma"]),
+            )],
+        );
+        let candidate = set(&[0, 1, 2, 3]);
+        let (_, some) = work_of(
+            &columns,
+            "sub",
+            &in_set(&["alpha", "delta", "zulu"]),
+            &candidate,
+        );
+        assert_eq!(some, vec![0], "only alpha of the three is held");
+
+        traverse_alike(
+            &columns,
+            "sub",
+            &candidate,
+            &[
+                ("every needle resolves", in_set(&["alpha", "beta", "gamma"])),
+                (
+                    "one needle of three resolves",
+                    in_set(&["alpha", "delta", "zulu"]),
+                ),
+                ("no needle resolves", in_set(&["delta", "zulu", "aa"])),
+            ],
+        );
+    }
+
+    /// **`contains` too**, which records §4.3 states the rule for by name: the broad route's walk
+    /// reads every key whatever the needle, and the ordinal scan that follows it runs on the
+    /// sentinel when no key matched. The candidate and dictionary here put [`contains_route`] on the
+    /// broad route, which is the one whose scan this counter sees.
+    #[test]
+    fn a_contains_matching_no_key_traverses_what_a_matching_one_does() {
+        let columns = keyword_column(
+            "sub",
+            vec![(
+                None,
+                universal(&[0, 1, 2, 1]),
+                dict(&["alpha", "alpine", "beta"]),
+            )],
+        );
+        let candidate = set(&[0, 1, 2, 3]);
+        assert_eq!(
+            contains_route(candidate.cardinality(), 3),
+            ContainsRoute::Broad
+        );
+        let (_, matched) = work_of(&columns, "sub", &contains("lph"), &candidate);
+        assert_eq!(matched, vec![0]);
+
+        traverse_alike(
+            &columns,
+            "sub",
+            &candidate,
+            &[
+                ("a fragment one key contains", contains("lph")),
+                ("a fragment no key contains", contains("zzz")),
+            ],
+        );
+    }
+
+    fn eq(needle: &str) -> FilterOperand {
+        FilterOperand::TextEquals(needle.into())
+    }
+
+    fn prefix(needle: &str) -> FilterOperand {
+        FilterOperand::TextPrefix(needle.into())
+    }
+
+    fn contains(needle: &str) -> FilterOperand {
+        FilterOperand::TextContains(needle.into())
+    }
+
+    fn in_set(needles: &[&str]) -> FilterOperand {
+        FilterOperand::TextIn(needles.iter().map(|n| (*n).into()).collect())
     }
 
     // -------------------------------------------------------------------------------------
