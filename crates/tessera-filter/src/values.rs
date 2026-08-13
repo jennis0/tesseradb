@@ -32,7 +32,41 @@
 //! collapses to 2.9–10.2 s on a broad candidate, because rank becomes a binary search per candidate
 //! entity. **Neither is a tuning choice a later reader should revisit from the storage column
 //! alone.**
+//!
+//! # The traversal is counted, so indistinguishability can be a test rather than a comment
+//!
+//! The property above is a claim about **work**, and the keyword family turns it into one the suite
+//! has to check: a needle no dictionary resolves becomes a reserved ordinal and is scanned for
+//! anyway, so that *no item has this value* is not cheaper than *some do* (`records-and-search.md`
+//! §4.3). Asserting that with a stopwatch is worse than not asserting it — a wall-clock comparison
+//! goes green on a loaded machine, which is the direction that lets the channel reopen unnoticed.
+//! [`take_scan_work`] reports instead what the calling thread's scans have traversed, in runs and
+//! slots, and the assertion is that two needles cost the same non-zero amount of it.
+//!
+//! **Runs and slots are the honest unit because [`ValueColumn::for_each_slot_run`] is the sole
+//! traversal**: every predicate of every family reaches its values through it, so work skipped
+//! anywhere above it — an early return, a bound narrowed to something unrepresentable, a layer
+//! passed over — arrives here as fewer slots, and a scan that ran to completion reports the same
+//! slots whatever it was looking for. Two quantities rather than one because they answer different
+//! halves of "the same candidate consulted": runs is how much of the candidate's structure was
+//! walked, slots is how many values were compared. What this deliberately does not count is work
+//! outside the traversal — the broad `contains` route's per-key dictionary walk, which is bounded by
+//! the artefact and asserted where it lives — or a break inside one run's element loop, which is not
+//! the shape a "this can match nothing, so skip it" optimisation takes.
+//!
+//! **Compiled only under `debug_assertions`, and thread-local rather than global.** The counter sits
+//! in the traversal's callback, which the scattered case reaches once per candidate entity, and this
+//! module has already measured that position as worth 20% (see [`ValueColumn::walk_typed`]) — so an
+//! always-compiled counter would buy the assertion with a permanent regression on the arm that can
+//! least afford one, and a shared atomic would additionally put a contended cache line under every
+//! parallel scan. Thread-local also makes the count correct under the test harness, which runs tests
+//! concurrently in one process; the limit to read with it is that a scan handed to another thread is
+//! not counted by the thread that asked for it. Read the release consequence too: a `--release` test
+//! run finds a counter that never moves, so the work assertions fail loudly rather than passing
+//! vacuously — they are debug-build assertions, and the gate builds them that way.
 
+#[cfg(debug_assertions)]
+use std::cell::Cell;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -697,6 +731,57 @@ pub struct Endpoint {
     pub inclusive: bool,
 }
 
+/// What scans have traversed: the unit the work assertions are written in (see this module's
+/// header for why it is counted at all, and why it is counted here).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanWork {
+    /// Contiguous slot ranges visited — the candidate's own run structure, clipped to the column's
+    /// presence and cut at [`CHUNK`]. The traversal's answer to "how much of the candidate was
+    /// consulted".
+    pub runs: u64,
+    /// Slots those ranges cover: one per candidate entity the column holds a value for, which is
+    /// the number of values the predicate was compared against.
+    pub slots: u64,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SCAN_WORK: Cell<ScanWork> = const { Cell::new(ScanWork { runs: 0, slots: 0 }) };
+}
+
+/// Record one slot range against the calling thread's counter.
+#[cfg(debug_assertions)]
+#[inline]
+fn record_slot_run(slots: usize) {
+    SCAN_WORK.with(|w| {
+        let mut work = w.get();
+        work.runs += 1;
+        work.slots += slots as u64;
+        w.set(work);
+    });
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn record_slot_run(_slots: usize) {}
+
+/// The work this thread's scans have traversed since this was last called, and reset.
+///
+/// **Read-and-reset rather than read**, so a caller that forgets to clear the counter measures the
+/// scan it just ran rather than that scan plus everything before it — the failure mode of a
+/// peek-only accessor is a work assertion that passes on the wrong number.
+///
+/// Zero in a `--release` build, where nothing records: see this module's header.
+#[cfg(debug_assertions)]
+pub fn take_scan_work() -> ScanWork {
+    SCAN_WORK.with(|w| w.replace(ScanWork::default()))
+}
+
+#[cfg(not(debug_assertions))]
+pub fn take_scan_work() -> ScanWork {
+    ScanWork::default()
+}
+
 /// One filterable column: its values in entity order, and how an entity id reaches one.
 #[derive(Debug)]
 pub struct ValueColumn {
@@ -762,6 +847,13 @@ impl ValueColumn {
         len: usize,
         mut f: impl FnMut(usize, usize, u32),
     ) {
+        // Counted here, once, for the same reason the traversal is here once: a range reaches a
+        // predicate only through this call, so this is the one place that can see all of the work
+        // and none of what a caller does with it. Nothing in release builds — see the header.
+        let mut f = |slot0: usize, count: usize, entity0: u32| {
+            record_slot_run(count);
+            f(slot0, count, entity0);
+        };
         match &self.presence {
             // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
             // array. The run structure is the *candidate's*, so a scattered candidate degenerates
