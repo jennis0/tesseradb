@@ -194,6 +194,8 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             # since 2026-08-12 — required for the same positional reason, inert for the same
             # reason (the flush-side blob extent is unbuilt, records §7 ⊘).
             pa.field("shelf", pa.utf8()),
+            # A text column arrives at its wire type, `utf8`, like the other two string families.
+            pa.field("abstract", pa.utf8()),
             pa.field("note", pa.utf8()),
             pa.field("pages", pa.uint32()),
         ]
@@ -210,6 +212,10 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.array([f"ingested-{i}" for i in range(len(external_ids))], type=pa.utf8()),
             pa.array([f"relay-restart-{i}" for i in range(len(external_ids))], type=pa.utf8()),
             pa.array(["north"] * len(external_ids), type=pa.utf8()),
+            pa.array(
+                [f"an ingested abstract ref{i}" for i in range(len(external_ids))],
+                type=pa.utf8(),
+            ),
             pa.array(
                 [f"ingested-note-{i}" for i in range(len(external_ids))], type=pa.utf8()
             ),

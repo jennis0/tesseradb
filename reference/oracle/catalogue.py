@@ -233,6 +233,12 @@ type     = "keyword"
 index    = true
 
 [[attribute]]
+name     = "abstract"
+type     = "text"
+index    = true
+analyser = "unicode"
+
+[[attribute]]
 name     = "note"
 type     = "keyword"
 
@@ -290,6 +296,7 @@ SHELF_ABSENT_STRIDE = 109
 NOTE_ABSENT_STRIDE = 113
 PAGES_ABSENT_STRIDE = 127
 SUBMITTER_ABSENT_STRIDE = 131
+ABSTRACT_ABSENT_STRIDE = 137
 
 # `pages` is planted as a *present zero* on this stride (after the absence rule): the blob must
 # keep "carries the value 0" and "carries no value" distinct, absence being absence from the row.
@@ -353,6 +360,75 @@ def title_of(source_id: int) -> str | None:
     if source_id % TITLE_ABSENT_STRIDE == 0:
         return None
     return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{PLANTED_ID_BASE + source_id}"
+
+
+# ---------------------------------------------------------------------------------------------
+# abstract — the text column
+# ---------------------------------------------------------------------------------------------
+
+# The prose is assembled from four slots, and each slot exists to make one property of the family
+# falsifiable rather than incidentally true.
+#
+# **A shared head, so every document has words in common.** Without it the postings are all
+# singletons, every `match` is answered by one posting, and a conjunction that took the first
+# token's answer instead of the intersection would pass.
+_ABSTRACT_HEAD = "the archive holds"
+
+# **An adjacent pair and its reverse, planted on different entities.** This is the whole of what
+# separates `phrase` from `match`: an entity carrying both words apart matches the conjunction and
+# must not match the phrase. `_ABSTRACT_PAIR` is the ordered one; the same two words appear
+# reversed and separated on the complementary residue, so both directions have a witness and a
+# counter-witness.
+_ABSTRACT_PAIR = ("quiet", "harbour")
+
+# **Non-Latin prose on a stride**, because the analyser's whole reason for being is that a
+# split-on-spaces tokeniser produces garbage for scripts without inter-word spaces. A conformance
+# suite whose text is all English tests the index and not the analyser. The Japanese phrase
+# segments into several tokens with no space between them; the Thai likewise.
+_ABSTRACT_CJK = "日本語のテキスト"
+_ABSTRACT_THAI = "ภาษาไทยเป็นภาษา"
+
+# **A word carried by exactly one entity**, the text family's answer to the keyword ordinal
+# boundaries: a `match` on it is a single-item answer, and a posting confused across layers or
+# ordinals returns a different item rather than none. Off every stride, inside `cross_lo`.
+ABSTRACT_SOLE_ID = 65_902
+ABSTRACT_SOLE_WORD = "quinquagenarian"
+
+# A word no document carries, for the hidden-versus-absent pair the register accepts as a timing
+# channel (Appendix C, C25) and requires to be *identical in the answer*.
+ABSTRACT_ABSENT_WORD = "zzzznonesuch"
+
+
+def abstract_of(source_id: int) -> str | None:
+    """`abstract` as planted — the text column. See [`department_of`] for the contract: what the
+    entity was *given*, upstream of the tokens the build derived from it.
+
+    The oracle answers `match` and `phrase` by tokenising this string through the **same analyser
+    the engine used**, reached over `tessera tokenise` so neither side owns a second segmentation
+    (decision 0070). What the differential then compares is two constructions over one token
+    stream: the engine's dictionary-and-postings, and a per-entity walk of this function.
+    """
+    if source_id % ABSTRACT_ABSENT_STRIDE == 0:
+        return None
+    first, second = _ABSTRACT_PAIR
+    parts = [_ABSTRACT_HEAD]
+    # The adjacency witness and its counter-witness, on complementary residues so both are dense
+    # enough for every catalogue principal to reach some of each.
+    if source_id % 3 == 0:
+        parts.append(f"{first} {second}")
+    elif source_id % 3 == 1:
+        # Both words, in the other order and not adjacent: matches the conjunction, not the phrase.
+        parts.append(f"{second} of the {first}")
+    if source_id % 5 == 0:
+        parts.append(_ABSTRACT_CJK)
+    if source_id % 7 == 0:
+        parts.append(_ABSTRACT_THAI)
+    if source_id == ABSTRACT_SOLE_ID:
+        parts.append(ABSTRACT_SOLE_WORD)
+    # A per-entity token, so the vocabulary has the long singleton tail real prose has and the
+    # postings exercise both encodings. Offset past the id space for `PLANTED_ID_BASE`'s reason.
+    parts.append(f"ref{PLANTED_ID_BASE + source_id}")
+    return " ".join(parts)
 
 
 def shelf_of(source_id: int) -> str | None:
@@ -483,7 +559,15 @@ def blob_entities_expected() -> set[int]:
     blob's one licensed artefact check (records §3, review B7) — the *addressing* is what the
     artefact walk verifies; *which entities have a row* is the fixture's own fact."""
     return {
-        e for e in range(N_ITEMS) if note_of(e) is not None or pages_of(e) is not None
+        e
+        for e in range(N_ITEMS)
+        if note_of(e) is not None
+        or pages_of(e) is not None
+        # **`abstract` counts here even though it is indexed**: text is blob-resident whatever its
+        # flags, so an entity with prose has a blob row for it whether or not it has a `note` or
+        # `pages` (records §4.4). Omitting it would make the has-row expectation short by every
+        # entity whose only blob-resident value is its prose.
+        or abstract_of(e) is not None
     }
 
 
@@ -511,6 +595,9 @@ def record_of(source_id: int, fx: list[int]) -> dict[str, object]:
         "archive": archive_of(source_id),
         "title": title_of(source_id),
         "submitter": submitter_of(source_id),
+        # **A text column's record is its prose**, not its terms: the tokens are an index and the
+        # blob is where the value lives, which is the two-homes rule (records §4.4).
+        "abstract": abstract_of(source_id),
         "note": note_of(source_id),
         "pages": pages_of(source_id),
     }
@@ -544,6 +631,13 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
         "shelf": ("category", frozenset({"eq", "in"})),
         "title": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
         "submitter": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
+        # **`abstract` publishes `text` and exactly two operators, and none of the four string
+        # predicates is among them.** That absence is the point of the family split: a text
+        # column's stored form is a token index, so there is no stored value for `eq` to compare
+        # bytes against or for `prefix` to anchor on. `phrase` is published beside `match` because
+        # it is built — an operand list that named an operator the parse gate would refuse is the
+        # drift this function exists to pin.
+        "abstract": ("text", frozenset({"match", "phrase"})),
         "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
     }
 
@@ -948,6 +1042,10 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 ),
                 # The render-only category arrives as its key, like the other two categories.
                 "shelf": pa.array([shelf_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # A text column arrives as its prose, exactly as written — the analyser is the
+                # build's and a data file supplying tokens would be naming a segmentation the
+                # manifest has not recorded yet (records §4.4, decision 0070).
+                "abstract": pa.array([abstract_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 # The blob-resident pair. A null is the absent value — for these, absence from
                 # the record blob's row and (jointly) from its has-row bitmap.
                 "note": pa.array([note_of(i) for i in range(N_ITEMS)], type=pa.string()),

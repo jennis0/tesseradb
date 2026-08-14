@@ -97,8 +97,9 @@ pub struct DeclaredScalar {
 }
 
 impl DeclaredScalar {
-    /// The arrow type an ingest batch must present this column at: `utf8` for a category — whatever
-    /// its code width — and the storage type for everything else.
+    /// The arrow type an ingest batch must present this column at: **`utf8` for all three string
+    /// families** — a category whatever its code width, a keyword, and a text column — and the
+    /// storage type for everything else.
     ///
     /// **The one place the wire/storage split is decided, and it is a function of the declaration
     /// alone.** A category's codes are minted by the server and never supplied
@@ -122,6 +123,11 @@ impl DeclaredScalar {
             // a per-layer index internal (`records-and-search.md` §4.3): it is not stable across
             // layers, so a caller could not name one even if the boundary let it.
             None if self.arrow_type == ScalarType::Keyword => ScalarType::Utf8,
+            // Text is the third column of the same split, and the widest of the three: it is stored
+            // as **no per-entity value at all** — a token dictionary, postings over it, and a blob
+            // row — and supplied as the prose. A caller could not name the storage form if the
+            // boundary let it, there being nothing per entity to name.
+            None if self.arrow_type == ScalarType::Text => ScalarType::Utf8,
             None => self.arrow_type,
         }
     }

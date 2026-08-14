@@ -583,6 +583,10 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             # for the same reason — and for the blob pair doubly so: the flush-side blob extent
             # is unbuilt (records §7 ⊘), so these values reach the WAL and no artefact yet.
             pa.field("shelf", pa.utf8()),
+            # A text column arrives at its **wire** type, `utf8`, like the other two string
+            # families — it stores no per-entity value at all, so there is nothing else it could
+            # arrive as (contracts §2.2).
+            pa.field("abstract", pa.utf8()),
             pa.field("note", pa.utf8()),
             pa.field("pages", pa.uint32()),
         ]
@@ -599,6 +603,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.array([f"ingested-{i}" for i in range(rows)], pa.utf8()),
             pa.array([f"relay-overlay-{i}" for i in range(rows)], pa.utf8()),
             pa.array(["north"] * rows, pa.utf8()),
+            pa.array([f"an ingested abstract ref{i}" for i in range(rows)], pa.utf8()),
             pa.array([f"ingested-note-{i}" for i in range(rows)], pa.utf8()),
             pa.array([100 + i for i in range(rows)], pa.uint32()),
         ],

@@ -33,11 +33,19 @@ from oracle import record_blob as rb
 def _blob_tags(manifest: dict) -> set[int]:
     """The manifest positions of the blob-resident columns — a row's `tag` is the column's
     position in `declared_scalars` (an index internal, resolved server-side, never on the
-    wire), and only a neither-key column may appear in a row."""
+    wire), and only a blob-resident column may appear in a row.
+
+    **Two rules, not one.** A column with neither placement key is blob-resident because it has
+    nowhere else to be; a **`text`** column is blob-resident *whatever its flags say*, because its
+    index is postings over words and no drill-down can rebuild a sentence from the set of words it
+    contained (records §4.4). That second rule is the family's defining property, and a predicate
+    carrying only the first reads an indexed text column's own prose as a leak.
+    """
     return {
         position
         for position, declared in enumerate(manifest["declared_scalars"])
-        if not declared["index"] and not declared["render"]
+        if declared["arrow_type"] == "text"
+        or (not declared["index"] and not declared["render"])
     }
 
 
@@ -46,11 +54,20 @@ def test_the_blob_declares_exactly_the_fixtures_blob_columns(catalogue_bundle):
     else is — in particular not the render-only category (`shelf`), because a category is never
     blob-resident (records §4.2: its entity-space structures are the constant floor)."""
     by_name = {d["name"]: d for d in catalogue_bundle.manifest["declared_scalars"]}
-    blob_resident = {
+    neither_key = {
         name for name, d in by_name.items() if not d["index"] and not d["render"]
     }
-    assert blob_resident == {"note", "pages"}
+    assert neither_key == {"note", "pages"}
     assert by_name["shelf"]["render"] and not by_name["shelf"]["index"]
+    # **And `abstract` is blob-resident *as well as* indexed** — the only family with two homes.
+    # Its terms answer `match`; its prose is a blob row, because postings reconstruct nothing.
+    assert by_name["abstract"]["arrow_type"] == "text"
+    assert by_name["abstract"]["index"] and not by_name["abstract"]["render"]
+    assert _blob_tags(catalogue_bundle.manifest) == {
+        position
+        for position, d in enumerate(catalogue_bundle.manifest["declared_scalars"])
+        if d["name"] in {"note", "pages", "abstract"}
+    }
 
 
 def test_the_blob_addressing_is_self_consistent(catalogue_bundle_root, catalogue_bundle):

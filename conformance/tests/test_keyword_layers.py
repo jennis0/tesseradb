@@ -180,6 +180,7 @@ def _ingest_body(values: list[str | None], fx: list[int], external_base: int) ->
             pa.field("title", pa.utf8()),
             pa.field("submitter", pa.utf8()),
             pa.field("shelf", pa.utf8()),
+            pa.field("abstract", pa.utf8()),
             pa.field("note", pa.utf8()),
             pa.field("pages", pa.uint32()),
         ]
@@ -200,6 +201,12 @@ def _ingest_body(values: list[str | None], fx: list[int], external_base: int) ->
             pa.array([f"ingested-{cat.PLANTED_ID_BASE + i}" for i in range(n)], pa.utf8()),
             pa.array(values, pa.utf8()),
             pa.array(["north"] * n, pa.utf8()),
+            # The text column. Prose rather than tokens — the analyser is the flush's, and this
+            # module reads none of it; what it needs is a well-formed value in every declared slot.
+            pa.array(
+                [f"an ingested abstract ref{cat.PLANTED_ID_BASE + i}" for i in range(n)],
+                pa.utf8(),
+            ),
             pa.array([f"ingested-note-{cat.PLANTED_ID_BASE + i}" for i in range(n)], pa.utf8()),
             pa.array([100 + i for i in range(n)], pa.uint32()),
         ],
