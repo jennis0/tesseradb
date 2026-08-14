@@ -428,11 +428,11 @@ impl CacheWeight for FrozenFragment {
 /// between clears" — assumed, not measured; at ~80 B per entry it caps this map at ~330 KB.
 const KEY_MEMO_MAX_ENTRIES: usize = 4096;
 
-/// What a canonical key is memoised against: the credential, the dictionary length its terms were
-/// resolved through, and the watermark the fragment covers. All three, because each of them alone
+/// What a canonical key is memoised against: the credential, the **generation stamp its terms were
+/// resolved against**, and the watermark the fragment covers. All three, because each of them alone
 /// changes what the same credential's fragment contains over time — see
 /// [`FragmentCache::get_or_build`].
-type KeyMemoKey = ([u8; 32], u32, u64);
+type KeyMemoKey = ([u8; 32], u64, u64);
 
 /// Directory-backed frozen fragment store.
 ///
@@ -771,25 +771,37 @@ impl FragmentCache {
     ///
     /// **Caller obligation:** `auth_data_hash` must identify the *credential* whose evaluation
     /// produced `satisfied` — i.e. it must be a (collision-resistant) function of the same
-    /// `auth_data` that the auth plugin evaluated to obtain `satisfied`; and `dict_len` must be
-    /// the length of the dictionary that resolution went through. Together they must never arrive
-    /// paired with two different term sets.
+    /// `auth_data` that the auth plugin evaluated to obtain `satisfied`; and `resolved_at` must be
+    /// the generation stamp that resolution ran against. Together they must never arrive paired
+    /// with two different term sets.
     ///
-    /// **`dict_len` is in the memo key because the same credential legitimately resolves to
+    /// **`resolved_at` is in the memo key because the same credential legitimately resolves to
     /// different term sets over time.** A flush promotes a novel descriptor to a durable ordinal
     /// (§3.2), so a credential naming it resolves to *more* terms after that flush than before —
     /// and `auth_data_hash` alone would then map to the older, smaller set, silently defeating the
-    /// promotion and, if a dictionary could ever renumber, returning a fragment for the wrong
-    /// grant set outright. Dictionary length is monotone across flushes and is exactly what the
-    /// resolution depended on besides the credential itself, so the pair identifies the
-    /// resolution. Compaction inherits the obligation to keep it monotone (§3.3). The in-memory
-    /// canonical-key fast path trusts this: on a memo hit it returns the previously-computed
-    /// canonical key *without* re-deriving it from `satisfied`, so a caller that violates the
-    /// obligation would silently get back a fragment built for a *different* grant set — an I2
-    /// disclosure if that other set happens to be a superset. Debug builds catch a violation via
-    /// a `debug_assert_eq!` against a freshly recomputed key; release builds do not re-check on
-    /// the fast path (that would defeat its purpose), so this obligation is load-bearing in
-    /// release too.
+    /// promotion and, if a dictionary could ever renumber, returning a fragment for the wrong grant
+    /// set outright.
+    ///
+    /// **It is the generation's own stamp rather than the dictionary's length, and the difference
+    /// is what the obligation rests on** (#112, 2026-08-14). Length was the natural proxy and is a
+    /// faithful one only while three separate things hold: that a dictionary grows by appending
+    /// within a prefix, that nothing but a fold removes or renumbers a term, and that a fold
+    /// rotates this cache and so empties this map. The third does all the work — compaction sweeps
+    /// terms, so a fold *can* leave a dictionary of a length it held before meaning something
+    /// different — and it is exactly the fact a later change would break by keeping the cache warm
+    /// across a rotation, which is an obvious thing to want. A monotone generation stamp needs none
+    /// of them: the engine refuses any publication that does not strictly increase it, so a
+    /// dictionary that changes at all changes this, and the dictionary may then be rebuilt however
+    /// compaction likes. `dict_len` also carried an obligation on compaction to keep it monotone;
+    /// that obligation is discharged rather than inherited.
+    ///
+    /// The in-memory canonical-key fast path trusts this: on a memo hit it returns the
+    /// previously-computed canonical key *without* re-deriving it from `satisfied`, so a caller
+    /// that violates the obligation would silently get back a fragment built for a *different*
+    /// grant set — an I2 disclosure if that other set happens to be a superset. Debug builds catch
+    /// a violation via a `debug_assert_eq!` against a freshly recomputed key; release builds do not
+    /// re-check on the fast path (that would defeat its purpose), so this obligation is
+    /// load-bearing in release too.
     ///
     /// `postings` and `deltas` supply the union inputs on a cache miss.
     ///
@@ -826,12 +838,12 @@ impl FragmentCache {
         &self,
         satisfied: &[TermId],
         auth_data_hash: [u8; 32],
-        dict_len: u32,
+        resolved_at: u64,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let memo_key = (auth_data_hash, dict_len, watermark);
+        let memo_key = (auth_data_hash, resolved_at, watermark);
         let key = {
             let cached = self.key_memo.lock().unwrap().get(&memo_key).copied();
             match cached {
@@ -844,11 +856,11 @@ impl FragmentCache {
                             satisfied,
                             watermark
                         ),
-                        "get_or_build: auth_data_hash {auth_data_hash:02x?} was previously \
-                         and dict_len {dict_len} were previously associated with a different term \
-                         set than `satisfied` now hashes to — callers must derive auth_data_hash \
-                         from the same auth_data that produced `satisfied`, and dict_len from the \
-                         dictionary it resolved through (see this method's doc: a violation \
+                        "get_or_build: auth_data_hash {auth_data_hash:02x?} at generation stamp \
+                         {resolved_at} was previously associated with a different term set than \
+                         `satisfied` now hashes to — callers must derive auth_data_hash from the \
+                         same auth_data that produced `satisfied`, and resolved_at from the \
+                         generation it resolved against (see this method's doc: a violation \
                          silently returns a fragment for the wrong grant set, an I2 disclosure \
                          risk)"
                     );

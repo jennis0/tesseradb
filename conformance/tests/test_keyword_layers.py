@@ -227,12 +227,13 @@ def layers(tmp_path_factory, private_catalogue_bundle):
     module and every later run reading a corpus nobody built.
 
     **A session is authorised only after the flush it is meant to see, and never before the
-    first.** A session's visible set is materialised once, at authorise; and on this build a
-    credential that named the ingest's access descriptor *before* the flush which promoted it keeps
-    its pre-flush visible set thereafter, even across a re-authorise (`README.md`, "Known
-    limitations" — observed, reported, not diagnosed). Every stage below therefore authorises fresh
-    after its flush, and asserts the unfiltered served count is the corpus it expects before
-    checking any keyword answer, so a stale generation fails as its own precondition rather than as
+    first.** A session's visible set is materialised once, at authorise. That used to be load
+    bearing against a defect — a credential naming the ingest's access descriptor *before* the flush
+    which promoted it kept its pre-flush visible set thereafter, even across a re-authorise — which
+    was diagnosed and fixed on 2026-08-14 (#112, and `dict_generation.rs` pins it). The habit is
+    kept because it is the right one anyway: it says what each stage is meant to see. Every stage
+    below authorises fresh after its flush, and asserts the unfiltered served count is the corpus it
+    expects before checking any keyword answer, so a stale generation fails as its own precondition rather than as
     an unexplained keyword disagreement.
     """
     tmp_dir = tmp_path_factory.mktemp("keyword-layers")

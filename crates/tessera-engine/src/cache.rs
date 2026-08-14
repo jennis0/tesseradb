@@ -134,6 +134,16 @@ pub(crate) struct SessionGeometry {
     pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
     /// `sha256(auth_data)`, the fragment cache's caller obligation.
     pub(crate) auth_data_hash: [u8; 32],
+    /// **The generation `satisfied_sorted` was resolved against** — carried so the background
+    /// refresh can discharge the other half of that obligation (#112).
+    ///
+    /// The refresh rebuilds a fragment from a term set frozen at some earlier authorise, so it must
+    /// name the generation that term set belongs to and never the one it happens to be running
+    /// against. Pairing the two wrongly poisons `FragmentCache`'s canonical-key memo for every
+    /// later authorise of the same credential — and this pass runs automatically after every
+    /// flush, for every resident session, which is what made the defect look like it had no
+    /// trigger.
+    pub(crate) satisfied_at: u64,
 }
 
 impl CacheWeight for SessionGeometry {

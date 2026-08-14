@@ -223,6 +223,16 @@ pub struct Session {
     pub(crate) unresolved_count: usize,
     /// See [`Self::unresolved_count`].
     pub(crate) dict_len_at_authorise: u32,
+    /// **The generation this session's `satisfied` was resolved against**, which is what
+    /// [`Engine::fragment_for`] must hand `FragmentCache::get_or_build` alongside the frozen term
+    /// set (#112).
+    ///
+    /// Distinct from [`Self::dict_len_at_authorise`] and not a duplicate of it: that one answers
+    /// *has the dictionary grown since* and is the staleness condition's own input, where this one
+    /// identifies the resolution. A length is a faithful stand-in for a generation only while the
+    /// dictionary is append-only, which a fold breaks — `get_or_build`'s doc argues the difference,
+    /// and it is why keying the memo on the length left a trap for a change nobody had made yet.
+    pub(crate) segments_version_at_authorise: u64,
 }
 
 impl Session {
@@ -1193,7 +1203,7 @@ impl Engine {
             .get_or_build(
                 &satisfied_sorted,
                 auth_data_hash,
-                generation.dict.len(),
+                generation.segments_version,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
@@ -1225,6 +1235,7 @@ impl Engine {
             expires_at,
             unresolved_count,
             dict_len_at_authorise: generation.dict.len(),
+            segments_version_at_authorise: generation.segments_version,
         })
     }
 
@@ -1650,7 +1661,7 @@ impl Engine {
     ///
     /// **What that costs, and where it is now paid.** One `build_fragment_with_deltas` per
     /// *credential*, not per session: [`tessera_authz::FragmentCache`] keys on
-    /// `(satisfied, auth_data_hash, dict_len, watermark)`, so every session sharing a credential
+    /// `(satisfied, auth_data_hash, resolved_at, watermark)`, so every session sharing a credential
     /// shares the build. **Measured at ~200 ms at 10⁹ and flat in tier count**
     /// (`probes/2026-08-04-refresh-ladder/` — P2, which refuted the modelled-seconds figure the
     /// corpus carried). That is three orders over decision 0044's request-path budget, so this no
@@ -1686,7 +1697,22 @@ impl Engine {
             .get_or_build(
                 &session.satisfied_sorted,
                 session.auth_data_hash,
-                generation.dict.len(),
+                // **The generation the session's `satisfied` was resolved against, not the live
+                // one** (#112). `get_or_build` memoises `auth_data_hash → canonical key` under
+                // `(hash, resolved_at, watermark)`, and its caller obligation is that the hash and
+                // the stamp "must never arrive paired with two different term sets". This session's
+                // `satisfied` was frozen at authorise, against the generation as it stood then;
+                // passing the *live* stamp pairs a stale term set with a generation that has moved
+                // past it, and the memo keeps that pairing.
+                //
+                // The cost was not to this session, which is stale either way until it
+                // re-authorises (`Session::is_stale`). It was to the **next** authorise of the same
+                // credential: that one resolves the promoted descriptor correctly, hits the entry
+                // this call left behind, and is handed the fragment for the grant set it has just
+                // stopped having — a session served its pre-flush visible set indefinitely, with
+                // nothing later repairing it. Same bytes took the poisoned path and different bytes
+                // naming the same terms did not, which is the asymmetry that identified it.
+                session.segments_version_at_authorise,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,

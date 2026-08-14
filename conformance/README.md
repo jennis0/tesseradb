@@ -104,15 +104,23 @@ cost. `reference/tests` still uses that corpus and is a separate question.
   `a_coalesced_keyword_extent_reads_back_every_entitys_own_key`. There is
   therefore no HTTP-reachable state to test, and `test_keyword_layers.py` covers the **fold** — the
   route such a column actually takes — rather than hand-writing an artefact to fake the other.
-- **A session does not see a flush that promoted a descriptor it had already named.** Observed on
-  this build, deterministically: authorise with `auth_data` naming a novel descriptor, ingest rows
-  labelled with it, flush — and a session authorised afterwards with the **same `auth_data` bytes**
-  is served the pre-flush visible set indefinitely, while one whose `auth_data` differs (a reordered
-  term list, an extra unknown term) resolving to the same term set is served the correct one.
-  Reported, not diagnosed; the suite works around it by never naming an ingest's access descriptor
-  in a credential before the flush that promotes it, and `test_keyword_layers.py` asserts the
-  principal's unfiltered corpus size at each stage so a stale generation fails as its own
-  precondition rather than as an unexplained keyword disagreement.
+- ~~**A session does not see a flush that promoted a descriptor it had already named.**~~ **Fixed
+  2026-08-14** (#112). Two callers paired a session's `satisfied` — frozen at authorise — with the
+  *live* generation's dictionary length, which is the one pairing `FragmentCache::get_or_build`'s
+  caller obligation forbids: the memo from `auth_data_hash` to the canonical fragment key then held
+  a pre-promotion term set under a post-promotion length, and the next authorise of the same bytes
+  hit it and was handed the fragment for the grant set it had just stopped having. Both now pass the
+  **generation stamp** the term set was resolved against, which the engine refuses to publish
+  without strictly increasing — where a dictionary length is faithful only while nothing renumbers,
+  and compaction's term sweep can renumber.
+  Pinned by two tests in `crates/tessera-engine/tests/dict_generation.rs`: one drives the
+  request path and one the **background refresh**, which is the caller that made the defect look
+  triggerless — it rebuilds every resident session's fragment after every publication, unprompted,
+  so in a running deployment nobody has to make the request that writes the bad entry. Each test
+  fails on its own call site under the pre-fix behaviour. The suite's own habit of authorising after
+  the flush it means to see is kept: it is good practice independently, and each layering module
+  still asserts the principal's unfiltered corpus size at every stage, so a generation disagreement
+  fails as its own precondition rather than as an unexplained filter result.
 - **`x-tessera-slice`**: unimplemented per the ledger note (Phase 1 ships exactly one slice); not
   exercised.
 - **Task 6's bit-flipped-`.frag`-is-a-cache-miss check**: added as a Rust unit test,
