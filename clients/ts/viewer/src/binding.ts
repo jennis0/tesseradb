@@ -68,6 +68,11 @@ export class DriverBinding {
     );
   }
 
+  /** Forward a changed marks-on-screen budget to the driver; the caller schedules after. */
+  setBudget(budget: number): void {
+    this.driver.setBudget(budget);
+  }
+
   schedule(view: ViewState, width: number, height: number): void {
     this.lastView = view;
     this.width = width;

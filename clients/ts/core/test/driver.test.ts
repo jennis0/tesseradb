@@ -36,6 +36,32 @@ function emptyResponse(pin = 'p1'): ViewportResponse {
   };
 }
 
+/**
+ * One served point in tile (0,0) with a large visible count. An all-empty response reports
+ * `visibleInView = 0`, which reads as saturation and pins every later depth choice at the floor —
+ * so any test about the budget's depth arithmetic needs the planner to stay unsaturated.
+ */
+function servedResponse(visible: bigint): ViewportResponse {
+  const result: ViewportResult = {
+    tiles: [{tile: 0n, visible, matched: visible, served: 1n}],
+    ids: new BigUint64Array([1n]),
+    codes: new BigUint64Array([1n]),
+    positions: new Float64Array([1, 1]),
+    world: new Float32Array([0.1, 0.1]),
+    scalars: {},
+    subCells: null
+  };
+  return {
+    result,
+    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
+    identityKey: 'ik',
+    contentKey: 'p1',
+    pin: 'p1',
+    stale: false,
+    bytes: 0
+  };
+}
+
 function fakeClock(): Clock & {advance(ms: number): Promise<void>; t(): number} {
   let now = 0;
   let seq = 0;
@@ -78,6 +104,8 @@ function harness(opts: {
   revalidateAfterMs?: number;
   fail?: (call: number) => boolean;
   hang?: (call: number, k?: number) => boolean;
+  prefetch?: boolean;
+  respond?: () => ViewportResponse;
 } = {}) {
   const clock = fakeClock();
   const calls: {zoom: number; k?: number; background?: boolean}[] = [];
@@ -89,7 +117,7 @@ function harness(opts: {
       calls.push({zoom: req.zoom, k: req.k, background});
       if (opts.hang?.(n, req.k)) await new Promise<void>((resolve) => hung.push(resolve));
       if (opts.fail?.(n)) throw new TesseraError(429, 'shed', 'saturated');
-      return emptyResponse();
+      return opts.respond ? opts.respond() : emptyResponse();
     },
     Q,
     {slice: 's', now: () => clock.now(), revalidateAfterMs: opts.revalidateAfterMs ?? Infinity}
@@ -102,7 +130,9 @@ function harness(opts: {
     {
       onFrame: () => {},
       onTrace: (kind, fields) => traces.push({kind, fields})
-    }
+    },
+    {},
+    opts.prefetch ?? true
   );
   const view = {target: [0.5, 0.5, 0] as [number, number, number], zoom: 3};
   return {clock, calls, traces, driver, replica, view, hung};
@@ -254,5 +284,28 @@ describe('driver', () => {
     expect(d.bankReady).toBe(false);
     await h.clock.advance(3_000); // the motion resolves at some tier; the hold re-arms
     expect(d.holdSuspended).toBe(false);
+  });
+
+  it('a budget change replans at its depth on the very next schedule — no motion, no settle', async () => {
+    // The budget was frozen into the options at construction, so the viewer's density control
+    // wrote a store field no plan ever read again — the map's density could not be reduced at
+    // all mid-session. Two mechanics are pinned together: `setBudget` reaches the next plan,
+    // and it suspends the depth hold, which would otherwise pin a one-step depth change to the
+    // presented depth and turn the covered path's early return into "the control does nothing".
+    const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n)});
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(600); // fetch, calibration, settle → presented at the budget's depth
+    // Same view again: covered, and the settle's banked suspension is consumed and re-armed.
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(50);
+    expect(h.calls.length).toBeGreaterThan(0);
+    expect(h.calls.every((c) => c.zoom === 10)).toBe(true);
+
+    // At this harness's view the default budget chooses depth 10 and 2,000 chooses depth 9 —
+    // one step, exactly what the un-suspended hold would defer.
+    h.driver.setBudget(2_000);
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(1_000);
+    expect(h.calls.some((c) => c.zoom === 9)).toBe(true);
   });
 });
