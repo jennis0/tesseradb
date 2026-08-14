@@ -11,11 +11,17 @@
 //!
 //! | | measured |
 //! |---|---|
-//! | full projection rebuild | 4 550 ms |
+//! | full projection rebuild | 1 277 ms |
 //! | the patch's bitmap clone alone | 40.9 ms |
 //! | the union the patch then does | 0.24 ms |
 //! | span rebase over a 4-extent merge | 44.6 ms |
 //! | fragment rebuild per credential | ~200 ms |
+//!
+//! The rebuild row is from `probes/2026-08-14-project-decomposition/` and the rest from the ladder
+//! probe above: the one-pass projection changed the rebuild and nothing else, so the **ratios** the
+//! ladder exists to exploit narrowed without reordering. Rebuild against span rebase was 102× and
+//! is 29×; against the union it was 19 000× and is 5 300×. Every rung still earns its place, and
+//! the cheap ones by margins nothing plausible closes.
 //!
 //! The patch is 40.9 ms because the cached value is immutable (lifecycle §7 — "invalidation is key
 //! rotation, never mutation"), so a patch must **copy** before it unions; the copy is the cost and
@@ -43,7 +49,7 @@
 //!
 //! **`refresh_in_flight` is set before the swap**, by the executor, not here. A racer landing
 //! between the swap and this task's first insert must see it set, or after a merge it pays the
-//! measured 4 550 ms rebuild inline — which is the 429 residual's whole point (review finding F5,
+//! measured 1 277 ms rebuild inline — which is the 429 residual's whole point (review finding F5,
 //! 2026-08-04).
 //!
 //! **The fragment and the projection are produced together, into one entry.** Resolving them
@@ -67,7 +73,7 @@ use crate::Generation;
 /// artefact in the process is invalid — but the *session* is not, and its entry still names the
 /// grant, the auth hash and the slice a rebuild needs. Refusing to refresh it is the failure
 /// compaction §6.2 records: the pass produces nothing, clears `refresh_in_flight`, and every
-/// resident session takes an inline 4 550 ms rebuild instead of the bounded 429 the ladder's rung 3
+/// resident session takes an inline 1 277 ms rebuild instead of the bounded 429 the ladder's rung 3
 /// exists to give — the stampede decision 0043 forbids, arriving through the mechanism written to
 /// honour it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +107,7 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
 /// Refresh every resident entry to `generation`, returning how many were produced.
 ///
 /// **Most-recently-used first** (`SingleFlightCache::ready_entries`). This is a serial loop over a
-/// rebuild that costs a *measured* 4 550 ms at 10⁹, so across a compaction it runs for minutes and
+/// rebuild that costs a *measured* 1 277 ms at 10⁹, so across a compaction it runs for minutes and
 /// the keys it has not reached are shed 429; ordering it does not shorten that window, it puts the
 /// tail of it on the sessions least likely to be asking.
 ///
@@ -182,7 +188,7 @@ pub(crate) fn refresh_resident(
             // 2. `can_rebase_extents` — the base permutation is the same file, which no flush and
             //    no merge rewrites within one prefix. Keep the base's contribution, re-project
             //    every extent. This is the rung a **merge** falls to, and it is what keeps a merge
-            //    publication off the 4 550 ms rebuild.
+            //    publication off the 1 277 ms rebuild.
             // 3. Otherwise the whole thing.
             //
             // **Rungs 1 and 2 are gated on the prefix by [`Carry`], not by their own predicates,
@@ -239,8 +245,16 @@ pub(crate) struct RefreshDeps {
     /// **⊘ A fold's publication must not arm this** (decision 0053). The rule, so a future
     /// publication kind does not have to re-litigate it: *shed only while the refresh pass is
     /// shorter than the rebuild it would save.* Flush and merge satisfy it — a ~0.7 s pass against a
-    /// measured 4 550 ms rebuild, so shedding turns a 4.5 s inline build into a 1 s retry. A fold
-    /// inverts it by two orders (a ~180 s pass against a 10.7 s build), so arming this would refuse
+    /// measured 1 277 ms rebuild, so shedding turns a 1.3 s inline build into a 0.7 s retry.
+    ///
+    /// **That margin was 6.5× and is now under 2×**, because the projection got faster and the pass
+    /// did not (`probes/2026-08-14-project-decomposition/`). The rule still selects the same
+    /// answer for both publication kinds, so nothing here changes — but it is now close enough that
+    /// a further improvement to `Permutation::project`, or a slower pass, would invert it for
+    /// flush and merge, and the shed would start costing more than it saves. It is the one
+    /// consequence of that change that wants re-deciding rather than re-wording.
+    ///
+    /// A fold inverts the rule by two orders (a ~180 s pass against a 1.3 s build), so arming this would refuse
     /// every session for minutes to avoid a burst that clears in seconds — and the burst is already
     /// bounded by `ComputeGate`, by `single_flight`, and by `RowProjection::new` fanning out across
     /// the whole pool so concurrent rebuilds contend rather than multiply. After a fold, a missing
@@ -252,7 +266,7 @@ pub(crate) struct RefreshDeps {
     /// it, each arming the flag and each spawning its own pass. With a boolean, whichever pass
     /// finished first cleared it while the other still had un-refreshed keys — and every request
     /// for a key neither had reached fell past rung 3 to an inline `RowProjection::new`, the
-    /// measured 4 550 ms, concurrently, across sessions. That is exactly the unbounded
+    /// measured 1 277 ms, concurrently, across sessions. That is exactly the unbounded
     /// inline-rebuild herd decision 0044's D2 withdrew the pre-swap refresh to avoid, arriving
     /// through duration instead of through omission.
     pub(crate) in_flight: Arc<std::sync::atomic::AtomicU64>,
@@ -386,7 +400,7 @@ mod tests {
     /// This is the guard compaction §6.2 names: as it stood, `refresh_resident` skipped every key
     /// whose prefix differed from the generation's, so a fold's refresh would produce *nothing*,
     /// clear `refresh_in_flight`, and leave every resident session taking an inline rebuild — a
-    /// *measured* 4 550 ms at 10⁹, concurrently, which is the stampede decision 0043 forbids
+    /// *measured* 1 277 ms at 10⁹, concurrently, which is the stampede decision 0043 forbids
     /// arriving through the mechanism written to honour it.
     ///
     /// **And it is `Rebuild`, not `Derive`, which is the other half of the fix.** Neither

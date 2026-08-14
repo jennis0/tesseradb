@@ -4081,7 +4081,7 @@ impl Executor {
     /// A row id inside the merged span names a different entity afterwards, so every cached
     /// projection covering that span is wrong and `RowProjection::extends_to` refuses to serve or
     /// extend it — which is why the refresh is armed before the swap and why a same-key racer in
-    /// that window is shed 429 instead of paying the *measured* 4 550 ms rebuild.
+    /// that window is shed 429 instead of paying the *measured* 1 277 ms rebuild.
     ///
     /// **Its own swap, not a rider on the next flush.** The one-cadence rule lost its stated
     /// justification when pin retention was deleted (decision 0041), and under 0043 the coupling
@@ -7497,7 +7497,7 @@ impl Executor {
         });
         // **Armed before the swap, and that ordering is the mechanism** (decision 0044 D1; review
         // finding F5). A request landing between the swap and the pool task's first insert must
-        // find the flag set, or it takes rung 3 of the ladder as a *build* — the measured 4 550 ms
+        // find the flag set, or it takes rung 3 of the ladder as a *build* — the measured 1 277 ms
         // rebuild after a merge — where the whole design is that it be shed with a 429 for the
         // bounded duration of the refresh instead.
         // The claim names the generation it is for, so a pass that is superseded mid-flight

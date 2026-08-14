@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+# The Roaring container assembler, shared with the filter index. `Permutation::project`
+# stamps looked-up rows into a bit array, which *is* the container payload.
+tessera-roaring = { path = "../tessera-roaring" }
 tessera-spatial = { path = "../tessera-spatial" }
 arrow = { workspace = true }
 # `terms/pairs.parquet` is the one bundle artefact contracts §2 defines in Parquet rather than

@@ -36,7 +36,8 @@ Three things decide the design, and none of them is the index.
   operand, and every un-intersected intermediate contains unauthorised IDs. It is also the *candidate
   bitmap* §8.2 lets an operand exploit.
 - **The projection is the expensive step, not the lookup.** Turning an entity-space bitmap into row ranges
-  costs O(cardinality) — *measured* at 8.8 s for a 69.3×10⁶-entity mask, 10.7 s end to end at 10⁹ — and
+  costs O(cardinality) — *measured* at 1 277 ms at 10⁹ over a 25% grant, and at 8.8 s for a
+  69.3×10⁶-entity mask against the superseded implementation — and
   §8.5 says the filtered selection turns over on every keystroke. Section §4 is about not paying that per
   keystroke, and about not paying it per publication either.
 - **Cost is a disclosure surface.** A filter answering correctly in a time proportional to something the
@@ -299,8 +300,8 @@ top and bottom rungs and would have died under steady ingest.
 | Publication | Response | Cost per entry |
 |---|---|---|
 | **Flush** — a segment is appended, existing rows do not move | **Extend**: re-resolve the operand over the new delta tier, then project the new extent and union it in | *measured* 0.24 ms for the extent union, dominated by the entry clone at **40.9 ms** (max 128 ms), since cache entries are immutable |
-| **Merge** — row space is permuted inside the merged span, within the same prefix | **Rebase**: keep the base's contribution, re-project the extents | *measured* **44.6 ms**, against the 4,550 ms rebuild it replaces — 102× |
-| **Fold** — row space is permuted globally and the prefix flips | **Rebuild** | *measured* 4,550 ms synthetic, 10.7 s end to end at 10⁹ |
+| **Merge** — row space is permuted inside the merged span, within the same prefix | **Rebase**: keep the base's contribution, re-project the extents | *measured* **44.6 ms**, against the 1 277 ms rebuild it replaces — 29× |
+| **Fold** — row space is permuted globally and the prefix flips | **Rebuild** | *measured* **1 277 ms** at 10⁹ (`probes/2026-08-14-project-decomposition/`) |
 
 **The merge rung is not optional.** Merge policy bounds live segment count against a flush cadence of
 order 90 s, so merges run at minutes cadence in steady state. Treating a merge as a rebuild — the first
@@ -451,7 +452,7 @@ ratio rests on, and the points between them track where the data is rather than 
 
 **Every one of those qualifiers is load-bearing, and the cache one is load-bearing for this section
 specifically.** The ~170 µs floor is a steady-state figure: the session's projection was already resident.
-A cold session pays the projection build instead — 4,550 ms at 10⁹ (*measured*), four orders of magnitude
+A cold session pays the projection build instead — 1 277 ms at 10⁹ (*measured*), nearly four orders of magnitude
 above the floor and wholly dominant when it happens. So the prefix is ~170 µs *between* geometry
 publications and nothing like it across one. That is the right split for this design rather than an
 inconvenience to it: the per-range filter intersection priced here is a **warm-path** term, and the cold

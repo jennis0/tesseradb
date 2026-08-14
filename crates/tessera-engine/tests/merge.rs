@@ -557,7 +557,7 @@ fn a_merge_collapses_segments_and_loses_no_item() {
 /// Row ids inside the merged span name different entities afterwards (I11), so no cached
 /// projection covering the span may be served: `extends_to` refuses, and rung 3 of the ladder is
 /// what a racer meets. The refresh replaces the entry with an extents-only re-projection rather
-/// than the *measured* 4 550 ms rebuild, which is what keeps the residual bounded.
+/// than the *measured* 1 277 ms rebuild, which is what keeps the residual bounded.
 ///
 /// **Mutation:** carry the deny mask forward instead of re-deriving it and a suppressed row keeps
 /// its old id — which after a permutation names a different entity.
@@ -660,7 +660,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
 ///
 /// Stale-serve is unsound across a merge: the stale entry's bits inside the merged span name
 /// different entities now. So rung 2 refuses, and rung 3's choice is the whole of what 0044
-/// bought — shed for the refresh's bounded duration, or pay the *measured* 4 550 ms rebuild on
+/// bought — shed for the refresh's bounded duration, or pay the *measured* 1 277 ms rebuild on
 /// the request thread. The refresh is **held** here rather than switched off, because those are
 /// different states: a refresh that finishes without producing anything clears the flag and rung 3
 /// builds, which is the liveness floor, not this.
@@ -692,7 +692,7 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
     assert_eq!(
         engine.full_projection_builds(),
         builds_before,
-        "the racer must not have rebuilt — that is the 4 550 ms this residual exists to avoid"
+        "the racer must not have rebuilt — that is the 1 277 ms this residual exists to avoid"
     );
 
     // Released, the window closes and the same request is served.

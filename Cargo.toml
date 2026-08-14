@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/tessera-types",
+    "crates/tessera-roaring",
     "crates/tessera-analyse",
     "crates/tessera-plugin",
     "crates/tessera-authz",

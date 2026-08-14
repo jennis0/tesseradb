@@ -1,7 +1,7 @@
 //! The row-projection refresh: a flush must cost a live session **nothing** on its request thread.
 //!
 //! Every flush advances `segments_version`, which is a component of `RowProjectionKey`, so every
-//! flush rotates every live session's key. Doing anything about that inline was measured at 4 550 ms
+//! flush rotates every live session's key. Doing anything about that inline was measured at 1 277 ms
 //! for a rebuild and 40.9 ms for the patch's bitmap clone alone at 10⁹
 //! (`probes/2026-08-04-refresh-ladder/`), against decision 0044's stated budget of 0.2 ms. The
 //! mechanism is therefore a background refresh at each publication, with a three-rung ladder in
@@ -203,7 +203,7 @@ fn consecutive_flushes_each_refresh_from_the_one_before() {
 /// it was built. The session sees them one refresh later.
 ///
 /// **Mutation:** make rung 2 rebuild instead of serving, and `full_projection_builds` rises —
-/// which is the inline 4 550 ms this design exists to remove.
+/// which is the inline 1 277 ms this design exists to remove.
 #[test]
 fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
     let tmp = tempfile::TempDir::new().unwrap();

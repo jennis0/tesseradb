@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+# The Roaring container assembler, shared with `tessera-store`'s row projection. Below both,
+# because `check-layers.sh` denies filter -> store and store must not reach the filter index.
+tessera-roaring = { path = "../tessera-roaring" }
 # For the CSR postings format only — `PostingsReader`, `DeltaTier` and their ordinal-addressed
 # format core. This crate reads attribute postings; it never reads an authorisation posting, and
 # nothing here constructs a `TermId`. See lib.rs for why the dependency is on the format rather

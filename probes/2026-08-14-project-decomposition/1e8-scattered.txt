@@ -1,0 +1,53 @@
+# project_decomposition
+entities=100000000 grant=0.25 shape=scattered reps=3 threads=1
+
+## slot mapping — what the kernel is told
+none (today)             advise      0.0 ms   walk   1780.2 ms   (0.4 GB, sum 4889172977209)
+MADV_WILLNEED            advise      0.1 ms   walk      3.3 ms   (0.4 GB, sum 4889172977209)
+MADV_HUGEPAGE            advise      0.0 ms   walk      3.2 ms   (0.4 GB, sum 4889172977209)
+MADV_SEQUENTIAL          advise      0.0 ms   walk      3.2 ms   (0.4 GB, sum 4889172977209)
+
+grant: 25000000 entities, 12.51 MB serialised (warm sum 4999999950000000)
+
+## baseline stages
+projection: 25000000 rows, 12.51 MB serialised
+S1 decode  mask.to_vec()               median      49.2 ms
+S2 gather  slots lookup                median     155.2 ms
+S3 sort    par_sort_unstable           median     492.9 ms
+S4 build   Bitmap::of                  median      97.6 ms
+TOTAL                                  median     795.2 ms
+
+## candidate G — F through the shared crate (isolates the boundary)
+G  fused one-pass + shared packer      median     125.1 ms
+speedup                                            6.35x vs baseline total
+
+## production Permutation::project, as landed
+Permutation::project                   median     130.6 ms
+speedup                                            6.09x vs baseline total
+
+## candidate A — fused decode+gather by range seek (replaces S1+S2)
+A  range-seek gather                   median     159.6 ms
+speedup                                            1.28x vs S1+S2
+
+## candidate C — parallel bitmap build (replaces S4)
+C  parallel build over sorted          median      94.5 ms
+speedup                                            1.03x vs S4
+
+## candidate B — partitioned build (replaces S3+S4)
+B  partition + stamp                   median     206.4 ms
+speedup                                            2.86x vs S3+S4
+
+## candidate E — fused one-pass, add_many tail (replaces all four)
+E  fused one-pass                      median     230.3 ms
+speedup                                            3.45x vs baseline total
+
+## candidate F — fused one-pass, containers emitted directly
+F  fused one-pass + packed             median     126.4 ms
+speedup                                            6.29x vs baseline total
+
+## summary — single-threaded work against today
+G (F via shared crate)                     6.35x
+Permutation::project (landed)              6.09x
+B (with baseline S1+S2)                    1.94x
+E                                          3.45x
+F                                          6.29x

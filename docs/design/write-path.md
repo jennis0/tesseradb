@@ -621,14 +621,17 @@ the records that carried allocations can never let a restart reissue an entity i
   from the same entry, so `visible_to` and the map cannot drift (§14's obligation 27).
 - **`refresh_in_flight` is armed before the swap, and that ordering is the mechanism.** A racer
   landing between the swap and the pool task's first insert must find it set, or after a merge it
-  takes rung 3 as a *build* — the measured 4 550 ms — where the design is that it be shed for the
+  takes rung 3 as a *build* — the measured 1 277 ms — where the design is that it be shed for the
   refresh's bounded duration (review finding F5).
 - **Stale-serve inserts nothing, and the retention depth is what stops that compounding.** A
   session whose refresh never runs would otherwise sit one generation behind for ever. At the next
   publication its entry is two back, `prune_generations_below` removes it, and its next request
   builds: the staleness is bounded at two publications, never permanent, and a refresh that
   cannot run degrades to the pre-0044 behaviour rather than wedging a session at 429.
-- **The measured ladder** (`probes/2026-08-04-refresh-ladder/`, 10⁹, 25% grant): rebuild 4 550 ms;
+- **The measured ladder** (`probes/2026-08-04-refresh-ladder/`, 10⁹, 25% grant, except the rebuild):
+  rebuild **1 277 ms** (`probes/2026-08-14-project-decomposition/` — the ladder probe's 4 550 ms
+  measured the superseded implementation, and over an *identity* permutation besides, which made its
+  sort nearly free);
   the patch's bitmap clone 40.9 ms; the union over one new extent 0.24 ms; the span rebase 44.6 ms;
   the fragment build ~200 ms and **flat in tier count** (199 ms at 1 tier, 198 ms at 512 — the
   "modelled seconds" this document carried was wrong, and P2 refuted it). The patch is the clone
@@ -1094,7 +1097,7 @@ maintenance schedule leaking into the product 0043 forbids:
   design accepts a refusal.
 - **The replacement is an extents-only re-projection**, not a rebuild: the base permutation is the
   file no flush and no merge rewrites within a prefix, so keeping its contribution and
-  re-projecting every extent is exact and costs a *measured* 0.24 ms per extent against 4 550 ms.
+  re-projecting every extent is exact and costs a *measured* 0.24 ms per extent against 1 277 ms.
   (The narrower span-local rebase 0044 names is declined: it needs the merged extent's row range
   threaded to the refresh and the old coverage reconciled against a shortened extent list, and it
   buys the difference between re-projecting one extent and all of them, which the merge policy
@@ -1241,8 +1244,9 @@ Cited, never restated; the table is the audit trail from mechanism to obligation
 |---|---|---|
 | deny ack 3.2 ms quiescent; 165 ms p50 / 346 ms max at 1 M buffered; apply 1.33 µs | measured | `docs/evidence/memos/2026-08-01-deny-ack-baseline.md` |
 | 1,000-suppression request 3.289 s → 31.9 ms | measured | `docs/evidence/memos/2026-08-01-deny-batching-and-window-compression.md` |
-| row projection full build 10.7 s at 10⁹, end to end over a built bundle | measured | `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md` |
-| the refresh ladder at 10⁹, 25% grant: rebuild 4 550 ms · patch clone 40.9 ms · union over one new extent 0.24 ms · span rebase 44.6 ms | measured, **synthetic** (primitives over a written `permutation.bin`, not an end-to-end request) | `probes/2026-08-04-refresh-ladder/` |
+| row projection full build **1 277 ms** at 10⁹, primitive, 25% grant, single-threaded | measured | `probes/2026-08-14-project-decomposition/` |
+| ⚠ *superseded:* the same build at 10.7 s end to end, and 4 550 ms for the primitive | measured, against the pre-one-pass implementation | `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`; `probes/2026-08-04-refresh-ladder/` — the end-to-end warm-up viewport has **not** been re-measured since; its projection component is now 6.5× cheaper, so the old figure is an upper bound that no longer describes the system |
+| the refresh ladder at 10⁹, 25% grant: rebuild ⚠ *superseded, see the row above* · patch clone 40.9 ms · union over one new extent 0.24 ms · span rebase 44.6 ms | measured, **synthetic** (primitives over a written `permutation.bin`, not an end-to-end request) | `probes/2026-08-04-refresh-ladder/` |
 | 125.12 MB serialised per wide-grant projection entry at 10⁹ | measured | `probes/results.md` §4.2 (quoted via the merge review memo) |
 | dictionary map rebuild 40–53 s at 1.17×10⁸ terms | measured | `probes/2026-08-03-dict-fst/` |
 | posting compression 8.9–36.7× under full-corpus sort; window-scope runs of order 10¹ | measured ceiling; **modelled** window figure — no per-window probe exists | probes results §2/§4; `window.rs`'s own calibration note |

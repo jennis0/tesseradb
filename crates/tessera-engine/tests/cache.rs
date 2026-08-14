@@ -175,7 +175,7 @@ fn revoke_prunes_the_token() {
 /// The keep half is the one a mutation breaks silently. A flush extends row space, so the
 /// superseded entry is the input the next request's projection patch derives from — pruning at the
 /// swap deletes that input before anything can use it, and every session pays the full rebuild
-/// (a *measured* 10.7 s at 10⁹) at every tick. There is no error and no wrong answer, only the
+/// (a *measured* 1 277 ms at 10⁹) at every tick. There is no error and no wrong answer, only the
 /// steady-state cost write-path §4.6 names. So the assertion is on the entry still being *there*.
 ///
 /// This replaces a test that asserted the same coupling through a pinned request being a cache

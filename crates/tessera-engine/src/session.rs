@@ -267,7 +267,7 @@ impl Session {
     /// - **It is a hint, not an expiry.** Treating a stale session as expired would need no new
     ///   wire field and is already contractual under decision 0025 — and is rejected on load: it
     ///   forces every affected session to rebuild its fragment at one tick, and the next viewport
-    ///   pays a **measured 10.7 s** row projection at 10⁹. A hint spreads the same total work over
+    ///   pays a **measured 1 277 ms** row projection at 10⁹. A hint spreads the same total work over
     ///   the interval. What bounds staleness for a client that ignores it already exists:
     ///   `token_max_lifetime_secs` caps every session's life. This is the fast path, not the safety
     ///   net.
@@ -623,7 +623,7 @@ pub struct Engine {
     /// **Set before the swap and cleared when the pass ends**, which is what makes the 429 rung of
     /// `Engine::session_geometry`'s ladder bounded rather than open-ended: a racer landing between
     /// the swap and the pool task's first insert must see `true`, or after a merge it takes the
-    /// measured 4.55 s rebuild inline (review finding F5). Shared with the executor, which is the
+    /// measured 1.28 s rebuild inline (review finding F5). Shared with the executor, which is the
     /// only writer.
     pub(crate) refresh_in_flight: Arc<AtomicU64>,
     /// Whether the background refresh runs — see [`crate::refresh::RefreshDeps::enabled`].
@@ -1735,7 +1735,7 @@ impl Engine {
     /// from the preceding generation's by unioning the new extents' rows.
     ///
     /// The number to watch after a flush: a deployment where this rises once per session per tick
-    /// is paying `Permutation::project` — a *measured* 10.7 s at 10⁹ — on the steady-state path,
+    /// is paying `Permutation::project` — a *measured* 1 277 ms at 10⁹ — on the steady-state path,
     /// which is the failure write-path §4.6 names. See `RowProjectionCache::get_or_derive`.
     pub fn full_projection_builds(&self) -> u64 {
         self.full_projection_builds.load(Ordering::Relaxed)

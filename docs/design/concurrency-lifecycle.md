@@ -94,7 +94,7 @@ flowchart TD
 
 The thing a publication genuinely must manage is the **row-projection cache**, whose key carries `segments_version` — so every publication rotates every live session's key.
 
-**Retention is one generation deep, and depth zero would be wrong.** A flush *extends* row space, so the superseded generation's projection is exactly the input the background refresh extends (write-path §4.6): the new projection is the old bitmap unioned with the new extents' rows, which is equal to — not an approximation of — a projection over the whole space. Pruning at the swap would delete that input before the refresh could use it, and every session would fall to a full `Permutation::project` — a *measured* 10.7 s at 10⁹ — at every tick, synchronised across the session population. So a publication drops entries **more than one generation back** and keeps the one immediately below it.
+**Retention is one generation deep, and depth zero would be wrong.** A flush *extends* row space, so the superseded generation's projection is exactly the input the background refresh extends (write-path §4.6): the new projection is the old bitmap unioned with the new extents' rows, which is equal to — not an approximation of — a projection over the whole space. Pruning at the swap would delete that input before the refresh could use it, and every session would fall to a full `Permutation::project` — a *measured* 1 277 ms at 10⁹ — at every tick, synchronised across the session population. So a publication drops entries **more than one generation back** and keeps the one immediately below it.
 
 **The depth carries a second load since decision 0044**: it is also the entry a request is *stale-served* from while the refresh runs, and — because a stale serve inserts nothing — it is what bounds how far a session whose refresh never ran can lag. At two generations back the entry is pruned and that session's next request builds, so the staleness is bounded at two publications rather than permanent.
 
@@ -378,7 +378,15 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 motivation (a parked waiter holds admission budget while burning no CPU) and now false of the
 built system. The motivation was not wrong; it was the wrong answer to the case it was applied to,
 which the arithmetic settles: a 4,550 ms cold build against a client retry budget of 1 s then 2 s
-means the refusal loses the client an answer that was always coming. §7.2 records the wait, its
+means the refusal loses the client an answer that was always coming.
+
+**That arithmetic has narrowed and the ruling survives it, but not for the original reason.** The
+cold build is now a measured 1 277 ms (`probes/2026-08-14-project-decomposition/`), which a 1 s +
+2 s retry budget *does* cover — so the refusal would no longer reliably lose the client its answer,
+and the premise as written no longer holds. What keeps the wait correct is the weaker claim that
+outlives the numbers: a racer that waits is served the build it waited for, where a refused one
+re-queues work already in flight and re-enters the gate to do it. Decision 0058 should be read as
+resting on that, and its cost argument as historical. §7.2 records the wait, its
 budget, the one caller that still must not wait and why that one is a deadlock rather than a
 preference, and the two-write argument that no wake can be missed. Nothing else in the section
 changed: the four eviction rules, the byte bound's reach and the deliberate cross-crate

@@ -1080,7 +1080,7 @@ impl Engine {
     /// 3. **Build, or refuse.** If a refresh is in flight the request is shed with
     ///    `ProjectionBuilding` (429, `Retry-After: 1`) rather than paying a rebuild the refresh is
     ///    already paying — the bounded residual 0044 permits, and after a merge the only thing
-    ///    standing between a racer and the measured 4.55 s. If no refresh is in flight, nothing is
+    ///    standing between a racer and the measured 1.28 s. If no refresh is in flight, nothing is
     ///    coming and this request builds: session establishment, or a rebuild after eviction,
     ///    neither of which is update-induced.
     ///
@@ -1388,7 +1388,7 @@ impl Engine {
 
         // **Zero update-induced work on this thread, in the steady state** (decision 0044's D1).
         // Every flush advances `segments_version`, so every flush rotates this key for every live
-        // session; the *measured* costs of doing anything about that here are 4.55 s for a rebuild
+        // session; the *measured* costs of doing anything about that here are 1.28 s for a rebuild
         // and 40.9 ms for the patch's bitmap clone alone (`probes/2026-08-04-refresh-ladder/`),
         // against a budget of 0.2 ms. Neither fits. What runs instead is a background refresh at
         // each publication (`crate::refresh`), and this is its request-side face: a three-rung

@@ -50,10 +50,15 @@ use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded
 ///
 /// 1. **`token_id` is never reused.** `Engine::authorise` draws it from a monotonic `AtomicU64`
 ///    that starts at zero on every `Engine::open`. That is safe *only because this cache is
-///    in-memory and dies with the process.* A 10.7 s miss makes persisting it an obvious future
-///    optimisation — and the day anyone does, token-id reuse across restarts becomes exactly the
-///    cross-principal mask reuse the paragraph above describes. Persisting this cache requires
-///    widening the key first.
+///    in-memory and dies with the process.* Persisting it across restarts would break that, and
+///    the day anyone does, token-id reuse becomes exactly the cross-principal mask reuse the
+///    paragraph above describes. Persisting this cache requires widening the key first.
+///
+///    **The reason to want it has largely gone.** This read "a 10.7 s miss makes persisting it an
+///    obvious future optimisation" when a miss cost that; a miss is now a measured 1 277 ms
+///    (`probes/2026-08-14-project-decomposition/`), which is an ordinary cold start rather than
+///    something worth carrying a disclosure hazard to avoid. The hazard did not shrink with the
+///    cost, so the trade moved decisively one way.
 /// 2. **`segments_version` is globally unique within a process**, which is why
 ///    [`RowProjectionCache::prune_generation`] may prune on it alone and ignore `Reclaimed::prefix`.
 ///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it,

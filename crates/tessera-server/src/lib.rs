@@ -41,7 +41,7 @@ pub struct Prepared {
 /// at the measured per-entry size.
 ///
 /// **Why a refusal and not a warning.** The miss/hit cost ratio here is 10⁵–10⁷: a projection miss
-/// is `RowProjection::new`, *measured* in seconds (the 10⁹ warm-up viewport is 10.7 s), and every
+/// is `RowProjection::new`, *measured* at 1 277 ms at 10⁹ (`probes/2026-08-14-project-decomposition/`), and every
 /// ≥25%-coverage mask at 10⁹ serialises to a *measured* 125.12 MB. A bound below the working set
 /// does not degrade the hit rate gently — under a cyclic access pattern LRU's hit rate is exactly
 /// zero, every request pays a rebuild, and because misses hold an admission permit for their whole

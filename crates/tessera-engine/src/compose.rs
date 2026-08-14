@@ -62,7 +62,7 @@ pub struct RowProjection {
     /// reused, across merges or prefixes (contracts §2.1) — so if the run it collapsed overlapped
     /// this projection's covered prefix, the extent now sitting at `extents_covered - 1` is either
     /// a different segment or out of range. Comparing that one id is therefore exact rather than
-    /// heuristic, and costs one string comparison against a *measured* 10.7 s rebuild.
+    /// heuristic, and costs one string comparison against a *measured* 1 277 ms rebuild.
     boundary_seg_id: Option<String>,
     /// The base permutation's row count at construction — the boundary between the part of this
     /// projection a merge can never move and the part it can.
@@ -129,7 +129,7 @@ impl RowProjection {
     ///
     /// The rung a *merge* needs. A merge permutes row space inside the merged span, so
     /// [`Self::extend`] refuses (correctly — [`Self::extends_to`] is exact), and the alternative
-    /// was a full rebuild: a *measured* 4 550 ms at 10⁹, essentially all of it the base
+    /// was a full rebuild: a *measured* 1 277 ms at 10⁹, essentially all of it the base
     /// permutation's `project` over a 25% grant. This keeps that part and re-does only the
     /// extents, at a *measured* 0.24 ms each (`probes/2026-08-04-refresh-ladder/`).
     ///

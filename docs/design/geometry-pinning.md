@@ -47,8 +47,9 @@ what a client actually needs is a *staleness signal* rather than a frozen view.
 **What the case is not.** An earlier draft led on the startup relation as a *floor of 75 s on
 visibility latency*, and that is wrong in both directions. It is not the binding floor: the
 row-projection cache keys on `segments_version`, so every flush rotates every session's key, and a
-miss is a **measured 10.7 s** at 10⁹ end to end (a synthetic 4 550 ms for the projection alone —
-`probes/2026-08-04-refresh-ladder/`). That floor is removed by the background refresh
+miss is a **measured 1 277 ms** for the projection at 10⁹
+(`probes/2026-08-14-project-decomposition/`; it was 4 550 ms against the superseded implementation,
+and the end-to-end warm-up viewport that figure sat inside has not been re-measured since). That floor is removed by the background refresh
 (write-path §4.6, decision 0044), which is needed whatever happens to pins and is not this
 document's to claim. Nor is the relation itself a reason to delete anything:
 it is a sizing constraint, and sizing constraints are satisfied by choosing numbers. The honest
@@ -244,7 +245,7 @@ to is not closing the door: dropping the request field now would mean re-adding 
   *measured* 47.02 GB live bundle — page cache spent holding geometry no client resolves.
 - **`flush_max_age_secs` loses one of its two constraints.** The startup relation goes, so the 90 s
   default stops being forced by the TTL. **It does not become a free choice**: the binding floor is
-  the row-projection rebuild, a *measured* 10.7 s at 10⁹ synchronised across the session population
+  the row-projection rebuild, a *measured* 1 277 ms at 10⁹ synchronised across the session population
   at every tick, and only taking that off the request path removes it. Claiming the tick as this
   document's win was an error in an earlier draft and is corrected here rather than quietly
   dropped. *(Decision 0044 is what took it off: a background refresh at each publication, with

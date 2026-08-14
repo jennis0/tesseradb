@@ -2491,6 +2491,7 @@ dependencies = [
  "memmap2",
  "tempfile",
  "tessera-authz",
+ "tessera-roaring",
  "tessera-types",
  "zstd",
 ]
@@ -2531,6 +2532,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "tessera-roaring"
+version = "0.1.0"
+dependencies = [
+ "croaring",
 ]
 
 [[package]]
@@ -2586,6 +2594,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tessera-roaring",
  "tessera-spatial",
  "tessera-types",
  "tracing",

@@ -700,7 +700,7 @@ pub struct LocatorExtent {
 /// *geometry* version — the counter a row-projection cache key rotates on — is a different
 /// quantity, and it must **not** advance when an overlay publication writes a manifest carrying
 /// only new deny state (write-path §5.6; bumping it would cost every live session a
-/// measured 10.7 s row-projection rebuild per deny burst). Two counters with one name is how the
+/// measured 1 277 ms row-projection rebuild per deny burst). Two counters with one name is how the
 /// two came to be conflated, so the redundant one is gone: the reader takes `n` from the filename,
 /// the writer allocates it, and the geometry version is process-local, carried by
 /// `Generation::segments_version` and no format field.

@@ -726,8 +726,8 @@ comfortable.
 dropped row shifts every id after it. So decision 0044's rung 2 (stale-serve) is unsound — it is
 exact for a flush only because a flush appends — and the extents-only re-projection that makes a
 merge affordable is unavailable, because the base permutation it re-projects onto is the file the
-fold rewrote. Every resident session needs a **full** projection build: a measured 4 550 ms for the
-primitive at 10⁹, 10.7 s end to end. Fragments must be rebuilt too, because the identity rotates:
+fold rewrote. Every resident session needs a **full** projection build: a measured 1 277 ms for the
+primitive at 10⁹. Fragments must be rebuilt too, because the identity rotates:
 a measured ~200 ms per credential, flat in tier count (P2).
 
 **The flip does not refuse anything** (decision 0053). The generation pointer moves, and a session
@@ -736,9 +736,17 @@ cold session does. The fold's publication does not arm the shed.
 
 The rule that decides it, so the next publication kind need not re-litigate: **shed only while the
 refresh pass is shorter than the rebuild it would save.** Flush and merge satisfy it — a ~0.7 s pass
-against a measured 4 550 ms rebuild, so shedding turns a 4.5 s inline build into a 1 s retry, and
-they keep the gate unchanged. A fold inverts it by two orders (a ~180 s pass against a 10.7 s
+against a measured 1 277 ms rebuild, so shedding turns a 1.3 s inline build into a 0.7 s retry, and
+they keep the gate unchanged. A fold inverts it by two orders (a ~180 s pass against a 1.3 s
 build), so shedding would refuse everyone for minutes to avoid a burst that clears in seconds.
+
+**The flush-and-merge margin is now under 2× and wants watching.** It was 6.5× when the rebuild was
+4 550 ms; the one-pass projection (`probes/2026-08-14-project-decomposition/`) cut the rebuild and
+left the pass where it was. The rule still returns the same answer for every publication kind that
+exists, so nothing here changes — but the quantity it compares is no longer lopsided, and a further
+improvement to the projection would invert it for flush and merge, at which point shedding costs
+more than it saves. This is the one place in the corpus where that change moves an answer rather
+than a number.
 Decision 0044's F5 finding established the gate against a *merge*; this document inherited it for a
 fold without re-checking, and §6.2 previously claimed to satisfy 0044 *verbatim* when 0044's word is
 *only* and it scopes to same-key racers.
@@ -750,13 +758,13 @@ named is already bounded three times over — `ComputeGate` bounds requests insi
 across the whole pool, so concurrent rebuilds contend rather than multiply.
 
 **What a viewer therefore pays at the flip is latency, not errors**: the first request per session
-after a fold rebuilds inline (a measured 10.7 s end to end at 10⁹, contending), and every request
+after a fold rebuilds inline (a measured 1 277 ms at 10⁹ for the projection, contending), and every request
 after it is served normally. That is 0043's *"not observable in a viewer's latency or in a viewer's
 errors"* traded down to the first of the two, which is the direction the rule permits.
 
 **A staging list is deferred** (decision 0057), having been licensed as an optimisation and never
 required (decision 0053). What it would remove is the *first* request per session after a fold — a
-measured 10.7 s end to end at 10⁹, once per session, on an operation floored at one a day — and what
+measured 1 277 ms at 10⁹, once per session, on an operation floored at one a day — and what
 it costs is a second cache with its own budget, a recency filter over sessions that nothing tracks,
 precomputation on a thread this design has not chosen, and the coverage check below. Cheap benefit,
 expensive machinery, in that order. **Decision 0053's condition survives the deferral**: it is not
@@ -1407,14 +1415,15 @@ are.
 |---|---|---|
 | on-disc bytes 2.0–2.6× manifest-named, monotone | **measured** at 10⁷ | `docs/evidence/memos/2026-08-05-write-path-at-scale.md` §2 |
 | merge peak RSS 4.4–4.9× input bytes — the multiplier this design refuses to inherit | **measured** | `probes/2026-08-04-maintenance-memory/` |
-| full row-projection build 4 550 ms (primitive) / 10.7 s (end to end) at 10⁹ | **measured** | `probes/2026-08-04-refresh-ladder/`; viewport review memo |
+| full row-projection build **1 277 ms** (primitive) at 10⁹, 25% grant, single-threaded | **measured** | `probes/2026-08-14-project-decomposition/` |
+| ⚠ *superseded:* 4 550 ms (primitive) / 10.7 s (end to end) | **measured**, against the pre-one-pass implementation | `probes/2026-08-04-refresh-ladder/`; viewport review memo — the end-to-end warm-up viewport has **not** been re-measured since; its projection component is now 6.5× cheaper, so the old figure is an upper bound that no longer describes the system. Every figure below **modelled from** this row is stale by the same factor |
 | fragment rebuild ~200 ms per credential, flat in tier count | **measured** | `probes/2026-08-04-refresh-ladder/` (P2) |
 | dictionary clone 7.1 GB, lookup-map rebuild 40–53 s, at 1.17×10⁸ terms | **measured** | `probes/2026-08-03-dict-fst/` |
 | **the fold's own peak RSS** | **measured** — **P1 run**, at three sizes over a 4× range. ~1× the bundle's live bytes resident, of which ~92% is reclaimable mapping; **5–8 B/entity anonymous**, which is the half that budgets. Projects to ~7.1 GB at 10⁹ plus §3's dictionary term ≈ 8 GB, against §3's stated ~9–10 GB | `docs/evidence/memos/2026-08-07-compaction-fold-memory.md` |
 | the fold's wall clock | **measured** — 0.39 µs/row, linear across the same range, ⇒ **~6.5 minutes at 10⁹** on this device. The publication is ~4% of it | same memo |
 | what a 10⁹ fold costs, and what a real dictionary adds | **modelled** — both projections are linear extrapolation from 10⁷, and the probe's fixture has a two-term dictionary, so §3's ~0.94 GB offsets buffer and its widest-term encode are unexercised | same memo |
 | the refresh's per-entry cost: 267–352 ms cold (what a fold forces) against 11.1–24.2 ms derived (what a flush pays), at 2.1×10⁷ | **measured** — **P2 run**; the population term is linear in resident entries | `docs/evidence/memos/2026-08-05-compaction-flip-and-io.md` |
-| the flip at 10⁹ ≈ 12.8 s per resident entry, ≈3 minutes at the ~16 a 2 GiB bound holds | **modelled** from the row above, and corroborated by the independently measured 10.7 s end-to-end — spec §6.2's stated window is confirmed rather than revised | same memo; `probes/2026-08-04-refresh-ladder/` |
+| the flip at 10⁹ ≈ 12.8 s per resident entry, ≈3 minutes at the ~16 a 2 GiB bound holds | ⚠ **stale** — modelled from the row above *and* corroborated against the 10.7 s end-to-end, both of which described the superseded projection. The projection term of that 12.8 s is now a measured 1 277 ms, so the per-entry figure and the ~3 minute window are both over-estimates by an unquantified margin. **Not re-derived here**: the fragment rebuild is the other term and was never separated from the projection in the P2 run, so the corrected figure needs a re-run rather than arithmetic. Spec §6.2's window is an upper bound until then | same memo; `probes/2026-08-04-refresh-ladder/` |
 | that a read-side **throttle** can be applied at all | **refuted at r5** — every fold input is an `Mmap::map`, so the byte movement is page faults; P3 measured a buffered reader. Spec §6.1 now carries two candidate mechanisms and no ruling | same memo |
 | what a *completed* fold leaves in the page cache | **not measured** — P3's 128 MiB/s arm displaced under 1% of the bundle in a 3.5 s sweep; a fold displaces all of it. The arms bound instantaneous contention, not cache composition | `probes/2026-08-05-compaction-flip-and-io/results.md` |
 | **what a concurrent viewport pays for a real fold** | **measured** — **P4 run**, four runs in the evicting regime: **1.05–1.18×** at the deepest zoom and at or inside the drift at shallower ones. About a fifth of the row below, which is an unthrottled *reader* and the upper bound rather than the operation | `docs/evidence/memos/2026-08-07-fold-against-a-live-viewport.md` |
@@ -1648,7 +1657,7 @@ overlapping multi-minute passes turn into the unbounded inline-rebuild herd D2 w
 refresh to avoid; fixed in code (`refresh::clear_if_current`). Smaller corrections: §6.2's claim to
 satisfy decision 0044 *verbatim* is withdrawn (it is a widening and wants a ruling), the
 "entry size and rebuild time cancel" mechanism is restated as an upper bound at a dense grant, a new
-session pays `window + 10.7 s` rather than the tail, §6.3's cost list gains the selection-order and
+session pays `window + 1.3 s` rather than the tail, §6.3's cost list gains the selection-order and
 `KEEP_SUPERSEDED_GENERATIONS` obstacles, and the pre-P3 "unknown" paragraph is deleted.
 
 **The two owed rulings, as landed — both in this design's favour, and both cost the *other*
@@ -1714,7 +1723,7 @@ recorded:
   differs; the fragment key hashes the watermark, so any flush between warm and swap invalidates
   the warm set — certain at a 90 s tick against an hours-long fold; and abandoning the post-swap
   pass removes `refresh_in_flight`, the gate that sheds racers, so unwarmed sessions take inline
-  4 550 ms builds where the design intended a 429.
+  1 277 ms builds where the design intended a 429.
 
 Two further structural findings: **a fourth seam gap** — `prefix_dir` is captured once on both
 `Engine` and the executor, so the next flush or deny publication after a flip writes into the

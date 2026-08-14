@@ -1742,7 +1742,7 @@ fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
 /// `merge.rs`'s `a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding` is that
 /// case, and this is deliberately its mirror. The rule that separates them: *shed only while the
 /// refresh pass is shorter than the rebuild it would save.* A merge satisfies it (a ~0.7 s pass
-/// against a measured 4 550 ms rebuild); a fold inverts it by two orders (~180 s against 10.7 s),
+/// against a measured 1 277 ms rebuild); a fold inverts it by two orders (~180 s against 1.3 s),
 /// so arming would refuse every session for minutes to avoid a burst that clears in seconds.
 ///
 /// The refresh is **held** here rather than switched off, because those are different states: a

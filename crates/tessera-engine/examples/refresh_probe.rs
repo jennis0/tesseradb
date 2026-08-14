@@ -18,7 +18,15 @@
 //! **Synthetic, and that is a stated limitation rather than a convenience.** These build a
 //! `permutation.bin` and a postings file directly, so the numbers are the *primitives'* costs at
 //! the shape a wide grant produces — not an end-to-end request. Nothing here measures a bundle's
-//! IO, its cache residency or its contention. The earlier 10.7 s / 125.12 MB figures came from a
+//! IO, its cache residency or its contention.
+//!
+//! **P1's rebuild row is superseded** (`probes/2026-08-14-project-decomposition/`): it measures the
+//! rebuild over the *identity* permutation this file writes, where the gathered rows come out
+//! already sorted and the sort it was meant to size charges almost nothing. A build orders rows by
+//! `(morton, tessera_id)`, so a real slot array scatters. The other three rungs are unaffected —
+//! they walk the same bitmap whatever the permutation is, which is what this probe is good for.
+//!
+//! The earlier 10.7 s / 125.12 MB figures came from a
 //! real 10⁹ bundle (`probes/2026-07-30-1e9-rebuild/`) and remain the reference; this probe's job
 //! is the *ratios between the rungs*, which a synthetic row space gives faithfully because every
 //! rung walks the same slot array and the same bitmap.

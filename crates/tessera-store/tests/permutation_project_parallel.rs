@@ -1,14 +1,31 @@
-//! `Permutation::project`'s parallelisation — correctness (not gated) and the measured
-//! throughput gate (`--ignored`).
+//! `Permutation::project`'s agreement with an independent serial reference.
 //!
-//! [`serial_project`] is an independent reference implementation of the serial algorithm
-//! (entity-by-entity through `row_of`, then sort) — deliberately *not* a second call to
-//! `Permutation::project` itself, because that method's chunking is the thing under test and an
-//! oracle sharing its code would not catch a chunking bug (e.g. a chunk-boundary entity dropped
-//! or double-counted).
+//! [`serial_project`] is an independent implementation of the obvious algorithm — entity by entity
+//! through `row_of`, then sort, then insert — deliberately *not* a second call to
+//! `Permutation::project`, because that method's bucketing and its container encoding are the
+//! things under test and an oracle sharing their code would not catch a bug in either.
+//!
+//! What the cases below are chosen to reach, since `project`'s cost model makes the interesting
+//! boundaries invisible from the outside:
+//!
+//! - **Both container encodings.** croaring stores a block of more than 4,096 members as a bitset
+//!   and the rest as a sorted array, and `project` writes the payload for whichever the cardinality
+//!   implies. Writing the wrong one is the format error least likely to announce itself, because the
+//!   deserializer picks how to *read* a payload from the descriptor rather than from the bytes.
+//! - **More than one bucket.** `project` partitions row space into 2²²-row buckets and stamps each
+//!   into a reused bit array. A fixture below that width exercises exactly one bucket, so the reuse
+//!   — and the clearing between buckets that the reuse depends on — never runs.
+//! - **Sentinels and out-of-bound entities**, which are skipped rather than erred.
+//! - **Any ambient rayon pool, or none.** The crate owns no pool and `project` no longer asks one
+//!   for anything, so what these pin is that it is indifferent to what it is called inside.
+//!
+//! **The file's name is older than its subject.** It was written when `project` was parallel and
+//! carried the measured gate that decided whether to keep it that way; the one-pass rewrite made
+//! the answer moot and the gate was deleted with it. The name stays because four reports in
+//! `probes/2026-07-31-concurrency-workstream/` cite this path as a record of what they changed, and
+//! a tidier name here would rot all four for nothing.
 
 use std::path::Path;
-use std::time::Instant;
 
 use croaring::Bitmap;
 use rand::rngs::StdRng;
@@ -20,7 +37,7 @@ use tessera_store::Permutation;
 use tessera_types::EntityId;
 
 /// Independent oracle: walk every set bit of `mask` through `perm.row_of`, one entity at a time,
-/// skipping absent/out-of-bound entities exactly as the pre-parallel `project` did, then sort.
+/// skipping absent/out-of-bound entities exactly as `project` does, then sort.
 fn serial_project(perm: &Permutation, mask: &Bitmap) -> Bitmap {
     let mut rows: Vec<u32> = Vec::new();
     for e in mask.iter() {
@@ -51,10 +68,10 @@ fn assert_bitmaps_equal(parallel: &Bitmap, serial: &Bitmap, case: &str) {
     );
 }
 
-/// Run `perm.project(mask)` inside a rayon pool with exactly `threads` workers — exercises the
-/// ambient-rayon contract (tessera-store owns no pool of its own; this installs one exactly as
-/// `tessera-engine` does at the real call site) and, at `threads > 1`, forces `par_chunks` to
-/// actually split the entity list across workers rather than degenerating to one chunk.
+/// Run `perm.project(mask)` inside a rayon pool with exactly `threads` workers — the ambient-rayon
+/// contract (tessera-store owns no pool of its own; this installs one exactly as `tessera-engine`
+/// does at the real call site). `project` is serial and uses none of it, which is the point: the
+/// answer must not depend on what the caller happens to have installed.
 fn project_with_threads(perm: &Permutation, mask: &Bitmap, threads: usize) -> Bitmap {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -213,76 +230,52 @@ fn project_on_the_global_pool_without_an_explicit_install_still_matches() {
     assert_bitmaps_equal(&got, &expected, "no explicit install");
 }
 
-/// MEASURED GATE (task-7 brief): keep the parallel implementation only if a representative
-/// cold-session projection build drops >= 2x at 8 threads vs 1 thread.
+/// **More than one bucket**, which every case above misses: they use a few thousand entities and
+/// row space is bucketed at 2²², so all of them exercise bucket zero and nothing else. What only
+/// appears here is the bit array being *reused* across buckets — and therefore the clearing between
+/// them, which is done by re-walking each bucket's rows rather than wiping the array, and which a
+/// single-bucket fixture can never catch getting wrong.
 ///
-/// Sized to stay well under the box's memory ceiling (WSL2, previously OOM-killed by a
-/// \>4G-allocating test): `n` entities means a full mask puts two `n * 4`-byte `Vec<u32>`s live at
-/// their peak overlap inside `project` (`entities` overlapping the just-finished `per_chunk`,
-/// then `per_chunk` overlapping `rows`'s reserved capacity -- see `Permutation::project`'s doc,
-/// "fix round 1" note, for why it is two and not three) -- at `n = 16_000_000` that is ~128 MB
-/// transient, plus the ~64 MB mmap-backed `permutation.bin` itself, comfortably under the budget
-/// this box has previously blown through.
-///
-/// Run explicitly: `cargo test -p tessera-store --release -- --ignored --nocapture
-/// project_parallel_speedup_at_8_threads`
+/// The permutation is scattered by a multiplier coprime to `n` rather than by a shuffle: it is a
+/// bijection for the same reason, it costs one pass instead of sorting 4 million entries, and it
+/// sends adjacent entities to distant buckets, which is the arrangement that makes the reuse matter.
 #[test]
-#[ignore]
-fn project_parallel_speedup_at_8_threads() {
+fn a_projection_spanning_several_buckets_matches_the_serial_reference() {
+    const BUCKET_ROWS: u32 = 1 << 22;
     let dir = tempfile::tempdir().expect("tempdir");
-    let n: u64 = 16_000_000;
+    // Two buckets and a bit, so the last one is partial as a real row space's last one is.
+    let n = (BUCKET_ROWS as u64) * 2 + 5_000;
+    // Coprime to `n`, so `r -> (r * STRIDE) % n` is a bijection on `[0, n)`.
+    const STRIDE: u64 = 1_000_003;
+    assert_ne!(n % STRIDE, 0, "sanity: the multiplier must not divide n");
 
-    let mut rng = StdRng::seed_from_u64(7);
-    let mut row_order: Vec<u32> = (0..n as u32).collect();
-    row_order.shuffle(&mut rng); // a genuine permutation: every entity has a row, no sentinels
-    let entities_in_row_order: Vec<EntityId> = row_order
-        .into_iter()
-        .map(|e| EntityId::new(e as u64))
+    let entities_in_row_order: Vec<EntityId> = (0..n)
+        .map(|row| EntityId::new((row * STRIDE) % n))
         .collect();
     let perm = build_permutation(dir.path(), &entities_in_row_order, n);
 
-    let mut mask = Bitmap::new();
-    mask.add_range(0..n as u32);
-    mask.run_optimize();
-
-    let pool1 = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()
-        .expect("1-thread pool should build");
-    let pool8 = rayon::ThreadPoolBuilder::new()
-        .num_threads(8)
-        .build()
-        .expect("8-thread pool should build");
-
-    // Warm the mmap's page cache before either timed run, so the comparison is CPU parallelism,
-    // not "first touch pays page faults, second run doesn't".
-    let warm = pool1.install(|| perm.project(&mask));
-    assert_eq!(warm.cardinality(), n);
-
-    // Take the best of three per thread count to smooth out scheduler noise on a shared box.
-    let mut best1 = None;
-    let mut best8 = None;
-    for _ in 0..3 {
-        let t1 = Instant::now();
-        let out1 = pool1.install(|| perm.project(&mask));
-        let d1 = t1.elapsed();
-        assert_eq!(out1.cardinality(), n);
-        best1 = Some(best1.map_or(d1, |b: std::time::Duration| b.min(d1)));
-
-        let t8 = Instant::now();
-        let out8 = pool8.install(|| perm.project(&mask));
-        let d8 = t8.elapsed();
-        assert_eq!(out8.cardinality(), n);
-        best8 = Some(best8.map_or(d8, |b: std::time::Duration| b.min(d8)));
+    for (label, keep) in [
+        // 3 keeps ~21,800 rows per container, comfortably above croaring's 4,096 crossover,
+        // at a third of the oracle's sorting cost.
+        ("dense: bitset containers throughout", 3u64),
+        ("sparse: array containers throughout", 5_000),
+    ] {
+        let mut mask = Bitmap::new();
+        for e in (0..n).step_by(keep as usize) {
+            mask.add(e as u32);
+        }
+        let expected = serial_project(&perm, &mask);
+        // At least two buckets occupied, which is what makes the bit array's reuse and the clearing
+        // between buckets run at all. Not three: the last bucket here is a 5,000-row sliver and the
+        // sparse arm lands in it only by luck, so requiring it would make this assertion a coin
+        // toss rather than a check.
+        assert!(
+            expected.maximum().expect("non-empty") >= BUCKET_ROWS,
+            "{label}: sanity — the fixture must span more than one bucket"
+        );
+        for threads in [1, 4] {
+            let got = project_with_threads(&perm, &mask, threads);
+            assert_bitmaps_equal(&got, &expected, &format!("{label}, {threads} threads"));
+        }
     }
-    let best1 = best1.expect("at least one iteration ran");
-    let best8 = best8.expect("at least one iteration ran");
-
-    let speedup = best1.as_secs_f64() / best8.as_secs_f64();
-    println!(
-        "row_projection_ns gate: n={n} 1-thread={best1:?} 8-thread={best8:?} speedup={speedup:.2}x"
-    );
-    // Deliberately not a hard assert. The action on a disappointing speedup is "revert the
-    // parallel path" — a code decision taken by hand after reading this number, not something a
-    // red test on a shared machine should force.
 }

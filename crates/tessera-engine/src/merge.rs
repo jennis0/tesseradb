@@ -24,7 +24,7 @@
 //!   flush's.
 //!
 //! What keeps that residual short is the refresh's second rung: an extents-only re-projection
-//! (`RowProjection::rebase_extents`) rather than the *measured* 4 550 ms full rebuild.
+//! (`RowProjection::rebase_extents`) rather than the *measured* 1 277 ms full rebuild.
 //!
 //! ## What a merge must not do
 //!

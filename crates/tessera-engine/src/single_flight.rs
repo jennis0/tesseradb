@@ -314,7 +314,7 @@ const WAIT_TICK: Duration = Duration::from_millis(50);
 /// The wait budget an embedder that never calls [`SingleFlightCache::set_wait_budget_ms`] gets.
 ///
 /// **Argued from the build it has to outlast, not chosen for roundness.** A full row-projection
-/// rebuild at 10⁹ is a *measured* 4,550 ms (`crate::refresh`'s table), and a racer can arrive at
+/// rebuild at 10⁹ is a *measured* 1 277 ms (`crate::refresh`'s table), and a racer can arrive at
 /// any point during one, so any budget at or below that reproduces decision 0058's defect at the
 /// scale that motivated it. 6,000 ms is that figure with headroom for a loaded box. It is
 /// deliberately **not** inherited from the compute gate's `admission_timeout_ms` (250 ms), which
@@ -1112,7 +1112,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// refresh's input.
     ///
     /// **The order is the refresh's, and it is load-bearing.** `refresh_resident` is a serial loop
-    /// and a full rebuild is a *measured* 4 550 ms at 10⁹, so across a compaction the pass runs for
+    /// and a full rebuild is a *measured* 1 277 ms at 10⁹, so across a compaction the pass runs for
     /// minutes and every key it has not reached is shed 429 (compaction §6.2). In map order the
     /// session that waits longest is arbitrary; in this order the tail lands on the sessions that
     /// asked least recently, which are the ones least likely to ask during it. It does not shorten
@@ -2147,7 +2147,7 @@ mod tests {
 
     /// **`ready_entries` is most-recently-used first, and reading it is not a use.**
     ///
-    /// The refresh is a serial loop over a rebuild that costs a *measured* 4 550 ms at 10⁹, so
+    /// The refresh is a serial loop over a rebuild that costs a *measured* 1 277 ms at 10⁹, so
     /// across a compaction it runs for minutes and every key it has not reached is shed 429
     /// (compaction §6.2). Ordering does not shorten that window; it decides who waits in it, and
     /// the answer must be the sessions that asked least recently. In `map` order — which is what

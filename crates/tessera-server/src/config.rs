@@ -1441,7 +1441,7 @@ const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 /// Every publication rotates `RowProjectionKey`'s `segments_version`, so every live session's
 /// projection has to be brought forward at the next request — a patch where the superseded entry
 /// is still resident (`KEEP_SUPERSEDED_GENERATIONS`), a full rebuild otherwise, and a rebuild is a
-/// *measured* 10.7 s at 10⁹. A tick shorter than a deployment's patch cost synchronises that work
+/// *measured* 1 277 ms at 10⁹. A tick shorter than a deployment's patch cost synchronises that work
 /// across the whole session population at every tick. 90 is kept because it is the number this
 /// deployment has run at, not because anything now forces it.
 const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 90;
@@ -1542,7 +1542,7 @@ pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 ///
 /// **Sized so the cache cannot collapse at the expected concurrency, because plain LRU does not
 /// degrade in this regime — it collapses.** A projection miss is
-/// `RowProjection::new`, measured in *seconds* (the 10⁹ warm-up viewport is 10.7 s), so the
+/// `RowProjection::new`, *measured* at 1 277 ms at 10⁹, so the
 /// miss/hit cost ratio is 10⁵–10⁷; and because the single-flight miss path returns
 /// `ProjectionBuilding` to every racer, a working set that does not fit presents as a permanent
 /// 429 storm with a core set pegged on rebuilds, not as a gently lower hit rate.

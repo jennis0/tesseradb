@@ -42,7 +42,7 @@ costs essentially nothing, and a view answered entirely from the replica costs n
 because no request is made.
 
 Two limits on that figure, because both change what it means. It is **steady state**: a session
-whose projection is not resident pays the build instead, which `refresh.rs` measures at 4,550 ms at
+whose projection is not resident pays the build instead, which `refresh.rs` measures at 1 277 ms at
 10⁹ — four orders of magnitude above this floor, and dominant whenever it happens. And the per-tile
 share grows with schema width, since the gather does; five declared columns is the narrow end.
 

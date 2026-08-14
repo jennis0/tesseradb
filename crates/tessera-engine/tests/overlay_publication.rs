@@ -262,7 +262,7 @@ fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
 ///
 /// The geometry half is the load-bearing assertion. `segments_version` is the row-projection cache
 /// key and its patch path derives only from `version - 1`, so a deny that moved it would drop any
-/// session quiet through a burst off that chain and cost it a full rebuild — measured at 10.7 s at
+/// session quiet through a burst off that chain and cost it a full rebuild — measured at 1 277 ms at
 /// 10⁹. No flush happens here at all.
 #[test]
 fn an_accepted_deny_publishes_without_moving_the_geometry_version() {

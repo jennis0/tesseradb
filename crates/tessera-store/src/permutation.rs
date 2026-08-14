@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use memmap2::Mmap;
-use rayon::prelude::*;
 
+use tessera_roaring::{Sink, WORDS};
 use tessera_types::{EntityId, RowId, ROW_ABSENT};
 
 use crate::error::{Result, StoreError};
@@ -32,6 +32,30 @@ use crate::error::{Result, StoreError};
 const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
 const PERMUTATION_VERSION: u16 = 1;
 const HEADER_LEN: usize = 4 + 2 + 2 + 8; // magic, version, reserved, bound
+
+/// Rows per bucket in [`Permutation::project`], as a power of two — the one free parameter in that
+/// pass, and the two constraints that fix it pull in opposite directions.
+///
+/// A bucket owns a contiguous range of row space. Too *wide* and the bit array it stamps falls out
+/// of L2, making every row's stamp a last-level miss; too *narrow* and there are so many live write
+/// cursors in the first pass that the append side misses instead. 2²² rows is a 512 KB bit array,
+/// which is L2-resident on the machines this targets, and leaves 239 buckets at 10⁹ — whose cursors
+/// and write tails together stay inside L1.
+///
+/// It is also a whole number of Roaring containers (64 of them), which is not a coincidence to be
+/// preserved by luck: the emit step hands each container's words straight to [`Sink`], so a bucket
+/// boundary that fell inside a container would split a payload across two of them.
+const BUCKET_SHIFT: u32 = 22;
+
+/// Entity IDs decoded from the mask at a time.
+///
+/// The point of decoding in bulk at all is that croaring's `read_many` is a memcpy per container
+/// where stepping an iterator is a call per value: an alternative that range-splits the mask and
+/// steps a cursor per range measured between 0.70× and 1.07× of this across scales — that is, never
+/// reliably better, and it gives up the sequential walk of the slot array as well. The point of the
+/// window being *small* is that it is reused: at 10⁹ a whole entity list is 1 GB written and
+/// immediately re-read, and this is 32 KB that stays hot.
+const DECODE_WINDOW: usize = 8192;
 
 /// A memory-mapped `permutation.bin`. `row_of` and `project` are the only ways to cross from
 /// entity space to row space anywhere in the codebase (I4) — no other module may open this
@@ -192,86 +216,127 @@ impl Permutation {
     /// permutation, skip entities with no row here (out of bound or sentinel), and return the
     /// resulting row IDs as a bitmap.
     ///
-    /// **Cost note (shared-context constraint 8):** this touches every set bit in `mask` and
-    /// then sorts the results — at 10⁹ rows this costs *seconds*, not the microseconds a
-    /// viewport query budgets for. Never call this on the per-viewport path; the engine caches
-    /// the result per `(token, slice, pin)` and reuses it across viewports within a session.
+    /// **Cost (shared-context constraint 8):** this touches every set bit in `mask` and reads the
+    /// slot array end to end, which is over a second at 10⁹ — **1 277 ms** single-threaded over a
+    /// 25% grant (`probes/2026-08-14-project-decomposition/`). Never call it on the per-viewport
+    /// path; the engine caches the result per `(token, slice, pin)` and reuses it across viewports
+    /// within a session.
     ///
-    /// **Parallel, and executor-agnostic.** This crate owns no `rayon::ThreadPool` of its
-    /// own — `par_chunks`/`par_sort_unstable` below run on whatever pool the caller has
-    /// `install`ed (the engine wraps its cold-session build in `self.pool.install(..)`, D-D), or
-    /// on rayon's own global pool if nobody has. Chunk boundaries never change the result — each
-    /// chunk's matches are independent of every other chunk's, and are simply concatenated and
-    /// then sorted — only throughput does, so this stays correct under any thread count,
-    /// including 1 (see the `--ignored` gate test and the correctness tests in
-    /// `tests/permutation_project_parallel.rs`, both of which run this at several thread counts).
+    /// # One pass, and why the shape is not the obvious one
     ///
-    /// **Transient memory (brief's constraint; fix round 1 correction).** Two bindings are live
-    /// at any one instant, never three: `entities` is dropped explicitly the moment the chunked
-    /// map that reads it has finished (before `rows` exists at all), and `per_chunk` is consumed
-    /// — not copied — into `rows`, so its chunks free themselves one at a time as `rows` fills
-    /// rather than sitting alongside a fully-built `rows`. The peak instant is therefore either
-    /// "`entities` (mask.cardinality() `u32`s) + the just-finished `per_chunk` (<= the same
-    /// size)" or "the just-finished `per_chunk` + `rows`'s reserved-but-empty capacity (exactly
-    /// that size, computed below)" — both are one cardinality's worth of `u32`s each, so peak
-    /// transient is roughly **double** `mask.cardinality()` `u32`s, not triple. This is on top of
-    /// the mmap-backed `slots()` array, which is never copied — only ever borrowed, read
-    /// concurrently by every chunk.
+    /// §10.4 asks for "gather, radix sort, and bulk-construct from the sorted array". The gather
+    /// and the sort are the same pass here, and the sort is not a sort.
     ///
-    /// Output is a sorted set of *unique* row IDs — unique because `self` is a permutation (a
-    /// bijection), so no two entities can ever map to the same row, whichever chunk found them —
-    /// and the sort makes the result order-independent of chunk scheduling, so the output bytes
-    /// cannot change with the thread count.
+    /// A row is written **once**, into a bucket, straight out of the slot lookup — the entity list
+    /// never exists, and neither does a row array to be sorted and re-read. The earlier form wrote
+    /// it four times over (decode to a `Vec`, gather, sort in place, read back through `add_many`)
+    /// and spent 5 272 ms of its 8 267 ms in `par_sort_unstable` alone.
+    ///
+    /// **A bucket is a row range, not a container key**, and that is the load-bearing choice rather
+    /// than an arbitrary one. Partitioning on the high 16 bits — which *is* the Roaring container
+    /// key, so it looks like the natural unit — leaves 15 259 live write cursors at 10⁹, far more
+    /// than the cache holds, and was **measured to get worse with scale**: 3.22× over the stages it
+    /// replaces at 10⁸ but only 2.06× at 10⁹. [`BUCKET_SHIFT`] instead fixes the two things that
+    /// decide the cost, and they pull in opposite directions: few enough buckets that the write
+    /// cursors stay in L1, wide enough that the bit array each one stamps stays in L2.
+    ///
+    /// **Containers are emitted, not inserted.** The bit array a bucket stamps *is* 64 Roaring
+    /// container payloads laid end to end, so [`tessera_roaring::Sink`] takes them as they are —
+    /// a popcount and a memcpy each. Expanding them back to `u32` for `add_many` instead costs
+    /// 1 077 ms more at 10⁹ (2 306 ms against 1 229 ms), which is the larger half of the primitive.
+    ///
+    /// **Serial, deliberately, and it is still faster in wall clock.** The form this replaces was
+    /// rayon-parallel and reached **3 024 ms on twelve threads** at 10⁹; this reaches 1 277 ms on
+    /// one. So the serial rewrite is not a trade of latency for efficiency — it wins both, by 2.4×
+    /// on wall clock while leaving eleven cores to other sessions. That second part is the reason
+    /// to care: a server answering concurrent sessions is already saturated, so a projection that
+    /// spreads across cores buys throughput nothing and only removing work counts.
+    ///
+    /// The one-pass form has no parallel decomposition worth taking in any case — see
+    /// [`DECODE_WINDOW`] for the range-split alternative and why bulk decode beats it.
+    ///
+    /// **Transient memory** is one `u32` per row of the result — roughly 1 GB at 10⁹ over a 25%
+    /// grant, held once in the buckets, against the three simultaneous copies the previous form
+    /// peaked at. The mmap-backed slot array is never copied, only read.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         let slots = self.slots();
-        let entities: Vec<u32> = mask.to_vec();
+        // Every row this permutation can yield is below `bound`: `validate_rows` establishes that
+        // it is a bijection *onto* `[0, row_count)`, so each row is claimed by a distinct in-bound
+        // entity and `row_count <= bound`. Sizing the buckets from `bound` therefore cannot
+        // under-count them, whatever the mask contains.
+        let nbuckets = (self.bound_usize >> BUCKET_SHIFT) + 1;
+        // Rows land near-uniformly across row space — a build orders them by `(morton,
+        // tessera_id)`, which is uncorrelated with entity-issue order — so the mean plus a quarter
+        // absorbs the variation without a histogram pass to find it. **The slack is not a rounding
+        // habit**: reserving the bare mean leaves about half the buckets to exceed it and double,
+        // and a bucket at 10⁹ is megabytes, so that is a realloc and a memcpy of the whole thing on
+        // half of them. Not separately measured — it was not separable from run-to-run variance at
+        // this size — so it is here on the argument, not on a number.
+        let expected = (mask.cardinality() as usize / nbuckets)
+            .saturating_mul(5)
+            .saturating_div(4)
+            .saturating_add(64);
+        let mut buckets: Vec<Vec<u32>> =
+            (0..nbuckets).map(|_| Vec::with_capacity(expected)).collect();
 
-        // Aim for a handful of chunks per worker so a run of mostly-sentinel entities in one
-        // chunk doesn't leave a worker idle while the others are still busy — the same
-        // over-subscription reasoning as `tessera-engine::viewport`'s `TILE_PAR_MIN_LEN`, just
-        // computed from the ambient pool's size rather than a fixed constant, since this crate
-        // does not know (and must not assume) how large that pool is.
-        let threads = rayon::current_num_threads().max(1);
-        let chunk_len = (entities.len() / (threads * 8)).max(1);
+        let mut window = [0u32; DECODE_WINDOW];
+        let mut cursor = mask.cursor();
+        loop {
+            let decoded = cursor.read_many(&mut window);
+            if decoded == 0 {
+                break;
+            }
+            for &entity in &window[..decoded] {
+                // `get` rather than an index: an entity at or above `bound` has no row *here* and
+                // is skipped, which is the same answer `row_of` gives and is not an error — it is
+                // ordinarily an entity living in a different segment.
+                if let Some(&row) = slots.get(entity as usize) {
+                    if row != ROW_ABSENT {
+                        buckets[(row >> BUCKET_SHIFT) as usize].push(row);
+                    }
+                }
+            }
+        }
 
-        let per_chunk: Vec<Vec<u32>> = entities
-            .par_chunks(chunk_len)
-            .map(|chunk| {
-                // `chunk.len()` is an exact upper bound on this chunk's hits (every filtered
-                // element survives at most once), so this capacity hint means the chunk's local
-                // `Vec` never reallocates as it fills — no realloc churn on top of the peak this
-                // doc note already accounts for.
-                let mut local = Vec::with_capacity(chunk.len());
-                local.extend(
-                    chunk
-                        .iter()
-                        .filter_map(|&entity| slots.get(entity as usize).copied())
-                        .filter(|&slot| slot != ROW_ABSENT),
+        let mut stamp = vec![0u64; (1usize << BUCKET_SHIFT) / 64];
+        let mut sink = Sink::new();
+        for (index, rows) in buckets.iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+            let base = (index as u32) << BUCKET_SHIFT;
+            // Which of the bucket's 64 containers hold anything. One `u64` covers them exactly,
+            // which is what lets the emit below skip the empty ones without scanning their words.
+            let mut occupied: u64 = 0;
+            for &row in rows.iter() {
+                let offset = row - base;
+                stamp[(offset >> 6) as usize] |= 1u64 << (offset & 63);
+                occupied |= 1u64 << (offset >> 16);
+            }
+            // Emitted and cleared in the same pass, container by container. Clearing *here* rather
+            // than in a second loop is worth stating: the container's words are in cache because
+            // the popcount just read them, and only the occupied ones are touched at all — so a
+            // sparse bucket pays for what it used, while a dense one pays a sequential 8 KB wipe.
+            // The alternative that looks frugal — re-walking each bucket's rows and zeroing the word
+            // each sits in — is O(rows) rather than O(width), which sounds better and is 250 million
+            // scattered writes at 10⁹ against 122 MB of sequential ones. Also not separately
+            // measured, and stated as reasoning rather than as a result.
+            for (container, words) in stamp.chunks_exact_mut(WORDS).enumerate() {
+                if occupied & (1u64 << container) == 0 {
+                    continue;
+                }
+                let cardinality: u32 = words.iter().map(|word| word.count_ones()).sum();
+                let key = u16::try_from((base >> 16) + container as u32)
+                    .expect("a row below 2^32 has a container key below 2^16");
+                sink.push_block(
+                    key,
+                    cardinality,
+                    (&*words).try_into().expect("a bucket is whole containers"),
                 );
-                local
-            })
-            .collect();
-        // `entities` is dead from here on — dropped explicitly rather than left to fall out of
-        // scope at the end of the function, so its allocation is freed before `rows` is even
-        // reserved below (fix round 1: this used to overlap with both `per_chunk` and `rows` at
-        // once, a 3x peak rather than the documented 2x).
-        drop(entities);
-
-        let total_rows: usize = per_chunk.iter().map(Vec::len).sum();
-        let mut rows: Vec<u32> = Vec::with_capacity(total_rows);
-        // `per_chunk.into_iter()` yields owned `Vec<u32>`s one at a time; `flatten` drains and
-        // drops each one as `extend` exhausts it, so `per_chunk`'s chunks free themselves
-        // progressively as `rows` fills, rather than the whole of `per_chunk` staying alive
-        // alongside a fully-built `rows` (which is what `per_chunk.concat()` did before this
-        // fix — the other half of the 3x-not-2x peak).
-        rows.extend(per_chunk.into_iter().flatten());
-
-        rows.par_sort_unstable();
-        // croaring 2.x has no dedicated "construct from sorted slice" entry point; `of` /
-        // `add_many` (`roaring_bitmap_add_many`) is CRoaring's bulk-add path and is what the
-        // design's "build from sorted output" guidance (§10.4) maps onto in this binding.
-        // Row IDs are unique (a permutation), so `rows` has no duplicates to fold away.
-        croaring::Bitmap::of(&rows)
+                words.fill(0);
+            }
+        }
+        sink.finish()
     }
 
     /// The path this permutation was loaded from (for diagnostics only).
