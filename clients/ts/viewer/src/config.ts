@@ -1,6 +1,32 @@
-export type ViewerConfig = {
+/** One term set the demo offers as a principal, with the visible-set size measured for it. */
+export type Preset = {label: string; terms: string[]; visible: number};
+
+/**
+ * One servable bundle: where it is, and enough about it to label the choice.
+ *
+ * **Presets travel with the dataset**, because a term dictionary is per bundle: the term ids that
+ * name a 10% principal in one bundle name something else entirely in another, so a single shared
+ * `presets.json` would silently mislabel every principal on the dataset it was not measured against.
+ */
+export type Dataset = {
+  id: string;
+  label: string;
+  items: number;
+  /** The text columns this bundle indexes — the reason one dataset differs from another. */
+  prose: string[];
   viewerUrl: string;
   sessionUrl: string;
+  presets: Preset[];
+};
+
+export type ViewerConfig = {
+  /**
+   * Every dataset a server is running for, from `datasets.json`.
+   *
+   * Never empty: with no document to read, this falls back to a single entry built from the
+   * environment, which is the shape every earlier version of this viewer had.
+   */
+  datasets: Dataset[];
   sessionCredential: string;
   /**
    * Mark radius in pixels, and whether marks are pickable.
@@ -64,8 +90,41 @@ export function readConfig(): ViewerConfig {
     ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
     gpuBuffers: query?.get('gpu') !== '0',
     prefetchLayers: query?.has('layers') ? Math.max(0, Number(query.get('layers')) || 0) : 1,
-    viewerUrl: env.VITE_TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
-    sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
+    datasets: [],
     sessionCredential: env.VITE_TESSERA_SESSION_CREDENTIAL ?? ''
   };
+}
+
+/**
+ * Load the dataset list — `datasets.json` if `run_demo.sh` wrote one, else the single server the
+ * environment names.
+ *
+ * **Fetched rather than imported**, and that is the point: a bundled import would fix the list at
+ * build time, so restarting the demo against a different set of bundles would need a viewer rebuild.
+ * It also means this file no longer has to be rewritten in the repository to change what is served —
+ * the previous shape rewrote a *tracked* `presets.json` on every run.
+ *
+ * A missing or malformed document is not an error. Falling back keeps `npm run dev` against a
+ * hand-started server working, which is what the environment variables are for.
+ */
+export async function loadDatasets(): Promise<Dataset[]> {
+  const env = import.meta.env;
+  const fallback: Dataset = {
+    id: 'default',
+    label: 'the running server',
+    items: 0,
+    prose: [],
+    viewerUrl: env.VITE_TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
+    sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
+    presets: []
+  };
+  try {
+    const response = await fetch('/datasets.json', {cache: 'no-store'});
+    if (!response.ok) return [fallback];
+    const body = (await response.json()) as {datasets?: Dataset[]};
+    const datasets = (body.datasets ?? []).filter((d) => d.id && d.viewerUrl && d.sessionUrl);
+    return datasets.length > 0 ? datasets : [fallback];
+  } catch {
+    return [fallback];
+  }
 }

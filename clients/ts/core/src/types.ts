@@ -56,7 +56,64 @@ export type DeclaredScalar = {
   name: string;
   arrowType: ArrowType;
   category: CategoryDescriptor | null;
+  /**
+   * Whether the column occupies a slot in every row of the hot column — and therefore whether it
+   * **arrives in a viewport response at all**.
+   *
+   * This is the flag that decides what may be drawn. A column with `render: false` lives in entity
+   * space or in the record blob; it can be filtered on and returned at drill-down, but no viewport
+   * response carries a value for it, so nothing can be coloured by it. A client that offered every
+   * declared column to its colour control would be offering columns whose values never arrive.
+   */
+  render: boolean;
+  /** Whether the column carries an entity-space filter index, as against being answered by a scan. */
+  index: boolean;
 };
+
+/**
+ * What a client may filter a column by, as `/v1/meta` publishes it (contracts §3.2).
+ *
+ * **`family` is what decides which control to draw**, and it is published rather than inferred
+ * because two of the four cannot be derived from `arrowType`: a `text` column's type is a string
+ * type and its operand is not a string predicate, and a `keyword`'s values are held in a dictionary
+ * the server never serves. Concretely — a `category` has a value set, so `/v1/categories` fills a
+ * dropdown; a `string` or `keyword` has none, because its values are row data rather than a
+ * vocabulary, so the control is a free-text box and no endpoint will ever enumerate it.
+ */
+export type FilterOperandSet = {
+  column: string;
+  family: 'category' | 'keyword' | 'string' | 'text' | 'numeric';
+  /** The operator names this column accepts — `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
+  operands: string[];
+};
+
+/**
+ * A filter expression, exactly as `/v1/viewport` takes it.
+ *
+ * A node carries **one** key: a column name, or one of the three combinators. Two keys would need
+ * an implicit operator between them, and the server refuses rather than choosing one.
+ *
+ * **An unresolvable value is an empty operand, never a refusal** (contracts §3.2): a filter naming
+ * a value this principal cannot see and one naming a value that does not exist are indistinguishable
+ * in status, body and every count. A client must not present "no matches" as "no such value".
+ */
+export type FilterExpr =
+  | {all_of: FilterExpr[]}
+  | {any_of: FilterExpr[]}
+  | {none_of: FilterExpr[]}
+  | {[column: string]: FilterOperator};
+
+/** One column's predicate. Exactly one key — the server refuses a leaf carrying two. */
+export type FilterOperator =
+  | {eq: string | number | boolean}
+  | {in: (string | number)[]}
+  | {prefix: string}
+  | {contains: string}
+  /** Every analysed token must appear, unless `minimum_should_match` names how many must. */
+  | {match: string | {query: string; minimum_should_match?: number}}
+  /** Adjacent, in order. There is no `minimum_should_match` for a phrase — adjacency is not a count. */
+  | {phrase: string}
+  | {range: {gte?: number; gt?: number; lte?: number; lt?: number}};
 
 export type Meta = {
   apiVersion: number;
@@ -79,6 +136,16 @@ export type Meta = {
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
+  /**
+   * Which columns this bundle may be filtered on, and by which operators. Empty when the schema
+   * declares nothing filterable.
+   *
+   * A client draws its filter controls from **this** rather than from {@link Meta.declaredScalars}:
+   * the two lists differ, and the difference is load-bearing in both directions. A blob-resident
+   * text column is filterable and never appears in a viewport response; a column with no index and
+   * no render placement appears in neither list's useful half.
+   */
+  filterOperands: FilterOperandSet[];
 };
 
 /** One category value: what a code stands for, and how to show it. */
@@ -119,6 +186,16 @@ export type ViewportRequest = {
    * simply means every response comes back `stale: false`.
    */
   stamp?: string | null;
+  /**
+   * The filter expression, or null for the unfiltered request.
+   *
+   * **A filter narrows what is served without changing the response's identity key**, which is the
+   * one thing a caller holding a replica has to know: the key partitions by principal, credential,
+   * mask and slice, so bands held under one filter are *renderable* under another and will be
+   * served as if they belonged. A client that changes this must drop what it holds itself — the
+   * server cannot tell it to.
+   */
+  filters?: FilterExpr | null;
 };
 
 /**
@@ -250,4 +327,10 @@ export type ViewportResponse = {
   bytes: number;
 };
 
-export type ItemDetail = {scalars: unknown[]; externalId: string | null};
+/**
+ * One item's whole record, keyed by declared column name — see {@link TesseraClient.item}.
+ *
+ * A category arrives already resolved to its vocabulary key, and a column the item carries no value
+ * for is absent from `fields` rather than present as null.
+ */
+export type ItemDetail = {fields: Record<string, unknown>; externalId: string | null};

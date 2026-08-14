@@ -7,10 +7,11 @@
 //
 //   TESSERA_SESSION_CRED=… node clients/ts/scripts/measure-principals.mjs \
 //     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0..200 \
-//     [--ranks <pairs>.term-ranks.json]
+//     [--ranks <pairs>.term-ranks.json] [--out PATH]
 //
 // Re-run it per fixture: the term dictionary differs between bundles, so presets measured against
-// 2m4 are meaningless against 1e8.
+// 2m4 are meaningless against 1e8. That is what `--out` is for — the demo serves several bundles at
+// once, and each needs its own measured list.
 //
 // With `--ranks` (scripts/rank_terms.py's output) it also composes COVERAGE principals — sparse
 // ~1%, medium ~10%, heavy ~50% of the corpus — because at a 4.8 x 10^4-term dictionary any single
@@ -19,8 +20,8 @@
 // with the REAL visible measured per probe — the ranking orders candidates, the service decides
 // sizes, and nothing here is estimated from pair counts.
 //
-// Note it decodes only the TILE stream, which is the one carrying an explicit length prefix at
-// byte 0 — so this script needs none of core's message-walking, and stays plain JS.
+// Note it decodes only the TILE stream, which is the response's first frame — so this script needs
+// none of core's frame walking beyond one header, and stays plain JS.
 import {writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -75,10 +76,18 @@ async function visibleFor(terms) {
   });
   if (!r.ok) throw new Error(`viewport ${terms}: ${r.status} ${await r.text()}`);
   const buf = new Uint8Array(Buffer.from(await r.arrayBuffer()));
-  const tileLength = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(0, true);
-  const tiles = tableFromIPC(buf.subarray(4, 4 + tileLength));
-  const visible = tiles.getChild('visible').toArray();
-  return [...visible].reduce((a, b) => a + Number(b), 0);
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  // `u8 kind, u32 LE length, <payload>` — every frame prefixed, tiles always first (`core/frame.ts`
+  // carries the full table). Asserted rather than assumed: reading the length from byte 0 decodes
+  // the kind tag as part of it, which yields a plausible-looking offset and an empty table, and an
+  // empty table here reads as "this principal sees nothing" rather than as a broken parse.
+  const kind = view.getUint8(0);
+  if (kind !== 1) throw new Error(`expected a tiles frame first, got kind ${kind}`);
+  const tileLength = view.getUint32(1, true);
+  const tiles = tableFromIPC(buf.subarray(5, 5 + tileLength));
+  const column = tiles.getChild('visible');
+  if (!column) throw new Error('the tiles frame carries no `visible` column');
+  return [...column.toArray()].reduce((a, b) => a + Number(b), 0);
 }
 
 const measured = [];
@@ -180,7 +189,12 @@ if (args.ranks) {
   });
 }
 
-const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
+// `--out` because presets are **per bundle** and the demo now serves more than one: a term id names
+// a different set in each dictionary, so one shared file would mislabel every principal on whichever
+// dataset it was not measured against. `run_demo.sh` composes the per-dataset files into
+// `datasets.json`.
+const out =
+  args.out ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
 await writeFile(out, `${JSON.stringify(chosen, null, 2)}\n`);
 console.table(chosen.map((p) => ({label: p.label, terms: p.terms.length, visible: p.visible})));
 console.log(

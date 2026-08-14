@@ -7,7 +7,11 @@
   </head>
   <body>
     <div id="map"></div>
-    <aside id="panels"></aside>
+    <!-- Controls left, readouts right. The two are separate elements because they are rebuilt under
+         different rules: the readouts refresh on every store change, while the controls must not be
+         rebuilt while focus is inside them or a filter box loses its caret mid-word. -->
+    <aside id="controls"></aside>
+    <aside id="stats"></aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

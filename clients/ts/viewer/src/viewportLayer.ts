@@ -73,7 +73,7 @@ export function encodingSignature(store: Store): string {
 }
 
 function encodingOf(store: Store): Encoding {
-  const {colourBy, meta, categories, categoryErrors, ranks, domains} = store.state;
+  const {colourBy, meta, categoryErrors, ranks, domains} = store.state;
   if (!colourBy || !meta) return {kind: 'uniform'};
   const column = meta.declaredScalars.find((c) => c.name === colourBy);
   if (!column) return {kind: 'uniform'};
@@ -84,11 +84,21 @@ function encodingOf(store: Store): Encoding {
   if (categoryErrors[colourBy]) return {kind: 'unmapped'};
 
   if (column.category) {
-    const values = categories[colourBy];
-    // Not yet resolved. Uniform rather than unmapped, because this state is transient and
-    // flashing the whole map grey on the way to a legend is worse than leaving it alone.
-    if (!values) return {kind: 'uniform'};
-    return {kind: 'category', column: colourBy, rankOfCode: ranks[colourBy] ?? {}};
+    // **Paint follows the ranks, and the ranks are local.** A colour is `colourOfRank`, and a rank
+    // is assigned from the codes counted in the bands already held — no round trip is involved. So
+    // the map is painted the moment the count lands, and does not wait for `/v1/categories`.
+    //
+    // Waiting for it was a mistake, and a visible one: the resolved value list is needed to *name* a
+    // colour in the legend and for nothing else, so gating the paint on it left every mark uniform
+    // across a fetch, and the map changed colour in one jump when the reply arrived. Worse at scale
+    // — the 25M bundle streams bands for seconds before the count runs at all.
+    //
+    // It discloses nothing extra. The codes being ranked came from marks the mask already admitted,
+    // which is the same argument that lets the legend exist; what stays gated is the *name*, and the
+    // legend still shows only values `/v1/categories` was willing to return.
+    const rankOfCode = ranks[colourBy];
+    if (!rankOfCode || Object.keys(rankOfCode).length === 0) return {kind: 'uniform'};
+    return {kind: 'category', column: colourBy, rankOfCode};
   }
   const domain = domains[colourBy];
   if (!domain) return {kind: 'uniform'};

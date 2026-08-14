@@ -1,5 +1,4 @@
 import {
-  PALETTE_SIZE,
   UNMAPPED,
   colourOfFraction,
   colourOfRank,
@@ -23,9 +22,20 @@ import type {AppState} from '../state.js';
  * scale, which is the one thing it must never be mistaken for.
  */
 export function renderLegend(state: AppState): string {
-  const columns = state.meta?.declaredScalars ?? [];
+  // **Only the rendered columns**, because only they arrive. A `render: false` column lives in
+  // entity space or the record blob and no viewport response carries a value for it, so offering it
+  // here would offer an encoding whose every mark is unmapped — the `title` and `abstract` columns
+  // are filterable and unpaintable, and the two lists differ for exactly that reason.
+  const columns = (state.meta?.declaredScalars ?? []).filter((c) => c.render);
   if (columns.length === 0) {
-    return panel('Colour', '<div class="muted">this bundle declares no per-item columns</div>');
+    const declared = state.meta?.declaredScalars.length ?? 0;
+    return panel(
+      'Colour',
+      declared === 0
+        ? '<div class="muted">this bundle declares no per-item columns</div>'
+        : `<div class="muted">none of this bundle's ${declared} columns is rendered, so no value
+           reaches a mark to be coloured by</div>`
+    );
   }
 
   const options = [
@@ -41,8 +51,8 @@ export function renderLegend(state: AppState): string {
   if (state.colourBy === null) {
     return panel(
       'Colour',
-      `${select}<div class="muted">every mark one colour. Pick a column to encode it — no request
-        is issued, because the response already carries every declared column.</div>`
+      `${select}<div class="muted">every mark one colour — pick a column to encode it. No request
+        is issued either way.</div>`
     );
   }
 
@@ -57,8 +67,8 @@ export function renderLegend(state: AppState): string {
       'Colour',
       `${select}
        <div class="bad">${esc(error.code)}: ${esc(error.detail)}</div>
-       <div class="muted">marks are drawn in the unmapped colour — every served mark is still on
-         the map, only its value is unnamed.</div>`
+       <div class="muted">drawn unmapped — every served mark is still on the map, only its value is
+         unnamed.</div>`
     );
   }
 
@@ -89,20 +99,19 @@ function categoryBody(state: AppState, name: string): string {
     })
     .join('');
 
+  // The palette holds a fixed number of colours and they go to the values commonest among the marks on
+  // screen. The rest share the unmapped colour rather than reusing a hue, which would imply two
+  // values are one.
   const rest = overflow > 0
     ? `<div class="row"><span class="swatch" style="background:${css(UNMAPPED)}"></span>
-       <span class="v">${overflow} rarer value${overflow === 1 ? '' : 's'}</span></div>
-       <div class="muted">the palette holds ${PALETTE_SIZE} colours and they go to the values
-         commonest among the marks on screen. The rest share the unmapped colour rather than
-         reusing a hue, which would imply two values are one.</div>`
+       <span class="v">${overflow} rarer value${overflow === 1 ? '' : 's'}</span></div>`
     : '';
 
-  return `${swatches}${rest}
-    <div class="row"><span class="swatch" style="background:${css(UNMAPPED)}"></span>
-      <span class="v">absent / unresolved</span></div>
-    <div class="muted">values are those carried by the marks on screen, resolved against
-      <code>/v1/categories</code> — not the bundle's whole vocabulary. A colour keeps its meaning
-      as you pan: ranks are assigned once and extended, never reordered.</div>`;
+  return `<div class="legend">${swatches}${rest}
+      <div class="row"><span class="swatch" style="background:${css(UNMAPPED)}"></span>
+        <span class="v">absent / unresolved</span></div>
+    </div>
+    <div class="muted">values on screen, not the whole vocabulary</div>`;
 }
 
 function rampBody(state: AppState, name: string): string {
@@ -119,10 +128,11 @@ function rampBody(state: AppState, name: string): string {
     return n.toLocaleString('en-GB');
   };
 
+  // The domain is the range of the marks *served*, widened as you pan and never narrowed. It is not
+  // the corpus range: a corpus-wide min/max would be an aggregate over items this principal cannot
+  // see, which is what I2 forbids. The caption says so because the difference is not visible.
   return `<div class="ramp" style="background:linear-gradient(to right, ${stops})"></div>
     ${row('min', fmt(domain.min))}
     ${row('max', fmt(domain.max))}
-    <div class="muted">the domain is the range of the marks <em>served</em>, widened as you pan and
-      never narrowed. It is not the corpus range: a corpus-wide min/max would be an aggregate over
-      items this principal cannot see.</div>`;
+    <div class="muted">range of marks served, not of the corpus</div>`;
 }

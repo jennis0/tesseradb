@@ -12,20 +12,41 @@ body {
   inset: 0;
 }
 
-#panels {
+/* The two columns frame the map: what you change on the left, what you read on the right. Both
+   float over the canvas rather than shrinking it, so the map keeps the full window and a mark under
+   a panel is still reachable by panning. */
+#controls,
+#stats {
   position: absolute;
   top: 0;
-  right: 0;
-  width: 340px;
   max-height: 100%;
   overflow-y: auto;
   padding: 12px 14px;
-  background: rgba(13, 15, 18, 0.9);
+  background: rgba(13, 15, 18, 0.92);
+}
+
+#controls {
+  left: 0;
+  width: 300px;
+  border-right: 1px solid #222;
+}
+
+#stats {
+  right: 0;
+  width: 300px;
   border-left: 1px solid #222;
 }
 
+/* Below this the two columns would take more of the window than the map does, so the readouts give
+   way: the controls are what a narrow window is still usable for. */
+@media (max-width: 900px) {
+  #stats {
+    display: none;
+  }
+}
+
 .panel {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .panel h2 {
@@ -92,10 +113,148 @@ input[type='range'] {
   margin-bottom: 6px;
 }
 
-select {
+select,
+input[type='search'],
+input[type='number'],
+input[type='date'],
+button {
   background: #171a1f;
   color: #dfe3e8;
   border: 1px solid #2a2f36;
   padding: 4px;
   font: inherit;
+}
+
+button {
+  width: 100%;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #3d454f;
+}
+
+/* ---------------------------------------------------------------------------------- filters */
+
+/* One column's control. The left rule is the active indicator: a filled-in filter is the single
+   most important thing to be able to see at a glance, because every count on the right is
+   conditioned on it and a forgotten filter reads as missing data. */
+.ctl {
+  margin-bottom: 10px;
+  padding-left: 8px;
+  border-left: 2px solid #2a2f36;
+}
+
+.ctl-name {
+  color: #7d8794;
+  margin-bottom: 2px;
+}
+
+.ctl-name.on {
+  color: #8fd3ff;
+}
+
+.ctl:has(.ctl-name.on) {
+  border-left-color: #8fd3ff;
+}
+
+.ctl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+/* Inputs in a row share the space; the operator select beside them takes only what it needs. */
+.ctl-row .grow {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ctl-row select {
+  width: auto;
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+/* A category's value list. Capped and scrolled: 171 primary categories is a legitimate list and an
+   uncapped one pushes every panel below it off the screen — measured at 350px of overflow with two
+   such columns, which put the filters this demo exists to show below the fold. */
+.checks {
+  max-height: 96px;
+  overflow-y: auto;
+  border: 1px solid #2a2f36;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+}
+
+.tick {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tick:hover {
+  color: #eaeef3;
+}
+
+.tick input {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------------------- drill-down */
+
+/* Prose gets a block rather than a label/value row: an abstract is ~950 characters, and justified
+   two-column layout turns that into one unreadable line. Clamped to six lines with the whole value
+   in `title`, so the panel keeps its shape without the text being lost. */
+.prose {
+  margin-top: 4px;
+}
+
+.prose-name {
+  color: #7d8794;
+}
+
+.prose-body {
+  color: #eaeef3;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------------------------- the drawer */
+
+/* The legend's swatch list is capped for the reason the value lists are: it runs to the palette's
+   full width plus an overflow row, and it sits under every control. */
+.legend {
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+details {
+  margin-top: 8px;
+  border-top: 1px solid #222;
+  padding-top: 6px;
+}
+
+details summary {
+  cursor: pointer;
+  color: #7d8794;
+  list-style: none;
+}
+
+details summary::before {
+  content: '▸ ';
+}
+
+details[open] summary::before {
+  content: '▾ ';
 }
