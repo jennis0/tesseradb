@@ -15,6 +15,11 @@ edition = "2021"
 # dictionaries for the scripts with no inter-word spaces. Promoting icu4x to a direct dependency of
 # an indexing crate is stated here rather than hidden — the `memchr` precedent.
 #
+# **All four, because the token rule is a property lookup and not only a segmentation.**
+# `icu_properties` supplies `Alphabetic` and `General_Category`, which decide whether a segment
+# becomes a token; that decision came from std's tables until 2026-08-14 and so moved with the
+# toolchain rather than with the pin below (`UNICODE_VERSION`, and #125).
+#
 # **Pinned to the minor, not the major, and the identity string is why.** `UNICODE_VERSION` records
 # `icu4x-2.2` in every bundle's manifest, and both readers refuse a bundle whose recorded identity
 # they cannot reproduce — but they compare the *string*, which a caret range lets drift. A `cargo
@@ -26,6 +31,7 @@ edition = "2021"
 # to move the constant with it.
 icu_normalizer = "=2.2"
 icu_casemap = "=2.2"
+icu_properties = "=2.2"
 icu_segmenter = "=2.2"
 
 [dev-dependencies]

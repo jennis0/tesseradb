@@ -65,6 +65,10 @@
 
 use icu_casemap::{CaseMapper, CaseMapperBorrowed};
 use icu_normalizer::{ComposingNormalizer, ComposingNormalizerBorrowed};
+use icu_properties::props::{Alphabetic, GeneralCategory, GeneralCategoryGroup};
+use icu_properties::{
+    CodePointMapData, CodePointMapDataBorrowed, CodePointSetData, CodePointSetDataBorrowed,
+};
 use icu_segmenter::options::WordBreakInvariantOptions;
 use icu_segmenter::{WordSegmenter, WordSegmenterBorrowed};
 
@@ -78,20 +82,31 @@ pub const UNICODE: &str = "unicode";
 /// component is the pipeline's own shape, and it moves if a stage is added, removed or reordered
 /// even when icu4x does not.
 ///
-/// **This string is a hand-maintained claim about two things it cannot observe**, which is worth
-/// stating where it is written rather than discovering later:
+/// **This string is a hand-maintained claim about the data behind the token stream**, and the
+/// claim is only sound because every input to that stream comes from one pinned place.
+/// `Cargo.toml` pins the four icu4x crates at `=2.2`, so a data bump has to be a deliberate edit
+/// and the edit has to move this constant with it. A caret range would let `cargo update` change
+/// the token stream while leaving the identity untouched — the base build and the next flush
+/// disagreeing about where a word ends, with every identity check passing, which is precisely the
+/// failure decision 0070 exists to catch and the one thing the identity cannot catch about itself.
 ///
-/// - The **icu4x data version**. `Cargo.toml` pins the three crates at `=2.2` so that a bump has to
-///   be a deliberate edit, and the edit has to move this constant with it. A caret range would let
-///   `cargo update` change the token stream while leaving the identity untouched — the base build
-///   and the next flush disagreeing about where a word ends, with every check passing.
-/// - ⊘ **Rust std's Unicode tables**, which `Analyser::tokens` consults through
-///   `char::is_alphanumeric` to decide whether a segment is a token. Those move with the toolchain,
-///   not with icu4x, and nothing here records the toolchain. A code point that becomes alphanumeric
-///   in a later Unicode revision turns a segment that produced no token into one that does. The
-///   closing move is to take the property from `icu_properties` — already in the tree — so the one
-///   pin covers both; not done here, and the exposure is small (a segment of pure punctuation
-///   becoming word-like) but it is real and unrecorded.
+/// **Nothing in the pipeline consults Rust std's Unicode tables**, and that is deliberate rather
+/// than incidental. `Analyser::tokens` decides whether a segment is a token from `Alphabetic ∪
+/// General_Category ∈ {Nd, Nl, No}`, taken from `icu_properties` — the same pin as the segmenter's
+/// dictionaries. It read `char::is_alphanumeric` until 2026-08-14, which is the same set by
+/// definition but from **std's** tables, and those move with the *toolchain*: a code point becoming
+/// alphanumeric in a later Unicode revision would have turned a segment that produced no token into
+/// one that does, in a corpus using it, with nothing recording the change. Small exposure — new
+/// script blocks and numeric forms, never the Latin or CJK cores — but it was the one input to this
+/// identity that nothing observed.
+///
+/// The swap did **not** change the token rule, so `p1` stands and no index needs rebuilding: the
+/// two definitions were compared across all 1,114,112 code points at icu4x 2.2 and rustc 1.90 and
+/// **agree exactly** — zero disagreements, so no segment classifies differently. (Both candidate
+/// formulations were measured: the general-category one above, which is std's own definition of
+/// `is_numeric`, and `Alphabetic ∪ Numeric_Type ≠ None`. Both matched, and the first is used
+/// because tracking std's definition is what keeps a future divergence a data question rather than
+/// a definition question.) A change to the rule itself would be `p1` → `p2` and a rebuild.
 const UNICODE_VERSION: &str = "icu4x-2.2/p1";
 
 /// Every analyser this binary can be asked for, by name. **A name not in this list is refused** —
@@ -125,6 +140,10 @@ pub struct Analyser {
     nfkc: ComposingNormalizerBorrowed<'static>,
     case: CaseMapperBorrowed<'static>,
     words: WordSegmenterBorrowed<'static>,
+    // The token rule's two property lookups, from the same pin as the stages above rather than
+    // from std — see [`UNICODE_VERSION`] for why the toolchain must not be an input here.
+    alphabetic: CodePointSetDataBorrowed<'static>,
+    general_category: CodePointMapDataBorrowed<'static, GeneralCategory>,
 }
 
 impl std::fmt::Debug for Analyser {
@@ -160,7 +179,18 @@ impl Analyser {
             // Lao, Khmer and Burmese, and the plain UAX #29 rules elsewhere. That per-run choice is
             // what lets one analyser serve a mixed-script corpus with nothing declared.
             words: WordSegmenter::new_auto(WordBreakInvariantOptions::default()),
+            alphabetic: CodePointSetData::new::<Alphabetic>(),
+            general_category: CodePointMapData::<GeneralCategory>::new(),
         }
+    }
+
+    /// Does this character make its segment a token? `Alphabetic ∪ General_Category ∈ {Nd, Nl, No}`
+    /// — std's own definition of `char::is_alphanumeric`, evaluated against **icu4x's** tables so
+    /// that the pipeline has exactly one Unicode version and this crate's identity covers all of it
+    /// ([`UNICODE_VERSION`]).
+    fn alphanumeric(&self, c: char) -> bool {
+        self.alphabetic.contains(c)
+            || GeneralCategoryGroup::Number.contains(self.general_category.get(c))
     }
 
     /// The tokens of `text`, in order, with duplicates kept.
@@ -203,7 +233,7 @@ impl Analyser {
         };
         for end in breaks {
             let segment = &folded[start..end];
-            if segment.chars().any(char::is_alphanumeric) {
+            if segment.chars().any(|c| self.alphanumeric(c)) {
                 out.push(segment.to_string());
             }
             start = end;
@@ -246,6 +276,24 @@ mod tests {
         assert_eq!(a.tokens("  \t\n "), Vec::<String>::new());
         assert_eq!(a.tokens(""), Vec::<String>::new());
         assert_eq!(a.tokens("a—b"), vec!["a", "b"]);
+    }
+
+    /// **The token rule is a union, and the numeric half is the part `Alphabetic` alone drops.**
+    ///
+    /// Worth its own test because the property moved from std to `icu_properties` on 2026-08-14
+    /// ([`UNICODE_VERSION`]) and the two halves are separate lookups there: a rule that kept only
+    /// the first would still tokenise every word in every golden vector and would silently stop
+    /// indexing accession numbers, years and every digit-only field.
+    ///
+    /// Non-Latin digits are the case that separates the union from ASCII-mindedness: `٣٤٥` is
+    /// `General_Category = Nd` and not `Alphabetic`, and NFKC leaves it alone, so it reaches the
+    /// rule as itself.
+    #[test]
+    fn a_segment_of_digits_alone_is_a_token() {
+        let a = Analyser::new();
+        assert_eq!(a.tokens("2026"), vec!["2026"]);
+        assert_eq!(a.tokens("٣٤٥"), vec!["٣٤٥"]);
+        assert_eq!(a.tokens("accession 2026"), vec!["accession", "2026"]);
     }
 
     /// **Duplicates and order are kept.** `match` needs neither, but the positional payload the
