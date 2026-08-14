@@ -20,4 +20,7 @@ node_modules/
 clients/ts/**/dist/
 clients/ts/.dev/
 clients/ts/dev-server.toml
+# What `run_demo.sh` is actually serving right now — a fact about an invocation, not about the
+# repository, and the reason the demo no longer rewrites a tracked file to record it.
+clients/ts/viewer/public/datasets.json
 *.env.local

@@ -2,6 +2,7 @@ import {createDecoder, type Decoder} from './decoder.js';
 import type {
   ArrowType,
   CategoryValue,
+  FilterOperandSet,
   ItemDetail,
   Meta,
   Session,
@@ -124,7 +125,9 @@ export class TesseraClient {
         // category is indistinguishable from a `u16` integer, since the hot path ships the code.
         category: s.category
           ? {vocabulary: s.category.vocabulary, kind: s.category.kind, listing: s.category.listing}
-          : null
+          : null,
+        render: s.render,
+        index: s.index
       })),
       selection: {
         kMin: m.selection.k_min,
@@ -136,7 +139,15 @@ export class TesseraClient {
       },
       // Older servers do not publish it; fall back to the documented default rather than
       // refusing to run against them.
-      maxTilesPerRequest: m.selection.max_tiles_per_request ?? 262_144
+      maxTilesPerRequest: m.selection.max_tiles_per_request ?? 262_144,
+      // Absent, not merely empty, when the schema declares nothing filterable — so the fallback is
+      // the empty list and a client draws no filter controls, which is the correct rendering of a
+      // bundle that has none.
+      filterOperands: (m.filter_operands ?? []).map((f) => ({
+        column: f.column,
+        family: f.family,
+        operands: f.operands
+      }))
     };
   }
 
@@ -159,6 +170,11 @@ export class TesseraClient {
     if (req.tiles) body.tiles = req.tiles.map(Number);
     if (req.k !== undefined) body.k = req.k;
     if (req.underlayOffset) body.underlay_offset = req.underlayOffset;
+    // Omitted when null, which is the unfiltered request. An empty `all_of` would *also* be
+    // unfiltered, but sending one makes every caller's "no filters" state a distinct request shape
+    // from the one a caller who never mentioned filters sends — and a cache keyed on the body would
+    // then hold two entries for one question.
+    if (req.filters) body.filters = req.filters;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
     // an opaque string on this side so a client never has to know its shape.
     if (req.stamp) body.pin = JSON.parse(req.stamp);
@@ -254,6 +270,18 @@ export class TesseraClient {
     };
   }
 
+  /**
+   * `POST /v1/items/{tessera_id}`: the whole record, by declared column name.
+   *
+   * **Named, not positional.** The response is an object keyed by column name covering all three
+   * homes — rendered columns, indexed and category columns (a category as its vocabulary *key*,
+   * already resolved), and blob-resident prose. A column the item carries no value for is **absent
+   * from the object** rather than null, so `name in fields` is the presence test and a missing key
+   * is a fact about the item rather than a gap in the response.
+   *
+   * Nothing here can be read positionally against `/v1/meta`'s `declared_scalars`: the absent
+   * columns are omitted, so index *i* of the response is not column *i* of the schema.
+   */
   async item(token: string, tesseraId: bigint): Promise<ItemDetail> {
     const response = await fetch(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
       method: 'POST',
@@ -261,8 +289,11 @@ export class TesseraClient {
       body: '{}'
     });
     if (!response.ok) await fail(response);
-    const body = (await response.json()) as {scalars: unknown[]; external_id?: string};
-    return {scalars: body.scalars, externalId: body.external_id ?? null};
+    const body = (await response.json()) as {
+      fields: Record<string, unknown>;
+      external_id?: string;
+    };
+    return {fields: body.fields ?? {}, externalId: body.external_id ?? null};
   }
 }
 
@@ -276,7 +307,10 @@ type RawMeta = {
     name: string;
     arrow_type: ArrowType;
     category: {vocabulary: string; kind: 'declared' | 'discovered'; listing: 'per_viewer' | 'public'} | null;
+    render: boolean;
+    index: boolean;
   }[];
+  filter_operands?: {column: string; family: FilterOperandSet['family']; operands: string[]}[];
   selection: {
     k_min: number;
     k_max_marks: number;

@@ -1,6 +1,7 @@
 import type {CategoryValue, DepthChoice, Meta, Session, Timings} from '@tessera/client';
 import type {Assembled} from './assemble.js';
 import type {Domain, Ranks} from './colour.js';
+import type {FilterDraft} from './filters.js';
 
 /**
  * The display states, kept distinct because collapsing them is how a fail-closed server becomes a
@@ -17,8 +18,37 @@ export type AppState = {
   meta: Meta | null;
   session: Session | null;
   slice: string;
+  /** Which of `datasets.json`'s entries is being served — see `panels/source.ts`. */
+  datasetId: string;
+  /**
+   * Whether a dataset change is in flight.
+   *
+   * Distinct from `status: 'loading'`, which is about a viewport request. This one covers the
+   * interval where there is no session at all, because the new server has not authorised yet — a
+   * state in which every panel's figures belong to a bundle that is no longer being shown.
+   */
+  switching: boolean;
   termsLabel: string;
   terms: string[];
+  /**
+   * The filter controls' draft, one entry per filterable column — see `filters.ts`.
+   *
+   * Held as the draft rather than as the composed expression because an empty control and an absent
+   * control are different things to a form and the same thing to the server: the expression is
+   * derived on the way out, and the controls keep their identity while a user clears one.
+   */
+  filters: FilterDraft;
+  /**
+   * The value set each filterable category offers, from `/v1/categories`' paging form.
+   *
+   * **Not `categories`, which the legend owns.** That map holds the codes the marks on screen carry,
+   * resolved because they were drawn; this one holds the values the server is willing to *list*,
+   * which is a different question with a different gate. Merging them would let a legend name a
+   * value no mark carries, which is precisely the disclosure the legend's construction avoids.
+   */
+  filterValues: Record<string, CategoryValue[]>;
+  /** A refused enumeration, per column — a `per_viewer` listing is the expected one. */
+  filterValueErrors: Record<string, {code: string; detail: string}>;
   /** Undefined means "do not send k", so the deployment's own ceiling applies (contracts §3.2). */
   k: number | undefined;
   underlayOffset: number;
@@ -64,10 +94,26 @@ export type AppState = {
   lastPlan: {omitted: number; fetched: number} | null;
   inFlight: number;
   failures: RequestFailure[];
-  selected: {id: bigint; scalars: unknown[]; externalId: string | null} | null;
+  /**
+   * The clicked mark's record, keyed by declared column name.
+   *
+   * Named rather than positional because `/v1/items` answers that way: a column the item carries no
+   * value for is *absent* from the object, so index *i* of the response is not column *i* of the
+   * schema, and a viewer reading it positionally would misattribute every field after the first gap.
+   */
+  selected: {id: bigint; fields: Record<string, unknown>; externalId: string | null} | null;
   selectedWorldXY: [number, number] | null;
   /** A refused `/v1/items` call. Distinct from `selected: null`, which means nothing is picked. */
   itemError: {code: string; detail: string} | null;
+  /**
+   * What the last click's pick returned, resolved or not.
+   *
+   * Recorded because a click that landed on empty canvas and a click whose mark carried no identity
+   * both used to leave the item panel reading "click a mark" — so a broken pick looked exactly like a
+   * miss. `index` is deck's hit index (`-1` for nothing under the cursor), `layer` is which layer
+   * answered, and `hasIds`/`idCount` say whether that layer carried the identity array at all.
+   */
+  lastPick: {index: number; layer: string | null; hasIds: boolean; idCount: number} | null;
 
   /**
    * The declared column marks are coloured by, or `null` for the uniform colour.

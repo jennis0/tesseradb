@@ -2,74 +2,87 @@ import {esc, panel, row} from '../html.js';
 import type {AppState} from '../state.js';
 
 /**
- * The clicked mark's drill-down.
+ * The clicked mark's drill-down: the whole record, from all three of its homes.
  *
- * **Scalars are named and categories are decoded**, because `/v1/items` returns them positionally
- * against `MANIFEST.declared_scalars` and a bare list of eighteen numbers says nothing. The names
- * come from `/v1/meta`, in declaration order — the same order the tail is stored and read back in,
- * so a mismatch here would be the same positional slip the contract warns about, visible.
+ * **Named, not positional.** `/v1/items` answers with an object keyed by declared column name, and a
+ * column the item carries no value for is *absent* from it rather than null. Reading it positionally
+ * against `/v1/meta` would misattribute every field after the first gap — and would silently miss
+ * the fields that have no position at all, which is most of what makes this panel worth having: a
+ * text column lives in the record blob and never appears in a viewport response, so **this is the
+ * only place its prose is ever seen**. A category arrives already resolved to its vocabulary key,
+ * so nothing here decodes a code.
  *
- * A category is shown as its **key**, resolved against the values the legend already holds. An
- * unresolved code is labelled as one rather than silently rendered as an integer, since an integer
- * beside a named value reads as a value rather than as a gap.
+ * Fields are shown in `/v1/meta`'s declaration order, with anything the response carried that the
+ * schema does not declare listed after — a disagreement between the two documents being worth
+ * showing rather than hiding behind a filter.
  */
 export function renderItem(state: AppState): string {
   if (!state.selected) {
-    return panel('Item', '<div class="muted">click a mark</div>');
+    const pick = state.lastPick;
+    // **A miss and a broken pick are different, and this panel used to show neither.** Both read
+    // "click a mark", so picking could fail silently for a whole session. `index < 0` is deck
+    // reporting nothing under the cursor, which is the ordinary case; an index with no identity
+    // array behind it, or one past the end of that array, is a defect in the layer and says so.
+    if (pick && pick.index >= 0 && (!pick.hasIds || pick.index >= pick.idCount)) {
+      return panel(
+        'Item',
+        `<div class="bad">picked mark ${pick.index} on ${esc(pick.layer ?? 'an unnamed layer')},
+           which carried ${pick.hasIds ? `only ${pick.idCount} identities` : 'no identities'}</div>
+         <div class="muted">the mark was hit and could not be resolved — a layer fault, not a
+           miss.</div>`
+      );
+    }
+    return panel(
+      'Item',
+      pick
+        ? '<div class="muted">nothing under the cursor — click a mark</div>'
+        : '<div class="muted">click a mark</div>'
+    );
   }
-  const {id, scalars, externalId} = state.selected;
+  const {id, fields, externalId} = state.selected;
   const declared = state.meta?.declaredScalars ?? [];
+  const names = Object.keys(fields);
 
-  if (scalars.length === 0 && externalId === null) {
+  if (names.length === 0 && externalId === null) {
     return panel(
       'Item',
       `${row('tessera_id', id.toString())}
-       <div class="muted">this bundle declares no scalars and carries no external id for this
-        item, so the round-trip is all there is to see — a resolved item here means the identity
-        inverted and this principal may see it</div>`
+       <div class="muted">this item carries no declared field and no external id, so the round-trip
+        is all there is to see — a resolved item here means the identity inverted and this principal
+        may see it</div>`
     );
   }
 
-  const rows = scalars
-    .map((value, i) => {
-      const column = declared[i];
-      // Positional against the manifest. A response carrying more scalars than `/v1/meta` declares
-      // means the two disagree, which is worth showing rather than hiding behind a slice.
-      if (!column) return row(`scalar ${i} (undeclared)`, String(value));
-      if (!column.category) return row(column.name, formatPlain(value));
-      return row(column.name, formatCode(state, column.name, value));
-    })
-    .join('');
+  const ordered = [
+    ...declared.map((c) => c.name).filter((name) => name in fields),
+    ...names.filter((name) => !declared.some((c) => c.name === name))
+  ];
+  const rows = ordered.map((name) => field(name, fields[name])).join('');
+  // Absence is a fact about the item, not a gap in the response, so it is worth naming — an item
+  // with no `abstract` and a bundle with no `abstract` column look identical without this.
+  const absent = declared.filter((c) => !(c.name in fields)).map((c) => c.name);
 
   return panel(
     'Item',
     `${row('tessera_id', id.toString())}
-     ${scalars.length === 0 ? '<div class="muted">no declared scalars in this bundle</div>' : ''}
      ${rows}
+     ${absent.length > 0 ? `<div class="muted">no value for ${esc(absent.join(', '))}</div>` : ''}
      ${externalId ? row('external id (base64)', externalId) : ''}`
   );
 }
 
-function formatPlain(value: unknown): string {
-  return value === null || value === undefined ? '—' : String(value);
-}
-
 /**
- * A category code as its key.
+ * One field.
  *
- * Falls back to naming the code when the legend has not resolved it — which happens when the
- * column is not the one being coloured, or when its vocabulary is `per_viewer` and therefore
- * refused. Both are honest states, and neither is an integer masquerading as a value.
+ * Prose gets its own block rather than a label/value row: an abstract is ~950 characters and a
+ * justified two-column row turns it into a single unreadable line. Long text is clamped with the
+ * full value in the `title` attribute, so the panel keeps its shape and nothing is actually lost.
  */
-function formatCode(state: AppState, column: string, value: unknown): string {
-  const code = Number(value);
-  if (!Number.isFinite(code)) return formatPlain(value);
-  if (code === 0) return 'absent';
-  const resolved = state.categories[column]?.find((v) => v.code === code);
-  if (!resolved) return `code ${code} (not resolved)`;
-  return resolved.label && resolved.label !== resolved.key
-    ? `${resolved.key} — ${resolved.label}`
-    : resolved.key;
+function field(name: string, value: unknown): string {
+  const text = value === null || value === undefined ? '—' : String(value);
+  if (text.length <= 60) return row(name, text);
+  return `<div class="prose"><div class="prose-name">${esc(name)}</div>
+    <div class="prose-body" title="${esc(text)}">${esc(text)}</div></div>`;
 }
 
 /** A refusal from `/v1/items` is shown as a refusal, never as an empty item. */

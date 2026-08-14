@@ -1,16 +1,23 @@
 import {Deck} from '@deck.gl/core';
 import {Replica, TesseraClient} from '@tessera/client';
-import presetsJson from '../presets.json';
-import {readConfig} from './config.js';
+import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';
 import {renderErrors} from './panels/errors.js';
 import {renderItem, renderItemError} from './panels/item.js';
-import {renderPrincipal, type Preset} from './panels/principal.js';
+import {renderSource} from './panels/source.js';
+import {renderFilters} from './panels/filters.js';
 import {renderLegend} from './panels/legend.js';
-import {renderStats} from './panels/stats.js';
-import {renderBudget, renderCounts} from './panels/view.js';
+import {renderStats, toggleStatsDrawer} from './panels/stats.js';
+import {renderCounts, renderDepth} from './panels/view.js';
 import {foldBandColumn} from './assemble.js';
-import {countCodesCached, extendRanks, widenDomain} from './colour.js';
+import {countCodes, countCodesCached, extendRanks, widenDomain} from './colour.js';
+import {
+  composeFilters,
+  dateToMicros,
+  emptyDraft,
+  isDateColumn,
+  type TextMode
+} from './filters.js';
 import {MarkSlab} from './slab.js';
 import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore, type Store} from './state.js';
@@ -35,34 +42,46 @@ const markSlab = new MarkSlab();
 // Counted here rather than in the controller: a driver needs to attribute a paint to whether it
 // cost a request, and the two are updated from different places.
 let requestCount = 0;
-const client = new TesseraClient({
-  viewerUrl: config.viewerUrl,
-  sessionUrl: config.sessionUrl,
-  sessionCredential: config.sessionCredential
-});
 
-const presets = presetsJson as Preset[];
 /**
- * The demo opens on its **hardest** case, not its gentlest: the broadest principal, the largest
- * mark budget, and a category encoding.
+ * The session client, the replica and the driver, all of which belong to **one dataset**.
  *
- * The narrow default it replaces saturates at almost any depth, so the budget never binds, the
- * cache has nothing to do and the render path is never loaded — which made every session start by
- * changing three controls before anything under measurement was running. A demo whose defaults
- * exercise none of the machinery it exists to show is a demo of the controls.
+ * Rebuilt together on a dataset switch and never partially: a client pointed at one server with a
+ * replica holding another's bands would draw one bundle's geometry under the other's identity space.
+ * `activate` is the only writer.
  */
-const first = presets.find((p) => p.label.startsWith('everything')) ?? presets.at(-1) ?? presets[0]!;
+let client: TesseraClient | null = null;
+let replica: Replica | null = null;
+let controller: DriverBinding | null = null;
+let datasets: Dataset[] = [];
+/** The presets of the dataset currently active — per bundle, since a term id is per dictionary. */
+let presets: Dataset['presets'] = [];
+
 /** The slider's own maximum — see `panels/view.ts`. */
 const DEFAULT_BUDGET = 500_000;
 /** A declared category column, so the palette, the legend and `/v1/categories` are all live. */
 const DEFAULT_COLOUR_BY = 'archive';
+/**
+ * How long a filter control must be quiet before its change is sent.
+ *
+ * A filtered selection turns over completely on every keystroke — nothing of the previous answer is
+ * reusable — so an un-debounced text box would issue a full re-selection per character and show the
+ * answers to prefixes nobody asked about. Long enough to swallow typing, short enough that a
+ * finished word lands before you look up.
+ */
+const FILTER_DEBOUNCE_MS = 350;
 
 const store = createStore({
   meta: null,
   session: null,
   slice: '',
-  termsLabel: first.label,
-  terms: first.terms,
+  datasetId: '',
+  switching: false,
+  termsLabel: '',
+  terms: [],
+  filters: {},
+  filterValues: {},
+  filterValueErrors: {},
   k: undefined,
   underlayOffset: 0,
   assembled: null,
@@ -86,6 +105,7 @@ const store = createStore({
   selected: null,
   selectedWorldXY: null,
   itemError: null,
+  lastPick: null,
   colourBy: DEFAULT_COLOUR_BY,
   categories: {},
   categoryErrors: {},
@@ -93,15 +113,10 @@ const store = createStore({
   domains: {}
 });
 
-/**
- * The replica sits between the stateless client and the scheduler: it owns the held bands and
- * decides which of the scheduler's wanted tiles actually need asking for. Created after `meta`,
- * because it needs the quantisation extent to turn tiles into a request box.
- */
-let replica: Replica | null = null;
-let controller: DriverBinding | null = null;
 const mapEl = document.getElementById('map') as HTMLDivElement;
-const panels = document.getElementById('panels')!;
+/** The two panel columns: what you change on the left, what you read on the right. */
+const controlsEl = document.getElementById('controls')!;
+const statsEl = document.getElementById('stats')!;
 
 let currentView: ViewState = {target: INITIAL_VIEW_STATE.target, zoom: INITIAL_VIEW_STATE.zoom};
 
@@ -147,13 +162,39 @@ const deck = new Deck({
     return viewState;
   },
   onClick: (info) => {
-    const ids = (info.sourceLayer?.props as {tesseraIds?: BigUint64Array} | undefined)?.tesseraIds;
-    const id = ids && info.index >= 0 ? ids[info.index] : undefined;
-    if (id === undefined || !store.state.session) {
+    /**
+     * The layer that answered the pick — `sourceLayer` **or** `layer`, and it has to be both.
+     *
+     * `sourceLayer` names the sublayer a *composite* layer generated; a layer handed to deck directly
+     * has none, and every mark layer here is handed over directly. So reading only `sourceLayer` found
+     * nothing on every click, the identity array was never reached, and drill-down could not resolve a
+     * mark at all — measured as a hit on index 112,633 with no identities behind it.
+     */
+    const layer = info.sourceLayer ?? info.layer;
+    const ids = (layer?.props as {tesseraIds?: BigUint64Array} | undefined)?.tesseraIds;
+    const id = ids && info.index >= 0 && info.index < ids.length ? ids[info.index] : undefined;
+    const session = store.state.session;
+    /**
+     * What the pick actually returned, recorded whether or not it resolved.
+     *
+     * **A click that hits nothing and a click whose mark carried no identity are different failures,
+     * and the panel showed neither.** Both left it reading "click a mark", so a broken pick was
+     * indistinguishable from a miss — which is the same empty-versus-failed conflation the counts
+     * panel goes to some length to avoid, reached through the one surface nobody had instrumented.
+     * `index` is deck's own hit index and `layer` is which layer answered.
+     */
+    const pick = {
+      index: info.index,
+      layer: layer?.id ?? null,
+      hasIds: ids !== undefined,
+      idCount: ids?.length ?? 0
+    };
+    if (id === undefined || !session || !client) {
       store.update((s) => {
         s.selected = null;
         s.selectedWorldXY = null;
         s.itemError = null;
+        s.lastPick = pick;
       });
       return;
     }
@@ -161,12 +202,13 @@ const deck = new Deck({
       ? ([info.coordinate[0]!, info.coordinate[1]!] as [number, number])
       : null;
     client
-      .item(store.state.session.token, id)
+      .item(session.token, id)
       .then((detail) => {
         store.update((s) => {
-          s.selected = {id, scalars: detail.scalars, externalId: detail.externalId};
+          s.selected = {id, fields: detail.fields, externalId: detail.externalId};
           s.selectedWorldXY = worldXY;
           s.itemError = null;
+          s.lastPick = pick;
         });
       })
       .catch((error) => {
@@ -178,6 +220,7 @@ const deck = new Deck({
             code: e.code ?? 'fetch-failed',
             detail: e.detail ?? e.message ?? String(error)
           };
+          s.lastPick = pick;
         });
       });
   }
@@ -208,7 +251,7 @@ function recordFailure(store: Store, what: string, error: unknown) {
  */
 async function resolveCategoryCodes(column: string) {
   const {assembled, meta, session} = store.state;
-  if (!assembled || !meta || !session) return;
+  if (!assembled || !meta || !session || !client) return;
   if (store.state.categoryErrors[column]) return;
   const declared = meta.declaredScalars.find((c) => c.name === column);
   if (!declared?.category) return;
@@ -221,12 +264,33 @@ async function resolveCategoryCodes(column: string) {
   // defeated the memo on precisely the largest column — measured at 51 ms per count *after* the
   // per-band cache landed, which is what gave it away. A code visible only through stand-ins
   // renders grey until its own bands arrive, and they are already on their way.
+  /**
+   * Whether nothing has been ranked for this column yet — the interval in which the map is grey.
+   *
+   * The exact-bands-only rule below is right for every *recount* and wrong for the first count, and
+   * the difference is what a viewer sees as pop-in. During a load the marks on screen are largely
+   * **stand-ins** borrowed from another zoom level, so a count that reads only exact bands finds
+   * nothing to rank and the map stays uniform until this depth's own bands have streamed in —
+   * measured on the 2.4M bundle at 7.7 s after the first marks were already drawn, and 4.1 s on the
+   * 25M one.
+   */
+  const bootstrap = Object.keys(store.state.ranks[column] ?? {}).length === 0;
+
   const counts = trace.phase('legend', () => {
     const held = new Map<number, number>();
     for (const band of assembled.bands) {
       const values = band.scalars[column];
       if (!values) continue;
       for (const [code, n] of countCodesCached(values)) held.set(code, (held.get(code) ?? 0) + n);
+    }
+    // The stand-in column joins the count **only to bootstrap the palette**, never afterwards. It is
+    // rebuilt on every derive, so it can never be memoised — which is why folding it unconditionally
+    // was measured at 51 ms per count on the largest column and taken back out. Under this guard it
+    // is paid at most once per column per principal: the moment anything is ranked the map is
+    // coloured, `bootstrap` goes false, and every later count is exact-bands-only as before.
+    if (bootstrap && held.size === 0) {
+      const values = assembled.standIn.scalars[column];
+      if (values) for (const [code, n] of countCodes(values)) held.set(code, (held.get(code) ?? 0) + n);
     }
     return held;
   });
@@ -265,23 +329,214 @@ async function resolveCategoryCodes(column: string) {
   }
 }
 
-function render() {
-  if (panels.contains(document.activeElement)) return;
+/**
+ * Enumerate a filterable category's value set, for its picker.
+ *
+ * **This is a different question from the legend's**, asked of the same endpoint through its other
+ * form. The legend resolves the codes it *drew*; this pages the values the server is willing to
+ * list, which `listing` gates before answering — `public` publishes taxonomy whose existence
+ * discloses nothing, `per_viewer` is refused. Keeping the two results in separate maps is what stops
+ * a listed-but-undrawn value ever reaching a swatch.
+ */
+async function loadFilterValues(column: string) {
+  const {session, meta} = store.state;
+  if (!session || !meta || !client) return;
+  if (store.state.filterValues[column] || store.state.filterValueErrors[column]) return;
+  try {
+    const values = await client.categories(session.token, column);
+    // Sorted by key, because a picker is scanned rather than read in rank order — the legend's
+    // frequency ordering is right there and wrong here.
+    values.sort((a, b) => a.key.localeCompare(b.key));
+    store.update((s) => {
+      s.filterValues[column] = values;
+    });
+  } catch (error) {
+    const e = error as {code?: string; detail?: string; message?: string};
+    store.update((s) => {
+      s.filterValueErrors[column] = {
+        code: e.code ?? 'fetch-failed',
+        detail: e.detail ?? e.message ?? String(error)
+      };
+    });
+  }
+}
 
-  panels.innerHTML =
-    renderPrincipal(store.state, presets) +
+/**
+ * Apply the filter draft: drop everything held, and ask again.
+ *
+ * **The replica must be reset by hand here, and this is the one thing about filtering a client gets
+ * wrong.** A response's identity key partitions by principal, credential, mask and slice — *not* by
+ * filter — so bands fetched under one filter remain renderable under the next and would be served
+ * from cache as though they belonged to it. Nothing on the wire says otherwise; the client that
+ * changed the question is the only party that knows the held answers are to a different one.
+ */
+function applyFilters() {
+  controller?.cancel();
+  replica?.reset();
+  store.update((s) => {
+    s.assembled = null;
+    s.status = 'loading';
+    s.lastVisibleInView = null;
+    s.selected = null;
+    s.selectedWorldXY = null;
+    s.itemError = null;
+    s.lastPick = null;
+  });
+  trace.event('filters', {n: Object.keys(store.state.filters).length});
+  controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+}
+
+let filterTimer: ReturnType<typeof setTimeout> | null = null;
+/** Debounced for typing; a tick or a date lands immediately, having no intermediate states. */
+function scheduleFilters(immediate = false) {
+  if (filterTimer) clearTimeout(filterTimer);
+  if (immediate) {
+    applyFilters();
+    return;
+  }
+  filterTimer = setTimeout(() => {
+    filterTimer = null;
+    applyFilters();
+  }, FILTER_DEBOUNCE_MS);
+}
+
+// ---------------------------------------------------------------------------------- the panels
+
+/** The left column: everything that changes what is asked for. */
+function renderControls(): string {
+  return (
+    renderSource(store.state, datasets, presets) +
+    renderFilters(store.state) +
+    renderLegend(store.state)
+  );
+}
+
+/** The right column: everything that reports what came back. */
+function renderReadouts(): string {
+  return (
     renderCounts(store.state) +
-    renderLegend(store.state) +
-    renderBudget(store.state) +
+    renderStats(store.state, {drawn: markSlab.drawn, departed: markSlab.departed}) +
+    renderDepth(store.state) +
     (store.state.itemError
       ? renderItemError(store.state.itemError.code, store.state.itemError.detail)
       : renderItem(store.state)) +
-    renderStats(store.state, {drawn: markSlab.drawn, departed: markSlab.departed}) +
-    renderErrors(store.state);
+    renderErrors(store.state)
+  );
+}
+
+/**
+ * Everything the control column's markup depends on, as one string.
+ *
+ * **A control column is only rebuilt when its own content would change**, and it needs this rather
+ * than a focus check because the two failures are different. A focus guard protects a control the
+ * user is *already* in; it cannot protect one they are reaching for — the store ticks several times
+ * a second while marks stream in, and `innerHTML` replaces the element under the cursor between the
+ * mouse going down and the click landing. Measured as exactly that: a filter box that could not be
+ * clicked into while a viewport was still arriving.
+ *
+ * So the readouts that move every frame were moved to the other column, and what is left changes
+ * only when a user changes it. The focus guard stays as well, for the case this cannot cover: a
+ * legend rank extending while a box is focused.
+ */
+function controlsSignature(): string {
+  const s = store.state;
+  const colour = s.colourBy ?? '';
+  return [
+    s.datasetId,
+    s.switching ? '1' : '0',
+    s.termsLabel,
+    s.terms.length,
+    s.meta ? s.meta.filterOperands.length : -1,
+    JSON.stringify(s.filters),
+    Object.entries(s.filterValues)
+      .map(([k, v]) => `${k}:${v.length}`)
+      .join(','),
+    Object.keys(s.filterValueErrors).join(','),
+    colour,
+    s.categories[colour]?.length ?? -1,
+    Object.keys(s.ranks[colour] ?? {}).length,
+    s.categoryErrors[colour]?.code ?? '',
+    s.domains[colour] ? `${s.domains[colour]!.min}..${s.domains[colour]!.max}` : '',
+    s.budget
+  ].join('|');
+}
+
+let controlsPainted = '';
+
+/**
+ * Rebuild the control column, carrying the user's place in it across the rebuild.
+ *
+ * **Focus is restored, not protected.** The obvious guard — skip the rebuild while focus is inside —
+ * deadlocks: a `<select>` keeps focus after it is used, so the column that must now describe a
+ * *different bundle* is the one thing that cannot refresh, and it sits there showing the old one
+ * until the user happens to click elsewhere. Restoring instead means a rebuild is always allowed and
+ * always harmless.
+ *
+ * Three things have to survive it, all of them found by being wrong: which element had focus, the
+ * caret and selection inside a text box (or every rebuild sends the caret to the end mid-word), and
+ * the scroll offset of a category list (which is 171 rows on this corpus, so losing it loses the
+ * user's place entirely).
+ */
+function repaintControls() {
+  const active = document.activeElement as HTMLElement | null;
+  const focusId = active && controlsEl.contains(active) ? active.id : null;
+  const text =
+    active instanceof HTMLInputElement && active.type === 'search'
+      ? {start: active.selectionStart, end: active.selectionEnd}
+      : null;
+  const scrolled = Array.from(controlsEl.querySelectorAll<HTMLElement>('[data-checks]')).map((el) => [
+    el.dataset.checks!,
+    el.scrollTop
+  ]) as [string, number][];
+
+  controlsEl.innerHTML = renderControls();
+  bindControls();
+
+  for (const [column, top] of scrolled) {
+    const el = controlsEl.querySelector<HTMLElement>(`[data-checks="${CSS.escape(column)}"]`);
+    if (el) el.scrollTop = top;
+  }
+  if (!focusId) return;
+  const restored = document.getElementById(focusId);
+  if (!restored) return;
+  restored.focus({preventScroll: true});
+  if (text && restored instanceof HTMLInputElement && text.start !== null) {
+    restored.setSelectionRange(text.start, text.end);
+  }
+}
+
+/**
+ * Rebuild the panels.
+ *
+ * **The two columns are refreshed under different rules, and the split is what makes that possible.**
+ * The readouts refresh on every store change; the controls refresh only when
+ * {@link controlsSignature} moves, because rebuilding markup that has not changed is what replaces
+ * the element under a user's cursor between mouse-down and click. With one column those rules were
+ * in conflict — the numbers froze for as long as a control was focused. Now they keep updating while
+ * a filter box is being typed into, which is exactly when watching them is most interesting.
+ */
+function render() {
+  statsEl.innerHTML = renderReadouts();
+  const drawer = document.getElementById('stats-drawer') as HTMLDetailsElement | null;
+  drawer?.addEventListener('toggle', () => toggleStatsDrawer(drawer.open));
+
+  const signature = controlsSignature();
+  if (signature === controlsPainted) return;
+  controlsPainted = signature;
+  repaintControls();
+}
+
+function bindControls() {
+  const dataset = document.getElementById('dataset') as HTMLSelectElement | null;
+  dataset?.addEventListener('change', () => {
+    const chosen = datasets.find((d) => d.id === dataset.value);
+    if (chosen) void activate(chosen);
+  });
 
   const select = document.getElementById('principal') as HTMLSelectElement | null;
   select?.addEventListener('change', () => {
-    const preset = presets[Number(select.value)]!;
+    const preset = presets[Number(select.value)];
+    if (!preset || !client) return;
     trace.event('principal', {label: preset.label, n: preset.terms.length});
     // A different principal is a different mask: abort anything in flight for the old token, and
     // drop the calibration, which was measured against a different visible set.
@@ -313,11 +568,18 @@ function render() {
           s.categoryErrors = {};
           s.ranks = {};
           s.domains = {};
+          // The filter *drafts* stay — a user switching principal is asking the same question of a
+          // different viewer. The offered value sets do not: `listing` is evaluated per principal,
+          // so a picker built under the old token may list values this one may not see.
+          s.filterValues = {};
+          s.filterValueErrors = {};
         });
         controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
       })
       .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));
   });
+
+  bindFilterControls();
 
   const colourBy = document.getElementById('colour-by') as HTMLSelectElement | null;
   colourBy?.addEventListener('change', () => {
@@ -325,7 +587,7 @@ function render() {
     store.update((s) => {
       s.colourBy = chosen;
     });
-    // **No refetch.** Every declared column is already in the held response, so this is a layer
+    // **No refetch.** Every rendered column is already in the held response, so this is a layer
     // rebuild — which is also what makes the switch a check on I7 that anyone can run: the mark
     // count cannot move, because no request is made.
     if (chosen) {
@@ -354,6 +616,102 @@ function render() {
   });
 }
 
+/**
+ * Wire the filter controls.
+ *
+ * Every handler writes the *draft* and then schedules; nothing composes an expression here, because
+ * the composition has one home (`filters.ts`) and a second would be a second set of rules about what
+ * an empty box means.
+ */
+function bindFilterControls() {
+  for (const [column, draft] of Object.entries(store.state.filters)) {
+    if (draft.family === 'text') {
+      const box = document.getElementById(`flt-text-${column}`) as HTMLInputElement | null;
+      box?.addEventListener('input', () => {
+        store.update((s) => {
+          const d = s.filters[column];
+          if (d?.family === 'text') d.query = box.value;
+        });
+        scheduleFilters();
+      });
+      const mode = document.getElementById(`flt-mode-${column}`) as HTMLSelectElement | null;
+      mode?.addEventListener('change', () => {
+        store.update((s) => {
+          const d = s.filters[column];
+          if (d?.family === 'text') d.mode = mode.value as TextMode;
+        });
+        scheduleFilters(true);
+      });
+    }
+
+    if (draft.family === 'string' || draft.family === 'keyword') {
+      const box = document.getElementById(`flt-str-${column}`) as HTMLInputElement | null;
+      box?.addEventListener('input', () => {
+        store.update((s) => {
+          const d = s.filters[column];
+          if (d?.family === 'string' || d?.family === 'keyword') d.needle = box.value;
+        });
+        scheduleFilters();
+      });
+      const op = document.getElementById(`flt-op-${column}`) as HTMLSelectElement | null;
+      op?.addEventListener('change', () => {
+        store.update((s) => {
+          const d = s.filters[column];
+          if (d?.family === 'string' || d?.family === 'keyword') {
+            d.op = op.value as 'eq' | 'prefix' | 'contains';
+          }
+        });
+        scheduleFilters(true);
+      });
+    }
+
+    if (draft.family === 'numeric') {
+      const date = isDateColumn(store.state.meta, column);
+      for (const bound of ['gte', 'lte'] as const) {
+        const box = document.getElementById(`flt-${bound}-${column}`) as HTMLInputElement | null;
+        box?.addEventListener('change', () => {
+          const value = date
+            ? dateToMicros(box.value)
+            : box.value === ''
+              ? null
+              : Number(box.value);
+          store.update((s) => {
+            const d = s.filters[column];
+            if (d?.family === 'numeric') d[bound] = Number.isFinite(value) ? value : null;
+          });
+          scheduleFilters(true);
+        });
+      }
+    }
+  }
+
+  // Delegated, because a category's ticks are rebuilt whenever its value list arrives and binding
+  // each box individually would leave the earlier listeners attached to detached nodes.
+  controlsEl.querySelectorAll<HTMLElement>('[data-checks]').forEach((box) => {
+    box.addEventListener('change', (event) => {
+      const input = event.target as HTMLInputElement;
+      const column = input.dataset.cat;
+      if (!column) return;
+      store.update((s) => {
+        const d = s.filters[column];
+        if (d?.family !== 'category') return;
+        d.keys = input.checked
+          ? [...d.keys, input.value]
+          : d.keys.filter((k) => k !== input.value);
+      });
+      scheduleFilters(true);
+    });
+  });
+
+  const clear = document.getElementById('filters-clear') as HTMLButtonElement | null;
+  clear?.addEventListener('click', () => {
+    store.update((s) => {
+      s.filters = emptyDraft(s.meta?.filterOperands ?? []);
+    });
+    scheduleFilters(true);
+  });
+}
+
 installTrace(mapEl);
 installTraceBar();
 
@@ -371,7 +729,21 @@ const rerender = coalesce(() => trace.phase('panels', render));
  */
 declare global {
   interface Window {
-    __tesseraProbe?: {paints: number; at: number; marks: number; requests: number};
+    __tesseraProbe?: {
+      paints: number;
+      at: number;
+      marks: number;
+      requests: number;
+      /**
+       * The colour half of the paint key — `uniform` until a palette has been assigned.
+       *
+       * Published because **when the palette lands was otherwise unmeasurable from outside**, and a
+       * cost nobody can measure is a cost that drifts. It is what made the legend's deferral wrong
+       * for as long as it was: the swatch list needs a round trip and the marks do not, so timing
+       * the swatches timed the wrong thing and the grey interval went unnoticed.
+       */
+      encoding: string;
+    };
   }
 }
 let paints = 0;
@@ -414,12 +786,12 @@ store.subscribe(
       paints,
       at: performance.now(),
       marks: markSlab.drawn + (store.state.assembled?.provisional ?? 0),
-      requests: requestCount
+      requests: requestCount,
+      encoding: encodingSignature(store)
     };
   })
 );
 store.subscribe(rerender);
-panels.addEventListener('focusout', () => setTimeout(rerender, 0));
 
 // A pan brings marks carrying codes the legend has not seen. Resolving on every store change
 // rather than only on a response is deliberate: the coloured column can also change without one,
@@ -437,26 +809,120 @@ panels.addEventListener('focusout', () => setTimeout(rerender, 0));
 // count still lands a 25-70 ms scan inside a gesture frame. The count feeds nothing but the
 // palette, so it runs when the store has been quiet for a beat — the legend gains its colours as
 // the gesture ends, which is also when anyone looks at it.
-const LEGEND_RECOUNT_MS = 500;
+const LEGEND_QUIET_MS = 500;
+/**
+ * The **cap** on how long the count may be deferred, however busy the store stays.
+ *
+ * Re-arming on every change alone was wrong, and the 25M bundle is where it showed: the store ticks
+ * for as long as bands are arriving, so "fire once things settle" meant *not until the whole load
+ * finished* — several seconds of grey marks, then the palette in one jump. Waiting for quiet is
+ * still right, because most of the deferral's value is skipping recounts mid-gesture; what it needed
+ * was a ceiling, so a load that never goes quiet still gets its colours on the way.
+ */
+const LEGEND_MAX_DEFER_MS = 1_200;
 let lastResolved: {column: string; version: number} | null = null;
 let legendTimer: ReturnType<typeof setTimeout> | null = null;
+/** When the currently-deferred count first became due — the cap is measured from here, not from the last change. */
+let legendDueSince = 0;
+
+function runLegendCount() {
+  legendTimer = null;
+  legendDueSince = 0;
+  const now = store.state;
+  if (!now.colourBy || !now.assembled) return;
+  lastResolved = {column: now.colourBy, version: now.assembled.version};
+  void resolveCategoryCodes(now.colourBy);
+}
+
 store.subscribe(() => {
   const {colourBy, assembled} = store.state;
   if (!colourBy || !assembled) return;
   if (lastResolved && lastResolved.column === colourBy && lastResolved.version === assembled.version)
     return;
-  // Re-armed on every change, so it fires once things settle rather than mid-stream.
+  // **Nothing ranked yet means the map is grey, and a grey map is not worth deferring.** The
+  // deferral exists to skip *recounts* mid-gesture; the first count is the one the user is waiting
+  // on, so it runs on the next store change rather than after the load goes quiet.
+  if (Object.keys(store.state.ranks[colourBy] ?? {}).length === 0) {
+    if (legendTimer) clearTimeout(legendTimer);
+    runLegendCount();
+    return;
+  }
+  const elapsed = legendDueSince === 0 ? 0 : performance.now() - legendDueSince;
+  if (legendDueSince === 0) legendDueSince = performance.now();
+  if (elapsed >= LEGEND_MAX_DEFER_MS) {
+    if (legendTimer) clearTimeout(legendTimer);
+    runLegendCount();
+    return;
+  }
+  // Re-armed on every change so it fires once things settle — but never past the cap above.
   if (legendTimer) clearTimeout(legendTimer);
-  legendTimer = setTimeout(() => {
-    legendTimer = null;
-    const now = store.state;
-    if (!now.colourBy || !now.assembled) return;
-    lastResolved = {column: now.colourBy, version: now.assembled.version};
-    void resolveCategoryCodes(now.colourBy);
-  }, LEGEND_RECOUNT_MS);
+  legendTimer = setTimeout(runLegendCount, Math.min(LEGEND_QUIET_MS, LEGEND_MAX_DEFER_MS - elapsed));
 });
 
-async function start() {
+/**
+ * Point the viewer at a dataset: a fresh client, session, replica and driver.
+ *
+ * **All four together, or none.** They are coupled through the identity space: a `tessera_id` minted
+ * by one bundle means nothing to another, a term id names a different set in each, and a held band
+ * carries geometry quantised under one bundle's extent. Reusing any of them across a switch would
+ * draw one bundle's data under the other's labels — silently, since nothing on either wire says the
+ * bundle changed.
+ */
+async function activate(dataset: Dataset) {
+  controller?.cancel();
+  client?.close();
+  replica?.reset();
+  markSlab.clear();
+  controller = null;
+  replica = null;
+  presets = dataset.presets;
+
+  client = new TesseraClient({
+    viewerUrl: dataset.viewerUrl,
+    sessionUrl: dataset.sessionUrl,
+    sessionCredential: config.sessionCredential
+  });
+
+  /**
+   * The demo opens on its **hardest** case, not its gentlest: the broadest principal available.
+   *
+   * The narrow default it replaces saturates at almost any depth, so the budget never binds, the
+   * cache has nothing to do and the render path is never loaded — which made every session start by
+   * changing three controls before anything under measurement was running. A demo whose defaults
+   * exercise none of the machinery it exists to show is a demo of the controls.
+   */
+  const first = presets.reduce<Dataset['presets'][number] | undefined>(
+    (best, p) => (best && best.visible >= p.visible ? best : p),
+    undefined
+  );
+
+  store.update((s) => {
+    s.datasetId = dataset.id;
+    s.switching = true;
+    s.meta = null;
+    s.session = null;
+    s.terms = first?.terms ?? [];
+    s.termsLabel = first?.label ?? '';
+    s.assembled = null;
+    s.sessionWarm = false;
+    s.status = 'idle';
+    s.lastVisibleInView = null;
+    s.selected = null;
+    s.selectedWorldXY = null;
+    s.itemError = null;
+    s.failures = [];
+    s.lastPlan = null;
+    s.latency = null;
+    s.lastTimings = null;
+    s.categories = {};
+    s.categoryErrors = {};
+    s.ranks = {};
+    s.domains = {};
+    s.filters = {};
+    s.filterValues = {};
+    s.filterValueErrors = {};
+  });
+
   const session = await client.authorise(store.state.terms);
   const meta = await client.meta(session.token);
   store.update((s) => {
@@ -464,13 +930,33 @@ async function start() {
     s.meta = meta;
     s.slice = meta.slices[0]!.id;
     s.mTarget = meta.selection.thetaTargetMarks;
+    // Seeded from what this bundle publishes as filterable, which is why the abstract box exists on
+    // one dataset and not the other without a line of code knowing either name.
+    s.filters = emptyDraft(meta.filterOperands);
+    // Colour by the default when this bundle renders it, else by its first rendered column — a
+    // bundle whose schema differs should still open on a live encoding rather than on grey.
+    const rendered = meta.declaredScalars.filter((c) => c.render);
+    s.colourBy = rendered.some((c) => c.name === DEFAULT_COLOUR_BY)
+      ? DEFAULT_COLOUR_BY
+      : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
+    s.switching = false;
   });
+
+  /**
+   * The replica sits between the stateless client and the scheduler: it owns the held bands and
+   * decides which of the scheduler's wanted tiles actually need asking for. Created after `meta`,
+   * because it needs the quantisation extent to turn tiles into a request box.
+   */
   replica = new Replica(
     (req, signal, background) => {
       requestCount += 1;
-      return client.viewport(
+      return client!.viewport(
         store.state.session!.token,
-        {...req, slice: store.state.slice},
+        // **The filter is composed per request, not cached.** It is read from the draft at the
+        // moment of asking, so a request in flight when a control changes carries the filter it was
+        // issued under, and `applyFilters` — not this closure — is what makes the held answers to
+        // the old one go away.
+        {...req, slice: store.state.slice, filters: composeFilters(store.state.filters)},
         signal,
         background
       );
@@ -491,16 +977,31 @@ async function start() {
   const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
   controller = new DriverBinding(store, replica, prefetch);
   trace.event('session', {
+    dataset: dataset.id,
     prefetch: prefetch ? 1 : 0,
     kMaxMarks: meta.selection.kMaxMarks,
     budget: store.state.budget,
     maxTiles: meta.maxTilesPerRequest
   });
+
+  // Every filterable category's picker, fetched once per dataset and principal. Concurrent and
+  // unawaited: the map must not wait on a control's value list.
+  for (const operand of meta.filterOperands) {
+    if (operand.family === 'category') void loadFilterValues(operand.column);
+  }
+
   controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 
+async function start() {
+  datasets = await loadDatasets();
+  const requested = new URLSearchParams(location.search).get('dataset');
+  const chosen = datasets.find((d) => d.id === requested) ?? datasets[0]!;
+  await activate(chosen);
+}
+
 start().catch((error) => {
-  panels.innerHTML = `<section class="panel"><h2>Startup failed</h2>
+  statsEl.innerHTML = `<section class="panel"><h2>Startup failed</h2>
     <div class="bad">${esc(error)}</div>
     <div class="muted">Is <code>tessera serve</code> running, and is this origin listed in
     <code>serve.dev_cors_origins</code>?</div></section>`;

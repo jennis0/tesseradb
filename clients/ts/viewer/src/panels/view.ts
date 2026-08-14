@@ -4,7 +4,22 @@ import type {AppState} from '../state.js';
 const fmt = (n: number | bigint) => n.toLocaleString('en-GB');
 
 /**
- * Counts for the current view.
+ * Counts for the current view — and the three numbers whose *relationship* is the point.
+ *
+ * `visible` is the mask over the drawn region: what this principal may see there, and a filter must
+ * never move it. `matched` is what the filter admits from inside that. `served` is what was drawn,
+ * which is a sample of `matched` chosen for the mark budget. Read in that order, the panel is the
+ * one place a viewer can see that filtering narrows the *answer* without touching the *grant*; a
+ * surface showing any one of them alone lets a sample read as a set.
+ *
+ * The figures cover the drawn region, which reaches well beyond the viewport so that panning inside
+ * it costs neither a request nor a redraw — so they are exact masked figures for that region and not
+ * for the visible rectangle.
+ *
+ * **Counts come only from exact tiles**, and provisional marks are reported as a count of marks
+ * rather than folded into any figure: a tile drawn from an ancestor or from held descendants shows a
+ * superset of its served set, and reading a superset as density is what `delta-serving.md` §7
+ * forbids.
  *
  * One request per view means there is no per-tile depth mixing to guard against any more — every
  * tile in `result` is at the same depth by construction, which removes the double-counting hazard
@@ -74,27 +89,22 @@ export function renderCounts(state: AppState): string {
 
   const provisional =
     assembled.provisional > 0
-      ? `<div class="muted">${fmt(BigInt(assembled.provisional))} further marks are drawn from
-         held bands at another depth while this view loads. They are shown but not counted: a
-         superset of what is served here, and never a density.</div>`
+      ? `${row('provisional (uncounted)', fmt(BigInt(assembled.provisional)))}`
       : '';
 
   return panel(
     'Counts',
-    `${row('served (drawn)', fmt(served))}
-     ${row('visible (in mask)', fmt(visible))}
-     ${row('matched', fmt(matched))}
-     ${row('counted tiles', fmt(BigInt(exactTiles)))}
-     <div class="headline">${fmt(served)} of ${fmt(visible)} shown</div>
+    `${row('visible (in mask)', fmt(visible))}
+     ${row('matched (after filters)', fmt(matched))}
+     ${row('served (drawn)', fmt(served))}
      ${provisional}
-     <div class="muted">counts cover the drawn region, which reaches well beyond the viewport so
-       that panning inside it costs neither a request nor a redraw. They are exact masked figures
-       for that region, not for the visible rectangle.</div>`
+     <div class="headline">${fmt(served)} of ${fmt(visible)} shown</div>
+     <div class="muted">exact, over the drawn region — wider than the viewport</div>`
   );
 }
 
-/** The budget readout — prediction against reality is the row that matters. */
-export function renderBudget(state: AppState): string {
+/** What the budget chose, and how close the prediction came. Prediction against reality is the row that matters. */
+export function renderDepth(state: AppState): string {
   const view = state.view;
   // Against the prediction, only exact tiles are comparable — they are what the budget asked for.
   const actual = state.assembled?.exactDrawn ?? 0;
@@ -104,18 +114,13 @@ export function renderBudget(state: AppState): string {
       : '—';
 
   return panel(
-    'Mark budget',
-    `<input id="budget" type="range" min="1000" max="500000" step="1000" value="${state.budget}" />
-     ${row('budget', fmt(state.budget))}
-     ${row('depth chosen', view ? String(view.depth) : '—')}
+    'Depth chosen',
+    `${row('depth', view ? String(view.depth) : '—')}
      ${row('tiles requested', view ? fmt(view.tiles) : '—')}
      ${row('predicted marks', view ? fmt(view.predictedMarks) : '—')}
      ${row('actual marks', fmt(actual))}
      ${row('drift', drift)}
      ${row('m_target (calibrated)', state.mTarget.toFixed(2))}
-     ${row('limited by', view ? view.limitedBy : '—')}
-     <div class="muted">depth is chosen for the budget, not from the zoom — marks on screen stay
-       roughly constant as you zoom. Calibration only ever goes deeper: a shallower request would
-       serve a subset of what is already drawn.</div>`
+     ${row('limited by', view ? view.limitedBy : '—')}`
   );
 }
