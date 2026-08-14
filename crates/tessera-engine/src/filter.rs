@@ -673,6 +673,40 @@ struct TextLayer {
     dict_rel: Option<String>,
 }
 
+/// One text layer's two halves, checked against each other before the layer is served.
+///
+/// **Posting *i* is term *i*'s, and nothing else says so.** A postings file short of its dictionary
+/// answers `None` for every ordinal past the gap — `PostingsReader::posting_at` returns it rather
+/// than refusing — so a truncated layer would report every word after the gap as carried by
+/// nobody: an under-report with no symptom, which is the shape this codebase refuses everywhere
+/// else. The fold makes the same check on its inputs before merging them, and a reader that did not
+/// would be trusting an artefact the writer's own consumer will not.
+fn text_layer(
+    dict: SortedDict,
+    postings: ColumnPostings,
+    column: &str,
+    which: &str,
+    present: Bitmap,
+    dict_rel: Option<String>,
+) -> std::io::Result<TextLayer> {
+    if dict.len() != postings.record_count() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "column '{column}': the {which} text layer holds {} terms but {} postings records.                  An ordinal names a position in its own layer's dictionary, so serving these                  together would answer `match` from the wrong words",
+                dict.len(),
+                postings.record_count()
+            ),
+        ));
+    }
+    Ok(TextLayer {
+        dict: Arc::new(dict),
+        postings: Arc::new(postings),
+        present,
+        dict_rel,
+    })
+}
+
 /// The three files one published text extent names, resolved to paths.
 #[derive(Debug, Clone)]
 pub struct TextExtentPaths {
@@ -821,6 +855,15 @@ pub enum FilterError {
     MembershipUnavailable(String),
     /// A `none_of` names more or fewer than one column — see [`FilterExpr::NoneOf`].
     NegationSpansColumns { columns: Vec<String> },
+    /// A `none_of` names a column with no presence set to subtract from — a `text` column, whose
+    /// index is postings over words and whose values are blob rows.
+    ///
+    /// **Fail-closed, and the alternative is what makes it worth a variant of its own.** A negation
+    /// is `present ∖ matched`; with no presence the left operand is empty and every such request
+    /// answers "no items" with a 200, which is indistinguishable from a corpus where nothing
+    /// matches. Refusing names the column and the reason, so a caller can say what they meant a
+    /// different way.
+    NegationWithoutPresence { column: String, family: String },
 }
 
 impl std::fmt::Display for FilterError {
@@ -867,6 +910,14 @@ impl std::fmt::Display for FilterError {
                     columns.join(", ")
                 ),
             },
+            FilterError::NegationWithoutPresence { column, family } =>  write!(
+                f,
+                "a 'none_of' names column '{column}', which is a {family} column and stores no \
+                 per-item value to be present or absent — its index is the words its documents \
+                 use. 'none_of' means *carries a value in this column, and none of these matches \
+                 it*, and there is nothing here to answer the first half. Say what is wanted with \
+                 a positive expression instead"
+            ),
         }
     }
 }
@@ -889,7 +940,8 @@ impl FilterError {
         match self {
             FilterError::UndeclaredColumn(_)
             | FilterError::TooDeep { .. }
-            | FilterError::NegationSpansColumns { .. } => true,
+            | FilterError::NegationSpansColumns { .. }
+            | FilterError::NegationWithoutPresence { .. } => true,
             FilterError::PostingsUnreadable { .. }
             | FilterError::DictionaryUnreadable { .. }
             | FilterError::MembershipUnavailable(_) => false,
@@ -1086,32 +1138,30 @@ impl FilterColumns {
                 }
                 let dir = partition_dir.join("attrs").join(&scalar.name);
                 // The base build's layer, then one per published extent, oldest first.
-                let mut text_layers = vec![TextLayer {
-                    dict: Arc::new(SortedDict::open_dir(&dir, request_access(mmap))?),
+                let mut text_layers = vec![text_layer(
+                    SortedDict::open_dir(&dir, request_access(mmap))?,
                     // Positional, not keyed: a token ordinal is a dense position in this
                     // dictionary, where a category's code is a scattered vocabulary entry (§2.5).
-                    postings: Arc::new(ColumnPostings::open(&dir.join("postings.arrow"), mmap)?),
-                    // The base covers every entity the build knew about that carried a value; it
-                    // writes no presence file of its own, so the postings' union is the closest
-                    // available and is only used to answer "which layer holds this entity".
-                    present: Bitmap::new(),
-                    dict_rel: None,
-                }];
+                    ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
+                    &scalar.name,
+                    "base",
+                    // The base writes no presence file of its own — the build writes none and the
+                    // fold therefore writes none — so nothing here can say which entities carry a
+                    // value. See `TextLayer::present`.
+                    Bitmap::new(),
+                    None,
+                )?];
                 for extent in text_extents.iter().filter(|e| e.column == scalar.name) {
-                    text_layers.push(TextLayer {
-                        dict: Arc::new(SortedDict::open(
-                            &prefix_dir.join(&extent.dict),
-                            request_access(mmap),
-                        )?),
-                        postings: Arc::new(ColumnPostings::open(
-                            &prefix_dir.join(&extent.postings),
-                            mmap,
-                        )?),
-                        present: Bitmap::deserialize::<croaring::Portable>(&std::fs::read(
+                    text_layers.push(text_layer(
+                        SortedDict::open(&prefix_dir.join(&extent.dict), request_access(mmap))?,
+                        ColumnPostings::open(&prefix_dir.join(&extent.postings), mmap)?,
+                        &scalar.name,
+                        &extent.dict,
+                        Bitmap::deserialize::<croaring::Portable>(&std::fs::read(
                             prefix_dir.join(&extent.presence),
                         )?),
-                        dict_rel: Some(extent.dict.clone()),
-                    });
+                        Some(extent.dict.clone()),
+                    )?);
                 }
                 // **The analyser that indexed it, not the default.** A bundle records the identity
                 // its build resolved; opening with anything else would answer `match` against a
@@ -1445,15 +1495,14 @@ impl FilterColumns {
                     ),
                 ));
             };
-            layers.text.push(TextLayer {
-                dict: Arc::new(SortedDict::open(&text.dict, self.access)?),
-                postings: Arc::new(ColumnPostings::open(
-                    &text.postings,
-                    self.access != tessera_filter::Access::Read,
-                )?),
-                present: Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&text.presence)?),
-                dict_rel: Some(text.dict.display().to_string()),
-            });
+            layers.text.push(text_layer(
+                SortedDict::open(&text.dict, self.access)?,
+                ColumnPostings::open(&text.postings, self.access != tessera_filter::Access::Read)?,
+                &text.column,
+                &text.dict.display().to_string(),
+                Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&text.presence)?),
+                Some(text.dict.display().to_string()),
+            )?);
         }
         for (column, values_rel, extent, dict) in extents {
             next.compose(column, values_rel, Arc::clone(extent), dict.clone())?;
@@ -1896,6 +1945,24 @@ impl FilterColumns {
             .get(column)
             .filter(|layers| layers.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        // **A column with no value column has no presence set, and answering the empty one is a
+        // wrong answer wearing a right one's clothes.** `Layers::layers` holds value columns; a
+        // `text` column has none — its index is postings over words and its prose is a blob row —
+        // so this loop would union nothing and every negation over it would return no entities, for
+        // every principal and every corpus, with a 200. Narrowing, so no disclosure; simply wrong,
+        // and silently.
+        //
+        // Refused rather than answered from the postings. The presence a negation needs is *carries
+        // a value*, and for prose that is not derivable from the index: text analysing to no terms
+        // at all — an empty string, a line of punctuation — carries a value and appears in no
+        // posting. A flush extent stores a presence bitmap for exactly that reason; the base build
+        // writes none, so there is nothing to answer from until it does.
+        if layers.layers.is_empty() {
+            return Err(FilterError::NegationWithoutPresence {
+                column: column.to_string(),
+                family: layers.family.as_str().to_string(),
+            });
+        }
         let mut out = Bitmap::new();
         for layer in &layers.layers {
             out |= layer.values.present_in(candidate);
@@ -2148,10 +2215,15 @@ fn scan_ordinals(values: &ValueColumn, predicate: &OrdinalPredicate, candidate: 
 /// `match` over one text column: intersect the tokens' postings inside the candidate, or count
 /// them where fewer than all are required.
 ///
-/// **The candidate is applied first and to every posting**, so no bitmap this function builds ever
-/// holds an entity outside `M_sel` — the tokens' corpus-wide postings are read but nothing derived
-/// from them is returned unmasked, which is I2 held by construction rather than by a final
-/// intersection that could be forgotten.
+/// **Every posting is masked as it is read, before anything is unioned or counted**, so no bitmap
+/// that reaches the answer holds an entity outside `M_sel` — which is I2 held by construction
+/// rather than by a final intersection that could be forgotten.
+///
+/// It is masked *as read* and not *before*: `ColumnPostings::entities` returns an owned bitmap, so
+/// each token's corpus-wide posting is materialised transiently and then narrowed. That is the
+/// resident cost of a `match` and it is a function of the tokens named rather than of what the
+/// principal may see — the same quantity Appendix C's C25 registers as observable in the timing,
+/// here in bytes. Nothing derived from it survives the intersection.
 ///
 /// **An unresolved token contributes an empty posting rather than short-circuiting.** Under plain
 /// `match` that yields the empty set either way; under m-of-n it must still consume its place in
@@ -2171,6 +2243,14 @@ fn text_match(
         // everything, which is the same reading `any_of([])` takes.
         return Ok(Bitmap::new());
     }
+    // **More required than asked for is unsatisfiable, not the conjunction.** `minimum` counts
+    // *distinct* tokens — the caller's query is deduplicated before it reaches here, so "the same
+    // word twice" is one piece of evidence — and a request for four of two words is one no item
+    // can meet. Folding it into the `>=` branch below would answer the two-word conjunction, which
+    // is a different and strictly wider question than the one asked.
+    if minimum as usize > tokens.len() {
+        return Ok(Bitmap::new());
+    }
     let mut per_token: Vec<Bitmap> = Vec::with_capacity(tokens.len());
     for token in tokens {
         let entities = match dict
@@ -2184,8 +2264,10 @@ fn text_match(
     }
 
     // Plain `match` is the intersection, which is the common case and the cheap one: a
-    // `and_inplace` per token, narrowing as it goes.
-    if minimum as usize >= tokens.len() {
+    // `and_inplace` per token, narrowing as it goes. Reached at equality only — a `minimum` above
+    // the token count was answered empty above, and `None` becomes exactly the token count at the
+    // call site.
+    if minimum as usize == tokens.len() {
         let mut out = per_token.swap_remove(0);
         for rest in &per_token {
             out.and_inplace(rest);

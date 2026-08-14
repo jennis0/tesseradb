@@ -2087,13 +2087,22 @@ fn write_text_index(
             attribute.name
         ))
     })?;
+    // **The whole identity, not the name.** The flush and the read path both compare the full
+    // `<name>/<version>` before they will use a pipeline, and this was the one of the three writers
+    // that compared only the first component — so a `Schema` built programmatically rather than
+    // parsed from TOML could carry `unicode/icu4x-1.0/p1`, index happily under today's segmenter,
+    // and record the stale string. The bundle would then refuse to open for every reader, for ever,
+    // with the defect a build behind it. Unreachable through `Schema::parse`, which resolves the
+    // identity from this binary's own analyser; the SDK and the tests are not obliged to.
     let name = identity.split('/').next().unwrap_or_default();
-    let analyser = tessera_analyse::analyser(name).ok_or_else(|| {
-        BuildError::Invalid(format!(
-            "attribute '{}' names analyser '{name}', which this build does not carry",
-            attribute.name
-        ))
-    })?;
+    let analyser = tessera_analyse::analyser(name)
+        .filter(|a| a.identity() == identity)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "attribute '{}' declares analyser '{identity}', which this build does not carry.                  Its terms cannot be reproduced, so an index written now would answer every                  `match` from a segmentation the manifest does not describe",
+                attribute.name
+            ))
+        })?;
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
     for (entity, value) in values.iter().enumerate() {

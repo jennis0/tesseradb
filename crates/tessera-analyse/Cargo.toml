@@ -14,9 +14,19 @@ edition = "2021"
 # `icu_casemap` and `icu_segmenter` are new, and `icu_segmenter`'s compiled data carries the
 # dictionaries for the scripts with no inter-word spaces. Promoting icu4x to a direct dependency of
 # an indexing crate is stated here rather than hidden — the `memchr` precedent.
-icu_normalizer = "2"
-icu_casemap = "2"
-icu_segmenter = "2"
+#
+# **Pinned to the minor, not the major, and the identity string is why.** `UNICODE_VERSION` records
+# `icu4x-2.2` in every bundle's manifest, and both readers refuse a bundle whose recorded identity
+# they cannot reproduce — but they compare the *string*, which a caret range lets drift. A `cargo
+# update` to `icu_segmenter` 2.3 with revised dictionary data would change the token stream while
+# leaving the identity untouched: the base build's index and the next flush's would disagree about
+# where a word ends, and a `match` would find it in the newer documents and silently miss it in the
+# older ones. That is precisely the failure decision 0070's per-column identity exists to catch, and
+# the identity cannot catch it about itself. `=2.2` turns the drift into a build-time bump that has
+# to move the constant with it.
+icu_normalizer = "=2.2"
+icu_casemap = "=2.2"
+icu_segmenter = "=2.2"
 
 [dev-dependencies]
 serde_json = "1"

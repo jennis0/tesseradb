@@ -430,6 +430,23 @@ pub(crate) fn execute_flush(
             );
         }
     }
+    // **All three files of every text extent, and the omission was not cosmetic.** A digest is not
+    // only an integrity check here: `publish_fold` carries a flight extent forward by looking its
+    // digest up in the live manifests and *discards the whole fold* when it finds none. So a
+    // deployment with an indexed text column and continuous ingest would have folded, spent minutes
+    // to hours rewriting the corpus, discarded at the last step, left an orphan prefix, and retired
+    // no deletion — for ever, since the next trigger re-plans into the same wall. The three travel
+    // together for the reason the manifest entry states: an extent's postings are positions in its
+    // own dictionary, and its presence is what stops an entity whose prose analysed to no terms
+    // reading as absent.
+    for extent in &text_extents {
+        for rel in [&extent.dict, &extent.postings, &extent.presence] {
+            files.insert(
+                rel.clone(),
+                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+            );
+        }
+    }
 
     let seg_dir = segment_dir(&ctx);
     let segment = SegmentData {
@@ -1028,6 +1045,16 @@ fn write_text_extents(
                     postings.push(entity);
                 }
             }
+        }
+
+        // **A batch that carried no value for this column publishes no layer at all.** An empty
+        // extent is not free: nothing coalesces text layers, so every one of them survives until
+        // the next fold and every `match` pays a dictionary resolve and a posting read per token
+        // against it — a per-query cost, permanent until compaction, buying an answer that is
+        // always the empty set. Presence is checked rather than the term map, because an entity
+        // whose prose analysed to no terms still carries a value and a layer is owed for it.
+        if presence.is_empty() {
+            continue;
         }
 
         let dict_rel = format!("{rel_dir}/{}-dict.bin", ctx.seg_id);

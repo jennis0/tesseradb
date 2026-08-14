@@ -77,6 +77,21 @@ pub const UNICODE: &str = "unicode";
 /// The `icu4x` component is the crate major-minor whose compiled data this binary carries; the `p`
 /// component is the pipeline's own shape, and it moves if a stage is added, removed or reordered
 /// even when icu4x does not.
+///
+/// **This string is a hand-maintained claim about two things it cannot observe**, which is worth
+/// stating where it is written rather than discovering later:
+///
+/// - The **icu4x data version**. `Cargo.toml` pins the three crates at `=2.2` so that a bump has to
+///   be a deliberate edit, and the edit has to move this constant with it. A caret range would let
+///   `cargo update` change the token stream while leaving the identity untouched — the base build
+///   and the next flush disagreeing about where a word ends, with every check passing.
+/// - ⊘ **Rust std's Unicode tables**, which `Analyser::tokens` consults through
+///   `char::is_alphanumeric` to decide whether a segment is a token. Those move with the toolchain,
+///   not with icu4x, and nothing here records the toolchain. A code point that becomes alphanumeric
+///   in a later Unicode revision turns a segment that produced no token into one that does. The
+///   closing move is to take the property from `icu_properties` — already in the tree — so the one
+///   pin covers both; not done here, and the exposure is small (a segment of pure punctuation
+///   becoming word-like) but it is real and unrecorded.
 const UNICODE_VERSION: &str = "icu4x-2.2/p1";
 
 /// Every analyser this binary can be asked for, by name. **A name not in this list is refused** —

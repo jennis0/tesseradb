@@ -433,3 +433,120 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
     )
     .expect("the text column opens")
 }
+
+/// **Asking for more words than the query has is unsatisfiable, not the conjunction.**
+///
+/// `minimum_should_match` counts *distinct* tokens, the query being deduplicated before it is
+/// resolved, so "three of these two words" is a question no item can meet. The branch that answers
+/// plain `match` was reached on `minimum >= tokens.len()` and therefore swallowed the case,
+/// returning every item carrying both words — a wrong answer in the over-inclusive direction, on
+/// the one operand this family has.
+///
+/// **Mutations this kills:** restoring `>=` in place of `==` in `text_match`'s intersection branch;
+/// dropping the `minimum > tokens.len()` guard; counting raw rather than deduplicated tokens (the
+/// repeated-word case then answers the conjunction).
+#[test]
+fn a_minimum_above_the_query_s_token_count_matches_nothing() {
+    use tessera_engine::filter::FilterOperand;
+
+    let dir = build_with(text_schema(true));
+    let out = dir.path().join("bundle");
+    let columns = open_columns(&out);
+    let source_of = source_to_entity(&out);
+    let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
+    let got = |query: &str, minimum: Option<u32>| -> u64 {
+        columns
+            .resolve(
+                "abstract",
+                &FilterOperand::Match {
+                    query: query.to_string(),
+                    minimum,
+                },
+                &all,
+            )
+            .expect("a declared text column resolves")
+            .cardinality()
+    };
+
+    // The control: both words together match something, so "nothing" below is a statement about
+    // the minimum rather than about the fixture.
+    assert!(got("quick fox", None) > 0);
+    assert_eq!(
+        got("quick fox", Some(3)),
+        0,
+        "three of two words is unsatisfiable; answering the conjunction is a wider question than \
+         the one asked"
+    );
+    assert_eq!(got("quick fox", Some(9)), 0);
+
+    // The same shape through deduplication: `quick quick brown` is two distinct words, so a
+    // minimum of three is unsatisfiable for exactly the same reason.
+    assert_eq!(got("quick quick brown", None), got("quick brown", None));
+    assert_eq!(
+        got("quick quick brown", Some(3)),
+        0,
+        "the denominator is the distinct token count, so a repeated word does not raise it"
+    );
+    // And the boundary still behaves: two of two is the conjunction, one of two the union.
+    assert_eq!(got("quick fox", Some(2)), got("quick fox", None));
+    assert!(got("quick fox", Some(1)) > got("quick fox", Some(2)));
+}
+
+/// **A negation over a text column is refused, not answered empty.**
+///
+/// `none_of` is `present ∖ matched`, and `present` is what makes it a positive predicate. A text
+/// column stores no per-item value to be present — its index is the words its documents use, and
+/// its prose is a blob row — so the presence half had nothing to union and every such request
+/// answered "no items" with a 200: indistinguishable from a corpus where nothing matches, for every
+/// principal, silently.
+///
+/// **Mutations this kills:** removing the `layers.is_empty()` guard in `present_in` (the request
+/// answers empty and succeeds); making the guard return `Ok(candidate.clone())` instead (the
+/// negation widens past what the column knows, which is the direction that discloses).
+#[test]
+fn a_negation_over_a_text_column_is_refused() {
+    use tessera_engine::filter::{FilterExpr, FilterOperand};
+
+    let dir = build_with(text_schema(true));
+    let out = dir.path().join("bundle");
+    let columns = open_columns(&out);
+    let source_of = source_to_entity(&out);
+    let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
+
+    let negation = FilterExpr::NoneOf(vec![FilterExpr::Leaf {
+        column: "abstract".to_string(),
+        operand: FilterOperand::Match {
+            query: "quick".to_string(),
+            minimum: None,
+        },
+    }]);
+    let err = columns
+        .evaluate(&negation, &all)
+        .expect_err("a negation over a text column must refuse rather than answer");
+    assert!(
+        err.is_callers_fault(),
+        "the caller can fix this by asking a different question, so it is a 422 and not a 500"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("abstract") && text.contains("text"),
+        "the refusal must name the column and why: {text}"
+    );
+
+    // The positive form of the same question still answers, so what is refused is the negation and
+    // not the column.
+    assert!(
+        columns
+            .resolve(
+                "abstract",
+                &FilterOperand::Match {
+                    query: "quick".to_string(),
+                    minimum: None,
+                },
+                &all,
+            )
+            .expect("the positive predicate answers")
+            .cardinality()
+            > 0
+    );
+}

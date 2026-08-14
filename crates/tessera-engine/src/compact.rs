@@ -1491,8 +1491,12 @@ fn fold_text_columns(
         // are disjoint in entity space by **I9**); it is kept because a manifest whose bytes depend
         // on an iteration order is a bundle identity that depends on one.
         //
-        // Advised sequential, and these are the fold's own mappings rather than the request path's
-        // (decision 0052): the merge streams each dictionary and each posting file exactly once.
+        // The dictionaries are advised sequential, and they are the fold's own mappings rather
+        // than the request path's (decision 0052): the merge streams each one exactly once, in
+        // order. The postings are not — `ColumnPostings::open` takes no `Access`, and the merge's
+        // access to them is *not* sequential anyway: it reads record `at[i]` of whichever layers
+        // hold the least key, which walks each file in ordinal order but interleaved across
+        // layers. `MADV_SEQUENTIAL`'s drop-behind would be wrong for that, not merely absent.
         let mut dicts = vec![tessera_filter::SortedDict::open_dir(
             &from_dir,
             tessera_filter::Access::MappedSequential,

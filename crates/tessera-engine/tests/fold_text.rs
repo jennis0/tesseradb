@@ -480,3 +480,179 @@ fn the_folded_prefix_lists_no_text_extent_and_holds_no_orphan() {
         expected.keys().collect::<Vec<_>>()
     );
 }
+
+/// **A flush's text extent is digested, and the fold that carries one forward publishes.**
+///
+/// The two halves are one defect and were found by two reviewers independently. `write_text_extents`
+/// wrote three files and named them in the side-manifest without ever inserting their digests —
+/// unlike the record extent immediately beside it — and `publish_fold` discards outright when a
+/// file it must carry forward has no digest in either live manifest. So the failure was not "a
+/// missing integrity check": **a deployment with a searchable prose column and continuous ingest
+/// would have folded, spent minutes to hours rewriting the corpus, discarded at the last step,
+/// left an orphan prefix, and retired no deletion — for ever**, since the next trigger re-plans
+/// into the same wall.
+///
+/// The three earlier cases in this file cannot reach it: they all flush *before* folding, so every
+/// extent is consumed and none is carried. This one publishes a second extent after the plan's
+/// snapshot, which is the flight case.
+///
+/// **Mutations this kills:** dropping any of the three digest insertions in `write_text_extents`
+/// (the fold discards); dropping the text extents from `carried_rels` (the publication cannot link
+/// the files and discards); dropping them from the new manifest's `text_extents` (the flushed
+/// batch's words answer no `match` afterwards).
+#[test]
+fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_text_fixture(&root, tmp.path());
+    let engine = engine_over(tmp.path(), &root);
+    let built = source_to_new_map(&root, "v00000");
+
+    let first = ingest_and_flush(&engine, &root);
+
+    // Every file the extent names is digested in the side-manifest that names it. Asserted on its
+    // own, because it is what the fold depends on and the dependency is not visible from either
+    // side.
+    let bundle = open_bundle(&root).expect("the bundle opens");
+    let files = &bundle.partitions["default"].manifest.files;
+    for extent in text_extents(&root) {
+        for rel in [&extent.dict, &extent.postings, &extent.presence] {
+            assert!(
+                files.contains_key(rel),
+                "the flush named '{rel}' in the manifest and did not digest it; a fold carrying it \
+                 forward discards, and nothing verifies its bytes"
+            );
+        }
+    }
+
+    // A second flush, whose extent the fold's plan cannot have seen. It is taken here rather than
+    // by racing the fold thread — the plan snapshots the live manifest, so an extent published
+    // after `request_fold` returns is indistinguishable from one published mid-flight, and racing
+    // a background thread would make the case timing-dependent for nothing.
+    let second = {
+        let external = "flight-0".to_string();
+        let row = UnallocatedRow {
+            external_id: Some(external.as_bytes().to_vec()),
+            slice: "s0".to_string(),
+            descriptors: vec![b"0".to_vec()],
+            x: 20.0,
+            y: 20.0,
+            scalars: vec![WalScalar::Utf8("corpus flightword".to_string())],
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+        };
+        let id = engine
+            .accept_ingest(vec![row], external, [0u8; 32])
+            .expect("the flight ingest is accepted")[0];
+        engine.request_flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while text_extents(&root).len() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second flush never published its text layer"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        id
+    };
+
+    fold(&engine);
+
+    // Both flushes' words are in the merged base — the fold consumed both extents, which is what
+    // the plan named. What this case is really about is that it *published at all*.
+    let index = base_index(&root);
+    assert!(
+        index.contains_key("flightword"),
+        "the second flush's words are missing from the folded index"
+    );
+    assert!(index["corpus"].contains(second.raw() as u32));
+    let mut flushed = first;
+    flushed.push(second);
+    for entity in &flushed {
+        assert!(
+            index["corpus"].contains(entity.raw() as u32),
+            "a flushed entity lost its words at the fold"
+        );
+    }
+    assert_eq!(
+        index["corpus"].cardinality(),
+        N + FLUSHED + 1,
+        "the merged posting is not every entity that carries the word"
+    );
+    assert!(
+        text_extents(&root).is_empty(),
+        "the fold consumed both extents"
+    );
+    let _ = built;
+}
+
+/// **A flush whose batch carries no value for a text column publishes no layer for it.**
+///
+/// An empty extent is not free. Nothing coalesces text layers — the entity-space coalesce skips any
+/// column whose layers carry a dictionary — so every one of them survives until the next fold, and
+/// every `match` pays a dictionary resolve and a posting read per token against each. A layer that
+/// can only ever answer the empty set is a permanent per-query cost buying nothing.
+///
+/// The batch here carries a *null*, which is absence. An entity whose prose is the empty string
+/// carries a value and no terms, and must still get a layer — that is why the flush tests presence
+/// rather than the term map, and why this case ingests both.
+#[test]
+fn a_flush_with_no_text_value_publishes_no_text_layer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_text_fixture(&root, tmp.path());
+    let engine = engine_over(tmp.path(), &root);
+
+    let ingest = |engine: &Engine, name: &str, value: WalScalar| {
+        let row = UnallocatedRow {
+            external_id: Some(name.as_bytes().to_vec()),
+            slice: "s0".to_string(),
+            descriptors: vec![b"0".to_vec()],
+            x: 30.0,
+            y: 30.0,
+            scalars: vec![value],
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+        };
+        engine
+            .accept_ingest(vec![row], name.to_string(), [0u8; 32])
+            .expect("the ingest is accepted")[0]
+    };
+
+    ingest(&engine, "null-prose", WalScalar::Null);
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().flushes == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never completed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        text_extents(&root).is_empty(),
+        "a batch with no prose published a text layer that can only answer the empty set"
+    );
+
+    // The empty string is a value a corpus may hold, and it does get a layer: it carries a presence
+    // bit and no terms, so a later `exists` predicate must be able to find it.
+    let empty = ingest(&engine, "empty-prose", WalScalar::Utf8(String::new()));
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while text_extents(&root).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the empty-string batch published no text layer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let extents = text_extents(&root);
+    assert_eq!(extents.len(), 1, "exactly the empty-string batch's layer");
+    let present = croaring::Bitmap::deserialize::<croaring::Portable>(
+        &std::fs::read(root.join(current_prefix(&root)).join(&extents[0].presence))
+            .expect("the presence bitmap reads"),
+    );
+    assert!(
+        present.contains(empty.raw() as u32),
+        "an entity whose prose is the empty string carries a value and must be in the layer's \
+         presence, where no posting can name it"
+    );
+}

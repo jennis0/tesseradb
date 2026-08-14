@@ -139,12 +139,13 @@ fn parse_operand(
     let applies = family.operands().contains(&op.as_str());
     if !applies {
         return Err(match op.as_str() {
-            // ⊘ Named rather than folded into the generic refusal: `match` is the analysed-token
-            // operator a `text` column would take, and that type is not declarable yet (#44), so
-            // this names what is absent rather than refusing generically (decision 0013).
+            // Named rather than folded into the generic refusal, because the mistake it catches
+            // is a schema one rather than a syntax one: the caller wants word matching and the
+            // column they named does not store words. Saying which declaration would give it to
+            // them is the difference between a fixable error and a puzzling one.
             "match" => bad(format!(
-                "column '{column}': `match` needs a column of declared type `text`, whose \
-                 analysed-token matching is specified and not built"
+                "column '{column}': `match` matches analysed words and needs a column declared \
+                 `type = \"text\"`. `/v1/meta` lists which columns are text"
             )),
             other => bad(format!(
                 "column '{column}' is a {} column, which takes {:?}; it does not take '{other}'",
@@ -173,8 +174,9 @@ fn parse_operand(
         // which of them a dictionary resolve answers and which an ordinal scan does is the
         // *column's* business, not the request's. Keeping them named for the predicate rather than
         // for the family is what stops the wire shape depending on a storage choice the client is
-        // not told about and cannot act on — and is what the `text` family (records §4.4, ⊘
-        // unbuilt) joins without a wire change.
+        // not told about and cannot act on. The `text` family joined without a wire change of its
+        // own for the same reason, bringing one operand rather than a second spelling of these
+        // four (records §4.4).
         (Family::Keyword, "eq") => Ok(FilterOperand::TextEquals(text_value(column, op, value)?)),
         (Family::Keyword, "in") => {
             let arr = value
@@ -585,12 +587,18 @@ mod tests {
         );
     }
 
+    /// `match` on a column that is not `text` names the declaration that would give it, rather
+    /// than refusing generically: the caller wants word matching and the column they picked does
+    /// not store words, which is a schema mistake and not a syntax one.
     #[test]
-    fn match_names_the_absent_text_type() {
+    fn match_on_a_non_text_column_names_the_declaration_it_needs() {
         let err = parse_str(r#"{"title": {"match": "smith"}}"#).unwrap_err();
+        let text = format!("{err:?}");
+        assert!(text.contains(r#"`type = \"text\"`"#), "{text}");
         assert!(
-            format!("{err:?}").contains("declared type `text`"),
-            "{err:?}"
+            !text.contains("not built"),
+            "the operator is built; a refusal saying otherwise sends the caller to look for a \
+             missing feature instead of at their column: {text}"
         );
     }
 

@@ -192,10 +192,11 @@ async fn meta(
         // (contracts §3.2, decision 0062). Empty when the schema declares nothing filterable.
         //
         // Per column rather than a flat operator list, because the operators are a property of the
-        // column's family: a category takes `eq`/`in` over its value set, a `utf8` or `keyword`
-        // column takes the four string predicates. A client that had to infer this from
-        // `arrow_type` would be re-deriving the schema's own rule, and would get `text` wrong the
-        // moment that type lands.
+        // column's family: a category takes `eq`/`in` over its value set, a `keyword` column takes
+        // the four string predicates, and a `text` column takes `match` and nothing else. A client
+        // that had to infer this from `arrow_type` would be re-deriving the schema's own rule, and
+        // would get `text` wrong — its type is a string type and its operand is not a string
+        // predicate.
         //
         // **`family` is what tells a viewer which control to draw.** A category has a value set, so
         // `/v1/categories/{column}` fills a dropdown. A string has none — its values are row data,
@@ -211,8 +212,13 @@ async fn meta(
         // `/v1/categories` counterpart (records §4.3) — so a client that reads `keyword` as
         // *enumerable* would be waiting for the same endpoint that will never exist.
         //
-        // The combinators (`all_of`, `any_of`) are not published per column — they compose
-        // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
+        // The combinators (`all_of`, `any_of`, `none_of`) are not published per column — they
+        // compose expressions rather than belonging to one. ⊘ **`none_of` is not universal over the
+        // columns published here, and nothing on this surface says so**: it subtracts from the set
+        // of items *carrying a value*, and a `text` column stores no per-item value to be present,
+        // so the engine refuses a negation over one (`FilterError::NegationWithoutPresence`). A
+        // client discovers that from the refusal rather than from the operand list, which is the
+        // wrong way round; publishing negatability per column is what would fix it.
         //
         // **The predicate is the engine's** (`filter::is_filterable`, decision 0068): `index`
         // columns, plus every rendered one — the render-only ones answered over the request's own
