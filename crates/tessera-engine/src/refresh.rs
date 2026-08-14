@@ -318,7 +318,7 @@ mod tests {
     /// real one would make this a test about the fixture. Same shape as `geometry::tests`'.
     fn generation_at(prefix: &str, segments_version: u64) -> Generation {
         let manifest = Manifest {
-            bundle_format: 1,
+            bundle_format: 2,
             created_at: "2026-07-31T00:00:00Z".to_string(),
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),

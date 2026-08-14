@@ -84,6 +84,7 @@ use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
+use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
@@ -2848,12 +2849,78 @@ pub(crate) fn filter_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
+        // **Text is not here, and `owes_value_column` is where that is decided** — it owes no value
+        // column, so there is no attribute extent for this pass to write. Its flush track is
+        // `text_schema_of`, whose extent is a dictionary and postings instead.
         .filter(|(_, d)| crate::filter::owes_value_column(d, &manifest.vocabularies))
         .map(|(index, d)| crate::flush::FilterColumnSpec {
             index,
             name: d.name.clone(),
             ty: d.arrow_type,
             category: d.vocabulary.is_some(),
+        })
+        .collect()
+}
+
+/// The indexed `text` columns, each with the analyser its declaration named — resolved once per
+/// dispatch rather than per row, because constructing one deserialises the segmenter's dictionaries.
+///
+/// **Refuses rather than defaults when the binary does not carry the recorded analyser.** A flush
+/// that indexed a batch with a different pipeline than the base build used would leave one column
+/// whose two layers disagree about what a word is, and a `match` would answer from whichever layer
+/// happened to hold the entity — a wrong answer with no error anywhere.
+pub(crate) fn text_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Result<Vec<crate::flush::TextColumnSpec>, crate::flush::FlushFailed> {
+    let mut out = Vec::new();
+    for (index, d) in manifest.declared_scalars.iter().enumerate() {
+        if d.arrow_type != tessera_spatial::tiler::ScalarType::Text || !d.index {
+            continue;
+        }
+        let identity = d.analyser.as_deref().ok_or_else(|| {
+            crate::flush::FlushFailed(format!(
+                "column '{}' is text but the manifest records no analyser identity",
+                d.name
+            ))
+        })?;
+        let analyser = tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+            .filter(|a| a.identity() == identity)
+            .ok_or_else(|| {
+                crate::flush::FlushFailed(format!(
+                    "column '{}' was indexed by analyser '{identity}', which this binary does not \
+                     carry — a flush cannot extend an index whose terms it cannot reproduce",
+                    d.name
+                ))
+            })?;
+        out.push(crate::flush::TextColumnSpec {
+            index,
+            name: d.name.clone(),
+            analyser: std::sync::Arc::new(analyser),
+        });
+    }
+    Ok(out)
+}
+
+/// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
+/// also its field tag (records §3).
+///
+/// **The predicate must be the build's**, [`crate::filter::blob_resident`], because this is the
+/// third placement pass and the three have to partition the same schema the same way. A flush that
+/// placed a field differently from the build would drop an ingested value the build stores: the
+/// buffered scalar is read by exactly three consumers — the render indices, the filter schema and
+/// this one — and a column no consumer claims is acknowledged and then lost.
+pub(crate) fn record_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Vec<crate::flush::RecordColumnSpec> {
+    manifest
+        .declared_scalars
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| crate::filter::blob_resident(d, &manifest.vocabularies))
+        .map(|(index, d)| crate::flush::RecordColumnSpec {
+            index,
+            name: d.name.clone(),
+            ty: d.arrow_type,
         })
         .collect()
 }
@@ -2961,7 +3028,7 @@ mod segment_schema_tests {
     #[test]
     fn a_segments_writer_schema_omits_filter_only_columns() {
         let manifest = tessera_store::manifest::Manifest {
-            bundle_format: 1,
+            bundle_format: 2,
             created_at: String::new(),
             data_plugin_hash: String::new(),
             declared_bounds: serde_json::json!({}),
@@ -2990,14 +3057,16 @@ mod segment_schema_tests {
                     name: "department".to_string(),
                     arrow_type: ScalarType::U16,
                     vocabulary: Some("departments".to_string()),
-                    filter: true,
+                    analyser: None,
+                    index: true,
                     render: true,
                 },
                 DeclaredScalar {
                     name: "title".to_string(),
                     arrow_type: ScalarType::Utf8,
                     vocabulary: None,
-                    filter: true,
+                    analyser: None,
+                    index: true,
                     render: false,
                 },
             ],
@@ -3032,6 +3101,8 @@ mod vocabulary_extensions_tests {
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
+            record_extents: Vec::new(),
+        text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -4523,6 +4594,18 @@ impl Executor {
                     .iter()
                     .any(|extent| extent.values == consumed.values)
             })
+            || !plan.record_extents.iter().all(|consumed| {
+                live_manifest
+                    .record_extents
+                    .iter()
+                    .any(|extent| extent.blocks == consumed.blocks)
+            })
+            || !plan.text_extents.iter().all(|consumed| {
+                live_manifest
+                    .text_extents
+                    .iter()
+                    .any(|extent| extent.dict == consumed.dict)
+            })
         {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
@@ -4572,6 +4655,37 @@ impl Executor {
             .attr_extents
             .iter()
             .filter(|extent| !consumed_attrs.contains(extent.values.as_str()))
+            .cloned()
+            .collect();
+        // The record-blob extents take the attribute extents' shape exactly: the fold consumed
+        // every one its snapshot named and folded the rows into the new base blob; what is carried
+        // is the flight's — a flush publishing during the fold appended entities the new base does
+        // not hold, and dropping its entry would answer their drill-downs "no record" with no
+        // symptom. Identified by the blocks path, `seg_id`-derived and never reused.
+        let consumed_records: FxHashSet<&str> = plan
+            .record_extents
+            .iter()
+            .map(|extent| extent.blocks.as_str())
+            .collect();
+        let carried_records: Vec<tessera_store::manifest::RecordExtent> = live_manifest
+            .record_extents
+            .iter()
+            .filter(|extent| !consumed_records.contains(extent.blocks.as_str()))
+            .cloned()
+            .collect();
+        // The text extents, same shape again: the fold merged every one its snapshot named into
+        // the new base index, and what is carried is the flight's. Identified by the dictionary
+        // path, which is `seg_id`-derived and never reused — and which is also the half a reader
+        // cannot substitute, an extent's postings being positions in *its own* dictionary.
+        let consumed_texts: FxHashSet<&str> = plan
+            .text_extents
+            .iter()
+            .map(|extent| extent.dict.as_str())
+            .collect();
+        let carried_texts: Vec<tessera_store::manifest::TextExtent> = live_manifest
+            .text_extents
+            .iter()
+            .filter(|extent| !consumed_texts.contains(extent.dict.as_str()))
             .cloned()
             .collect();
 
@@ -4679,6 +4793,11 @@ impl Executor {
         published_overlay.retire(&executed);
 
         let mut segments_manifest = SegmentsManifest {
+            // The flight's text extents, and the pass merged every other one into the new base
+            // index. A flush publishing during the fold indexed entities the new base does not
+            // hold, and dropping its entry would answer every `match` over that batch's prose with
+            // silence — the words are simply not in the base the fold wrote.
+            text_extents: carried_texts.clone(),
             // **Live, and untouched.** Deriving either from the fold's inputs moves the watermark
             // backwards past every post-snapshot entity, and composition treats an entity at or
             // above it as buffered rather than rowed — so the gap goes invisible to every principal
@@ -4700,6 +4819,7 @@ impl Executor {
             // wrong answer with no symptom, and strictly worse than a refusal to open. The two
             // halves are written here, in one manifest write.
             attr_extents: carried_attrs.clone(),
+            record_extents: carried_records.clone(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -4765,21 +4885,62 @@ impl Executor {
         // `hard_link_forward` refuses.
         let mut carried_rels: BTreeSet<String> = BTreeSet::new();
         for descriptor in &carried_segments {
+            let segment_prefix = format!(
+                "partitions/{}/slices/{}/segments/{}",
+                plan.partition, descriptor.slice, descriptor.seg_id
+            );
             for name in ["morton.u32", "columns.arrow"] {
-                carried_rels.insert(format!(
-                    "partitions/{}/slices/{}/segments/{}/{name}",
-                    plan.partition, descriptor.slice, descriptor.seg_id
-                ));
+                carried_rels.insert(format!("{segment_prefix}/{name}"));
             }
+            // **And every render column's presence bitmap the live manifest names for it**
+            // (decision 0064). A fixed list of two files was right while a segment held exactly
+            // two; a segment now holds a `presence/<column>.roaring` per rendered column that has
+            // an absence, and a carried segment that arrived without one would read as
+            // every-row-present — an item with no number matching a range containing zero, which
+            // is the 2026-08-11 defect reached by the fold's carry-forward rather than by the
+            // scan. Taken from the manifest, not from a directory scan, for the reason
+            // `AttrExtent` gives: a scan finds what is there, and the manifest says what must be.
+            let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
+            carried_rels.extend(
+                live_manifest
+                    .files
+                    .keys()
+                    .filter(|rel| rel.starts_with(&presence_prefix))
+                    .cloned(),
+            );
         }
         carried_rels.extend(carried_runs.iter().cloned());
         carried_rels.extend(carried_locators.iter().map(|e| e.path.clone()));
         carried_rels.extend(carried_tiers.iter().cloned());
-        // Both files of every carried attribute extent — the values *and* the presence bitmap,
-        // whose absence is not "those entities carry no value" but a refusal to open
-        // (`filter-index.md` §2.5).
+        // **Every file a carried attribute extent's entry names**, not the two a numeric one has.
+        // The values and the presence bitmap always; the sorted dictionary whenever the entry names
+        // one, which is exactly when the column is a keyword — its values are ordinals into *that
+        // layer's* dictionary and nothing else numbers them, so a carried extent without it is an
+        // entry pointing at a file that is not there. The whole prefix then refuses to open, which
+        // is how this was found. `postings` and `offsets` ride along for the same reason: an entry
+        // naming a file the link set omits is a bundle that will not open, whatever the file is
+        // for (`filter-index.md` §2.5; records §4.3, §7).
         for extent in &carried_attrs {
             carried_rels.insert(extent.values.clone());
+            carried_rels.insert(extent.presence.clone());
+            carried_rels.extend(extent.dict.iter().cloned());
+            carried_rels.extend(extent.postings.iter().cloned());
+            carried_rels.extend(extent.offsets.iter().cloned());
+        }
+        // All three files of every carried record extent: the blocks and both addressing files,
+        // any of whose absence is a refusal to open rather than "those entities have no record"
+        // (records §7).
+        for extent in &carried_records {
+            carried_rels.insert(extent.blocks.clone());
+            carried_rels.insert(extent.hasrow.clone());
+            carried_rels.insert(extent.directory.clone());
+        }
+        // All three files of every carried text extent, under the same rule: the dictionary and
+        // the postings are one record — an ordinal names a position in *this* dictionary — and the
+        // presence half is what stops an entity whose prose analysed to no terms reading as absent.
+        for extent in &carried_texts {
+            carried_rels.insert(extent.dict.clone());
+            carried_rels.insert(extent.postings.clone());
             carried_rels.insert(extent.presence.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
@@ -5400,6 +5561,23 @@ impl Executor {
         let manifest = &generation.bundle.manifest;
         let scalar_schema = scalar_schema_of(manifest);
         let filter_schema = filter_schema_of(manifest);
+        let record_schema = record_schema_of(manifest);
+        // **An unusable analyser stops the dispatch rather than flushing an unindexed batch.** A
+        // flush that skipped the column would leave the buffer's text out of the index with no
+        // error, and the next fold would rebuild from values that are in the blob — so the gap
+        // would close silently and look like nothing had happened.
+        let text_schema = match text_schema_of(manifest) {
+            Ok(schema) => schema,
+            Err(e) => {
+                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e.0,
+                    "ALARM: a text column's analyser is not one this binary carries; no flush is \
+                     dispatched, and the buffer is retained"
+                );
+                return;
+            }
+        };
         let render_indices: Vec<usize> = manifest.render_indices().collect();
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
@@ -5490,6 +5668,8 @@ impl Executor {
                     scalar_schema: scalar_schema.clone(),
                     render_indices: render_indices.clone(),
                     filter_schema: filter_schema.clone(),
+                    record_schema: record_schema.clone(),
+                    text_schema: text_schema.clone(),
                     dict: Arc::clone(&generation.dict),
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
@@ -7104,7 +7284,7 @@ impl Executor {
         // an extent covers entities I9 has just issued, which no earlier layer can hold — so this
         // is the same posture as every other flush failure: the files are orphans, the buffer
         // stands, the next tick re-plans.
-        let extents: Vec<(String, String, Arc<tessera_filter::ValueColumn>)> = completed
+        let extents: Vec<crate::filter::PublishedExtent> = completed
             .filter_extents
             .iter()
             .map(|e| {
@@ -7112,10 +7292,40 @@ impl Executor {
                     e.column.clone(),
                     e.values_rel.clone(),
                     Arc::clone(&e.values),
+                    // A keyword extent's dictionary travels with its ordinals or the composition
+                    // refuses: the ordinals are positions in *this* dictionary and name nothing
+                    // against another (records §4.3).
+                    e.dict.clone(),
                 )
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_extents(&extents) {
+        // The record extent composes onto the live stack here, not only into the manifest: a
+        // published extent that no live stack holds answers no drill-down until the next fold.
+        let record_dir = self.bundle_root.join(&completed.prefix);
+        let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
+            .record_extent
+            .iter()
+            .map(|e| tessera_filter::RecordExtentPaths {
+                blocks: record_dir.join(&e.blocks),
+                hasrow: record_dir.join(&e.hasrow),
+                directory: record_dir.join(&e.directory),
+            })
+            .collect();
+        let text_paths: Vec<crate::filter::TextExtentPaths> = completed
+            .text_extents
+            .iter()
+            .map(|e| crate::filter::TextExtentPaths {
+                column: e.column.clone(),
+                dict: record_dir.join(&e.dict),
+                postings: record_dir.join(&e.postings),
+                presence: record_dir.join(&e.presence),
+            })
+            .collect();
+        let filter_columns =
+            match live
+                .filter_columns
+                .with_extents(&extents, &record_paths, &text_paths)
+            {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -7156,8 +7366,26 @@ impl Executor {
                         column: e.column.clone(),
                         values: e.values_rel.clone(),
                         presence: e.presence_rel.clone(),
+                        // One record, so the layer's files swap as one: an extent's ordinals are
+                        // positions in *that* extent's dictionary, and a reader that saw a new
+                        // dictionary beside old ordinals would recolour the window (records §7).
+                        dict: e.dict_rel.clone(),
+                        postings: None,
+                        offsets: None,
                     }),
             );
+        // The record-blob extent, under the same two-obligation rule: the three files are already
+        // in `files`, and this entry is what makes them reachable — a record stack opens exactly
+        // what `record_extents` names, so bytes this list omits answer no drill-down and bytes it
+        // names but that are absent refuse the open (records §7's fail-closed rule).
+        manifest.record_extents.extend(completed.record_extent);
+        // The text layers, under the same two-obligation rule: the files are already digested in
+        // `files`, and this entry is what makes them reachable to a reopen. The live generation
+        // composes them below — a published layer no live reader holds answers no `match` until the
+        // next fold, which is the defect the record blob's own composition was missing.
+        manifest
+            .text_extents
+            .extend(completed.text_extents.iter().cloned());
         write_deny_state(&mut manifest, &live.overlay);
         write_vocabulary_extensions(
             &mut manifest,

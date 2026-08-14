@@ -41,8 +41,8 @@ enum Command {
         #[arg(long)]
         limit: Option<u64>,
         /// `schema.toml`: the per-item columns to carry alongside the point
-        /// (per-point-attributes §4.2). Each declares what it is *for* and the placement follows;
-        /// `used_for = ["render"]` puts it in `columns.arrow`. Omit for a bundle with no
+        /// (per-point-attributes §4.2, records §2). Each declares what it *is* and the placement
+        /// follows; `render = true` puts it in `columns.arrow`. Omit for a bundle with no
         /// per-item columns, which is what every build wrote before this flag existed.
         ///
         /// **A build input, never server configuration** (§4.1). It compiles into MANIFEST.json
@@ -122,6 +122,25 @@ enum Command {
     Verify {
         /// Bundle root (the directory containing `CURRENT`).
         bundle: PathBuf,
+    },
+    /// Analyse text through the shipped tokeniser, one input per line, tokens tab-separated.
+    ///
+    /// **The conformance oracle's access to the analyser** (`records-and-search.md` §4.4). The
+    /// oracle derives expected `match` results from the fixture's own values and must pass them
+    /// through the *same* pipeline the index was built with; reimplementing it in Python would
+    /// test PyICU's ICU4C against icu4x rather than testing Tessera. This verb is that access, on
+    /// the harness's existing drive-the-CLI precedent.
+    Tokenise {
+        /// Text to analyse. Repeatable. With none given, reads one input per line from stdin.
+        #[arg(long = "text")]
+        text: Vec<String>,
+        /// Which analyser, by declared name (decision 0070). A column records the identity this
+        /// resolves to, and an unknown name is refused rather than defaulted.
+        #[arg(long, default_value = tessera_analyse::UNICODE)]
+        analyser: String,
+        /// Print the analyser's identity and exit — what a column records, and what a rebuild moves.
+        #[arg(long)]
+        identity: bool,
     },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     Serve {
@@ -732,6 +751,39 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        Command::Tokenise {
+            text,
+            analyser,
+            identity,
+        } => {
+            let Some(analyser) = tessera_analyse::analyser(&analyser) else {
+                eprintln!(
+                    "'{analyser}' is not an analyser this binary carries. Available: {}",
+                    tessera_analyse::ANALYSER_NAMES.join(", ")
+                );
+                return ExitCode::FAILURE;
+            };
+            if identity {
+                println!("{}", analyser.identity());
+                let _ = text;
+                return ExitCode::SUCCESS;
+            }
+            // Tab-separated because a token can contain anything but a tab or a newline: the
+            // segmenter's word-like segments never span a line break, and a caller that split on
+            // spaces would corrupt nothing here but would elsewhere.
+            let emit = |line: &str| println!("{}", analyser.tokens(line).join("\t"));
+            if text.is_empty() {
+                use std::io::BufRead;
+                for line in std::io::stdin().lock().lines() {
+                    emit(&line.expect("a readable line on stdin"));
+                }
+            } else {
+                for line in &text {
+                    emit(line);
+                }
+            }
+            ExitCode::SUCCESS
         }
         Command::Verify { bundle } => match tessera_build::verify(&bundle) {
             Ok(report) => {

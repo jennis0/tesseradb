@@ -45,7 +45,7 @@ const SCHEMA_TOML: &str = r#"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -59,7 +59,7 @@ listing    = "public"
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["render"]
+render     = true
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
@@ -78,8 +78,21 @@ listing    = "per_viewer"
 [[attribute]]
 name     = "score"
 type     = "f32"
-used_for = ["render"]
+render = true
 "#;
+
+/// The rendered number, **with absences** — every seventh item carries none.
+///
+/// The absences are the point. A render column is non-nullable, so an absent number is written as
+/// the type's zero (decision 0064), and this fixture's filter below is `score < 16`, a range that
+/// contains zero. If the presence bitmap beside the column were not honoured, every absent item
+/// would match it — the 2026-08-11 defect, end to end, through a real build and a real request.
+fn score_of(entity: u64) -> Option<f32> {
+    if entity.is_multiple_of(7) {
+        return None;
+    }
+    Some((entity % 97) as f32 * 0.5)
+}
 
 /// Five archives, so several codes are live and no code is the only one present.
 fn archive_of(entity: u64) -> &'static str {
@@ -103,14 +116,14 @@ fn write_points(path: &Path, n: u64) {
         Field::new("y", DataType::Float64, false),
         Field::new("archive", DataType::Utf8, false),
         Field::new("department", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, false),
+        Field::new("score", DataType::Float32, true),
     ]));
     let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
     let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (e % 97) as f32 * 0.5).collect();
+    let scores: Vec<Option<f32>> = ids.iter().map(|&e| score_of(e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -241,6 +254,113 @@ async fn meta_publishes_the_category_descriptor_and_no_values() {
     assert!(
         !raw.contains("astro"),
         "/v1/meta must not carry vocabulary values: {raw}"
+    );
+}
+
+/// **`/v1/meta` publishes what a client may filter on, and a rendered number is on that list** with
+/// its family's full operator set — decision 0064's render half, which put a number's absence in a
+/// bitmap beside the hot column and so made the row route safe for one.
+///
+/// The fixture's `score` is `render`-only: it has no entity-space column at all, so if it appears
+/// here it can only be answered over the request's own rows. A client cannot tell which route
+/// served it, which is 0068's whole licence to have two — so the operand list says `numeric` and
+/// nothing about placement.
+#[tokio::test]
+async fn meta_publishes_a_rendered_number_as_a_filterable_numeric_operand() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, body) = get(&server, &token, "/v1/meta").await;
+    assert_eq!(status, 200);
+    let operands = body["filter_operands"].as_array().unwrap();
+    let of = |column: &str| {
+        operands
+            .iter()
+            .find(|o| o["column"] == column)
+            .unwrap_or_else(|| panic!("{column} must be filterable: {body}"))
+            .clone()
+    };
+
+    let score = of("score");
+    assert_eq!(score["family"], "numeric");
+    assert_eq!(
+        score["operands"].as_array().unwrap(),
+        &vec!["eq", "in", "range"],
+        "a rendered number takes its family's whole operator set, `range` included"
+    );
+
+    // The rendered categories are still published as they were, by the same predicate.
+    assert_eq!(of("archive")["family"], "category");
+    assert_eq!(of("department")["family"], "category");
+}
+
+/// **A client can actually filter on the rendered number `/v1/meta` offers it**, end to end: the
+/// request parses, the row route answers it, and the counts narrow.
+///
+/// The published list and the parse gate are the same predicate (`filter::is_filterable`), so an
+/// operand advertised and then refused would be a contradiction inside one function — which is
+/// exactly why the pair is asserted from the outside rather than trusted.
+#[tokio::test]
+async fn a_viewport_filters_on_a_rendered_number_over_its_own_rows() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let viewport = |filter: Option<serde_json::Value>| {
+        let mut body = serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1000
+        });
+        if let Some(filter) = filter {
+            body["filters"] = filter;
+        }
+        server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+    };
+
+    // `score` is `(e % 97) * 0.5` over 64 items with every seventh absent, so this is the lower
+    // half of the corpus minus those — a real narrowing, a fractional bound (the endpoint form an
+    // integer column would have had to round and a float column must not), and a range that
+    // **contains zero**, which is what makes the absences load-bearing rather than decorative.
+    let resp = viewport(Some(serde_json::json!({"score": {"range": {"lt": 16.0}}})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a rendered number must be filterable");
+    let (tiles, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let matched: u64 = tiles.iter().map(|t| t.2).sum();
+    let visible: u64 = tiles.iter().map(|t| t.1).sum();
+
+    let expected = (0..N)
+        .filter(|&e| score_of(e).is_some_and(|v| v < 16.0))
+        .count() as u64;
+    assert_eq!(
+        matched, expected,
+        "the filtered count disagrees with the corpus"
+    );
+    assert!(matched < visible, "the filter narrowed nothing");
+    // The absence half, stated as its own assertion because the count above would also pass if
+    // the corpus happened to have none: an item with no score is stored as 0.0 in the hot column,
+    // and 0.0 is inside this range. Only the presence bitmap keeps it out.
+    let absent = (0..N).filter(|&e| score_of(e).is_none()).count() as u64;
+    assert!(absent > 0, "the fixture must plant absences for this to mean anything");
+    assert_eq!(
+        matched,
+        expected,
+        "an item with no score matched a range containing zero — decision 0064's bitmap is not \
+         being honoured on the row route"
+    );
+    assert_eq!(points.len() as u64, matched, "every matching item is drawn");
+
+    // The unfiltered request over the same window: `visible` is the composed mask's own count and
+    // must not have moved (§7.1, I12).
+    let resp = viewport(None).await.unwrap();
+    let (all_tiles, _) = decode_viewport(&resp.bytes().await.unwrap());
+    assert_eq!(
+        all_tiles.iter().map(|t| t.1).sum::<u64>(),
+        visible,
+        "the filter moved `visible`, which is computed above it"
     );
 }
 

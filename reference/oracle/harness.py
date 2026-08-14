@@ -123,6 +123,26 @@ def ensure_cli_built() -> None:
 
 
 
+def run_build(args: list[str]) -> subprocess.CompletedProcess:
+    """Run `tessera build` and hand back the completed process, refusal or not.
+
+    The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
+    them a failed build is a broken harness. The schema-refusal catalogue is the opposite test:
+    the refusal *is* the subject (records §2; decision 0013's naming discipline), so the caller
+    asserts on the exit status and the message rather than having them converted into a
+    `CalledProcessError`. Output is captured — stderr is where the CLI reports a refusal — and
+    text-decoded so a test can grep it for the reason the message must name.
+    """
+    ensure_cli_built()
+    return subprocess.run(
+        [str(CLI_BIN), "build", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def open_bundle_with_source(
     bundle_root: Path, points: Path | str, limit: int | None = None
 ) -> "object":
@@ -479,6 +499,54 @@ class Server:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def flush(self, timeout: float = 60.0) -> None:
+        """Ask for a flush and **wait for one to complete** (contracts §3.4).
+
+        The route answers `202` — accepted, not done — so a caller that returned there would be
+        asserting against whichever generation happened to be live. The barrier is
+        `/control/status`'s own `flushes` counter rising past the value read before the request,
+        which is the executor's record of a publication rather than an inference from one.
+        """
+        before = self.status()["write_executor"]["flush"]["flushes"]
+        resp = requests.post(
+            f"{self.control_base}/control/flush",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.status()["write_executor"]["flush"]["flushes"] > before:
+                return
+            time.sleep(0.1)
+        raise TimeoutError(f"no flush completed within {timeout}s")
+
+    def compact(self, timeout: float = 300.0) -> None:
+        """Ask for a compaction fold and **wait for one to land** (contracts §3.4).
+
+        Same shape as [`flush`] and the same reason for the barrier, over a longer wait: a fold
+        re-reads and rewrites the whole corpus. `fold_failures` is watched beside `folds` so a
+        refused or failed fold surfaces as its own error rather than as a timeout — the two are
+        different diagnoses, and the gates a fold can refuse on (memory, free disc, a poisoned WAL)
+        are properties of the machine rather than of the code under test.
+        """
+        before = self.status()["compaction"]
+        resp = requests.post(
+            f"{self.control_base}/control/compact",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            now = self.status()["compaction"]
+            if now["fold_failures"] > before["fold_failures"]:
+                raise RuntimeError(f"the compaction fold failed: {now}")
+            if now["folds"] > before["folds"]:
+                return
+            time.sleep(0.2)
+        raise TimeoutError(f"no compaction fold landed within {timeout}s")
 
 
 def write_config(

@@ -15,7 +15,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
@@ -44,8 +44,13 @@ const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// owes membership postings *and* keeps the scan for filtering (decision 0063); `archive` is
 /// `public`, which is the shape whose filter is routed through those postings. The two carry the
 /// same value distribution under different names, so the routed answer and the scanned one are
-/// comparable value by value. The string is `filter`-only, which is the shape that owes no postings
+/// comparable value by value. The string is `index`-only, which is the shape that owes no postings
 /// at all.
+///
+/// `score` is **rendered and filtered**, which is the shape that affords both routes for a
+/// number: the hot column answers it over the request's own rows, the entity-space column over the
+/// whole corpus, and 0068 chooses between them on the request's span. `bonus` is `index`-only and
+/// is the column with absences — see [`bonus_of`], and the row-route note there.
 ///
 /// `ops` and `ww` are declared and carried by nothing, which is the empty-value case: a code the
 /// vocabulary binds, that no posting holds, and that no principal may be offered until something
@@ -55,7 +60,8 @@ const SCHEMA_TOML: &str = r#"
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
@@ -68,7 +74,8 @@ listing    = "per_viewer"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -79,18 +86,19 @@ listing    = "public"
 
 [[attribute]]
 name     = "title"
-type     = "utf8"
-used_for = ["filter"]
+type     = "keyword"
+index    = true
 
 [[attribute]]
 name     = "score"
 type     = "i32"
-used_for = ["render", "filter"]
+render   = true
+index    = true
 
 [[attribute]]
 name     = "bonus"
 type     = "i32"
-used_for = ["filter"]
+index    = true
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -132,6 +140,12 @@ fn score_of(e: u64) -> i32 {
 /// the whole point. Absence used to be stored as `0` and marked present (decision 0064), so an item
 /// with no bonus matched every range containing zero; a fixture whose values were all positive
 /// could not tell the two apart.
+///
+/// ⊘ **`index`-only, because the row route's presence bitmap is not yet written.** The scan reads
+/// one — `viewport.rs`'s `an_absent_number_matches_no_range_not_even_one_containing_zero` fixes
+/// that behaviour against a bitmap directly — but nothing produces one for a segment yet, so a
+/// rendered column with absences would answer the 2026-08-11 defect over its own rows. Rendering
+/// this column is what closes that loop once the build, flush, merge and fold write the bitmap.
 fn bonus_of(e: u64) -> Option<i32> {
     if e.is_multiple_of(3) {
         None
@@ -283,6 +297,8 @@ fn fixture() -> Fixture {
         &opened.manifest.vocabularies,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
+        &opened.partitions[&phash].manifest.record_extents,
+        &opened.partitions[&phash].manifest.text_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
         true,
@@ -1071,6 +1087,8 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &opened.manifest.declared_scalars,
             &opened.manifest.vocabularies,
             extents,
+            &[],
+            &[],
             true,
         )
     };
@@ -1090,6 +1108,48 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
     assert!(open(&extents).is_ok(), "restored, it composes again");
 }
 
+/// A keyword extent built in this process: the ordinal column and the dictionary that numbers it.
+///
+/// The two are returned together because they are one layer. An ordinal is a position in **this**
+/// dictionary and means nothing against any other (records §4.3), so a test that handed `compose`
+/// the values without the dictionary would not be testing a shorter version of the same thing — it
+/// would be testing a layer that has no reading, which is what `compose` refuses.
+fn keyword_extent(
+    entities: &[u32],
+    values: &[String],
+) -> (
+    Arc<tessera_filter::ValueColumn>,
+    Arc<tessera_filter::SortedDict>,
+) {
+    let mut keys: Vec<&str> = values.iter().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut bytes = Vec::new();
+    let mut writer = tessera_filter::SortedDictWriter::new(&mut bytes).expect("a writer opens");
+    for key in &keys {
+        writer.push(key).expect("keys ascend strictly");
+    }
+    writer.finish().expect("the dictionary closes");
+    let ordinals: Vec<u32> = values
+        .iter()
+        .map(|v| keys.binary_search(&v.as_str()).expect("built from these") as u32)
+        .collect();
+    let mut presence = Bitmap::new();
+    for e in entities {
+        presence.add(*e);
+    }
+    (
+        Arc::new(
+            tessera_filter::ValueColumn::partial(
+                tessera_filter::Codes::U32(ordinals.into()),
+                presence,
+            )
+            .unwrap(),
+        ),
+        Arc::new(tessera_filter::SortedDict::from_vec(bytes).expect("the dictionary reads back")),
+    )
+}
+
 /// **Two layers may not claim one entity, and that is checked rather than reasoned about.**
 ///
 /// Entity ids are permanent and issued from the high-water (**I9**), so an extent can only add ids
@@ -1099,43 +1159,29 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
 #[test]
 fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let fx = fixture();
-    let mut presence = Bitmap::new();
-    presence.add(0);
-    let overlapping = Arc::new(
-        tessera_filter::ValueColumn::partial(
-            tessera_filter::Codes::text(vec!["collision".to_string()]),
-            presence,
-        )
-        .unwrap(),
-    );
+    let (overlapping, dict) = keyword_extent(&[0], &["collision".to_string()]);
     let err = fx
         .columns
         .with_extents(&[(
             "title".to_string(),
             "attrs/title/extents/overlapping.arrow".to_string(),
             overlapping,
-        )])
+            Some(dict),
+        )], &[], &[])
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
     // And an extent for a column the schema does not declare filterable is refused too: it would
     // otherwise be silently dropped, which is a value column quietly going missing.
-    let mut presence = Bitmap::new();
-    presence.add(N as u32 + 1);
-    let stray = Arc::new(
-        tessera_filter::ValueColumn::partial(
-            tessera_filter::Codes::text(vec!["stray".to_string()]),
-            presence,
-        )
-        .unwrap(),
-    );
+    let (stray, stray_dict) = keyword_extent(&[N as u32 + 1], &["stray".to_string()]);
     assert!(fx
         .columns
         .with_extents(&[(
             "no_such_column".to_string(),
             "attrs/no_such_column/extents/stray.arrow".to_string(),
             stray,
-        )])
+            Some(stray_dict),
+        )], &[], &[])
         .is_err());
 }
 
@@ -1326,6 +1372,13 @@ fn a_filtered_viewport_serves_only_matching_marks() {
 ///
 /// The window is chosen to sit past `PER_TILE_CROSSING_RATIO`, and the route counters assert it
 /// landed there rather than leaving the test to pass on the route it was meant to exercise.
+///
+/// **The predicate is on `bonus`, an entity-only column, and that is load-bearing.** This test
+/// drove `department` until decision 0068 admitted the row-space operand, and `score` until 0064's
+/// render half made a number rendered-and-filtered too: a column affording the row route takes it
+/// for a window this narrow, so the request stops crossing at all and the counters go to zero. The
+/// crossing is still the only route an entity-only column has, and that is what this test exists to
+/// cover; the row route has its own tests below.
 #[test]
 fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let fx = fixture();
@@ -1334,13 +1387,21 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
-    // Every department: 48 of the 60 items, against a window holding ~11 rows. Broad enough to
-    // clear the ratio, and still a genuine narrowing — the every-fifth item carries no department.
-    let any_department = FilterExpr::AnyOf(
-        ["eng", "sales", "legal"]
-            .iter()
-            .map(|d| leaf("department", FilterOperand::Equals(AttrLocalId::new(fx.codes[*d]))))
-            .collect(),
+    // Every bonus that exists lies in `[-10, 10]`, so this range is "carries a bonus" — two items
+    // in three of the 60, against a window of ~11 rows: broad enough to clear the ratio, and still
+    // a genuine narrowing, since the third that carries none matches no range at all.
+    let any_bonus = leaf(
+        "bonus",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(-10),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(10),
+                inclusive: true,
+            }),
+        },
     );
     let narrow = [0.0, 0.0, 400.0, 400.0];
     let zoom = 8;
@@ -1353,7 +1414,7 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let filtered_narrow = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", zoom, narrow, 10_000).filter(any_department.clone()),
+            ViewportRequest::new("s0", zoom, narrow, 10_000).filter(any_bonus.clone()),
         )
         .expect("the narrow window answers filtered");
     let after = engine.filter_crossing_routes();
@@ -1369,7 +1430,7 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     let filtered_full = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(any_department),
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(any_bonus),
         )
         .expect("the full extent answers filtered");
     let after = engine.filter_crossing_routes();
@@ -1656,10 +1717,7 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
         "'legal' must be carried by something, or withholding it discloses nothing"
     );
 
-    let expr = FilterExpr::NoneOf(vec![leaf(
-        "department",
-        FilterOperand::In(offered.clone()),
-    )]);
+    let expr = FilterExpr::NoneOf(vec![leaf("department", FilterOperand::In(offered.clone()))]);
     let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
 
     assert!(
@@ -1691,8 +1749,14 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
         .evaluate(&spanning, &cand)
         .expect_err("a negation over two columns is refused");
     let text = format!("{err}");
-    assert!(text.contains("department") && text.contains("title"), "{text}");
-    assert!(text.contains("all_of"), "the refusal names the way to say it: {text}");
+    assert!(
+        text.contains("department") && text.contains("title"),
+        "{text}"
+    );
+    assert!(
+        text.contains("all_of"),
+        "the refusal names the way to say it: {text}"
+    );
 
     // And the composition it points at is accepted, and is the intersection of the two negations.
     let composed = FilterExpr::AllOf(vec![
@@ -1700,7 +1764,10 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
             "department",
             FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
         )]),
-        FilterExpr::NoneOf(vec![leaf("title", FilterOperand::TextPrefix("paper-1".into()))]),
+        FilterExpr::NoneOf(vec![leaf(
+            "title",
+            FilterOperand::TextPrefix("paper-1".into()),
+        )]),
     ]);
     let got = fx.columns.evaluate(&composed, &cand).unwrap();
     assert_eq!(
@@ -1970,7 +2037,10 @@ fn every_entity_reads_back_its_own_number_across_the_absences() {
             fx.columns.evaluate(&expr, &cand).unwrap().contains(entity)
         };
         match want {
-            Some(v) => assert!(hit(v), "source {source} (entity {entity}) lost its bonus {v}"),
+            Some(v) => assert!(
+                hit(v),
+                "source {source} (entity {entity}) lost its bonus {v}"
+            ),
             None => {
                 for v in -10..=10 {
                     assert!(
@@ -2060,6 +2130,8 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &fx.declared,
         &fx.vocabularies,
         &fx.extents,
+        &[],
+        &[],
         true,
     )
 }
@@ -2730,15 +2802,39 @@ fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
 /// The folded prefix's value column for one attribute, opened directly off disc.
 fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> tessera_filter::ValueColumn {
     tessera_filter::ValueColumn::open_dir(
-        &fx.bundle
-            .join(prefix)
-            .join("partitions")
-            .join(&fx.phash)
-            .join("attrs")
-            .join(column),
+        &attr_dir(fx, prefix, column),
         tessera_filter::Access::Read,
     )
     .expect("the folded column opens")
+}
+
+fn attr_dir(fx: &Fixture, prefix: &str, column: &str) -> PathBuf {
+    fx.bundle
+        .join(prefix)
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .join(column)
+}
+
+/// The **key** a folded keyword column holds for one entity, resolved through the dictionary
+/// written beside it.
+///
+/// An ordinal alone says nothing: it is a position in one layer's dictionary and means nothing
+/// against another's (records §4.3), so a test asserting what an entity carries has to read the
+/// pair. `None` where no slot is held — which is what a blanked entity leaves behind.
+fn folded_key(fx: &Fixture, prefix: &str, column: &str, entity: u32) -> Option<String> {
+    let dir = attr_dir(fx, prefix, column);
+    let values = folded_column(fx, prefix, column);
+    let ordinal = values.value_of(entity)?.raw();
+    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+        .expect("a keyword column's dictionary is beside its values");
+    let mut scratch = Vec::new();
+    Some(
+        dict.key_of(ordinal, &mut scratch)
+            .expect("the ordinal names a key in its own layer's dictionary")
+            .to_string(),
+    )
 }
 
 /// **A deleted entity is gone from every predicate after the fold, and its bytes are gone with
@@ -2802,23 +2898,36 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
         .unwrap()
         .contains(survivor as u32));
 
-    // The artefact itself: no slot, no bytes, no posting.
-    let titles = folded_column(&fx, "v00001", "title");
-    assert_eq!(titles.text_of(deleted as u32), None);
-    assert_eq!(titles.text_of(survivor as u32).unwrap(), title_of(8));
-    let bytes = std::fs::read(
-        fx.bundle
-            .join("v00001")
-            .join("partitions")
-            .join(&fx.phash)
-            .join("attrs/title/values.arrow"),
+    // The artefact itself: no slot, no bytes, no posting. For a keyword the value's bytes live in
+    // the dictionary rather than in the ordinal column, so that is where "gone" has to be read —
+    // the fold rebuilds the dictionary from the surviving entities alone, and a key no survivor
+    // carries is not in it.
+    assert_eq!(folded_key(&fx, "v00001", "title", deleted as u32), None);
+    assert_eq!(
+        folded_key(&fx, "v00001", "title", survivor as u32).as_deref(),
+        Some(title_of(8).as_str())
+    );
+    // Walked rather than searched for as bytes: the dictionary is front-coded, so a key's bytes
+    // are not contiguous in the file and a byte-window search would report absence for keys that
+    // are present — passing vacuously, which is the direction that hides the failure.
+    let dict = tessera_filter::SortedDict::open_dir(
+        &attr_dir(&fx, "v00001", "title"),
+        tessera_filter::Access::Read,
     )
-    .expect("the folded column is on disc");
-    let needle = title_of(2);
+    .expect("the folded dictionary is on disc");
+    let mut keys = Vec::new();
+    dict.walk(|_, key| keys.push(key.to_string()))
+        .expect("the folded dictionary walks");
     assert!(
-        !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
-        "the deleted entity's value bytes are still in the folded column — blanking is removal \
-         from presence and no value bytes, never a sentinel over them"
+        !keys.contains(&title_of(2)),
+        "the deleted entity's value is still a key of the folded dictionary — blanking removes the \
+         entity from presence and rebuilds the keys from the survivors, never writing a sentinel \
+         over them"
+    );
+    assert!(
+        keys.contains(&title_of(8)),
+        "and the survivor's key is still there, so 'gone' is not satisfied by emptying the \
+         dictionary"
     );
 
     let postings = tessera_filter::ColumnPostings::open_keyed(
@@ -2863,11 +2972,10 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
         "Rule S: a suppression never retires, and the fold does not execute one"
     );
 
-    let titles = folded_column(&fx, "v00001", "title");
     assert_eq!(
-        titles.text_of(suppressed as u32).map(|s| s.to_string()),
+        folded_key(&fx, "v00001", "title", suppressed as u32),
         Some(title_of(2)),
-        "the suppressed entity keeps its slot and its bytes: no attribute artefact changes for a \
+        "the suppressed entity keeps its slot and its key: no attribute artefact changes for a \
          suppression"
     );
     let postings = tessera_filter::ColumnPostings::open_keyed(
@@ -3189,6 +3297,12 @@ fn every_answer(engine: &tessera_engine::Engine, fx: &Fixture) -> Vec<(String, V
 /// fixture can express rather than a sample, because the failure this guards against — a merge that
 /// pairs values with the wrong entities — moves some answers and not others.
 ///
+/// **`title` is exempt and asserted to be exempt**, because it is a keyword: a coalesce merges two
+/// key sets and renumbers, and the composition installs a layer's values without a dictionary to go
+/// with them, so the pass declines any column whose layers carry one (records §4.3, §7; the
+/// selection's own note in `coalesce.rs`). Its extents therefore stay one per flush, and asserting
+/// that here is what keeps a later change that quietly starts taking them from going unnoticed.
+///
 /// **Mutations this kills:** dropping the coalesced extent from `attr_extents` (the post-build
 /// entities stop matching); pushing the coalesced layer without removing the consumed ones (the
 /// disjointness check refuses at the replace); merging in list order rather than in entity order
@@ -3200,6 +3314,13 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let entities = flush_a_window(&engine, "coalesce", 0);
 
     for (column, count) in extents_per_column(&fx) {
+        if column == "title" {
+            assert_eq!(
+                count, COALESCE_WIDTH,
+                "the keyword column's extents must be left alone, one per flush"
+            );
+            continue;
+        }
         assert_eq!(
             count, 1,
             "column '{column}' still holds {count} extents where the window collapsed to one"
@@ -3232,6 +3353,9 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let more = flush_a_window(&engine, "again", COALESCE_WIDTH);
     assert!(engine.write_executor_stats().coalesces >= 2);
     for (column, count) in extents_per_column(&fx) {
+        if column == "title" {
+            continue;
+        }
         assert!(
             count <= 2,
             "column '{column}' holds {count} extents; a coalesced extent must coalesce again"
@@ -3346,9 +3470,24 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
             tessera_filter::Access::Read,
         )
         .expect("a listed extent opens");
-        if let Some(value) = column.text_of(deleted as u32) {
-            held = Some(value.to_string());
-        }
+        // The ordinal alone would not settle it: a key is what the entity carried, and only this
+        // extent's own dictionary numbers this extent's ordinals (records §4.3).
+        let Some(ordinal) = column.value_of(deleted as u32).map(|v| v.raw()) else {
+            continue;
+        };
+        let dict_rel = extent
+            .dict
+            .as_ref()
+            .expect("a keyword extent lists its dictionary beside its values");
+        let dict =
+            tessera_filter::SortedDict::open(&prefix.join(dict_rel), tessera_filter::Access::Read)
+                .expect("the listed dictionary opens");
+        let mut scratch = Vec::new();
+        held = Some(
+            dict.key_of(ordinal, &mut scratch)
+                .expect("the ordinal names a key in its own extent's dictionary")
+                .to_string(),
+        );
     }
     assert_eq!(
         held.as_deref(),
@@ -3365,6 +3504,11 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
 /// later disjointness check tests against the wrong coverage — silently, and for the life of the
 /// generation. The merge's own duplicate guard makes the mismatch unreachable, which is exactly why
 /// it is cheap to verify and wrong to assume.
+///
+/// Asserted over `bonus`, a plain numeric column, because a coalesce never takes a keyword one: its
+/// merge renumbers the joined key set, and `CoalescedWindow` carries a layer's values without the
+/// dictionary that would have to be swapped in with them, so `with_coalesced` refuses the family
+/// outright (records §4.3, §7). Using `title` here would test that refusal instead of this one.
 #[test]
 fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let fx = fixture();
@@ -3375,32 +3519,43 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         }
         Arc::new(
             tessera_filter::ValueColumn::partial(
-                tessera_filter::Codes::text(
+                tessera_filter::Codes::I32(
                     entities
                         .iter()
-                        .map(|e| format!("t-{e}"))
-                        .collect::<Vec<_>>(),
+                        .map(|e| *e as i32)
+                        .collect::<Vec<_>>()
+                        .into(),
                 ),
                 presence,
             )
             .unwrap(),
         )
     };
-    let first = "attrs/title/extents/a.arrow".to_string();
-    let second = "attrs/title/extents/b.arrow".to_string();
+    let first = "attrs/bonus/extents/a.arrow".to_string();
+    let second = "attrs/bonus/extents/b.arrow".to_string();
     let columns = fx
         .columns
         .with_extents(&[
-            ("title".to_string(), first.clone(), extent(&[100, 101])),
-            ("title".to_string(), second.clone(), extent(&[200, 201])),
-        ])
+            (
+                "bonus".to_string(),
+                first.clone(),
+                extent(&[100, 101]),
+                None,
+            ),
+            (
+                "bonus".to_string(),
+                second.clone(),
+                extent(&[200, 201]),
+                None,
+            ),
+        ], &[], &[])
         .expect("two extents above the build's high-water compose");
 
     let window =
         |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
-            column: "title".to_string(),
+            column: "bonus".to_string(),
             consumed: vec![first.clone(), second.clone()],
-            values_rel: "coalesced/c-1/attrs/title/values.arrow".to_string(),
+            values_rel: "coalesced/c-1/attrs/bonus/values.arrow".to_string(),
             values,
         };
     let err = columns
@@ -3413,7 +3568,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let mut stray = window(extent(&[100, 101, 200, 201]));
     stray
         .consumed
-        .push("attrs/title/extents/never.arrow".to_string());
+        .push("attrs/bonus/extents/never.arrow".to_string());
     assert!(columns.with_coalesced(&[stray]).is_err());
 
     // The well-formed replace, which is what the pass actually publishes.
@@ -3423,7 +3578,414 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let mut cand = Bitmap::new();
     cand.add_range(0..300);
     let answer = next
-        .resolve("title", &FilterOperand::TextEquals("t-201".into()), &cand)
+        .resolve(
+            "bonus",
+            &FilterOperand::NumEquals(tessera_filter::Scalar::Int(201)),
+            &cand,
+        )
         .expect("answers");
     assert_eq!(answer.iter().collect::<Vec<_>>(), vec![201]);
+}
+
+// =================================================================================================
+// The row-space route (decision 0068): suppression, route agreement, and θ's anchor
+// =================================================================================================
+
+/// **A suppressed entity is gone from every answer a render-column filter gives** — the mark, the
+/// count and the record alike.
+///
+/// This is the differential `Engine::evaluate_row_route`'s module doc names, and it pins the half
+/// of the route that is easiest to get wrong and impossible to see. The row bitmap the route
+/// returns *still contains the suppressed row*: the hot column holds its value and Rule S says no
+/// filter artefact may ever be touched by a suppression, so the value is there to be matched. What
+/// removes the entity is that the bitmap narrows the request only through `EffectiveMask`, whose
+/// consumers intersect the composed mask — fragment minus overlay — last. A route that took the
+/// raw fragment as its candidate, or that let the row bitmap stand as the answer, would resurrect
+/// every suppressed item that happens to match the predicate, and would do so while every count
+/// stayed self-consistent.
+///
+/// The unsuppress at the end is what distinguishes "hidden" from "never matched": the entity comes
+/// back through the same filter, so its value was in the column throughout.
+///
+/// Run for both row-space families. The rule is a property of where the row bitmap is consumed
+/// rather than of what the leaf read, but "the hot column still holds a suppressed row's value" is
+/// exactly as true of a number as of a code, and the differential costs one more predicate.
+#[test]
+fn a_suppressed_entity_is_absent_from_a_render_column_filters_marks_counts_and_record() {
+    let fx = fixture();
+    // Source 1 carries "sales" and scores 7; each predicate is its own value, so the entity
+    // matches the filter and only the suppression can remove it.
+    let department = department_of(1).expect("source 1 carries a department");
+    let category = leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes[department])),
+    );
+    let number = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(score_of(1) as i128),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(score_of(1) as i128),
+                inclusive: true,
+            }),
+        },
+    );
+    suppression_is_a_differential_on(&fx, "category", category);
+    suppression_is_a_differential_on(&fx, "number", number);
+}
+
+fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: FilterExpr) {
+    let cache = fx._dir.path().join(format!("cache-row-suppress-{family}"));
+    let wal = fx._dir.path().join(format!("wal-row-suppress-{family}"));
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let source = 1u64;
+    let entity = fx.entity_of[&source];
+    let id = engine
+        .tessera_id_of(tessera_types::EntityId::new(entity))
+        .expect("identity is computable");
+    let raw = id.raw();
+
+    let filtered = |engine: &tessera_engine::Engine, session: &tessera_engine::Session| {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate.clone()),
+            )
+            .expect("the filtered viewport answers")
+    };
+
+    let before_routes = engine.filter_row_routes();
+    let before = filtered(&engine, &session);
+    assert_eq!(
+        engine.filter_row_routes() - before_routes,
+        1,
+        "{family}: this differential is about the row route, and the request did not take it"
+    );
+    let drawn: std::collections::BTreeSet<u64> =
+        before.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.contains(&raw),
+        "{family}: the fixture is degenerate — the entity must match the filter before it is \
+             suppressed"
+    );
+    let matched =
+        |out: &tessera_engine::ViewportOut| -> u64 { out.tiles.iter().map(|t| t.matched).sum() };
+    let matched_before = matched(&before);
+
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(entity),
+            tessera_lifecycle::wal::ChangeOp::Suppress,
+        )
+        .expect("a suppression is accepted");
+
+    // A session authorised before the suppression must not still see it: the mask composes
+    // against the live overlay, not the one that existed at authorise.
+    let after = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> = after.points.tessera_ids.iter().copied().collect();
+    assert!(
+        !drawn.contains(&raw),
+        "{family}: a suppressed entity was drawn as a mark by a render-column filter"
+    );
+    assert_eq!(
+        matched(&after),
+        matched_before - 1,
+        "{family}: the filtered count still counts the suppressed entity"
+    );
+    assert!(
+        engine
+            .item(&session, id, None)
+            .expect("the drill-down succeeds")
+            .is_none(),
+        "{family}: a suppressed entity still answers drill-down"
+    );
+
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(entity),
+            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+        )
+        .expect("an unsuppress is accepted");
+    let restored = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> =
+        restored.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.contains(&raw),
+        "{family}: the unsuppress must reveal the entity through the same filter — proving its \
+         value was in the column throughout, hidden rather than erased (Rule S)"
+    );
+}
+
+/// **Both routes answer the same question over the same window**, which is the whole licence for
+/// admitting a second operand kind (decision 0068): a row-space result is exact over the request's
+/// domain, so the route may be chosen on cost alone.
+///
+/// The route rule is `rows_in_ranges ≤ |M_auth|`, so what selects the routown visible total — the same predicate, the same mask, once
+/// through each route, must draw the same marks over the same domain. The counters assert each
+/// request landed on the route it was meant to exercise rather than leaving the equality to hold
+/// trivially because both took the same one.
+///
+/// **The mask is a subset credential, and that is what makes the pair reachable.** Under full
+/// coverage the whole extent's row span *equals* the visible total, so the rule's `≤` chooses row
+/// space for every window and the entity route is unreachable from this fixture. A principal who
+/// sees part of the corpus has a visible total below the full extent's row span, which is the
+/// ordinary shape the rule was written for.
+#[test]
+fn the_row_route_and_the_entity_route_agree_over_the_domain() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-route-agree");
+    let wal = fx._dir.path().join("wal-route-agree");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    let predicate = FilterExpr::AnyOf(
+        ["eng", "sales"]
+            .iter()
+            .map(|d| {
+                leaf(
+                    "department",
+                    FilterOperand::Equals(AttrLocalId::new(fx.codes[*d])),
+                )
+            })
+            .collect(),
+    );
+    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+
+    // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let before = engine.filter_row_routes();
+    let narrow_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        1,
+        "the narrow request was supposed to take the row route; the window or the rule moved"
+    );
+
+    // The same window, unfiltered, gives the domain the comparison is made over.
+    let narrow_all = ids(&engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("the narrow window answers unfiltered"));
+
+    // The whole extent: rows in range now exceed the principal's total, so the entity route runs.
+    let before = engine.filter_row_routes();
+    let full_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate),
+        )
+        .expect("the full extent answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        0,
+        "the full-extent request was supposed to take the entity route"
+    );
+
+    let (row_marks, entity_marks) = (ids(&narrow_filtered), ids(&full_filtered));
+    assert_eq!(
+        row_marks,
+        entity_marks
+            .intersection(&narrow_all)
+            .copied()
+            .collect::<std::collections::BTreeSet<u64>>(),
+        "the row route's marks differ from the entity route's over the same domain"
+    );
+    assert!(
+        !row_marks.is_empty() && row_marks.len() < narrow_all.len(),
+        "non-degenerate in both directions: the window holds matches, and the filter removed some"
+    );
+}
+
+/// **The two routes agree over a numeric range as well as over a category**, which is what admits
+/// a rendered number to the row-space operand at all (decision 0064's render half).
+///
+/// A number is the family the row route could most easily get wrong: its bounds have to be read the
+/// same way on both sides — exclusivity folded, a bound past the type's edge meaning no constraint
+/// or no match — and the two narrowings are separate transcriptions across a crate boundary
+/// (`viewport.rs`'s `range_run` says why). Route agreement over the domain is what holds them
+/// together; the endpoint rules themselves are pinned directly in that module's own tests.
+#[test]
+fn the_row_route_and_the_entity_route_agree_over_a_numeric_range() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-route-agree-num");
+    let wal = fx._dir.path().join("wal-route-agree-num");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    // `score_of(e) = (7e) % 100`, so this range takes roughly a third of the corpus and its upper
+    // bound is exclusive — the endpoint the two narrowings must fold identically.
+    let predicate = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(20),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(55),
+                inclusive: false,
+            }),
+        },
+    );
+    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+
+    // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let before = engine.filter_row_routes();
+    let narrow_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        1,
+        "the narrow request was supposed to take the row route; the window or the rule moved"
+    );
+    let narrow_all = ids(&engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("the narrow window answers unfiltered"));
+
+    // The whole extent: rows in range now exceed the principal's total, so the entity route runs.
+    let before = engine.filter_row_routes();
+    let full_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate),
+        )
+        .expect("the full extent answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        0,
+        "the full-extent request was supposed to take the entity route"
+    );
+
+    let (row_marks, entity_marks) = (ids(&narrow_filtered), ids(&full_filtered));
+    assert_eq!(
+        row_marks,
+        entity_marks
+            .intersection(&narrow_all)
+            .copied()
+            .collect::<std::collections::BTreeSet<u64>>(),
+        "the row route's marks differ from the entity route's over the same numeric range"
+    );
+    assert!(
+        !row_marks.is_empty() && row_marks.len() < narrow_all.len(),
+        "non-degenerate in both directions: the window holds matches, and the filter removed some"
+    );
+
+    // The corpus itself, not just the other route: an agreement between two wrong readings of the
+    // same bounds would satisfy the assertion above.
+    let expected_full: std::collections::BTreeSet<u64> = (0..N)
+        .filter(|&e| (20..55).contains(&score_of(e)))
+        .filter_map(|e| fx.entity_of.get(&e).copied())
+        .filter_map(|entity| {
+            engine
+                .tessera_id_of(tessera_types::EntityId::new(entity))
+                .ok()
+        })
+        .map(|id| id.raw())
+        .collect();
+    assert!(
+        entity_marks.is_subset(&expected_full),
+        "a route returned an item outside the range the corpus says matches"
+    );
+}
+
+/// **A filter narrows the selection and never moves θ** (I3/I12): the label frontier anchors on the
+/// unfiltered composed mask, so the same viewport answers the same θ filtered or not.
+///
+/// This is the invariant a row-space route is most likely to break by accident, because the route
+/// is evaluated inside the same sweep that computes the anchor — and an anchor taken after the
+/// filter would let a caller move the frontier by narrowing, which is a disclosure rather than a
+/// view. The unfiltered total is asserted alongside it: it is `visible_total()`, computed above the
+/// filter and deliberately blind to it.
+///
+/// Both row-space families run it: the anchor is computed above the filter whatever the leaf reads,
+/// and a rule that held for a category's codes and not for a number's bounds would be a coincidence
+/// of where the code sits rather than a property of the sweep.
+#[test]
+fn a_render_column_filter_narrows_the_selection_without_moving_the_anchor() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-anchor");
+    let wal = fx._dir.path().join("wal-anchor");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let unfiltered = engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("unfiltered");
+
+    let category = leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+    );
+    // `score_of(e) = (7e) % 100`, so the top fifth is a genuine narrowing of any window.
+    let number = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(80),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    );
+
+    for (family, predicate) in [("category", category), ("number", number)] {
+        let before = engine.filter_row_routes();
+        let filtered = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate),
+            )
+            .expect("filtered");
+        assert_eq!(
+            engine.filter_row_routes() - before,
+            1,
+            "{family}: this test is only meaningful if the row route ran"
+        );
+
+        // `TileCount::visible` is the anchor's own input — the composed mask's count for the tile,
+        // computed above the filter — while `matched` is what the filter narrowed to. The first
+        // must be identical across the pair; the second must not be.
+        let anchor = |out: &tessera_engine::ViewportOut| -> Vec<(u64, u64)> {
+            out.tiles.iter().map(|t| (t.tile, t.visible)).collect()
+        };
+        let (visible, visible_unfiltered) = (anchor(&filtered), anchor(&unfiltered));
+        assert_eq!(
+            visible, visible_unfiltered,
+            "{family}: the filter moved the anchor: θ anchors on the unfiltered composed mask \
+             (I3/I12)"
+        );
+        let matched: u64 = filtered.tiles.iter().map(|t| t.matched).sum();
+        let visible_total: u64 = filtered.tiles.iter().map(|t| t.visible).sum();
+        assert!(
+            matched < visible_total,
+            "{family}: the filter must actually have narrowed the matched set beneath the anchor"
+        );
+        let drawn: std::collections::BTreeSet<u64> =
+            filtered.points.tessera_ids.iter().copied().collect();
+        let all: std::collections::BTreeSet<u64> =
+            unfiltered.points.tessera_ids.iter().copied().collect();
+        assert!(
+            drawn.is_subset(&all) && drawn.len() < all.len(),
+            "{family}: a filter may only narrow (I12), and this one must actually have narrowed"
+        );
+    }
 }

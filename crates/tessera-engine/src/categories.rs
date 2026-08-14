@@ -25,7 +25,7 @@
 //! `listing = "per_viewer"` is the C11 channel: a value is visible iff at least one item carrying
 //! it is (§3.3), derived per request from inside `M_auth`, never maintained. The per-`(column,
 //! code)` membership sets it needs are the category's derived postings, which the build writes for
-//! every `per_viewer` column whatever its `used_for` says (`filter-index.md` §2.3) — so the
+//! every `per_viewer` column whatever its `index` says (`filter-index.md` §2.3) — so the
 //! predicate is `members(code) ∩ candidate ≠ ∅` against the *composed* candidate, the same
 //! entity-space set a filter is evaluated under. **Derivation self-retires**: a value whose last
 //! visible member is suppressed stops being offered with no third retirement rule, which is why

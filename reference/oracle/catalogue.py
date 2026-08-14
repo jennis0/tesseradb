@@ -114,7 +114,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 #
 # **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
 # presentation, and declaring a category would need a value set enumerating every item — the
-# fixture would then be maintaining a 1:1 vocabulary to say nothing. `used_for = ["render"]` is
+# fixture would then be maintaining a 1:1 vocabulary to say nothing. `render = true` is
 # what puts it in `columns.arrow` and therefore in the points batch, which is the join this exists
 # for.
 #
@@ -124,7 +124,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # route.
 #
 # The two filter columns exist for `conformance/tests/test_filter_differential.py` (I12's mask
-# half). Both are `filter`-only, so neither touches the points batch, the hot column, or any
+# half). Both are `index`-only, so neither touches the points batch, the hot column, or any
 # existing point-set assertion — a mask-catalogue test built before them sees the same wire bytes.
 #
 # **`department` is deliberately decorrelated from the grant structure.** The catalogue's terms
@@ -150,17 +150,43 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # period (`(source_id // 5) % 3`), decorrelated from the term blocks, the department cycle's 6 and
 # the title cycle's 12; `void` is declared and planted nowhere, which is the routed reading of an
 # absent keyed record.
+#
+# **`shelf` is the render-only category** (records §2/§3): `render = true`, no `index`, so its
+# codes ride the hot column and today it publishes no filter operand. It exists for the row-space
+# route (records §6.2, decision 0068): when that lands, `render = true` implies filterable and
+# `/v1/meta` widens — [`filter_operands_expected`] is the one place that widening is recorded.
+# `public`, so the routed reading stays clear of the vocabulary-control ruling a `per_viewer`
+# rendered category waits on; a fifth period (`(source_id // 7) % 3`), decorrelated like the rest.
+#
+# **`title` and `submitter` are the two keyword columns** (records §4.3) — the only declarable
+# string family, `utf8` being retired. Each is an open, exact vocabulary stored as a sorted
+# per-layer dictionary with a `u32` ordinal column. Two of them, with different value shapes: the
+# `submitter` shapes are chosen backwards from the catalogue entries records §10 gives this family
+# — see [`submitter_of`], which names each one at the branch that plants it — while `title`'s stems
+# give the string operators a second, differently distributed vocabulary to disagree over. Both are
+# `index`-only, because `render` on a keyword is refused (a keyword's slot would be its ordinal,
+# and an ordinal is a per-layer position).
+#
+# **`note` and `pages` are blob-resident** — neither key set, so their values live only in the
+# record blob, `attrs/record/` (records §3): a string and a numeric, exercising mixed row content.
+# `note`'s declared type is `keyword`, and it plants the **empty string**, which is not the
+# contradiction it looks like: the empty string is refused as a *dictionary key* and a blob-resident
+# column has no dictionary — its row carries the bytes the wire carried.
+# Their planting carries the blob's adversarial shapes: an empty string (a value, not an absence),
+# a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
+# block target (an oversized block of its own — records §3's "target, not a cap"), and entities
+# absent from both (absent from has-row entirely).
 SCHEMA_TOML = """\
 [[attribute]]
 name     = "fx_key"
 type     = "u64"
-used_for = ["render"]
+render   = true
 
 [[attribute]]
 name       = "department"
 type       = "category"
 width      = "u8"
-used_for   = ["filter"]
+index      = true
 vocabulary = "declared"
 listing    = "per_viewer"
   [attribute.values]
@@ -175,7 +201,7 @@ listing    = "per_viewer"
 name       = "archive"
 type       = "category"
 width      = "u8"
-used_for   = ["filter"]
+index      = true
 vocabulary = "declared"
 listing    = "public"
   [attribute.values]
@@ -186,8 +212,39 @@ listing    = "public"
 
 [[attribute]]
 name     = "title"
-type     = "utf8"
-used_for = ["filter"]
+type     = "keyword"
+index    = true
+
+[[attribute]]
+name       = "shelf"
+type       = "category"
+width      = "u8"
+render     = true
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  north = 51
+  south = 52
+  east  = 53
+
+[[attribute]]
+name     = "submitter"
+type     = "keyword"
+index    = true
+
+[[attribute]]
+name     = "abstract"
+type     = "text"
+index    = true
+analyser = "unicode"
+
+[[attribute]]
+name     = "note"
+type     = "keyword"
+
+[[attribute]]
+name     = "pages"
+type     = "u32"
 """
 
 # The declaration's own key→code pinning, transcribed for the filter oracle. The oracle resolves
@@ -212,18 +269,45 @@ ARCHIVE_CODES: dict[str, int] = {
     "void": 44,
 }
 
+# The render-only category's pinning — its own code space, like the other two. Not a filter
+# oracle input today (no operand exists to resolve); it becomes one when the row-space route
+# lands (records §6.2) and the filter differential gains a `shelf` column.
+SHELF_CODES: dict[str, int] = {
+    "north": 51,
+    "south": 52,
+    "east": 53,
+}
+
 # The one entity carrying `solo` — a single-member value, inside `cross_lo` so the crossover
 # principals can see it. Chosen not to collide with the absence rule below.
 DEPARTMENT_SOLO_ID = 69_000
 
-# Absence strides. Both columns leave a value off a thin, deterministic scattering of entities so
-# presence is partial — the ordinary case filter-index §2.1 designs for — and an entity with no
-# value must match no predicate. Distinct primes, and distinct from every other period in this
-# corpus (the term blocks, the department cycle's 6, the title cycle's 12), so absence correlates
-# with nothing.
+# Absence strides. Every planted column leaves its value off a thin, deterministic scattering of
+# entities so presence is partial — the ordinary case filter-index §2.1 designs for — and an
+# entity with no value must match no predicate (for a blob column: contributes nothing to the
+# row). Distinct primes, and distinct from every other period in this corpus (the term blocks,
+# the department cycle's 6, the title cycle's 12), so absence correlates with nothing. The blob
+# pair's product, 113 × 127 = 14,351, is what makes whole entities absent from the has-row
+# bitmap: its ten multiples under `N_ITEMS` carry no blob-resident value at all.
 DEPARTMENT_ABSENT_STRIDE = 101
 TITLE_ABSENT_STRIDE = 103
 ARCHIVE_ABSENT_STRIDE = 107
+SHELF_ABSENT_STRIDE = 109
+NOTE_ABSENT_STRIDE = 113
+PAGES_ABSENT_STRIDE = 127
+SUBMITTER_ABSENT_STRIDE = 131
+ABSTRACT_ABSENT_STRIDE = 137
+
+# `pages` is planted as a *present zero* on this stride (after the absence rule): the blob must
+# keep "carries the value 0" and "carries no value" distinct, absence being absence from the row.
+PAGES_ZERO_STRIDE = 17
+
+# Two designated `note` entities, both inside `cross_lo` (so the crossover principals can reach
+# them at drill-down) and off every stride above. The oversize row is larger than the 256 KiB
+# block target, so the build must give it an oversized block of its own (records §3 — the target
+# is a target, not a cap); the empty string is a value and must survive as one.
+NOTE_OVERSIZE_ID = 65_700
+NOTE_EMPTY_ID = 65_701
 
 
 def department_of(source_id: int) -> str | None:
@@ -257,11 +341,305 @@ def archive_of(source_id: int) -> str | None:
 _TITLE_STEMS = ("smith", "smithy", "jones", "smythe")
 
 
+# **The offset every planted value applies before writing an id into free text**, and it is not
+# decoration. `test_byte_scan` reads every maximal run of ASCII decimal digits out of a
+# `/v1/items` body and fails if one equals a real entity id — the I10 check that no identifier
+# crosses the trust boundary. A bare source id in planted prose collides with that by
+# construction, because source ids and entity ids share the range `[0, N_ITEMS)`; the scan then
+# reports the fixture quoting itself as a leak. Offsetting past `N_ITEMS` keeps every value unique
+# and legible while putting its number outside the id space the scan searches, and because the
+# scan's runs are maximal no shorter id matches inside the longer one either.
+#
+# This became visible only when drill-down began returning every declared field (records §3): the
+# planted `title` had embedded its id since the column was added, and nothing had served it.
+PLANTED_ID_BASE = 1_000_000
+
+
 def title_of(source_id: int) -> str | None:
     """`title` as planted — see [`department_of`]."""
     if source_id % TITLE_ABSENT_STRIDE == 0:
         return None
-    return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{source_id}"
+    return f"{_TITLE_STEMS[(source_id // 3) % 4]}-{PLANTED_ID_BASE + source_id}"
+
+
+# ---------------------------------------------------------------------------------------------
+# abstract — the text column
+# ---------------------------------------------------------------------------------------------
+
+# The prose is assembled from four slots, and each slot exists to make one property of the family
+# falsifiable rather than incidentally true.
+#
+# **A shared head, so every document has words in common.** Without it the postings are all
+# singletons, every `match` is answered by one posting, and a conjunction that took the first
+# token's answer instead of the intersection would pass.
+_ABSTRACT_HEAD = "the archive holds"
+
+# **An adjacent pair and its reverse, planted on different entities.** This is the whole of what
+# separates `phrase` from `match`: an entity carrying both words apart matches the conjunction and
+# must not match the phrase. `_ABSTRACT_PAIR` is the ordered one; the same two words appear
+# reversed and separated on the complementary residue, so both directions have a witness and a
+# counter-witness.
+_ABSTRACT_PAIR = ("quiet", "harbour")
+
+# **Non-Latin prose on a stride**, because the analyser's whole reason for being is that a
+# split-on-spaces tokeniser produces garbage for scripts without inter-word spaces. A conformance
+# suite whose text is all English tests the index and not the analyser. The Japanese phrase
+# segments into several tokens with no space between them; the Thai likewise.
+_ABSTRACT_CJK = "日本語のテキスト"
+_ABSTRACT_THAI = "ภาษาไทยเป็นภาษา"
+
+# **A word carried by exactly one entity**, the text family's answer to the keyword ordinal
+# boundaries: a `match` on it is a single-item answer, and a posting confused across layers or
+# ordinals returns a different item rather than none. Off every stride, inside `cross_lo`.
+ABSTRACT_SOLE_ID = 65_902
+ABSTRACT_SOLE_WORD = "quinquagenarian"
+
+# A word no document carries, for the hidden-versus-absent pair the register accepts as a timing
+# channel (Appendix C, C25) and requires to be *identical in the answer*.
+ABSTRACT_ABSENT_WORD = "zzzznonesuch"
+
+
+def abstract_of(source_id: int) -> str | None:
+    """`abstract` as planted — the text column. See [`department_of`] for the contract: what the
+    entity was *given*, upstream of the tokens the build derived from it.
+
+    The oracle answers `match` and `phrase` by tokenising this string through the **same analyser
+    the engine used**, reached over `tessera tokenise` so neither side owns a second segmentation
+    (decision 0070). What the differential then compares is two constructions over one token
+    stream: the engine's dictionary-and-postings, and a per-entity walk of this function.
+    """
+    if source_id % ABSTRACT_ABSENT_STRIDE == 0:
+        return None
+    first, second = _ABSTRACT_PAIR
+    parts = [_ABSTRACT_HEAD]
+    # The adjacency witness and its counter-witness, on complementary residues so both are dense
+    # enough for every catalogue principal to reach some of each.
+    if source_id % 3 == 0:
+        parts.append(f"{first} {second}")
+    elif source_id % 3 == 1:
+        # Both words, in the other order and not adjacent: matches the conjunction, not the phrase.
+        parts.append(f"{second} of the {first}")
+    if source_id % 5 == 0:
+        parts.append(_ABSTRACT_CJK)
+    if source_id % 7 == 0:
+        parts.append(_ABSTRACT_THAI)
+    if source_id == ABSTRACT_SOLE_ID:
+        parts.append(ABSTRACT_SOLE_WORD)
+    # A per-entity token, so the vocabulary has the long singleton tail real prose has and the
+    # postings exercise both encodings. Offset past the id space for `PLANTED_ID_BASE`'s reason.
+    parts.append(f"ref{PLANTED_ID_BASE + source_id}")
+    return " ".join(parts)
+
+
+def shelf_of(source_id: int) -> str | None:
+    """`shelf` as planted — the render-only category. Same contract as [`department_of`]: what
+    the entity was *given*, upstream of the code the build stored in the hot column."""
+    if source_id % SHELF_ABSENT_STRIDE == 0:
+        return None
+    return ("north", "south", "east")[(source_id // 7) % 3]
+
+
+# ---------------------------------------------------------------------------------------------
+# submitter — the keyword column
+# ---------------------------------------------------------------------------------------------
+
+# The three regions both keyword families share. A shared region is deliberate: it gives
+# `contains "apac"` a needle that spans the repeat-heavy family *and* the near-unique one, which is
+# the shape the dictionary walk has to get right (a substring may span a front-coded elision).
+_SUBMITTER_REGIONS = ("apac", "emea", "latam")
+
+# The repeat-heavy family's twelve hub letters. **Letters, not numbers**, and that is the
+# `PLANTED_ID_BASE` rule arriving by its other door: a bucket written `03` is the digit run `03`,
+# which `test_byte_scan` reads out of a drill-down body as the integer 3 — a real entity id. A
+# keyword's values reach a client as text, so nothing here may carry a bare small number.
+_SUBMITTER_HUB_LETTERS = "abcdefghijkl"
+
+# One entity in 19 (after the absence rule) carries a value **no other entity carries**; the rest
+# share a hub. The stride is a prime distinct from every other period in this corpus, so which
+# entities are unique correlates with nothing — and it sizes the base build's dictionary at
+# ~8,000 keys, which is what puts both `contains` routes in play across the catalogue's principals:
+# the engine chooses narrow below ~15% of the dictionary's key count and broad at or above it, so
+# the small cases take one route and the crossover and full-coverage cases take the other.
+SUBMITTER_UNIQUE_STRIDE = 19
+
+# **The two ordinal-boundary values** (records §10). Sorted lexicographically, `aaa-` precedes
+# every `hub-`/`node-` value and `zzz-` follows every one, so these are the first and the last key
+# of the base build's dictionary — ordinals 0 and `len - 1`. Each is carried by exactly one entity,
+# which makes `eq` on them a single-item answer a cross-layer ordinal confusion cannot fake: an
+# engine that resolved ordinal 0 against the base and then scanned a *flush extent* with it would
+# return that extent's own first-key rows instead.
+#
+# Both ids sit inside `cross_lo` so a principal short of full coverage can reach them, and both are
+# off `SUBMITTER_ABSENT_STRIDE`.
+SUBMITTER_FIRST_ID = 65_900
+SUBMITTER_LAST_ID = 65_901
+SUBMITTER_FIRST = "aaa-ingress-anchor"
+SUBMITTER_LAST = "zzz-egress-anchor"
+
+
+def submitter_of(source_id: int) -> str | None:
+    """`submitter` as planted — the keyword column. Same contract as [`department_of`]: what the
+    entity was *given*, upstream of the ordinal the build stored.
+
+    Three value shapes, each here for a catalogue entry records §10 names:
+
+    * the two **anchors**, one entity each, first and last in byte order — the ordinal boundaries;
+    * `node-<region>-<id>`, one entity each, heavily prefix-shared — a `prefix` range over one
+      region spans thousands of keys and therefore hundreds of front-coded blocks, which is the
+      only way a prefix range crosses a block boundary rather than sitting inside one;
+    * `hub-<region>-<letter>`, thirty-six values carried by thousands of entities each — the
+      repeat-heavy half, and the values a flush extent can also carry so that one string has a
+      *different ordinal in each layer*.
+    """
+    if source_id % SUBMITTER_ABSENT_STRIDE == 0:
+        return None
+    if source_id == SUBMITTER_FIRST_ID:
+        return SUBMITTER_FIRST
+    if source_id == SUBMITTER_LAST_ID:
+        return SUBMITTER_LAST
+    region = _SUBMITTER_REGIONS[(source_id // 13) % 3]
+    if source_id % SUBMITTER_UNIQUE_STRIDE == 0:
+        return f"node-{region}-{PLANTED_ID_BASE + source_id}"
+    return f"hub-{region}-{_SUBMITTER_HUB_LETTERS[(source_id // 3) % 12]}"
+
+
+def submitter_values_in_order() -> list[str]:
+    """Every distinct planted `submitter`, in the byte order a sorted dictionary holds them.
+
+    **Not a dictionary, and not an accelerator.** Nothing evaluates a filter through this list:
+    `oracle.filters` answers `eq`, `in`, `prefix` and `contains` by walking [`submitter_of`] one
+    entity at a time, which is what keeps the oracle a second derivation rather than a
+    transcription of the artefact (records §10). This exists so a test can *name* the values whose
+    ordinals are the base build's dictionary boundaries without opening the artefact to find out
+    which they are — and the answers those tests then assert still come from the per-entity walk,
+    so a build that wrote a different dictionary disagrees with the oracle rather than with this.
+
+    Every planted value is ASCII, so Python's code-point order is the byte order the dictionary is
+    sorted in.
+    """
+    return sorted({v for e in range(N_ITEMS) if (v := submitter_of(e)) is not None})
+
+
+# The blob-resident string's cycling stems — a period of 33 (stride 11 × 3 ledgers), decorrelated
+# from every other cycle here. The appended source id makes every full note unique, so the future
+# drill-down differential compares a value only its entity can carry.
+_NOTE_LEDGERS = ("acquisitions", "loans", "conservation")
+
+
+def note_of(source_id: int) -> str | None:
+    """`note` as planted — blob-resident, so nothing serves it before the drill-down assembly
+    lands; the build stores it in `attrs/record/` now. Same contract as [`department_of`]."""
+    if source_id % NOTE_ABSENT_STRIDE == 0:
+        return None
+    if source_id == NOTE_OVERSIZE_ID:
+        # > 256 KiB uncompressed, a pure function of the id range: the one row the block target
+        # cannot hold, which must become an oversized block of its own rather than split.
+        return "".join(f"{i:08x}" for i in range(40_000))
+    if source_id == NOTE_EMPTY_ID:
+        return ""
+    return (
+        f"{_NOTE_LEDGERS[(source_id // 11) % 3]} ledger, "
+        f"accession {PLANTED_ID_BASE + source_id}"
+    )
+
+
+def pages_of(source_id: int) -> int | None:
+    """`pages` as planted — the blob-resident numeric. Same contract as [`department_of`]; the
+    zero stride plants a *present* zero, which the blob must keep distinct from absence."""
+    if source_id % PAGES_ABSENT_STRIDE == 0:
+        return None
+    if source_id % PAGES_ZERO_STRIDE == 0:
+        return 0
+    return (source_id * 37 + 11) % 4999
+
+
+def blob_entities_expected() -> set[int]:
+    """The entities the record blob's has-row bitmap must contain, from the generation functions
+    alone: everyone with at least one blob-resident value. This is the fixture-input half of the
+    blob's one licensed artefact check (records §3, review B7) — the *addressing* is what the
+    artefact walk verifies; *which entities have a row* is the fixture's own fact."""
+    return {
+        e
+        for e in range(N_ITEMS)
+        if note_of(e) is not None
+        or pages_of(e) is not None
+        # **`abstract` counts here even though it is indexed**: text is blob-resident whatever its
+        # flags, so an entity with prose has a blob row for it whether or not it has a `note` or
+        # `pages` (records §4.4). Omitting it would make the has-row expectation short by every
+        # entity whose only blob-resident value is its prose.
+        or abstract_of(e) is not None
+    }
+
+
+def record_of(source_id: int, fx: list[int]) -> dict[str, object]:
+    """Every declared column's planted value for one entity — the record, as the fixture defines
+    it, across all three homes (records §3): hot column (`fx_key`, `shelf`), entity space
+    (`department`, `archive`, `title`), record blob (`note`, `pages`).
+
+    This is the oracle's side of the record-always-exists differential (records §10): when
+    drill-down assembles the record from its three homes, `/v1/items/{tessera_id}` must return
+    exactly these values for every visible entity. Absent values are omitted, not `None`-valued —
+    absence is absence from the record, exactly as it is absence from the blob row.
+
+    A keyword's record is its **key**, never its ordinal: the dictionary is an index internal and
+    an ordinal is a per-layer position, so nothing about either crosses the trust boundary
+    (records §4.3).
+
+    `fx` is [`fx_keys`]'s list, passed in because recomputing 150,000 seeded draws per entity
+    would make a whole-corpus sweep quadratic; the caller computes it once.
+    """
+    values: dict[str, object] = {
+        "fx_key": fx[source_id],
+        "shelf": shelf_of(source_id),
+        "department": department_of(source_id),
+        "archive": archive_of(source_id),
+        "title": title_of(source_id),
+        "submitter": submitter_of(source_id),
+        # **A text column's record is its prose**, not its terms: the tokens are an index and the
+        # blob is where the value lives, which is the two-homes rule (records §4.4).
+        "abstract": abstract_of(source_id),
+        "note": note_of(source_id),
+        "pages": pages_of(source_id),
+    }
+    return {name: value for name, value in values.items() if value is not None}
+
+
+def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
+    """What `/v1/meta` must publish as `filter_operands`: column → (family, operator set),
+    exactly — no more and no fewer. The meta conformance test asserts equality against this
+    function alone, so the operand surface is recorded in **one place**.
+
+    What the exactness pins: the blob-resident columns (`note`, `pages`) publish no operand —
+    records §3 gives them no query surface — while every *rendered* column publishes one, because
+    decision 0068 makes `render = true` imply filterable and the row-space route answers it over
+    the request's own rows. That covers the render-only category (`shelf`) and, since decision
+    0064's render half landed, the rendered number `fx_key`: a number's absence now lives in a
+    presence bitmap beside the hot column, so a range no longer matches the rows that have no
+    value. A column's operand set is a property of its family alone — routing is a property of the
+    deployment's declaration, never of the query surface.
+
+    **`submitter` publishes `keyword` and its four string operators, and `range` is not among
+    them.** A keyword's stored values are ordinals — positions in the layer's own sorted dictionary
+    — so a numeric range over them would compare one layer's positions against another's and answer
+    the same request differently against the base build and against a flush extent, invisibly. The
+    family derivation enumerates the numeric types rather than defaulting to them precisely so that
+    cannot happen (records §4.3); this line is where the surface it produces is pinned.
+    """
+    return {
+        "department": ("category", frozenset({"eq", "in"})),
+        "archive": ("category", frozenset({"eq", "in"})),
+        "shelf": ("category", frozenset({"eq", "in"})),
+        "title": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
+        "submitter": ("keyword", frozenset({"eq", "in", "prefix", "contains"})),
+        # **`abstract` publishes `text` and exactly two operators, and none of the four string
+        # predicates is among them.** That absence is the point of the family split: a text
+        # column's stored form is a token index, so there is no stored value for `eq` to compare
+        # bytes against or for `prefix` to anchor on. `phrase` is published beside `match` because
+        # it is built — an operand list that named an operator the parse gate would refuse is the
+        # drift this function exists to pin.
+        "abstract": ("text", frozenset({"match", "phrase"})),
+        "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
+    }
 
 # The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
 # `Bundle.extent` uses for the same four numbers (`(x_min, x_max, y_min, y_max)`). Writing the
@@ -656,6 +1034,22 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
                 ),
                 "archive": pa.array([archive_of(i) for i in range(N_ITEMS)], type=pa.string()),
                 "title": pa.array([title_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # A keyword arrives as its **value**, never as an ordinal: the ordinal is the
+                # build's to assign, per layer, and a data file supplying one would be naming a
+                # position in a dictionary that does not exist yet (records §4.3).
+                "submitter": pa.array(
+                    [submitter_of(i) for i in range(N_ITEMS)], type=pa.string()
+                ),
+                # The render-only category arrives as its key, like the other two categories.
+                "shelf": pa.array([shelf_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # A text column arrives as its prose, exactly as written — the analyser is the
+                # build's and a data file supplying tokens would be naming a segmentation the
+                # manifest has not recorded yet (records §4.4, decision 0070).
+                "abstract": pa.array([abstract_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                # The blob-resident pair. A null is the absent value — for these, absence from
+                # the record blob's row and (jointly) from its has-row bitmap.
+                "note": pa.array([note_of(i) for i in range(N_ITEMS)], type=pa.string()),
+                "pages": pa.array([pages_of(i) for i in range(N_ITEMS)], type=pa.uint32()),
             }
         ),
         points_path,
@@ -719,6 +1113,13 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
+        # 9: the corpus gained the keyword column (`submitter`) and its planting rules, for the
+        #    keyword family's conformance coverage (2026-08-13).
+        # 8: every planted value that writes an id into free text (`note`, `title`) offsets it by
+        #    `PLANTED_ID_BASE`, so the byte scan stops reading the fixture quoting itself as a
+        #    leak once drill-down serves those fields (2026-08-12).
+        # 6: the corpus gained the render-only category (`shelf`) and the blob-resident pair
+        #    (`note`, `pages`) for the record-blob conformance capability (2026-08-12).
         # 5: the corpus gained a `public` category, `archive`, so the differential covers the
         # postings route decision 0063 opened as well as the scan (2026-08-10).
         # 4: the corpus gained the two filter columns (`department`, `title`) and their planting
@@ -727,7 +1128,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
         # version moves with them.
         # 3: the bundle gained a declared `fx_key` column (2026-08-07).
-        "recipe_version": 5,
+        "recipe_version": 9,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -748,6 +1149,33 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
             "title_absent_stride": TITLE_ABSENT_STRIDE,
             "title_stems": list(_TITLE_STEMS),
             "archive_absent_stride": ARCHIVE_ABSENT_STRIDE,
+        },
+        # The render-only category's and the blob pair's planting rules — same reasoning as
+        # `filter_columns`: everything the generation functions are a function of that the
+        # schema text does not carry.
+        "render_category": {
+            "shelf_absent_stride": SHELF_ABSENT_STRIDE,
+        },
+        # The keyword column's planting rules — same reasoning again, and load-bearing twice over
+        # here: the ordinal-boundary tests name `SUBMITTER_FIRST`/`SUBMITTER_LAST` as the first and
+        # last key of the base dictionary, which is only true while the regions, the hub letters
+        # and the unique stride are the ones the bundle was built from.
+        "keyword_column": {
+            "submitter_absent_stride": SUBMITTER_ABSENT_STRIDE,
+            "submitter_unique_stride": SUBMITTER_UNIQUE_STRIDE,
+            "submitter_regions": list(_SUBMITTER_REGIONS),
+            "submitter_hub_letters": _SUBMITTER_HUB_LETTERS,
+            "submitter_first": [SUBMITTER_FIRST_ID, SUBMITTER_FIRST],
+            "submitter_last": [SUBMITTER_LAST_ID, SUBMITTER_LAST],
+        },
+        "record_columns": {
+            "note_absent_stride": NOTE_ABSENT_STRIDE,
+            "note_ledgers": list(_NOTE_LEDGERS),
+            "note_oversize_id": NOTE_OVERSIZE_ID,
+            "note_empty_id": NOTE_EMPTY_ID,
+            "planted_id_base": PLANTED_ID_BASE,
+            "pages_absent_stride": PAGES_ABSENT_STRIDE,
+            "pages_zero_stride": PAGES_ZERO_STRIDE,
         },
         # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
         # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt

@@ -191,38 +191,37 @@ run_selftest() {
   }
 
   local track
-  # 1. The freeze binds every track. This is the case that regressed: with these two paths in
-  #    `[shared]`, every one of these expected `allowed` and the freeze meant its own opposite.
+  # 1. The freeze binds every track. The manifest is epic 1's seam commit and is spent; the
+  #    design corpus changes only through the owner.
   for track in $(track_names); do
-    check "$track" "crates/tessera-server/tests/http.rs" frozen
-    check "$track" "crates/tessera-engine/tests/viewport.rs" frozen
+    check "$track" "crates/tessera-store/src/manifest.rs" frozen
+    check "$track" "docs/design/records-and-search.md" frozen
   done
   # 2. A shared path is permitted for every track — the contrast that makes point 1 meaningful.
+  #    `tessera-build/src/lib.rs` is the deliberate epic-1 case: tracks a and b cross in it, so
+  #    it is shared rather than owned, and the merge reviews the conflict.
   for track in $(track_names); do
-    check "$track" "crates/tessera-engine/src/session.rs" allowed
     check "$track" "Cargo.toml" allowed
-    check "$track" "docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md" allowed
+    check "$track" "crates/tessera-build/src/lib.rs" allowed
   done
   # 3. Each track's own files are accepted.
-  check a "crates/tessera-store/src/read.rs" allowed
-  check a "crates/tessera-engine/src/select.rs" allowed
-  check b "crates/tessera-engine/src/write.rs" allowed
-  check b "crates/tessera-lifecycle/src/command.rs" allowed
-  check b "crates/tessera-server/src/error.rs" allowed
-  check c "crates/tessera-engine/src/pins.rs" allowed
-  check c "crates/tessera-engine/src/cache.rs" allowed
+  check a "crates/tessera-build/src/schema.rs" allowed
+  check a "crates/tessera-engine/tests/filtering.rs" allowed
+  check a "reference/oracle/catalogue.py" allowed
+  check b "crates/tessera-filter/src/lib.rs" allowed
+  check b "crates/tessera-filter-write/src/lib.rs" allowed
+  check b2 "crates/tessera-engine/src/flush.rs" allowed
   check c "crates/tessera-engine/src/viewport.rs" allowed
-  check c "crates/tessera-engine/src/single_flight.rs" allowed
-  check c "crates/tessera-server/tests/http_engine_state.rs" allowed
-  check t "reference/oracle/viewport.py" allowed
+  check c "crates/tessera-server/src/viewer.rs" allowed
+  check d "reference/oracle/viewport.py" allowed
   # 4. And another track's files are not — the check's whole purpose.
-  check a "crates/tessera-engine/src/write.rs" unowned
-  check b "crates/tessera-engine/src/pins.rs" unowned
-  check c "crates/tessera-server/src/control.rs" unowned
-  check t "crates/tessera-engine/src/select.rs" unowned
+  check a "crates/tessera-filter/src/lib.rs" unowned
+  check b "crates/tessera-build/src/schema.rs" unowned
+  check c "crates/tessera-engine/src/flush.rs" unowned
+  check d "crates/tessera-engine/src/viewport.rs" unowned
   # 5. A path in no section at all is unowned, for everyone.
   for track in $(track_names); do
-    check "$track" "crates/tessera-build/src/lib.rs" unowned
+    check "$track" "crates/tessera-lifecycle/src/command.rs" unowned
   done
 
   if [ "$failures" -gt 0 ]; then

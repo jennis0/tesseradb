@@ -180,15 +180,23 @@ async fn meta(
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
                 "category": category,
+                // The column's compiled placement (records §3): `render` — a slot in every row of
+                // the hot column; `index` — an entity-space search structure. Neither set means
+                // blob-resident: stored, returned at drill-down, not filterable — derived from
+                // the two flags exactly as the manifest derives it, never a third flag.
+                "render": s.render,
+                "index": s.index,
             })
         }).collect::<Vec<_>>(),
         // Reference Sheet R5: **which columns a client may filter on, and with which operators**
         // (contracts §3.2, decision 0062). Empty when the schema declares nothing filterable.
         //
         // Per column rather than a flat operator list, because the operators are a property of the
-        // column's family: a category takes `eq`/`in` over its value set, a `utf8` column takes
-        // byte predicates. A client that had to infer this from `arrow_type` would be re-deriving
-        // the schema's own rule, and would get `text` wrong the moment that type lands.
+        // column's family: a category takes `eq`/`in` over its value set, a `keyword` column takes
+        // the four string predicates, and a `text` column takes `match` and nothing else. A client
+        // that had to infer this from `arrow_type` would be re-deriving the schema's own rule, and
+        // would get `text` wrong — its type is a string type and its operand is not a string
+        // predicate.
         //
         // **`family` is what tells a viewer which control to draw.** A category has a value set, so
         // `/v1/categories/{column}` fills a dropdown. A string has none — its values are row data,
@@ -197,9 +205,31 @@ async fn meta(
         // §2.3), and a client that expected a value list for a string would be waiting for an
         // endpoint that will never exist.
         //
-        // The combinators (`all_of`, `any_of`) are not published per column — they compose
-        // expressions rather than belonging to one — and `none_of` is absent because it is unbuilt.
-        "filter_operands": meta.declared_scalars.iter().filter(|d| d.filter).map(|d| {
+        // `keyword` is published as its own family beside `string`, and takes the same four
+        // operators, because a client draws the same control for both and the difference between
+        // them is a storage one. Naming it is still worth a word on the wire: a keyword's values are
+        // held in a sorted dictionary the server never serves — no listing, no autocomplete, no
+        // `/v1/categories` counterpart (records §4.3) — so a client that reads `keyword` as
+        // *enumerable* would be waiting for the same endpoint that will never exist.
+        //
+        // The combinators (`all_of`, `any_of`, `none_of`) are not published per column — they
+        // compose expressions rather than belonging to one. ⊘ **`none_of` is not universal over the
+        // columns published here, and nothing on this surface says so**: it subtracts from the set
+        // of items *carrying a value*, and a `text` column stores no per-item value to be present,
+        // so the engine refuses a negation over one (`FilterError::NegationWithoutPresence`). A
+        // client discovers that from the refusal rather than from the operand list, which is the
+        // wrong way round; publishing negatability per column is what would fix it.
+        //
+        // **The predicate is the engine's** (`filter::is_filterable`, decision 0068): `index`
+        // columns, plus every rendered one — the render-only ones answered over the request's own
+        // rows. The viewport parse gates on the same function, so the surface a client is
+        // published here cannot differ from the one its requests are held to.
+        //
+        // A rendered **number** is on this list with its family's full operator set, `range`
+        // included: the hot column cannot express absence, so decision 0064 puts it in a presence
+        // bitmap beside the column that the row scan reads. A client cannot tell which route
+        // answered — that is 0068's whole licence to have two.
+        "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
             let family = family_of(d);
             serde_json::json!({
                 "column": d.name,
@@ -306,7 +336,9 @@ async fn categories(
                 .map(|c| c.trim().parse::<u32>())
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| {
-                    ApiError::Contract(format!("`codes` must be a comma-separated list of u32: {e}"))
+                    ApiError::Contract(format!(
+                        "`codes` must be a comma-separated list of u32: {e}"
+                    ))
                 })?,
         ),
         None => None,
@@ -339,17 +371,13 @@ async fn categories(
     })))
 }
 
-/// A filterable column's family — **one derivation, used by both `/v1/meta` and the parser**, so
-/// the operator list a client is published cannot differ from the one it is held to.
+/// A filterable column's family — **one derivation, used by `/v1/meta`, the parser and the engine's
+/// own routing alike**, so the operator list a client is published cannot differ from the one it is
+/// held to, nor from the rules the scan reads its values by. It lives in the engine because the row
+/// route needs it too: a rendered `u8` category and a rendered `u8` number are the same bytes and
+/// have opposite absence rules.
 fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Family {
-    use tessera_engine::filter::Family;
-    if d.vocabulary.is_some() {
-        Family::Category
-    } else if d.arrow_type == tessera_engine::ScalarType::Utf8 {
-        Family::Text
-    } else {
-        Family::Numeric
-    }
+    tessera_engine::filter::Family::of(d)
 }
 
 #[derive(Debug, Deserialize)]
@@ -597,10 +625,13 @@ fn run_viewport_stream(
         None => None,
         Some(value) => {
             let meta = state.engine.meta();
+            // The same predicate `/v1/meta`'s operand list publishes — the engine's
+            // `filter::is_filterable` — so a column a client was told about parses and a column
+            // it was not stays the unknown-column 422.
             let filterable: std::collections::HashMap<&str, tessera_engine::filter::Family> = meta
                 .declared_scalars
                 .iter()
-                .filter(|d| d.filter)
+                .filter(|d| tessera_engine::filter::is_filterable(d))
                 .map(|d| (d.name.as_str(), family_of(d)))
                 .collect();
             let vocab_of: std::collections::HashMap<&str, &str> = meta
@@ -639,12 +670,10 @@ fn run_viewport_stream(
         request = request.filter(filter);
     }
 
-    let outcome = state.engine.viewport_stream(
-        session,
-        request,
-        state.stream_flush_bytes,
-        &mut sink,
-    );
+    let outcome =
+        state
+            .engine
+            .viewport_stream(session, request, state.stream_flush_bytes, &mut sink);
 
     match outcome {
         Ok(timings) => {
@@ -903,7 +932,10 @@ async fn viewport(
         // the request remains perfectly answerable and refusing it would turn the fail-closed path
         // into a failure rather than a fallback. Weak-tag syntax is not used; this is an exact
         // comparison of an opaque value.
-        .header("etag", format!("\"{}\"", hex16(&first.coordinates.content_key)))
+        .header(
+            "etag",
+            format!("\"{}\"", hex16(&first.coordinates.content_key)),
+        )
         // The authorisation coordinate, which governs whether a held band may be RENDERED at all
         // and is therefore the client's cache PARTITION key. Separate from the entity tag because
         // it answers a different question and moves on a different schedule: HTTP has one
@@ -1063,7 +1095,12 @@ struct ItemReq {
 
 #[derive(Debug, Serialize)]
 struct ItemResp {
-    scalars: Vec<serde_json::Value>,
+    /// The full record, by declared column name (records §3): render fields, indexed and
+    /// category fields — a category as its vocabulary **key** — and blob-resident fields alike.
+    /// An absent field is absent from the object, never `null`: the engine already omits it, and
+    /// a `null` would invent a distinction between "no value" and "value of null" that no home
+    /// stores.
+    fields: serde_json::Map<String, serde_json::Value>,
     /// Base64, present only when the item has a caller-supplied external id. This is the only
     /// place a caller external id appears on the viewer plane — the conformance byte-scanner's
     /// viewer-plane sweep must be scoped to exclude this endpoint's response.
@@ -1119,23 +1156,23 @@ fn run_item(
         Ok(Some(item)) => item,
     };
 
-    let scalars = item
-        .scalars
+    let fields = item
+        .fields
         .into_iter()
         // Every width lands on a JSON number; the drill-down response is a presentation of the
         // value, not of its storage width, and a client reading `severity: 3` should not have to
         // know the column is a `u8`. The width is a residency decision (per-point-attributes
         // §3.6), and `/v1/meta` publishes it for a client that does care.
-        .map(|s| {
+        .map(|f| {
             macro_rules! arms {
                 ($($v:ident),* $(,)?) => {
-                    match s {
+                    match f.value {
                         $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
                         tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
                     }
                 };
             }
-            scalar_families!(arms)
+            (f.name, scalar_families!(arms))
         })
         .collect();
 
@@ -1144,7 +1181,7 @@ fn run_item(
         .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
 
     Ok(ItemResp {
-        scalars,
+        fields,
         external_id,
     })
 }

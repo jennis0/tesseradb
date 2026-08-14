@@ -1,0 +1,53 @@
+# contains recovery — 2400000 rows, restart interval 16, median of 3
+
+## id — 2400000 present of 2400000 rows, 2400000 distinct keys, 150000 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 197128 | 12.04 | 32.47 | 17.77 | **1.83×** |
+| 4 | 107455 | 12.04 | 31.28 | 17.12 | **1.83×** |
+| 6 | 1080 | 12.04 | 26.77 | 16.89 | **1.58×** |
+| 8 | 10 | 12.04 | 19.92 | 15.61 | **1.28×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped | sorted distinct | recovered |
+|---|---|---|---|---|---|---|
+| 25% contiguous | 600000 | 600000 | 37500 | 70.5 | 72.9 | **0.97×** |
+| 25% stride-4 | 600000 | 600000 | 150000 | 60.1 | 61.6 | **0.98×** |
+
+## submitter — 2399904 present of 2400000 rows, 542489 distinct keys, 33906 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 444 | 19.35 | 43.83 | 26.18 | **1.67×** |
+| 4 | 284 | 19.35 | 43.67 | 25.72 | **1.70×** |
+| 6 | 5 | 19.35 | 41.70 | 25.95 | **1.61×** |
+| 8 | 2 | 19.35 | 38.57 | 25.31 | **1.52×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped | sorted distinct | recovered |
+|---|---|---|---|---|---|---|
+| 25% contiguous | 599976 | 151821 | 32267 | 164.5 | 38.5 | **4.28×** |
+| 25% stride-4 | 599976 | 278380 | 33905 | 128.8 | 59.7 | **2.16×** |
+
+## doi — 1026531 present of 2400000 rows, 1024837 distinct keys, 64053 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 399554 | 12.79 | 19.71 | 17.35 | **1.14×** |
+| 4 | 286679 | 12.79 | 20.58 | 17.40 | **1.18×** |
+| 6 | 234025 | 12.79 | 22.59 | 17.69 | **1.28×** |
+| 8 | 224855 | 12.79 | 22.56 | 17.93 | **1.26×** |
+| 16 | 9055 | 12.79 | 38.25 | 18.87 | **2.03×** |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped | sorted distinct | recovered |
+|---|---|---|---|---|---|---|
+| 25% contiguous | 256632 | 256144 | 22075 | 102.6 | 91.7 | **1.12×** |
+| 25% stride-4 | 256633 | 256518 | 63392 | 113.5 | 93.8 | **1.21×** |
+

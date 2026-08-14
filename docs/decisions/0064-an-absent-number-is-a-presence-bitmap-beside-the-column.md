@@ -60,6 +60,14 @@ and §3.2); how merge, flush and the compaction fold carry it; and whether `/con
 a null numeric, which today it does not distinguish. Contracts R4 stays as written — the column
 remains non-nullable — and that is the point of the ruling rather than an exception to it.
 
+**Landed, in part** (2026-08-13): the filter half, and the *server side* of the render half — the
+bitmap beside `columns.arrow` (`tessera_store::render_presence`), written by both builds, flush,
+merge and the fold, and read by the row-space filter route, so a rendered number is filterable and
+an item with no value matches no range. What stays deferred is the rest of the render half as
+described below: the points batch still cannot say "absent", so a client still draws an absent
+number at zero. The split follows this section's own reasoning — the deferral's stated blocker is
+the client, and nothing in the server-side bitmap touches it.
+
 **The two halves are separable, and the order is deliberate** (owner, 2026-08-10). The *filter*
 half — keep the source's validity through the build, and let an absent number occupy no slot in the
 filter column, exactly as an absent string already does — is entirely server-side and fixes the

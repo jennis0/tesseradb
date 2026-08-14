@@ -123,11 +123,16 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+use croaring::Bitmap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use tessera_authz::encode_posting;
-use tessera_filter::{Codes, ColumnKind, ValueColumnWriter};
+use tessera_filter::{
+    Codes, ColumnKind, RecordField, RecordValue, ValueColumnWriter, RECORD_BLOCKS_FILE,
+    RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
+};
+use tessera_filter_write::RecordBlobWriter;
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
@@ -1195,6 +1200,10 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
     let filter_paths = write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
+    // The record blob rides the same stage boundary, for the same two reasons: entity ids are
+    // final (I9) and the attribute values are in hand. Its files join the manifest digest at
+    // step 11 with everything else.
+    let record_paths = write_record_blob(&partition_dir, &args.schema, &attributes_by_entity)?;
     timer.end(BuildStage::FilterPostings, n);
 
     // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
@@ -1251,6 +1260,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     fsync_file(&row_entity_path)?;
 
     let columns_path = segment_dir.join("columns.arrow");
+    let mut presence_paths: Vec<PathBuf> = Vec::new();
     {
         // Built and released one column at a time: the record batch itself is the largest thing
         // this build ever holds, so nothing that can be dropped first is kept alongside it.
@@ -1294,9 +1304,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
         // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
         // geometry's 8) the tail is the smaller term either way.
-        let scalars = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
+        let tail = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
         drop(entity_row);
-        write_columns(&columns_path, tessera_row, residual_row, scalars)
+        for (column, rows) in tail.presence {
+            if let Some(path) =
+                tessera_store::flush::write_render_presence(&segment_dir, &column, rows, n as u32)
+                    .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
+            {
+                presence_paths.push(path);
+            }
+        }
+        write_columns(&columns_path, tessera_row, residual_row, tail.columns)
             .map_err(|e| BuildError::io(&columns_path, e))?;
     }
     fsync_file(&columns_path)?;
@@ -1313,8 +1331,10 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         morton_path,
     ];
     other_paths.extend(filter_paths);
+    other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
+    other_paths.extend(presence_paths);
     let report = write_manifests(
         args,
         &BundleFiles {
@@ -1407,7 +1427,7 @@ fn read_attributes_by_entity(
     Ok(by_entity)
 }
 
-/// Write the entity-space filter postings for every column declared `used_for = "filter"`, and
+/// Write the entity-space filter postings for every column declared `index = true`, and
 /// return the paths so the manifest digests them.
 ///
 /// **One file per column** — `attrs/<column>/postings.arrow` — never one file for the whole
@@ -1472,15 +1492,32 @@ fn write_filter_postings_banded(
         let column_dir = partition_dir.join("attrs").join(&attribute.name);
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
 
+        // **A text column has no value column**, so it leaves before the one below is written. Its
+        // entity-space artefact is the token dictionary and the postings over it; the values
+        // themselves are in the record blob, which no scan reads (records §4.4).
+        if attribute.ty == ScalarType::Text {
+            paths.extend(write_text_index(&column_dir, attribute, values)?);
+            continue;
+        }
+
         // The value column is the artefact of record (filter-index §2.1); the postings below are
         // derived from it. Written first so that a build interrupted between the two leaves the
         // record without its accelerator rather than an accelerator with no record.
         let values_path = column_dir.join("values.arrow");
         let presence_path = column_dir.join("presence.roaring");
-        let presence = write_column_values(&values_path, &presence_path, attribute, values)?;
+        let written =
+            write_column_values(&column_dir, &values_path, &presence_path, attribute, values)?;
         fsync_file(&values_path)?;
         paths.push(values_path);
-        if presence {
+        // The dictionary is not an accelerator and the ordering above does not apply to it: a
+        // keyword's value column holds ordinals, which name nothing without the dictionary they
+        // index. Both are digested, so a build interrupted between them refuses at open either
+        // way — the pair is the artefact of record, not the values file alone (records §7).
+        if let Some(dict_path) = written.dict {
+            fsync_file(&dict_path)?;
+            paths.push(dict_path);
+        }
+        if written.presence {
             fsync_file(&presence_path)?;
             paths.push(presence_path);
         }
@@ -1502,6 +1539,147 @@ fn write_filter_postings_banded(
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// Write the record blob — `attrs/record/{blocks.bin,hasrow.roaring,directory.arrow}` — for every
+/// declared column that is neither indexed nor rendered, and return the paths so the manifest
+/// digests them like every base artefact (records §3, §7).
+///
+/// **The blob is the third home**: a column with neither flag has no entity-space structure and no
+/// slot in the hot column, so these files are the only place its values exist. When the schema
+/// declares no such column the stage writes nothing and the open demands nothing — the file set
+/// stays a function of the schema. (On this branch the schema *parse* still refuses a
+/// neither-column; the declaration surface that admits one lands with the `used_for` migration in
+/// this same epic, so the case is reachable programmatically and, after integration, from TOML.)
+///
+/// **Absence is per family, exactly as the value column spells it** (`write_column_values`): a
+/// category's absence is the reserved code 0, everything else's is `ScalarValue::Null`. An entity
+/// absent from every blob column gets no row and no has-row bit. The stage is otherwise
+/// family-agnostic — a blob row is bytes, whatever family supplied them — which is what makes the
+/// keyword epic's storage swap a tag rename plus rebuild rather than a format change. Whether a
+/// vocabulary-controlled category may be blob-resident at all is store-once's open ruling; this
+/// stage writes what the compiled placement says and takes no view.
+///
+/// The field tag is the column's position among `declared_scalars` — the same positional identity
+/// the hot column's tail and the ingest row vector already rely on — so drill-down resolves it
+/// against the manifest without any name table in the artefact.
+pub(crate) fn write_record_blob(
+    partition_dir: &Path,
+    schema: &crate::schema::Schema,
+    by_entity: &[Vec<ScalarValue>],
+) -> Result<Vec<PathBuf>> {
+    // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
+    // Records §4.2 exempts categories from the blob because their entity-space structures are the
+    // vocabulary machinery's constant floor, but that floor is `postings_are_owed`, which holds
+    // for an *indexed* or `per_viewer` category and not for a `public` one. A `public` category
+    // declared with neither flag therefore has no hot column, no value column and no postings, so
+    // excluding every category here stored its values nowhere at all and refused nothing —
+    // silent loss of a field the caller declared. Asking the same question the entity-space pass
+    // asks is what keeps the two exhaustive between them: a field is in exactly one home, and
+    // records §3's rule that every declared field answers `entity → value` holds by construction.
+    let blob_columns: Vec<usize> = schema
+        .attributes
+        .iter()
+        .enumerate()
+        // **Text is blob-resident whether or not it is indexed** (records §4.4), which is the one
+        // place this predicate is not simply "has no other home": an indexed text column has a
+        // token index *and* a blob row, because the index answers `match` and only the blob can
+        // answer `entity → value`. Postings are term → entities; nothing in them reconstructs the
+        // prose a drill-down returns.
+        .filter(|(_, a)| a.ty == ScalarType::Text || (!a.render && !postings_are_owed(schema, a)))
+        .map(|(i, _)| i)
+        .collect();
+    if blob_columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `record` is reserved as a column name at parse (records §7, review N10), so this directory
+    // cannot collide with a declared column's.
+    let record_dir = partition_dir.join("attrs").join("record");
+    std::fs::create_dir_all(&record_dir).map_err(|e| BuildError::io(&record_dir, e))?;
+    let blocks_path = record_dir.join(RECORD_BLOCKS_FILE);
+    let hasrow_path = record_dir.join(RECORD_HASROW_FILE);
+    let directory_path = record_dir.join(RECORD_DIRECTORY_FILE);
+    let mut writer = RecordBlobWriter::create(
+        &blocks_path,
+        &hasrow_path,
+        &directory_path,
+        RECORD_BLOCK_TARGET,
+    )
+    .map_err(|e| BuildError::io(&blocks_path, e))?;
+
+    let n = by_entity.first().map_or(0, Vec::len);
+    let mut fields: Vec<RecordField> = Vec::with_capacity(blob_columns.len());
+    // A range loop on purpose: each entity gathers across *several* parallel columns, which is
+    // not the single-slice shape `needless_range_loop`'s rewrite fits.
+    #[allow(clippy::needless_range_loop)]
+    for entity in 0..n {
+        fields.clear();
+        for &column in &blob_columns {
+            let attribute = &schema.attributes[column];
+            let Some(value) = record_value_of(&by_entity[column][entity], attribute)? else {
+                continue;
+            };
+            let tag = u16::try_from(column).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "attribute '{}' is declared at position {column}, past the u16 field-tag \
+                     space",
+                    attribute.name
+                ))
+            })?;
+            fields.push(RecordField { tag, value });
+        }
+        if fields.is_empty() {
+            continue;
+        }
+        writer
+            .push_row(entity as u32, &fields)
+            .map_err(|e| BuildError::io(&blocks_path, e))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| BuildError::io(&blocks_path, e))?;
+    for path in [&blocks_path, &hasrow_path, &directory_path] {
+        fsync_file(path)?;
+    }
+    Ok(vec![blocks_path, hasrow_path, directory_path])
+}
+
+/// One staged value as the blob row carries it, or `None` where the entity carries nothing in
+/// this column — the per-family absence rule `write_record_blob`'s doc states.
+fn record_value_of(
+    value: &ScalarValue,
+    attribute: &crate::schema::Attribute,
+) -> Result<Option<RecordValue>> {
+    if attribute.vocabulary.is_some() {
+        let code = category_code(value, &attribute.name)?;
+        if code == tessera_store::vocabulary::ABSENT_CODE {
+            return Ok(None);
+        }
+        // The code at the declared width — the value the entity-space column would have stored,
+        // resolved to its key at drill-down through the manifest's vocabulary, never in the
+        // artefact.
+        return Ok(Some(match attribute.ty {
+            ScalarType::U8 => RecordValue::U8(code as u8),
+            ScalarType::U16 => RecordValue::U16(code as u16),
+            _ => RecordValue::U32(code),
+        }));
+    }
+    Ok(match value {
+        ScalarValue::Null => None,
+        ScalarValue::Bool(v) => Some(RecordValue::Bool(*v)),
+        ScalarValue::U8(v) => Some(RecordValue::U8(*v)),
+        ScalarValue::U16(v) => Some(RecordValue::U16(*v)),
+        ScalarValue::U32(v) => Some(RecordValue::U32(*v)),
+        ScalarValue::U64(v) => Some(RecordValue::U64(*v)),
+        ScalarValue::I8(v) => Some(RecordValue::I8(*v)),
+        ScalarValue::I16(v) => Some(RecordValue::I16(*v)),
+        ScalarValue::I32(v) => Some(RecordValue::I32(*v)),
+        ScalarValue::I64(v) => Some(RecordValue::I64(*v)),
+        ScalarValue::F32(v) => Some(RecordValue::F32(*v)),
+        ScalarValue::F64(v) => Some(RecordValue::F64(*v)),
+        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(*v)),
+        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v.clone())),
+    })
 }
 
 /// The staged attribute values of one category column, as the shared postings emit reads them.
@@ -1547,28 +1725,47 @@ fn write_category_postings(
     .map_err(|e| BuildError::io(path, e))
 }
 
-/// Write one column's values in entity order, and its presence bitmap where presence is partial.
+/// What writing one column's values produced beside the values file itself.
+struct WrittenColumn {
+    /// Whether a presence bitmap was written — see [`write_column_values`] on why its absence is
+    /// meaningful rather than an omission.
+    presence: bool,
+    /// The layer's sorted dictionary, for the one family that has one.
+    dict: Option<PathBuf>,
+}
+
+/// Write one column's values in entity order, its presence bitmap where presence is partial, and
+/// its dictionary where the family stores one.
 ///
-/// Returns whether a presence bitmap was written. **A column every entity carries a value in gets
-/// none**, and that is the fast path rather than an omission: the entity id is then the array index,
-/// which measured 28.7 ms against a presence-addressed 1,078 ms at 10⁹
-/// (`probes/2026-08-08-filter-layout/`). Writing an all-ones bitmap would be correct and would cost
-/// the scan that path, so the distinction lives in the file set rather than in the bitmap's contents.
+/// **A column every entity carries a value in gets no presence bitmap**, and that is the fast path
+/// rather than an omission: the entity id is then the array index, which measured 28.7 ms against a
+/// presence-addressed 1,078 ms at 10⁹ (`probes/2026-08-08-filter-layout/`). Writing an all-ones
+/// bitmap would be correct and would cost the scan that path, so the distinction lives in the file
+/// set rather than in the bitmap's contents.
 ///
-/// **Absence is out of band in both families, and by different means.** A category spends the
+/// **Absence is out of band in every family, and by different means.** A category spends the
 /// reserved code 0, which its vocabulary reserves out of the value space. A string has no spare
 /// value to spend — the empty string is one a corpus may legitimately hold, and contracts §2.4
 /// already refuses it on the ingest plane because an unset field and a client bug both produce it —
 /// so absence arrives as `ScalarValue::Null`. Folding the two together would report an item as
-/// matching a value it does not have.
+/// matching a value it does not have. A keyword inherits the string rule exactly: absence is
+/// `ScalarValue::Null` and never ordinal 0, which is an ordinary key like any other.
+///
+/// **A keyword's values file holds `u32` ordinals into the dictionary written beside it, and both
+/// belong to this layer alone** (records §4.3). The base build is one layer, so the ordinals here
+/// are positions in *this* base's dictionary and mean nothing against any extent's. Nothing
+/// downstream may assume otherwise — which is what keeps a durable manufactured identity, and the
+/// reuse hazard that comes with one, out of the family.
 fn write_column_values(
+    column_dir: &Path,
     values_path: &Path,
     presence_path: &Path,
     attribute: &crate::schema::Attribute,
     values: &[ScalarValue],
-) -> Result<bool> {
+) -> Result<WrittenColumn> {
     let mut present = croaring::Bitmap::new();
     let mut universal = true;
+    let mut dict = None;
 
     let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
         .map_err(|e| BuildError::io(values_path, e))?;
@@ -1585,28 +1782,41 @@ fn write_column_values(
     // code 0, which its vocabulary reserves out of the value space; a string has no spare value to
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
-    if attribute.ty == ScalarType::Utf8 {
-        let mut held: Vec<String> = Vec::new();
-        for (entity, value) in values.iter().enumerate() {
-            match value {
-                ScalarValue::Utf8(text) => {
-                    present.add(entity as u32);
-                    held.push(text.clone());
-                }
-                ScalarValue::Null => universal = false,
-                other => {
-                    return Err(BuildError::Invalid(format!(
-                        "attribute '{}' is declared `utf8` but carries {other:?}",
-                        attribute.name
-                    )))
-                }
-            }
+    if attribute.ty == ScalarType::Keyword {
+        let present_values = keyword_values(attribute, values, &mut present, &mut universal)?;
+        // The distinct key set, sorted — the dictionary's contents and, by position, the ordinals
+        // the column stores. `sort_unstable` is sound where a stable sort would not be, because
+        // the elements compared are the keys themselves: equal elements are indistinguishable, and
+        // `dedup` then leaves one of each.
+        let mut keys: Vec<&str> = present_values.clone();
+        keys.sort_unstable();
+        keys.dedup();
+        let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+        tessera_filter::write_sorted_dict(&dict_path, keys.iter().copied())
+            .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
+        dict = Some(dict_path);
+
+        // The ordinal is the key's position in the sorted distinct set, which is exactly the
+        // ordinal the writer assigned it: `SortedDictWriter::push` returns positions in the order
+        // it is fed, and it was fed this vector. Searching rather than threading the writer's
+        // return values through keeps that equality checkable in one line instead of resting on
+        // two loops staying in step.
+        let mut held: Vec<u32> = Vec::new();
+        for text in present_values {
+            let ordinal = keys.binary_search(&text).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "attribute '{}': the value {text:?} is absent from the dictionary built from \
+                     it — the ordinal column would name a different value's key",
+                    attribute.name
+                ))
+            })?;
+            held.push(ordinal as u32);
             if held.len() >= VALUE_CHUNK {
-                push!(Codes::text(held.drain(..)));
+                push!(Codes::U32(std::mem::take(&mut held).into()));
             }
         }
         if !held.is_empty() {
-            push!(Codes::text(held));
+            push!(Codes::U32(held.into()));
         }
     } else if attribute.vocabulary.is_some() {
         let mut held: Vec<u32> = Vec::new();
@@ -1650,7 +1860,59 @@ fn write_column_values(
     writer
         .finish(presence)
         .map_err(|e| BuildError::io(values_path, e))?;
-    Ok(!universal)
+    Ok(WrittenColumn {
+        presence: !universal,
+        dict,
+    })
+}
+
+/// One keyword column's present values, in entity order, with `present` and `universal` updated as
+/// the string families update them.
+///
+/// Separate from the ordinal emit so that the pass which decides *presence* is the pass which
+/// decides *slots*: the k-th set bit's value is at slot k (filter-index §2.1), and the vector this
+/// returns is the slot sequence, so the two cannot come to disagree about an absent entity.
+///
+/// **A keyword's values arrive as [`ScalarValue::Utf8`]**, because that is what the wire carries
+/// (records §7) — the type names the storage, not the value in flight.
+///
+/// **The empty string is refused, where a `utf8` column stores it.** That is the families
+/// differing, not this pass being stricter than it need be: records §7 refuses an empty keyword on
+/// the ingest wire for the reason contracts §2.4 gives — an unset field and a client bug both
+/// produce it — and the dictionary has no key for it either. A points file is not the ingest plane
+/// and has no upstream check, so the refusal is here, naming the column and the entity a build
+/// operator has to go and fix.
+fn keyword_values<'a>(
+    attribute: &crate::schema::Attribute,
+    values: &'a [ScalarValue],
+    present: &mut croaring::Bitmap,
+    universal: &mut bool,
+) -> Result<Vec<&'a str>> {
+    let mut out = Vec::new();
+    for (entity, value) in values.iter().enumerate() {
+        match value {
+            ScalarValue::Utf8(text) if text.is_empty() => {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{}' is declared `keyword` and entity {entity} carries the empty \
+                     string, which is not a value (records §7, contracts §2.4 — an unset field and \
+                     a client bug both produce it). Leave the cell null for absence",
+                    attribute.name
+                )))
+            }
+            ScalarValue::Utf8(text) => {
+                present.add(entity as u32);
+                out.push(text.as_str());
+            }
+            ScalarValue::Null => *universal = false,
+            other => {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{}' is declared `keyword` but carries {other:?}",
+                    attribute.name
+                )))
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Values pushed to the column writer at a time. The writer spools each chunk as it arrives, so
@@ -1673,8 +1935,11 @@ fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
 /// The kind of column a declared attribute stores — the type the writer is created with, before
 /// its first value arrives.
 fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
-    if attribute.ty == ScalarType::Utf8 {
-        return ColumnKind::Text;
+    // A keyword's values file is an ordinal column, not a string one: the strings live once each
+    // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
+    // measured constants rather than at a string scan's (records §4.3).
+    if attribute.ty == ScalarType::Keyword {
+        return ColumnKind::U32;
     }
     if attribute.vocabulary.is_some() {
         return match attribute.ty {
@@ -1696,7 +1961,15 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
         ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
         ScalarType::F32 => ColumnKind::F32,
         ScalarType::F64 => ColumnKind::F64,
-        ScalarType::Utf8 => ColumnKind::Text,
+        // `utf8` survives as the *wire* type of a keyword's value and of a category's key
+        // (`DeclaredScalar::wire_type`); it is refused at the schema parse, so no declared
+        // attribute carries it.
+        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
+        ScalarType::Keyword => unreachable!("a keyword returns above"),
+        // A text column's terms are `u32` ordinals into the layer's token dictionary, exactly as a
+        // keyword's value is — what differs is how many a row has, which is the postings' business
+        // and not this width's.
+        ScalarType::Text => ColumnKind::U32,
     }
 }
 
@@ -1758,7 +2031,9 @@ fn push_numeric_chunks(
         ScalarType::F32 => stream!(F32, Codes::F32),
         ScalarType::F64 => stream!(F64, Codes::F64),
         ScalarType::TimestampUs => stream!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 => unreachable!("the caller handles utf8 before reaching here"),
+        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
+        ScalarType::Keyword => unreachable!("the caller handles a keyword before reaching here"),
+        ScalarType::Text => unreachable!("the caller handles text before reaching here"),
     }
     Ok(())
 }
@@ -1767,7 +2042,7 @@ fn push_numeric_chunks(
 ///
 /// Two independent reasons, and the second is the one a reader will not expect.
 ///
-/// **`used_for = "filter"`** is the obvious one: the column is declared filterable, and postings are
+/// **`index = true`** is the obvious one: the column is declared filterable, and postings are
 /// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
 ///
 /// **`listing = "per_viewer"`** is the other, and it is *not* optional. That control gates the
@@ -1778,12 +2053,102 @@ fn push_numeric_chunks(
 /// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
 /// compute-admission justification ("no mask composition, no projection, no file IO") false.
 ///
-/// So a `per_viewer` category gets postings whatever its `used_for` says. This is the one place the
+/// So a `per_viewer` category gets postings whatever its `index` says. This is the one place the
 /// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
 /// that does not answer identically and differ only in latency, but here a disclosure control depends
 /// on them existing.
+/// One text column's entity-space index: the per-layer token dictionary and the postings over it.
+///
+/// **The dictionary's ordinals are positions in the sorted distinct term set**, exactly as a
+/// keyword's are in its key set, and the postings are written in that same order — so posting *i*
+/// belongs to the *i*-th key the dictionary holds. A `BTreeMap` is what keeps those two in step
+/// without a second sort to get wrong: its iteration order *is* the dictionary's order.
+///
+/// **A term repeated within one document contributes one posting entry.** The analyser keeps
+/// duplicates and order because the positional payload upgrade (§4.5) needs both; a posting is a
+/// set, so the duplicate collapses here rather than in the analyser.
+///
+/// The singleton encoding is `tessera-authz`'s, unchanged: a term carried by few enough entities is
+/// a bare `u32` array rather than a serialised bitmap, which is what the string-storage campaign
+/// measured at 4.4× smaller on the singleton-heavy vocabularies real prose produces. Reusing that
+/// format rather than minting a second one is the whole reason this crate already depends on it.
+fn write_text_index(
+    column_dir: &Path,
+    attribute: &crate::schema::Attribute,
+    values: &[ScalarValue],
+) -> Result<Vec<PathBuf>> {
+    // The identity was resolved at the schema parse; the name is its first component. Resolving it
+    // again here rather than threading an `Analyser` down keeps the build's contract with the
+    // manifest one-directional: what is recorded is what indexed.
+    let identity = attribute.analyser.as_deref().ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "attribute '{}' is text but carries no resolved analyser — the schema parse is what \
+             resolves one, so this is a compilation defect rather than a schema error",
+            attribute.name
+        ))
+    })?;
+    // **The whole identity, not the name.** The flush and the read path both compare the full
+    // `<name>/<version>` before they will use a pipeline, and this was the one of the three writers
+    // that compared only the first component — so a `Schema` built programmatically rather than
+    // parsed from TOML could carry `unicode/icu4x-1.0/p1`, index happily under today's segmenter,
+    // and record the stale string. The bundle would then refuse to open for every reader, for ever,
+    // with the defect a build behind it. Unreachable through `Schema::parse`, which resolves the
+    // identity from this binary's own analyser; the SDK and the tests are not obliged to.
+    let name = identity.split('/').next().unwrap_or_default();
+    let analyser = tessera_analyse::analyser(name)
+        .filter(|a| a.identity() == identity)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "attribute '{}' declares analyser '{identity}', which this build does not carry.                  Its terms cannot be reproduced, so an index written now would answer every                  `match` from a segmentation the manifest does not describe",
+                attribute.name
+            ))
+        })?;
+
+    let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
+    for (entity, value) in values.iter().enumerate() {
+        let entity = entity as u32;
+        let prose = match value {
+            ScalarValue::Utf8(s) => s.as_str(),
+            // Absence is `Null`, and the empty string is a value a corpus may hold — the same
+            // out-of-band rule the string families share. Neither yields a term.
+            ScalarValue::Null => continue,
+            other => {
+                return Err(BuildError::Invalid(format!(
+                    "attribute '{}': a text column's value must be a string, got {other:?}",
+                    attribute.name
+                )))
+            }
+        };
+        for token in analyser.tokens(prose) {
+            let postings = terms.entry(token).or_default();
+            // Entities arrive ascending, so the duplicate a repeated term produces is always the
+            // last entry — no sort and no set needed to collapse it.
+            if postings.last() != Some(&entity) {
+                postings.push(entity);
+            }
+        }
+    }
+
+    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    tessera_filter::write_sorted_dict(&dict_path, terms.keys().map(String::as_str))
+        .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
+    fsync_file(&dict_path)?;
+
+    let per_term: Vec<Vec<u32>> = terms.into_values().collect();
+    let postings_path = column_dir.join("postings.arrow");
+    tessera_authz::postings::write_postings(
+        &postings_path,
+        &per_term,
+        SMALL_TERM_THRESHOLD_DEFAULT,
+    )
+    .map_err(|e| BuildError::io(&postings_path, e))?;
+    fsync_file(&postings_path)?;
+
+    Ok(vec![dict_path, postings_path])
+}
+
 fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::Attribute) -> bool {
-    if attribute.filter {
+    if attribute.index {
         return true;
     }
     attribute
@@ -1795,9 +2160,9 @@ fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::
 
 /// The vocabulary code a category column's value carries.
 ///
-/// The schema refuses `used_for = "filter"` on anything but a category, so the three unsigned
-/// widths §3.6 allows are the whole domain; anything else reaching here is a schema-compilation
-/// defect, and it fails loudly rather than filtering on a value it invented.
+/// Reached only for a category — postings are derived for the vocabulary-bearing family alone —
+/// so the three unsigned widths §3.6 allows are the whole domain; anything else reaching here is
+/// a schema-compilation defect, and it fails loudly rather than filtering on a value it invented.
 fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
     match value {
         ScalarValue::U8(c) => Ok(*c as u32),
@@ -1810,7 +2175,8 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
     }
 }
 
-/// Permute the entity-major columns into **row order**, ready for `write_columns`.
+/// Permute the entity-major columns into **row order**, ready for `write_columns`, and record
+/// which rows carry a value.
 ///
 /// `entity_row[r]` is the entity whose values row `r` carries — the same permutation
 /// `residual_row` and `tessera_row` are built through, applied to the same arrays, so a row's
@@ -1819,22 +2185,27 @@ fn permute_attribute_tail(
     schema: &crate::schema::Schema,
     by_entity: Vec<Vec<ScalarValue>>,
     entity_row: &[u32],
-) -> Result<Vec<(String, ScalarColumnData)>> {
+) -> Result<AttributeTail> {
+    let mut presence = Vec::new();
     let mut out = Vec::with_capacity(by_entity.len());
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
-        // **The tail is exactly the render columns.** A `filter`-only column is entity-space and
+        // **The tail is exactly the render columns.** An `index`-only column is entity-space and
         // has already been written there; including it here would give it a slot in every row as
         // well, which is the per-row cost §10.3's routing exists to avoid and — for a `utf8`
         // column — the one `render` on `utf8` is refused for outright.
         if !attribute.render {
             continue;
         }
+        // Taken before the substitution below, which is what erases the distinction: the column
+        // itself stays non-nullable (contracts R4) and an absent value is written as the type's
+        // zero, and this is what says that zero means nothing.
+        if let Some(rows) = render_presence_of(entity_row.iter().map(|&e| &values[e as usize])) {
+            presence.push((attribute.name.clone(), rows));
+        }
         let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
         for &entity in entity_row {
             column
                 .push(
-                    // A render column is non-nullable, so an absent value is drawn at the type's
-                    // zero until decision 0064's render half lands — see `or_render_placeholder`.
                     values[entity as usize].or_render_placeholder(attribute.ty),
                     &attribute.name,
                 )
@@ -1842,7 +2213,45 @@ fn permute_attribute_tail(
         }
         out.push((attribute.name.clone(), column));
     }
-    Ok(out)
+    Ok(AttributeTail {
+        columns: out,
+        presence,
+    })
+}
+
+/// A segment's attribute tail: the columns `write_columns` takes, and the presence bitmaps that go
+/// beside them (decision 0064) — one per render column that has an absence, in row order.
+struct AttributeTail {
+    columns: Vec<(String, ScalarColumnData)>,
+    presence: Vec<(String, Bitmap)>,
+}
+
+/// Which rows of one render column carry a value, from that column's values **in row order** —
+/// `None` where every row does, which is the case that writes no file (decision 0064).
+///
+/// **`ScalarValue::Null` names exactly the columns that owe a bitmap, so this needs no schema.**
+/// The two families with an in-band way to say "nothing" never produce one here: a category's
+/// missing key resolves to the reserved code 0 its vocabulary keeps out of the value space, at the
+/// points file (`BatchColumn::value`) and at the ingest plane alike, and `render` on `utf8` is
+/// refused at schema parse. What is left is the numeric family, every bit pattern of which is a
+/// legal value.
+///
+/// Shared by the streaming and linear builds because they hold their values in different shapes
+/// but must write the same bytes — the property `tests/build_equivalence.rs` exists to hold them
+/// to.
+pub(crate) fn render_presence_of<'a>(
+    values: impl IntoIterator<Item = &'a ScalarValue>,
+) -> Option<Bitmap> {
+    let mut present = Bitmap::new();
+    let mut any_absent = false;
+    for (row, value) in values.into_iter().enumerate() {
+        if matches!(value, ScalarValue::Null) {
+            any_absent = true;
+        } else {
+            present.add(row as u32);
+        }
+    }
+    any_absent.then_some(present)
 }
 
 /// The selected source ids, in scan order (which is **no particular order** — the decode is
@@ -2202,6 +2611,125 @@ fn refine_group(
 mod tests {
     use super::*;
     use tessera_types::IdentityKey;
+
+    /// **Every declared field lands in exactly one home, and the two placement passes must agree
+    /// on which** (records §3). The blob takes a field the entity-space pass declines, so the
+    /// question both ask is `postings_are_owed`: a `per_viewer` category keeps its entity-space
+    /// floor and gets no blob row, while a `public` category with neither flag — which that pass
+    /// declines, having no `index` and no per-viewer listing — must land here rather than
+    /// nowhere.
+    ///
+    /// The `public` half is a regression test. Excluding every category from the blob reads as
+    /// records §4.2's rule and is not: §4.2's premise is the entity-space floor, and a `public`
+    /// category with no `index` has none. The field was stored in no home at all, and nothing
+    /// refused the declaration — the caller declared a column and the corpus silently dropped it.
+    #[test]
+    fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
+        let category = crate::schema::Attribute {
+            name: "department".to_string(),
+            ty: ScalarType::U16,
+            analyser: None,
+            vocabulary: Some("departments".to_string()),
+            vocabulary_kind: Some(crate::schema::VocabularyKind::Declared),
+            index: false,
+            render: false,
+        };
+        let note = crate::schema::Attribute {
+            name: "note".to_string(),
+            ty: ScalarType::Keyword,
+            analyser: None,
+            vocabulary: None,
+            vocabulary_kind: None,
+            index: false,
+            render: false,
+        };
+
+        // A `per_viewer` listing is what gives a category its entity-space floor.
+        let per_viewer = |listing| {
+            let mut v = std::collections::HashMap::new();
+            v.insert(
+                "departments".to_string(),
+                crate::schema::Vocabulary {
+                    name: "departments".to_string(),
+                    kind: crate::schema::VocabularyKind::Declared,
+                    listing,
+                    codes: Default::default(),
+                    labels: Default::default(),
+                    reserved: Vec::new(),
+                },
+            );
+            v
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = crate::schema::Schema {
+            attributes: vec![category.clone(), note.clone()],
+            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
+        };
+        // One entity; values are per column, in declaration order.
+        let by_entity = vec![
+            vec![ScalarValue::U16(7)],
+            vec![ScalarValue::Utf8("kept".to_string())],
+        ];
+        let written =
+            write_record_blob(dir.path(), &schema, &by_entity).expect("blob stage writes");
+        assert!(!written.is_empty());
+        let blob = tessera_filter::RecordBlob::open_dir(
+            &dir.path().join("attrs/record"),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("open");
+        let fields = blob
+            .fields_of(0)
+            .expect("read")
+            .expect("entity 0 has a row");
+        assert_eq!(
+            fields.len(),
+            1,
+            "only the utf8 column is blob-resident; the category's home is entity space"
+        );
+        assert_eq!(fields[0].tag, 1, "the surviving field is `note`, tag 1");
+
+        // Alone, the `per_viewer` category leaves the stage with nothing to write at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = crate::schema::Schema {
+            attributes: vec![category.clone()],
+            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
+        };
+        let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
+            .expect("blob stage accepts");
+        assert!(written.is_empty(), "no blob-resident column, no files");
+
+        // But the same category under a `public` listing owes no value column and no postings, so
+        // the blob is its only home and must take it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = crate::schema::Schema {
+            attributes: vec![category],
+            vocabularies: per_viewer(crate::schema::Listing::Public),
+        };
+        let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
+            .expect("blob stage writes");
+        assert!(
+            !written.is_empty(),
+            "a public category with neither flag has no entity-space home; without a blob row \
+             its values are stored nowhere at all"
+        );
+        let blob = tessera_filter::RecordBlob::open_dir(
+            &dir.path().join("attrs/record"),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("open");
+        assert_eq!(
+            blob.fields_of(0)
+                .expect("read")
+                .expect("entity 0 has a row"),
+            vec![tessera_filter::RecordField {
+                tag: 0,
+                value: tessera_filter::RecordValue::U16(7),
+            }],
+            "the public category's value is the blob row"
+        );
+    }
 
     /// **The band count must not be observable in the artefact.** A band boundary is a place the
     /// scatter restarts and the ascending-key check spans, so a column emitted in one band and the

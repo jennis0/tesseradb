@@ -32,7 +32,41 @@
 //! collapses to 2.9–10.2 s on a broad candidate, because rank becomes a binary search per candidate
 //! entity. **Neither is a tuning choice a later reader should revisit from the storage column
 //! alone.**
+//!
+//! # The traversal is counted, so indistinguishability can be a test rather than a comment
+//!
+//! The property above is a claim about **work**, and the keyword family turns it into one the suite
+//! has to check: a needle no dictionary resolves becomes a reserved ordinal and is scanned for
+//! anyway, so that *no item has this value* is not cheaper than *some do* (`records-and-search.md`
+//! §4.3). Asserting that with a stopwatch is worse than not asserting it — a wall-clock comparison
+//! goes green on a loaded machine, which is the direction that lets the channel reopen unnoticed.
+//! [`take_scan_work`] reports instead what the calling thread's scans have traversed, in runs and
+//! slots, and the assertion is that two needles cost the same non-zero amount of it.
+//!
+//! **Runs and slots are the honest unit because [`ValueColumn::for_each_slot_run`] is the sole
+//! traversal**: every predicate of every family reaches its values through it, so work skipped
+//! anywhere above it — an early return, a bound narrowed to something unrepresentable, a layer
+//! passed over — arrives here as fewer slots, and a scan that ran to completion reports the same
+//! slots whatever it was looking for. Two quantities rather than one because they answer different
+//! halves of "the same candidate consulted": runs is how much of the candidate's structure was
+//! walked, slots is how many values were compared. What this deliberately does not count is work
+//! outside the traversal — the broad `contains` route's per-key dictionary walk, which is bounded by
+//! the artefact and asserted where it lives — or a break inside one run's element loop, which is not
+//! the shape a "this can match nothing, so skip it" optimisation takes.
+//!
+//! **Compiled only under `debug_assertions`, and thread-local rather than global.** The counter sits
+//! in the traversal's callback, which the scattered case reaches once per candidate entity, and this
+//! module has already measured that position as worth 20% (see [`ValueColumn::walk_typed`]) — so an
+//! always-compiled counter would buy the assertion with a permanent regression on the arm that can
+//! least afford one, and a shared atomic would additionally put a contended cache line under every
+//! parallel scan. Thread-local also makes the count correct under the test harness, which runs tests
+//! concurrently in one process; the limit to read with it is that a scan handed to another thread is
+//! not counted by the thread that asked for it. Read the release consequence too: a `--release` test
+//! run finds a counter that never moves, so the work assertions fail loudly rather than passing
+//! vacuously — they are debug-build assertions, and the gate builds them that way.
 
+#[cfg(debug_assertions)]
+use std::cell::Cell;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -278,52 +312,6 @@ fn pack_run<T>(
     true
 }
 
-/// Find `finder`'s needle in the concatenated bytes of slots `slot0..slot0 + count`, and record the
-/// entity of every value that contains it.
-///
-/// **A match that straddles a value boundary is not a match in any value**, and discarding those is
-/// the whole correctness argument for searching a region instead of a value: the concatenation joins
-/// values that are unrelated, so `"ab" ++ "cd"` contains the bytes `bc` and neither value does. A
-/// match is kept only when it ends at or before the end of the value it starts in.
-///
-/// The owning slot is tracked with a forward cursor rather than a binary search, because matches
-/// arrive in ascending order — so the cursor advances at most `count` times across the whole run,
-/// however many matches there are.
-///
-/// **Out of line on purpose**, like `pack_run`: inlined into the traversal's callback this costs
-/// every scan whose runs are single values, because the larger closure stops being inlined into
-/// `for_each_run`. That has happened three times in this module's history.
-#[allow(clippy::too_many_arguments)]
-#[inline(never)]
-fn search_region(
-    finder: &memchr::memmem::Finder<'_>,
-    needle_len: usize,
-    bytes: &[u8],
-    offsets: &[i64],
-    slot0: usize,
-    count: usize,
-    entity0: u32,
-    hits: &mut Hits,
-) {
-    let base = offsets[slot0] as usize;
-    let region = &bytes[base..offsets[slot0 + count] as usize];
-    let mut slot = slot0;
-    let mut last: Option<usize> = None;
-    for pos in finder.find_iter(region) {
-        let at = base + pos;
-        while (offsets[slot + 1] as usize) <= at {
-            slot += 1;
-        }
-        // A value containing the needle twice is recorded once. The result would be correct either
-        // way — the accumulator's bulk add tolerates a repeat — but a repeat breaks the run being
-        // coalesced in two, so this keeps a dense result expressible as ranges.
-        if at + needle_len <= offsets[slot + 1] as usize && last != Some(slot) {
-            hits.push(entity0 + (slot - slot0) as u32);
-            last = Some(slot);
-        }
-    }
-}
-
 /// A membership test over a narrow code domain: one bit per code point.
 ///
 /// Built once per scan and tested in constant time, which is what keeps a set-membership filter the
@@ -331,86 +319,60 @@ fn search_region(
 /// at construction — it can be carried by no entity, so it changes no answer — and dropping it
 /// costs nothing that a caller could time, because the table is built and consulted identically
 /// either way.
-struct CodeSet {
+pub struct CodeSet {
     bits: Vec<u64>,
+    domain: u32,
 }
 
 impl CodeSet {
     fn new(values: &[AttrLocalId], max: u32) -> Self {
-        let mut bits = vec![0u64; (max as usize / 64) + 1];
+        let mut set = CodeSet::over_domain(max);
         for v in values {
-            let code = v.raw();
-            if code <= max {
-                bits[code as usize / 64] |= 1 << (code % 64);
-            }
+            set.insert(v.raw());
         }
-        CodeSet { bits }
+        set
+    }
+
+    /// An empty table over `[0, max]`.
+    ///
+    /// **The size is the domain's and never the answer's**, which is the whole property: a set
+    /// naming one code and a set naming a million cost the same to build, to hold and to test. That
+    /// is what a sorted needle list cannot offer — its `O(log k)` per slot makes the scan's cost a
+    /// function of *k*, which for `contains` is the number of dictionary keys carrying the
+    /// substring: a corpus-wide quantity, counting values no visible entity carries, and therefore
+    /// one the per-slot work must not be a function of (records §8, and the same argument the `u8`
+    /// and `u16` arms of [`ValueColumn::scan_in`] already make).
+    pub fn over_domain(max: u32) -> Self {
+        CodeSet {
+            bits: vec![0u64; (max as usize / 64) + 1],
+            domain: max,
+        }
+    }
+
+    /// Add `code`. Silently ignores one outside the domain — the reserved `NO_SUCH_ORDINAL`
+    /// sentinel is exactly that, and an ordinal past the dictionary is a pair that disagrees, which
+    /// the dictionary read has already refused.
+    #[inline]
+    pub fn insert(&mut self, code: u32) {
+        if code <= self.domain {
+            self.bits[code as usize / 64] |= 1 << (code % 64);
+        }
+    }
+
+    /// The inclusive upper bound this table was built over. Carried so a caller can assert the
+    /// size is the domain's rather than the answer's.
+    pub fn domain(&self) -> u32 {
+        self.domain
     }
 
     #[inline]
-    fn contains(&self, code: u32) -> bool {
+    pub fn contains(&self, code: u32) -> bool {
         // The caller only ever passes a value read from a column of the width this was built for,
         // so the index is in range by construction; `get` keeps that a wrong answer rather than a
         // panic if that ever stops being true.
         self.bits
             .get(code as usize / 64)
             .is_some_and(|w| w & (1 << (code % 64)) != 0)
-    }
-}
-
-/// A membership test over a set of byte strings, bucketed by first byte.
-///
-/// **The bucket is what makes `in` cost about what `eq` costs.** Searching a sorted needle list
-/// compares whole values, and a text column's values share long prefixes by nature — names, paths,
-/// identifiers — so each comparison runs deep before it fails. Measured at 10⁸ that made a
-/// five-value `in` cost 16 ns per candidate entity against equality's 3.4. Dispatching on the first
-/// byte reduces the usual case to zero or one full comparison, and the length check in front of
-/// that rejects most of what survives.
-///
-/// The buckets are a CSR index — one allocation and a 257-entry offset table — rather than 256
-/// vectors, because the table is built once per scan and then read once per candidate entity.
-struct ByteSet<'a> {
-    /// Needles sorted by first byte. `needles[starts[b]..starts[b + 1]]` all begin with byte `b`.
-    needles: Vec<&'a [u8]>,
-    starts: [u32; 257],
-    /// The empty needle matches the empty value, and has no first byte to bucket on.
-    empty: bool,
-}
-
-impl<'a> ByteSet<'a> {
-    fn new(values: impl IntoIterator<Item = &'a [u8]>) -> Self {
-        let mut needles: Vec<&[u8]> = values.into_iter().collect();
-        needles.sort_unstable();
-        needles.dedup();
-        let empty = needles.first().is_some_and(|n| n.is_empty());
-        needles.retain(|n| !n.is_empty());
-
-        // Sorting by whole value already sorts by first byte, so the counts can be taken in one
-        // pass over the sorted list rather than by a second sort.
-        let mut starts = [0u32; 257];
-        for n in &needles {
-            starts[n[0] as usize + 1] += 1;
-        }
-        for b in 1..257 {
-            starts[b] += starts[b - 1];
-        }
-        ByteSet {
-            needles,
-            starts,
-            empty,
-        }
-    }
-
-    #[inline]
-    fn contains(&self, v: &[u8]) -> bool {
-        let Some(&first) = v.first() else {
-            return self.empty;
-        };
-        let lo = self.starts[first as usize] as usize;
-        let hi = self.starts[first as usize + 1] as usize;
-        self.needles[lo..hi]
-            .iter()
-            .any(|n| n.len() == v.len() && *n == v)
     }
 }
 
@@ -504,25 +466,6 @@ pub enum Codes {
     I64(ScalarBuffer<i64>),
     F32(ScalarBuffer<f32>),
     F64(ScalarBuffer<f64>),
-    /// UTF-8 values, concatenated, with `offsets[k]..offsets[k+1]` delimiting slot `k`.
-    ///
-    /// **A string column carries no dictionary and no index, and that is the design rather than a
-    /// stage it has not reached** (`filter-index.md` §2.3). A dictionary exists to give a value an
-    /// integer identity so an inverted index can key on it; nothing here is keyed on a value, so
-    /// there is nothing to intern. Equality, prefix and substring are all the same masked scan with
-    /// a different comparison, and the FST a prefix walk would need exists to *order* distinct
-    /// values, which only matters when the values are being looked up rather than tested.
-    ///
-    /// Interning would also not be free of consequence: it is what made a value's identity durable,
-    /// and a durable per-value identity is what the C11 ordinal hazard lives in.
-    ///
-    /// **The offsets are 64-bit**, which is a capacity requirement rather than a preference: Arrow's
-    /// 32-bit `Utf8` caps a column's concatenated bytes at 2 GiB, and a 10⁹-entity string column
-    /// passes that at two bytes per value. The file is written as `LargeUtf8` for the same reason.
-    Text {
-        bytes: Buffer,
-        offsets: ScalarBuffer<i64>,
-    },
 }
 
 impl Codes {
@@ -538,38 +481,6 @@ impl Codes {
             Codes::I64(v) => v.len(),
             Codes::F32(v) => v.len(),
             Codes::F64(v) => v.len(),
-            Codes::Text { offsets, .. } => offsets.len().saturating_sub(1),
-        }
-    }
-
-    /// The UTF-8 value at `slot`, for a text column. `None` for a numeric one.
-    #[inline]
-    fn text_at(&self, slot: usize) -> Option<&str> {
-        match self {
-            Codes::Text { bytes, offsets } => {
-                let lo = offsets[slot] as usize;
-                let hi = offsets[slot + 1] as usize;
-                // Validated once at open (`read_values`), so the slice is known UTF-8 and the
-                // unchecked conversion would be sound — but the checked one costs a length-
-                // proportional scan only on invalid input, and this is a request path where a
-                // corrupted file must fail closed rather than reinterpret bytes.
-                std::str::from_utf8(&bytes[lo..hi]).ok()
-            }
-            _ => None,
-        }
-    }
-
-    /// Build a text column from values in slot order.
-    pub fn text(values: impl IntoIterator<Item = String>) -> Codes {
-        let mut bytes = Vec::new();
-        let mut offsets = vec![0i64];
-        for v in values {
-            bytes.extend_from_slice(v.as_bytes());
-            offsets.push(bytes.len() as i64);
-        }
-        Codes::Text {
-            bytes: Buffer::from_vec(bytes),
-            offsets: offsets.into(),
         }
     }
 
@@ -697,6 +608,57 @@ pub struct Endpoint {
     pub inclusive: bool,
 }
 
+/// What scans have traversed: the unit the work assertions are written in (see this module's
+/// header for why it is counted at all, and why it is counted here).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanWork {
+    /// Contiguous slot ranges visited — the candidate's own run structure, clipped to the column's
+    /// presence and cut at [`CHUNK`]. The traversal's answer to "how much of the candidate was
+    /// consulted".
+    pub runs: u64,
+    /// Slots those ranges cover: one per candidate entity the column holds a value for, which is
+    /// the number of values the predicate was compared against.
+    pub slots: u64,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SCAN_WORK: Cell<ScanWork> = const { Cell::new(ScanWork { runs: 0, slots: 0 }) };
+}
+
+/// Record one slot range against the calling thread's counter.
+#[cfg(debug_assertions)]
+#[inline]
+fn record_slot_run(slots: usize) {
+    SCAN_WORK.with(|w| {
+        let mut work = w.get();
+        work.runs += 1;
+        work.slots += slots as u64;
+        w.set(work);
+    });
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn record_slot_run(_slots: usize) {}
+
+/// The work this thread's scans have traversed since this was last called, and reset.
+///
+/// **Read-and-reset rather than read**, so a caller that forgets to clear the counter measures the
+/// scan it just ran rather than that scan plus everything before it — the failure mode of a
+/// peek-only accessor is a work assertion that passes on the wrong number.
+///
+/// Zero in a `--release` build, where nothing records: see this module's header.
+#[cfg(debug_assertions)]
+pub fn take_scan_work() -> ScanWork {
+    SCAN_WORK.with(|w| w.replace(ScanWork::default()))
+}
+
+#[cfg(not(debug_assertions))]
+pub fn take_scan_work() -> ScanWork {
+    ScanWork::default()
+}
+
 /// One filterable column: its values in entity order, and how an entity id reaches one.
 #[derive(Debug)]
 pub struct ValueColumn {
@@ -744,10 +706,9 @@ impl ValueColumn {
     /// alone and never of what is being sought, so a predicate cannot skip work whatever it tests
     /// for. Adding a family adds a comparison and cannot add a channel.
     ///
-    /// It hands out *ranges* rather than single slots so that each family can walk its own storage
-    /// without a bounds check per element — a fixed-width column iterates a slice of values, a text
-    /// column iterates a slice of offsets. Handing out one slot at a time would force both into
-    /// indexed access and cost the fixed-width case the property it goes fast on.
+    /// It hands out *ranges* rather than single slots so that a family can walk its own storage
+    /// without a bounds check per element — a slice of values iterated directly. Handing out one
+    /// slot at a time would force indexed access and cost the scan the property it goes fast on.
     ///
     /// **No range exceeds [`CHUNK`]**, which is what lets [`Hits`] bound its buffer with a check per
     /// range instead of per entity. A broad candidate is one enormous run — a 25% candidate at 10⁹
@@ -762,6 +723,13 @@ impl ValueColumn {
         len: usize,
         mut f: impl FnMut(usize, usize, u32),
     ) {
+        // Counted here, once, for the same reason the traversal is here once: a range reaches a
+        // predicate only through this call, so this is the one place that can see all of the work
+        // and none of what a caller does with it. Nothing in release builds — see the header.
+        let mut f = |slot0: usize, count: usize, entity0: u32| {
+            record_slot_run(count);
+            f(slot0, count, entity0);
+        };
         match &self.presence {
             // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
             // array. The run structure is the *candidate's*, so a scattered candidate degenerates
@@ -824,9 +792,6 @@ impl ValueColumn {
     /// call through a closure that cannot be specialised. This takes the slice directly, so the
     /// inner loop is a monomorphic index and comparison over `&[T]` — which is what a fixed-width
     /// column can actually go fast on.
-    ///
-    /// One transcription of the traversal, not a fast path beside a slow one: `walk` is kept only
-    /// for the variable-width text column, whose values are not a slice of anything.
     #[inline]
     fn walk_typed<T, F>(&self, candidate: &Bitmap, values: &[T], mut pred: F) -> Bitmap
     where
@@ -889,54 +854,6 @@ impl ValueColumn {
         let mut out = hits.finish();
         out.or_inplace(&packed.finish());
         out
-    }
-
-    /// Walk the candidate over a **text column**, keeping entities whose bytes satisfy `pred`.
-    ///
-    /// **The predicate sees bytes, not `&str`, and that is where the cost went.** Resolving a slot
-    /// to a `&str` runs a UTF-8 validation over the value — for every candidate entity, on every
-    /// request, over bytes Arrow already validated when the column was opened. Measured at 10⁸ that
-    /// was the dominant term in every text predicate: equality cost 11.2 ns per candidate entity
-    /// against a category's 0.24 ns, and `contains` 40 ns.
-    ///
-    /// **A byte comparison answers the same question**, because UTF-8 is self-synchronising: a
-    /// valid UTF-8 needle cannot occur in a valid UTF-8 haystack starting part-way through a
-    /// character, since every continuation byte is `10xxxxxx` and no lead byte is. So byte equality,
-    /// byte prefix and byte substring agree with their `str` counterparts on validated input, and
-    /// the validation is what the file format already guarantees.
-    #[inline]
-    fn walk_text<F>(&self, candidate: &Bitmap, mut pred: F) -> Bitmap
-    where
-        F: FnMut(&[u8]) -> bool,
-    {
-        let Codes::Text { bytes, offsets } = &self.codes else {
-            // A byte predicate against a numeric column matches nothing, which is the same answer
-            // the operator/family check at the parse already gives. This is the second line of
-            // defence, not the first.
-            return Bitmap::new();
-        };
-        let mut hits = Hits::new();
-        self.for_each_slot_run(candidate, self.codes.len(), |slot0, count, entity0| {
-            // `offsets` has one more element than there are values, so a run of `count` values
-            // needs `count + 1` offsets — walked as overlapping pairs, which is the text-shaped
-            // equivalent of the fixed-width arm's slice walk and avoids a bounds check per value.
-            for (i, w) in offsets[slot0..=slot0 + count].windows(2).enumerate() {
-                let (lo, hi) = (w[0] as usize, w[1] as usize);
-                if pred(&bytes[lo..hi]) {
-                    hits.push(entity0 + i as u32);
-                }
-            }
-        });
-        hits.finish()
-    }
-
-    /// Entities whose UTF-8 value equals `needle`, restricted to `candidate`.
-    ///
-    /// A string column needs no dictionary to answer this: the comparison is against the stored
-    /// bytes (`Codes::Text`).
-    pub fn scan_text_eq(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
-        let needle = needle.as_bytes();
-        self.walk_text(candidate, |v| v == needle)
     }
 
     /// Entities whose numeric value lies within the given bounds, restricted to `candidate`.
@@ -1004,7 +921,6 @@ impl ValueColumn {
             Codes::I64(v) => int_range!(v, i64),
             Codes::F32(v) => float_range!(v, f32),
             Codes::F64(v) => float_range!(v, f64),
-            Codes::Text { .. } => Bitmap::new(),
         }
     }
 
@@ -1071,91 +987,7 @@ impl ValueColumn {
             Codes::I64(v) => int_in!(v, i64),
             Codes::F32(v) => float_in!(v),
             Codes::F64(v) => float_in!(v),
-            Codes::Text { .. } => Bitmap::new(),
         }
-    }
-
-    /// Entities whose UTF-8 value equals any of `needles`, restricted to `candidate`.
-    ///
-    /// **`in` is `eq` over a list**, and that generalisation is not category-only: a string's
-    /// values are compared for equality exactly as a category's codes are, so set membership means
-    /// the same thing over both families. What differs is only what a value *is*.
-    ///
-    /// One pass with a sorted needle list, for the reason [`Self::scan_in`] gives: a per-needle
-    /// loop would make the running time proportional to how many needles *match*, which is the
-    /// channel this module's candidate-first discipline exists to deny.
-    pub fn scan_text_in(&self, candidate: &Bitmap, needles: &[String]) -> Bitmap {
-        let wanted = ByteSet::new(needles.iter().map(|n| n.as_bytes()));
-        self.walk_text(candidate, |v| wanted.contains(v))
-    }
-
-    /// Entities whose UTF-8 value starts with `prefix`, restricted to `candidate`.
-    ///
-    /// The FST an inverted design needed here existed to walk *distinct values in order*, which is
-    /// only necessary when a prefix has to be turned into a set of value identifiers to look up.
-    /// Testing a stored value directly needs no ordering at all.
-    pub fn scan_text_prefix(&self, candidate: &Bitmap, prefix: &str) -> Bitmap {
-        let prefix = prefix.as_bytes();
-        self.walk_text(candidate, |v| v.starts_with(prefix))
-    }
-
-    /// Entities whose UTF-8 value contains `needle`, restricted to `candidate`.
-    ///
-    /// **This is why substring matching stopped needing a trigram index.** A trigram conjunction
-    /// returns a *superset* that must be verified against the stored value, and the cut to issue #44
-    /// was made because a filter-only attribute had no route to that value. The value column is that
-    /// route, and with it the verification step *is* the whole operation — there is nothing left for
-    /// the trigram index to accelerate that the budget does not already afford.
-    pub fn scan_text_contains(&self, candidate: &Bitmap, needle: &str) -> Bitmap {
-        let needle = needle.as_bytes();
-        let Codes::Text { bytes, offsets } = &self.codes else {
-            return Bitmap::new();
-        };
-        // The empty needle is contained in every value, so there is nothing to search for; the
-        // per-value walk answers it without a special case in the loop below.
-        if needle.is_empty() {
-            return self.walk_text(candidate, |_| true);
-        }
-
-        // **A contiguous run's values are adjacent bytes, so the search runs over the region rather
-        // than over each value.** The per-value loop was spending its time on memory rather than
-        // comparison — measured, a contiguous candidate's cost is ~80% inner loop and ~10% cache
-        // misses, the reverse of the scattered case — and searching the concatenation amortises the
-        // scan across every value in the run at SIMD throughput. Measured at 10⁸: 11.4 → 1.7 ns per
-        // candidate entity on a 25% candidate, and 15.9 → 7.5 ns for a needle a quarter of the
-        // values contain (probe arm 12).
-        //
-        // This is a property of the *candidate's* run structure, not of the values: a scattered
-        // candidate degenerates to one value per run and takes the same per-value path it always
-        // did. Nothing here depends on what is being sought.
-        let finder = memchr::memmem::Finder::new(needle);
-        let mut hits = Hits::new();
-        self.for_each_slot_run(candidate, self.codes.len(), |slot0, count, entity0| {
-            if count == 1 {
-                let (lo, hi) = (offsets[slot0] as usize, offsets[slot0 + 1] as usize);
-                if finder.find(&bytes[lo..hi]).is_some() {
-                    hits.push(entity0);
-                }
-                return;
-            }
-            search_region(
-                &finder,
-                needle.len(),
-                bytes,
-                offsets,
-                slot0,
-                count,
-                entity0,
-                &mut hits,
-            );
-        });
-        hits.finish()
-    }
-
-    /// The UTF-8 value an entity carries, or `None` where it carries none or the column is numeric.
-    pub fn text_of(&self, entity: u32) -> Option<&str> {
-        self.slot_of(entity)
-            .and_then(|slot| self.codes.text_at(slot))
     }
 
     fn slot_of(&self, entity: u32) -> Option<usize> {
@@ -1183,6 +1015,27 @@ impl ValueColumn {
             Codes::U16(v) => self.walk_typed(candidate, v, |x| u32::from(*x) == w),
             Codes::U32(v) => self.walk_typed(candidate, v, |x| *x == w),
             // Only a category has a code, and a category is one of the three widths above.
+            _ => Bitmap::new(),
+        }
+    }
+
+    /// Entities of `candidate` whose ordinal is in `set` — the `contains` routes' second stage.
+    ///
+    /// **Separate from [`Self::scan_in`] because the two have different callers and only one of
+    /// them may use a sorted list.** `scan_in` serves an `in` operand, where *k* is the number of
+    /// values the caller typed and `O(log k)` per slot is priced for eight of them. Both `contains`
+    /// routes hand their stage a set whose size is a property of the *corpus*: the broad route's is
+    /// every dictionary key carrying the substring, measured at 22,500 on one real column, and it
+    /// counts keys no visible entity carries. Testing that with a binary search would make the
+    /// scan's per-slot cost a function of the needle against the whole vocabulary — a fragment
+    /// statistic in the timing, which is the class records §4.3 refuses postings for. A table over
+    /// the ordinal domain answers in O(1) per slot and is the same size whatever matched.
+    ///
+    /// A layer whose codes are not `u32` is not a keyword layer; the fail-closed reading is that
+    /// nothing matches, as every other ordinal path here reads it.
+    pub fn scan_ordinal_set(&self, candidate: &Bitmap, set: &CodeSet) -> Bitmap {
+        match &self.codes {
+            Codes::U32(v) => self.walk_typed(candidate, v, |x| set.contains(*x)),
             _ => Bitmap::new(),
         }
     }
@@ -1233,10 +1086,7 @@ impl ValueColumn {
     /// (`filter-index.md` §9), and why substring matching needs no trigram index to verify against.
     pub fn value_of(&self, entity: u32) -> Option<AttrLocalId> {
         let slot = self.slot_of(entity)?;
-        match &self.codes {
-            Codes::Text { .. } => None,
-            codes => Some(AttrLocalId::new(codes.at(slot))),
-        }
+        Some(AttrLocalId::new(self.codes.at(slot)))
     }
 
     /// The column's values, in slot order — what the write side slices when it merges layers, and
@@ -1385,7 +1235,7 @@ impl Access {
 /// is no bundle that holds a multi-batch value column: the writer emits one batch, and pre-release
 /// there is no past to be compatible with (decision 0048).
 fn read_values(path: &Path, access: Access) -> io::Result<Codes> {
-    use arrow::array::{Array, LargeStringArray};
+    use arrow::array::Array;
     use arrow::datatypes::DataType;
 
     let buffer = if let Some(sequential) = access.mapped() {
@@ -1461,31 +1311,6 @@ fn read_values(path: &Path, access: Access) -> io::Result<Codes> {
         DataType::Int64 => borrow!(arrow::array::Int64Array, Codes::I64),
         DataType::Float32 => borrow!(arrow::array::Float32Array, Codes::F32),
         DataType::Float64 => borrow!(arrow::array::Float64Array, Codes::F64),
-        DataType::LargeUtf8 => {
-            let a = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "value column at {}: the batch disagrees with the schema's type",
-                            path.display()
-                        ),
-                    )
-                })?;
-            // The offsets and the bytes are the array's own buffers, so a text column maps exactly
-            // as a numeric one does. `LargeStringArray` validated UTF-8 on construction, which is
-            // what lets `text_at` slice by offset without a second validation pass — it still
-            // *checks* the conversion, because a corrupt file must fail closed on a request path
-            // rather than reinterpret bytes.
-            let offsets: ScalarBuffer<i64> = a.offsets().clone().into_inner();
-            Codes::Text {
-                bytes: a.values().clone(),
-                offsets,
-            }
-        }
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1572,20 +1397,6 @@ mod tests {
             .is_empty());
     }
 
-    fn text_column(values: &[&str]) -> ValueColumn {
-        ValueColumn::universal(Codes::text(values.iter().map(|s| s.to_string())))
-    }
-
-    #[test]
-    fn a_string_column_answers_equality_without_a_dictionary() {
-        let column = text_column(&["smith", "smythe", "smith", "jones"]);
-        let hits = column.scan_text_eq(&candidate(0..4), "smith");
-        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
-    }
-
-    /// Prefix needs no FST: the FST existed to order *distinct values* so a prefix could be turned
-    /// into a set of identifiers to look up, and nothing here looks a value up.
-    /// `in` over strings is `eq` over a list — the same generalisation a category gets.
     fn num_column(codes: Codes) -> ValueColumn {
         ValueColumn::universal(codes)
     }
@@ -1801,15 +1612,6 @@ mod tests {
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 4]);
     }
 
-    /// A range over a text column matches nothing rather than comparing an offset to a bound.
-    #[test]
-    fn a_range_on_text_matches_nothing() {
-        let column = text_column(&["1", "2"]);
-        assert!(column
-            .scan_range(&candidate(0..2), Some(at(0, true)), Some(at(9, true)))
-            .is_empty());
-    }
-
     #[test]
     fn numeric_set_membership_is_exact() {
         let column = num_column(Codes::I64(vec![1, 2, 3].into()));
@@ -1818,146 +1620,6 @@ mod tests {
             &[Scalar::Int(1), Scalar::Int(3), Scalar::Int(99)],
         );
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
-    }
-
-    #[test]
-    fn a_string_column_answers_set_membership() {
-        let column = text_column(&["smith", "smythe", "jones", "smith"]);
-        let hits = column.scan_text_in(
-            &candidate(0..4),
-            &[
-                "smith".to_string(),
-                "jones".to_string(),
-                "absent".to_string(),
-            ],
-        );
-        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2, 3]);
-    }
-
-    /// A **code**-valued set predicate over a text column matches nothing: the two `in` spellings
-    /// do not cross, because a text column has no code to compare.
-    #[test]
-    fn a_code_set_predicate_on_text_matches_nothing() {
-        let column = text_column(&["1", "2"]);
-        assert!(column
-            .scan_in(
-                &candidate(0..2),
-                &[AttrLocalId::new(1), AttrLocalId::new(2)]
-            )
-            .is_empty());
-    }
-
-    #[test]
-    fn a_string_column_answers_prefix_without_an_fst() {
-        let column = text_column(&["smith", "smythe", "smote", "jones"]);
-        let hits = column.scan_text_prefix(&candidate(0..4), "sm");
-        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
-        assert!(column.scan_text_prefix(&candidate(0..4), "zz").is_empty());
-    }
-
-    /// Substring was cut to #44 because a trigram conjunction returns a superset needing
-    /// verification against the stored value, and a filter-only attribute had no route to that
-    /// value. The value column is that route, and the verification step is the whole operation.
-    #[test]
-    fn a_string_column_answers_substring_without_a_trigram_index() {
-        let column = text_column(&["blacksmith", "smythe", "goldsmith", "jones"]);
-        let hits = column.scan_text_contains(&candidate(0..4), "smith");
-        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![0, 2]);
-    }
-
-    /// **A value's bytes are concatenated with its neighbours', and a match must not span them.**
-    /// The predicate sees one value's slice, so "bc" cannot be found across "ab" ++ "cd" — the case
-    /// a mis-sliced offset pair would produce, silently and with plausible-looking results.
-    #[test]
-    fn a_substring_does_not_match_across_two_values() {
-        let column = text_column(&["ab", "cd", "bc"]);
-        assert_eq!(
-            column
-                .scan_text_contains(&candidate(0..3), "bc")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![2],
-            "only the value that actually contains it"
-        );
-        assert_eq!(
-            column
-                .scan_text_prefix(&candidate(0..3), "bc")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![2]
-        );
-    }
-
-    /// The text predicates compare **bytes**, which agrees with the `str` semantics they replaced
-    /// because UTF-8 is self-synchronising — no valid needle can match starting inside a character.
-    /// Multi-byte values are where a byte comparison would show it if that reasoning were wrong.
-    #[test]
-    fn multibyte_values_compare_by_bytes_and_agree_with_str() {
-        let column = text_column(&["naïve", "日本語", "naive", "café"]);
-        let all = candidate(0..4);
-
-        assert_eq!(
-            column
-                .scan_text_eq(&all, "naïve")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![0],
-            "the two-byte ï does not equate to the one-byte i"
-        );
-        assert_eq!(
-            column
-                .scan_text_prefix(&all, "na")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![0, 2]
-        );
-        assert_eq!(
-            column
-                .scan_text_contains(&all, "本")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![1],
-            "a multi-byte needle inside a multi-byte value"
-        );
-        assert_eq!(
-            column
-                .scan_text_in(&all, &["café".into(), "日本語".into()])
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-        // The empty needle is contained in everything, as `str::contains` also holds.
-        assert_eq!(column.scan_text_contains(&all, "").cardinality(), 4);
-    }
-
-    /// The needle set buckets on a value's first byte, so the empty string — which has none — is
-    /// the case that has to be carried separately, and a corpus may legitimately hold it (an empty
-    /// string is a value; absence is a null, which `an_absent_string_is_not_an_empty_string`
-    /// covers).
-    #[test]
-    fn a_needle_set_handles_the_empty_string_and_repeats() {
-        let column = text_column(&["", "a", "bb", ""]);
-        let all = candidate(0..4);
-
-        assert_eq!(
-            column
-                .scan_text_in(&all, &["".into(), "bb".into()])
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![0, 2, 3],
-            "the empty needle matches the empty values and nothing else"
-        );
-        assert!(
-            column
-                .scan_text_in(&all, &["a".into(), "a".into()])
-                .iter()
-                .eq([1]),
-            "a repeated needle is one needle"
-        );
-        assert!(
-            column.scan_text_in(&all, &[]).is_empty(),
-            "no needle, no match"
-        );
     }
 
     /// The code table is built over the column's declared width, so its extremes must be members
@@ -2134,151 +1796,6 @@ mod tests {
         );
     }
 
-    /// The same boundaries on the text walker, which has its own accumulator call sites.
-    #[test]
-    fn a_text_result_is_complete_across_the_fold_boundary() {
-        let n: u32 = (CHUNK as u32) + 500;
-        let column = ValueColumn::universal(Codes::text((0..n).map(|e| {
-            if e % 3 == 0 {
-                "hit".into()
-            } else {
-                "miss".into()
-            }
-        })));
-        let mut all = Bitmap::new();
-        all.add_range(0..n);
-        all.run_optimize();
-
-        let hits = column.scan_text_eq(&all, "hit");
-        assert_eq!(hits.cardinality(), u64::from(n.div_ceil(3)));
-        assert!(hits.contains(CHUNK as u32 - (CHUNK as u32 % 3)));
-        assert_eq!(hits.maximum(), Some((n - 1) - ((n - 1) % 3)));
-
-        // A prefix every value shares is the text column's dense case.
-        let all_hit = column.scan_text_prefix(&all, "");
-        assert_eq!(all_hit.cardinality(), u64::from(n));
-    }
-
-    /// **The region search must agree with a per-value definition**, over candidate shapes that
-    /// exercise its two moving parts: the cursor that maps a match back to the value it fell in, and
-    /// the boundary test that discards a match spanning two values. The expectation is a literal
-    /// per-value `contains`, not another route through the same code.
-    #[test]
-    fn the_region_search_agrees_with_a_per_value_definition() {
-        // Values chosen so the concatenation manufactures substrings none of them contain: "ab" ++
-        // "ba" reads as "abba", and repeats put the needle in one value twice.
-        let corpus: Vec<String> = (0..500)
-            .map(|i| match i % 7 {
-                0 => "ab".into(),
-                1 => "ba".into(),
-                2 => "xabx".into(),
-                3 => "abab".into(), // two occurrences in one value
-                4 => "".into(),
-                5 => "zzzz".into(),
-                _ => format!("q{i}ab"),
-            })
-            .collect();
-        let column = ValueColumn::universal(Codes::text(corpus.iter().cloned()));
-        let n = corpus.len() as u32;
-
-        let shapes: [(&str, &[(u32, u32)]); 4] = [
-            ("all", &[(0, n)]),
-            ("one run, offset start", &[(3, n - 3)]),
-            ("many runs", &[(0, 10), (11, 12), (13, 100), (150, n)]),
-            ("alternating singles", &[(0, 1), (2, 3), (4, 5), (6, 7)]),
-        ];
-        for needle in ["ab", "abba", "zz", "q", "nowhere", "abab"] {
-            for (shape, runs) in shapes {
-                let mut candidate = Bitmap::new();
-                for &(lo, hi) in runs {
-                    candidate.add_range(lo..hi);
-                }
-                candidate.run_optimize();
-
-                let want: Vec<u32> = candidate
-                    .iter()
-                    .filter(|&e| corpus[e as usize].contains(needle))
-                    .collect();
-                assert_eq!(
-                    column.scan_text_contains(&candidate, needle).to_vec(),
-                    want,
-                    "needle {needle:?} / {shape}"
-                );
-            }
-        }
-    }
-
-    /// A value holding the needle more than once is one entity, not several — the region search
-    /// sees every occurrence and `Hits` requires strictly ascending entities.
-    #[test]
-    fn a_repeated_needle_records_its_entity_once() {
-        let column = text_column(&["aaaa", "b", "aa"]);
-        let hits = column.scan_text_contains(&candidate(0..3), "a");
-        assert_eq!(hits.to_vec(), vec![0, 2]);
-        assert_eq!(
-            hits.cardinality(),
-            2,
-            "each entity once, however many matches"
-        );
-    }
-
-    /// The mask still goes in first for text, by the same shared walker every other family uses.
-    #[test]
-    fn the_candidate_bounds_a_text_result() {
-        let column = text_column(&["a", "a", "a", "a"]);
-        let hits = column.scan_text_prefix(&candidate([1, 3]), "a");
-        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![1, 3]);
-    }
-
-    /// A string column's absent values are its presence bitmap's business, exactly as a
-    /// category's are — there is no in-band empty-string sentinel, because the empty string is a
-    /// value a corpus may legitimately hold.
-    #[test]
-    fn an_absent_string_is_not_an_empty_string() {
-        let column = ValueColumn::partial(
-            Codes::text(["".to_string(), "x".to_string()]),
-            candidate([5, 9]),
-        )
-        .unwrap();
-        assert_eq!(column.text_of(5), Some(""));
-        assert_eq!(column.text_of(7), None);
-        // Entity 5 holds the empty string and matches an empty-prefix test; entity 7 holds no
-        // value and matches nothing at all.
-        let hits = column.scan_text_prefix(&candidate(0..10), "");
-        assert_eq!(hits.iter().collect::<Vec<_>>(), vec![5, 9]);
-    }
-
-    /// A numeric predicate against a text column matches nothing rather than comparing an offset
-    /// to a code.
-    #[test]
-    fn a_numeric_predicate_on_text_matches_nothing() {
-        let column = text_column(&["1", "2"]);
-        assert!(column
-            .scan_eq(&candidate(0..2), AttrLocalId::new(1))
-            .is_empty());
-        assert_eq!(column.value_of(0), None);
-    }
-
-    #[test]
-    fn a_text_column_round_trips_through_its_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let values = dir.path().join("values.arrow");
-        let presence = dir.path().join("presence.roaring");
-        let codes = Codes::text(["alpha".to_string(), "".to_string(), "gamma".to_string()]);
-        write_value_column(&values, &presence, &codes, None).unwrap();
-        let column = ValueColumn::open(&values, None, Access::Read).unwrap();
-        assert_eq!(column.text_of(0), Some("alpha"));
-        assert_eq!(column.text_of(1), Some(""));
-        assert_eq!(column.text_of(2), Some("gamma"));
-        assert_eq!(
-            column
-                .scan_text_contains(&candidate(0..3), "amm")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![2]
-        );
-    }
-
     #[test]
     fn a_column_round_trips_through_its_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -2301,11 +1818,10 @@ mod tests {
         assert_eq!(dense.value_of(5), None);
     }
 
-    /// The mapped column and the read one must answer identically, for **every** family — the
+    /// The mapped column and the read one must answer identically, for **every** width — the
     /// engine maps and the tests mostly read, so a divergence would be invisible until it was
-    /// served. Text is the case worth naming: its bytes and offsets are two separate buffers
-    /// borrowed from the same array, so a column that mapped its bytes and copied its offsets (or
-    /// the reverse) would read plausible values at the wrong boundaries rather than fail.
+    /// served. The failure this catches is a width whose mapped buffer is sliced at the wrong
+    /// stride: it reads plausible values at the wrong slots rather than failing.
     #[test]
     fn mapping_a_column_and_reading_it_answer_identically() {
         let dir = tempfile::tempdir().unwrap();
@@ -2316,10 +1832,6 @@ mod tests {
             ("u32", Codes::U32(vec![5, 6, 7, 5].into())),
             ("i64", Codes::I64(vec![-9, 0, 1 << 40, 3].into())),
             ("f64", Codes::F64(vec![-1.5, 0.0, 2.25, 9.0].into())),
-            (
-                "text",
-                Codes::text(["alpha", "", "gamma", "alpha"].map(String::from)),
-            ),
         ] {
             let values = dir.path().join(format!("{name}.arrow"));
             write_value_column(&values, &presence, &codes, None).unwrap();
@@ -2330,11 +1842,6 @@ mod tests {
 
             for slot in 0..4u32 {
                 assert_eq!(
-                    mapped.text_of(slot),
-                    read.text_of(slot),
-                    "{name}: text at {slot}"
-                );
-                assert_eq!(
                     mapped.value_of(slot),
                     read.value_of(slot),
                     "{name}: value at {slot}"
@@ -2344,11 +1851,6 @@ mod tests {
                 mapped.scan_range(&all, None, None).cardinality(),
                 read.scan_range(&all, None, None).cardinality(),
                 "{name}: an unbounded range covers the same slots"
-            );
-            assert_eq!(
-                mapped.scan_text_prefix(&all, "alph").to_vec(),
-                read.scan_text_prefix(&all, "alph").to_vec(),
-                "{name}: prefix"
             );
         }
     }

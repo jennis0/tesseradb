@@ -34,14 +34,17 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fs;
 use std::path::Path;
 
+use croaring::Bitmap;
+
 use tessera_spatial::tiler::ScalarType;
 use tessera_types::{IdentityKey, TesseraId, ROW_ABSENT};
 
 use crate::coalesce::{merge_runs, open_runs};
 use crate::error::{Result, StoreError};
-use crate::flush::{digest_of, FlushOutput};
+use crate::flush::{digest_of, write_render_presence, FlushOutput};
 use crate::manifest::{LocatorExtent, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
+use crate::render_presence::RENDER_PRESENCE_DIR;
 use crate::segment_cursor::{gather_scalars, SegmentCursor};
 use crate::write::{SegmentRow, SegmentWriter};
 
@@ -290,6 +293,12 @@ pub fn execute_merge(
         }
     }
 
+    // Where each input's rows land in the merged segment — `new_row_of[index][old_row]`, filled as
+    // rows are emitted. Its cost is 4 B per merged row in total, the same order as `extent_rows`
+    // above, which is what makes materialising it affordable *here* and not in the fold (whose
+    // span is the whole corpus; see `fold_row_space`).
+    let mut new_row_of: Vec<Vec<u32>> = cursors.iter().map(|c| vec![0u32; c.rows]).collect();
+
     let mut row_count: usize = 0;
     while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
@@ -318,6 +327,7 @@ pub fn execute_merge(
         // The extent is filled as rows are emitted, so it needs no companion permutation of the
         // entity axis: the merged row *is* the emission ordinal.
         extent_rows[(entity.raw() - entity_lo) as usize] = row_count as u32;
+        new_row_of[index][row] = row_count as u32;
         row_count += 1;
 
         cursor.row += 1;
@@ -326,6 +336,50 @@ pub fn execute_merge(
         }
     }
     writer.finish().map_err(io)?;
+
+    // ---- the render columns' presence, permuted (decision 0064) ------------------------------
+    //
+    // **A merge permutes row space within the merged span**, so an input's bitmap carried across
+    // unchanged describes rows that have moved — and it fails *open*: wherever a present row's old
+    // index lands on an absent row's new one, an item with no value starts matching a range
+    // containing zero again. `RenderPresence::permuted` is the operation that answers that, driven
+    // by the mapping the emission loop just recorded.
+    //
+    // Skipped entirely for a column no input has a file for, which is every category (its absence
+    // is the reserved code 0, in the column) and every column with no absence anywhere.
+    let mut presence_written: Vec<&str> = Vec::new();
+    for (name, _) in spec.scalar_schema {
+        if !cursors
+            .iter()
+            .any(|cursor| cursor.columns.presence(name).bitmap().is_some())
+        {
+            continue;
+        }
+        let mut present = Bitmap::new();
+        for (index, cursor) in cursors.iter().enumerate() {
+            // Indexing `map` by an input row is in range because `ColumnsRef::load` refuses a
+            // bitmap naming a row at or past its segment's row count, and every input row is
+            // emitted — a merge drops none.
+            let map = &new_row_of[index];
+            let presence = cursor.columns.presence(name);
+            match presence.bitmap() {
+                // No file means every row of *this* input carries a value, and each contributes
+                // its new row. Permuting cannot say that: an all-present bitmap permutes to
+                // all-present, which adds nothing to a union and would leave every one of this
+                // input's rows absent in the merged segment.
+                None => present.add_many(map),
+                Some(_) => {
+                    if let Some(moved) = presence.permuted(|old| map[old as usize]).bitmap() {
+                        present.or_inplace(moved);
+                    }
+                }
+            }
+        }
+        if write_render_presence(&out_dir, name, present, row_count as u32)?.is_some() {
+            presence_written.push(name);
+        }
+    }
+
     // The inputs' mappings go before the coalesce and the digests below, which read whole files:
     // holding *k* segment mappings across work that does not need them is the one place this
     // function could reintroduce a resident term it just removed.
@@ -350,6 +404,10 @@ pub fn execute_merge(
         "ext-locator.u32",
     ] {
         files.insert(rel(name), digest_of(&out_dir.join(name))?);
+    }
+    for column in presence_written {
+        let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
+        files.insert(rel(&name), digest_of(&out_dir.join(&name))?);
     }
 
     Ok(FlushOutput {
@@ -381,4 +439,179 @@ pub fn execute_merge(
         watermark: spec.watermark,
         entity_id_high_water: spec.entity_id_high_water,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_spatial::tiler::ScalarValue;
+    use tessera_types::EntityId;
+
+    use crate::flush::{write_flush_segment, FlushInput, FlushRow};
+    use crate::manifest::Quantisation;
+    use crate::read::{ColumnsRef, ScalarSlice};
+
+    const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
+
+    fn schema() -> [(String, ScalarType); 1] {
+        [("score".to_string(), ScalarType::I32)]
+    }
+
+    /// Write one input segment. Items are laid out along x alone, so Morton order is x order and a
+    /// fixture can say exactly which rows the merge will interleave.
+    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f32, ScalarValue)]) -> MergeInput {
+        let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
+        let flush_rows: Vec<FlushRow> = rows
+            .iter()
+            .map(|(entity, x, score)| FlushRow {
+                entity_id: EntityId::new(*entity),
+                external_id: Some(format!("e-{entity}").into_bytes()),
+                x: *x,
+                y: 0.0,
+                scalars: vec![score.clone()],
+            })
+            .collect();
+        write_flush_segment(
+            dir,
+            "p",
+            "s",
+            FlushInput {
+                seg_id,
+                rows: flush_rows,
+                quantisation: Quantisation {
+                    x_min: 0.0,
+                    x_max: 1.0,
+                    y_min: 0.0,
+                    y_max: 1.0,
+                },
+                identity_key: &key,
+                shard_id: 0,
+                scalar_schema: &schema(),
+                row_base: 0,
+            },
+        )
+        .expect("flush");
+        MergeInput {
+            seg_id: seg_id.to_string(),
+            entity_lo: rows[0].0,
+            entity_hi: rows[rows.len() - 1].0,
+        }
+    }
+
+    /// **The merge trap, on a permutation that is not its own inverse.**
+    ///
+    /// The two inputs interleave in Morton space, so input A's rows 0..4 land at merged rows
+    /// 0, 2, 4 and 6. A's row 1 carries no score, which the merged segment holds at row 2 — and A's
+    /// *row 2* does carry one. A bitmap carried across the merge unchanged therefore says row 2 is
+    /// present, which is the fail-open direction: an item with no value starts matching a range
+    /// containing zero again, which is the defect decision 0064 exists to fix arriving by another
+    /// route.
+    ///
+    /// Input B has no absence and so no file of its own, which is the other half of the operation:
+    /// its rows must come out present, and they can only do so by being added — permuting an
+    /// all-present bitmap yields all-present, which contributes nothing to the union.
+    #[test]
+    fn a_merge_permutes_each_input_bitmap_onto_the_rows_its_values_moved_to() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = segment(
+            dir.path(),
+            "seg-a",
+            &[
+                (0, 0.00, ScalarValue::I32(11)),
+                (1, 0.20, ScalarValue::Null),
+                (2, 0.40, ScalarValue::I32(13)),
+                (3, 0.60, ScalarValue::I32(14)),
+            ],
+        );
+        let b = segment(
+            dir.path(),
+            "seg-b",
+            &[
+                (4, 0.10, ScalarValue::I32(21)),
+                (5, 0.30, ScalarValue::I32(22)),
+                (6, 0.50, ScalarValue::I32(23)),
+                (7, 0.70, ScalarValue::I32(24)),
+            ],
+        );
+        let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
+        let out = execute_merge(
+            dir.path(),
+            "p",
+            "s",
+            MergeSpec {
+                seg_id: "seg-m",
+                inputs: &[a, b],
+                identity_key: &key,
+                shard_id: 0,
+                scalar_schema: &schema(),
+                row_base: 0,
+                watermark: 8,
+                entity_id_high_water: 8,
+            },
+        )
+        .expect("merge");
+        assert_eq!(out.segment.row_count, 8);
+
+        let merged = dir.path().join("partitions/p/slices/s/segments/seg-m");
+        let columns = ColumnsRef::load(&merged.join("columns.arrow")).expect("columns");
+        let ScalarSlice::I32(scores) = columns.scalar("score").expect("score column") else {
+            panic!("score is declared i32");
+        };
+        assert_eq!(
+            scores,
+            [11, 21, 0, 22, 13, 23, 14, 24],
+            "the fixture must interleave, or the permutation this test is about is the identity"
+        );
+
+        let presence = columns.presence("score");
+        assert!(
+            !presence.contains(2),
+            "row 2 is the item with no score; carried across the merge unpermuted the bitmap \
+             would call it present, and it would match a range containing zero"
+        );
+        assert!(
+            (0..8)
+                .filter(|&row| row != 2)
+                .all(|row| presence.contains(row)),
+            "every other row carries a value, input B's included — and B has no bitmap of its own"
+        );
+        assert!(out
+            .files
+            .contains_key("partitions/p/slices/s/segments/seg-m/presence/score.roaring"));
+    }
+
+    /// A merge whose inputs have no absence between them writes no bitmap, exactly as a flush with
+    /// none does: the file's absence is the representation of "every row", not a missing artefact.
+    #[test]
+    fn a_merge_of_columns_with_no_absence_writes_no_bitmap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = segment(dir.path(), "seg-a", &[(0, 0.00, ScalarValue::I32(11))]);
+        let b = segment(dir.path(), "seg-b", &[(1, 0.50, ScalarValue::I32(21))]);
+        let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
+        let out = execute_merge(
+            dir.path(),
+            "p",
+            "s",
+            MergeSpec {
+                seg_id: "seg-m",
+                inputs: &[a, b],
+                identity_key: &key,
+                shard_id: 0,
+                scalar_schema: &schema(),
+                row_base: 0,
+                watermark: 2,
+                entity_id_high_water: 2,
+            },
+        )
+        .expect("merge");
+
+        let merged = dir.path().join("partitions/p/slices/s/segments/seg-m");
+        assert!(!merged.join(RENDER_PRESENCE_DIR).exists());
+        assert!(!out
+            .files
+            .keys()
+            .any(|rel| rel.contains(RENDER_PRESENCE_DIR)));
+        let columns = ColumnsRef::load(&merged.join("columns.arrow")).expect("columns");
+        assert!((0..2).all(|row| columns.presence("score").contains(row)));
+    }
 }

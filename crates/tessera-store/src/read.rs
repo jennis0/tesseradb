@@ -35,6 +35,7 @@ use tessera_types::{IdentityKey, BUNDLE_FORMAT};
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
+use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
 
 /// One loaded (partition, slice) pair: the row space addressing its rows, and every segment
 /// in that slice — a build writes exactly one (contracts §2.1's "one segment per
@@ -517,6 +518,33 @@ fn open_prefix(
                 &manifest.files,
                 &columns_path,
             )?;
+            // `ColumnsRef::load` reads every presence bitmap beside the column, so each one has to
+            // pass the same membership rule the two files above do. Driven off the directory rather
+            // than off the manifest because it is what the loader will *read* that must have been
+            // verified — a bitmap dropped in beside a segment, naming rows no digest covers, is
+            // exactly what this half of the check exists to refuse.
+            let presence_dir = seg_dir.join(RENDER_PRESENCE_DIR);
+            if presence_dir.is_dir() {
+                let entries =
+                    std::fs::read_dir(&presence_dir).map_err(|source| StoreError::Io {
+                        path: presence_dir.clone(),
+                        source,
+                    })?;
+                for entry in entries {
+                    let entry = entry.map_err(|source| StoreError::Io {
+                        path: presence_dir.clone(),
+                        source,
+                    })?;
+                    let rel = format!(
+                        "partitions/{}/slices/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
+                        partition_desc.phash,
+                        seg_desc.slice,
+                        seg_desc.seg_id,
+                        entry.file_name().to_string_lossy()
+                    );
+                    ensure_verified(&rel, &segments_manifest, &manifest.files, &entry.path())?;
+                }
+            }
 
             let morton = MortonSlice::load(&morton_path)?;
             let columns = ColumnsRef::load(&columns_path)?;
@@ -1230,6 +1258,13 @@ impl ScalarSlice<'_> {
 pub struct ColumnsRef {
     batch: RecordBatch,
     scalar_index: HashMap<String, usize>,
+    /// One entry per scalar column whose segment holds a presence bitmap (decision 0064). A column
+    /// with no entry is every-row-present, and [`ColumnsRef::presence`] hands back
+    /// `all_present` for it rather than an `Option`, so no caller branches on which it got.
+    presence: HashMap<String, RenderPresence>,
+    /// The value every column without a file resolves to. Held rather than constructed per call
+    /// because the accessor lends a reference.
+    all_present: RenderPresence,
     /// The mapping `batch`'s buffers point into, kept only so [`ColumnsRef::advise_sequential`] has
     /// something to advise: the `Arc` is already captured as each `Buffer`'s allocation, and there
     /// is no way back to it from a `RecordBatch`. A second reference count, no second mapping.
@@ -1273,7 +1308,7 @@ impl ColumnsRef {
         let batch = decode_single_batch(&buffer, path)?;
         validate_schema(&batch, path)?;
 
-        let scalar_index = batch
+        let scalar_index: HashMap<String, usize> = batch
             .schema_ref()
             .fields()
             .iter()
@@ -1282,9 +1317,42 @@ impl ColumnsRef {
             .map(|(idx, field)| (field.name().clone(), idx))
             .collect();
 
+        // The bitmaps beside the column, one per scalar column that has one. Read here rather than
+        // on demand so that a damaged one refuses at open, with every other malformation of this
+        // segment, instead of at the first request that filters on it.
+        let segment_dir = path.parent().unwrap_or(Path::new("."));
+        let mut presence = HashMap::new();
+        for name in scalar_index.keys() {
+            let bitmap_path = render_presence_path(segment_dir, name);
+            if bitmap_path.exists() {
+                let loaded = RenderPresence::load(&bitmap_path)?;
+                // A bit past this segment's last row is a bitmap belonging to some other segment —
+                // the shape a merge or a carry-forward produces when it moves a file without
+                // permuting it — and it fails open: rows this segment does hold read as present
+                // because the bits describing them landed elsewhere. Refused here, where the row
+                // count is known, rather than at the scan, which sees only a `contains`.
+                let rows = batch.num_rows() as u32;
+                if loaded
+                    .bitmap()
+                    .and_then(|b| b.maximum())
+                    .is_some_and(|max| max >= rows)
+                {
+                    return Err(StoreError::MalformedBundle {
+                        detail: format!(
+                            "{}: presence bitmap names a row at or past this segment's {rows}",
+                            bitmap_path.display()
+                        ),
+                    });
+                }
+                presence.insert(name.clone(), loaded);
+            }
+        }
+
         Ok(ColumnsRef {
             batch,
             scalar_index,
+            presence,
+            all_present: RenderPresence::all_present(),
             mapping: arc,
         })
     }
@@ -1367,6 +1435,23 @@ impl ColumnsRef {
             DataType::Timestamp(TimeUnit::Microsecond, None) =>
                 (TimestampUs, TimestampMicrosecondArray),
         })
+    }
+
+    /// Which of this segment's rows carry a value for `column` — decision 0064's bitmap, read from
+    /// `presence/<column>.roaring` beside `columns.arrow`.
+    ///
+    /// **A column with no file is every row present**, and that is an answer rather than a
+    /// missing artefact: the common column has no absences and costs no bytes, so this returns
+    /// [`RenderPresence::all_present`] for it and a caller never learns which it got. An unknown
+    /// column name resolves the same way, because a column that is not in the tail has no row
+    /// whose value could be absent.
+    ///
+    /// A **category** never has a file: its vocabulary reserves code 0 out of the value space, so
+    /// its absence is in the column itself (per-point-attributes §3.6). The row-space scan reads a
+    /// category's absence from that code and a number's from here, and those are the only two
+    /// rules.
+    pub fn presence(&self, column: &str) -> &RenderPresence {
+        self.presence.get(column).unwrap_or(&self.all_present)
     }
 }
 

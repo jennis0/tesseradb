@@ -57,13 +57,24 @@ Then, depending on what you are after:
 - **How concurrency and deletion work.** [`concurrency-lifecycle.md`](concurrency-lifecycle.md) —
   generations, retention, the removal rules (Rule S / Rule F), the write-ahead log — and
   [`write-path.md`](write-path.md) for the write path end to end.
+- **What a per-item field is, and where it lives.** [`records-and-search.md`](records-and-search.md)
+  — the five families, the `type`/`render`/`index`/`multi` declaration, and the rule that every
+  declared field has exactly one home: the hot column, its family's entity-space structure, or the
+  record blob. [`per-point-attributes.md`](per-point-attributes.md) owns the category, its
+  vocabulary and its disclosure controls.
 - **How filtering works.** [`filter-index.md`](filter-index.md) for the attribute artefact the
   operands read, and [`filter-surface.md`](filter-surface.md) for what a query does with it. Both are
-  provisional, and the **category and string families are built** end to end — value column, masked
-  scan, boolean composition (decision 0062), the viewport operand, and a conformance differential
-  that covers I12's mask half. Numeric ranges, ingest and the fold are not. `per-point-attributes.md`
-  covers the `render` placement.
+  provisional, and **every shipped family is built** end to end — value column and masked scan for
+  categories, strings and numerics, boolean composition (decision 0062), the viewport operand, the
+  per-flush extent with its coalesce and the fold's attribute pass, and a conformance differential
+  that covers I12's mask half. **Text joined them** — a token index, `match`, and a fold that merges
+  its layers. Lists are not.
 - **How any of it is checked.** [`conformance.md`](conformance.md).
+- **How fast it is, and how that is known.** [`measurement.md`](measurement.md) owns the benchmark
+  suite's axes, denominators and reporting conventions;
+  [`performance-suite.md`](performance-suite.md) applies them to the per-item surface — what the
+  record blob, the row-space route and the keyword family must measure, and what fails when a
+  budget is crossed.
 - **How a client talks to it.** [`client-interaction.md`](client-interaction.md) and its children.
 
 Supporting evidence — the prior-art survey behind "no existing technology can replace this build",
@@ -94,9 +105,11 @@ architecture design.
 | [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |
 | [`write-path.md`](write-path.md) | Normative | The write path end to end: ingest, the commit window, the WAL, flush, the deny lifecycle, merge, and where compaction will sit. Absorbed `flush-and-merge.md` (deleted 2026-08-04) and the write-path halves of the lifecycle and system-architecture designs; its §13 is the map of what moved |
 | [`compaction.md`](compaction.md) | Normative | The fold: what retires at it, what it carries forward, the prefix rewrite and the `CURRENT` flip, reclamation, and the schedule that dispatches it. Answers write-path §8's obligation list, and is **built** — the deferred staging list (§6.2) and §6.1's two page-cache hints are what is not |
-| [`filter-index.md`](filter-index.md) | Provisional | The attribute artefact behind §8.2: a flat entity-indexed value column scanned under the candidate mask, with per-value Roaring postings derived over it for categories, and its build, ingest and fold lifecycle. **Categories and strings are built**; numerics, ingest extents and the fold are not, and are marked at each claim |
+| [`filter-index.md`](filter-index.md) | Provisional | The attribute artefact behind §8.2: a flat entity-indexed value column scanned under the candidate mask, with per-value Roaring postings derived over it for categories, and its build, ingest and fold lifecycle. **Built for every shipped family**, read path and write side alike, text included; lists are not, and are marked at each claim |
 | [`filter-surface.md`](filter-surface.md) | Provisional | What a query does with that artefact: operand evaluation under the composed candidate, boolean composition, the entity→row step, and the counts a filter may produce. **Built** through `/v1/viewport`'s `filters` and `/v1/meta`'s operand list. §4's shared projection cache is superseded and retained only as a record |
+| [`records-and-search.md`](records-and-search.md) | Provisional | The general per-item data model: five type families (number, datetime, category, keyword, text), the `type`/`render`/`index`/`multi` declaration that replaced the placement set, the three-home storage rule with the record blob, the keyword and text index mechanisms, the icu4x analyser, staged masked scoring and phrase, and multi-valued fields. **Its first three epics are built** — the declaration, the record blob, the render-column route (§2, §3, §6.2), the keyword family in place of `utf8` (§4.3), and the text family end to end: the icu4x analyser, the token index through all three producers, and `match` (§4.4, decision 0070). Exact phrase, multi-value and scoring are not, in that order (§13). r7, reviewed, all rulings made (decisions 0067–0070) |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
+| [`performance-suite.md`](performance-suite.md) | Provisional | The per-item surface's performance suite: `records-and-search.md` §6.4's budget table as the index, the read and write arms that discharge it, layer count as an axis, and the gates. **Nothing in it is built**, and its audit finds two of §6.4's eleven rows carrying an engine-level figure, none carrying one at 10⁹ |
 | [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
 | [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |
 | [`inventory.md`](inventory.md)(inventory.md) | Generated | Every invariant and leak-register row, so a change to either is a one-line diff |

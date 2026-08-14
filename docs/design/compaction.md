@@ -17,7 +17,7 @@ extents (r21, decision 0051). **The §5/§6 re-review ran at r5 and is
 dispositioned**, and its findings changed both sections: §5's retirement rule tests the whole
 carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), and §6.2's refusal
 window is gone — a fold's aftermath is a cache miss, not a refusal (decision 0053), which also
-retires §6.3. **The fold is built and scheduled** (2026-08-07): the plan, the dedicated thread, all five passes,
+retires §6.3. **The fold is built and scheduled** (2026-08-07): the plan, the dedicated thread, every pass,
 the publication in §4's order, retirement's `executed` derivation, reclamation, and §9's trigger as
 decision 0056 rules it — a nightly gated window and four any-hour gauges. **An adversarial round has
 run against the implementation** (r10, three lenses; dispositioned in the body) and found no
@@ -52,7 +52,7 @@ lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048, 0
 and are cited from elsewhere as `compaction §n`.
 
 **The fold runs**, and everything in §1–§5 and §8 is description. `tessera-engine::compact` holds
-the plan and the five passes; `Executor::publish_fold` holds the publication, retirement's
+the plan and the passes; `Executor::publish_fold` holds the publication, retirement's
 derivation and the reclamation; and all four trigger routes spec §9's schedule specifies, beside
 `Engine::request_fold` for a caller that wants one now, which `POST /control/compact` calls. Both
 pre-flight refusals are built (spec §3, §8), and so is the startup sweep that reclaims a discarded
@@ -98,7 +98,7 @@ construction.
 
 ```mermaid
 flowchart TD
-  A["plan on the executor:<br/>name the files, clone the tombstone set"] --> B["execute on one dedicated thread:<br/>five streaming passes into a new prefix"]
+  A["plan on the executor:<br/>name the files, clone the tombstone set"] --> B["execute on one dedicated thread:<br/>the streaming passes into a new prefix"]
   B --> C["publish on the executor:<br/>hard-link carry-forwards, MANIFEST,<br/>SEGMENTS-n, flip CURRENT"]
   C --> D["one swap: new prefix, new postings,<br/>new identity, retirement, re-derived deny mask"]
   D --> E["post-swap refresh, MRU order —<br/>a cache miss, never a refusal (spec §6)"]
@@ -131,7 +131,10 @@ plan-time-clone hazard applies here identically and at greater cost.
 | **live segments** (base + extents) | folded into one segment per partition-slice | post-snapshot segments carried forward, re-based |
 | **delta tiers** | folded into the new base postings | post-snapshot tiers carried forward, listed |
 | **external-id runs + locator extents** | folded into one run 0 and one locator **bounded at the snapshot's entity space** (spec §3, pass 3) | post-snapshot runs carried forward, recency order preserved |
-| **dictionary extents** | — | carried forward **verbatim** (spec §3, pass 4) |
+| **dictionary extents** | — | carried forward **verbatim** (spec §3, pass 4b) |
+| **attribute extents** (`attr_extents`) | **all** folded into one new base column per declared filter column, `D₀`'s slots blanked and the derived postings rebuilt from the folded column (`filter-index.md` §6.2) | the flight's carried forward and listed |
+| **record-blob extents** (`record_extents`) | **all** folded into one new base blob, `D₀`'s rows emitting no bytes (`records-and-search.md` §7) | the flight's carried forward, all three files linked |
+| **text extents** (`text_extents`) | **all** merged with the base into one token dictionary and one postings file, `D₀` subtracted per term and a term whose every carrier was blanked dropped (`records-and-search.md` §4.4) | the flight's carried forward, all three files linked |
 | `deleted` | `D₀` **executed**: its rows dropped, its postings dropped, its keys dropped | `executed ⊆ D₀` retires; `live deleted − executed` published as `tombstones` |
 | `suppressed` | untouched — rows and postings stay (Rule S) | the **live** set, serialised fresh, copied forward whole |
 | ingest buffer, WAL | untouched | untouched |
@@ -153,7 +156,7 @@ reason three of the four carried categories exist at all.
 directions are separate mistakes with the same shape, and both have been made in this codebase's
 flush path before the rebase rule fixed it (write-path §4.4).
 
-## 3. Execution: five streaming passes
+## 3. Execution: the streaming passes
 
 **On one dedicated thread, not the shared compute pool.** Flush, merge and coalesce run on
 `Engine`'s single rayon pool — the same pool a viewport's tile loop installs onto — and that is
@@ -348,7 +351,32 @@ turn a re-ingest of that external id into a **409**, refusing a user's write and
 decision 0047 directly. The fold therefore drops the retired entities' keys here **and** removes
 them from the live external-id map at the swap; either alone leaves the other path answering.
 
-### Pass 4 — the dictionary
+### Pass 4a — the attribute artefacts
+
+**Three shapes, and each is where a deleted item's *data* leaves the corpus** — the passes above
+take its row, its authorisation postings and its external id, and none of them touches an attribute
+value. `filter-index.md` §6.2 and `records-and-search.md` §7 own the detail; what belongs here is
+that the pass exists, that it runs on the fold's own thread inside the same window, and that it
+executes exactly `D₀` like every other pass.
+
+- **Value columns.** Base plus every snapshot extent streamed in entity order into one new base,
+  `D₀`'s entities removed from presence and their value bytes never written, and a category's
+  postings rebuilt whole from the folded column. A keyword column folds through its own variant,
+  its dictionary rebuilt from the survivors and its ordinals renumbered against it — a key whose
+  only carrier was blanked leaves the corpus.
+- **The record blob.** Rewritten without the blanked entities' rows: *remove, emit no bytes*, so a
+  deleted item's prose is physically absent from the folded artefact rather than merely unreachable.
+- **The text index.** A **merge**, not a rebuild: every layer's token dictionary is walked in one
+  k-way scan, each term's posting is the union across the layers holding it with `D₀` subtracted,
+  and a term whose every carrier was blanked is written nowhere — not as a key, not as an empty
+  posting. This family owes no value column, so the value-column merge has nothing to take from it.
+
+**Only the fold can do this**, and that is the reason it is a pass rather than an optimisation: a
+deleted entity's row is gone the moment the fold rewrites row space, so its *rendered* value goes
+with it — but a value column is positional and **I9** forbids renumbering the slot away, so an
+entity-space value survives every other pass. This is where those bytes leave.
+
+### Pass 4b — the dictionary
 
 **Carried forward verbatim, hard-linked, never renumbered and never shrunk.** Ordinals are
 positions in the concatenation (contracts §2.4), a session's granted terms are resolved once at
@@ -371,7 +399,7 @@ written until the carry-forward set is known, and that set is live state, decide
 like every other live thing (spec §2). What pass 5 owns is the digests.
 
 **Each digest is taken by reading the file back, and the obvious alternative — hashing as the bytes
-are written — is not available.** None of the five writers the passes compose can offer it: `SegmentWriter`, `RunWriter`, `LocatorWriter` and
+are written — is not available.** None of the writers the passes compose can offer it: `SegmentWriter`, `RunWriter`, `LocatorWriter` and
 `PostingsSpool` all *assemble* their output at `finish` from a spool they map back, and
 `PairsParquetWriter` hands its bytes to an Arrow writer that owns the file. Hashing at the source
 means a hashing wrapper inside each of them, against writers whose byte-identity with the build's is
@@ -662,7 +690,7 @@ over separate copies of one bundle.
 
 What it found first is not about the hint at all: **a real fold costs a concurrent viewport
 1.05–1.18× at the deepest zoom**, about a fifth of P3's 2.03×. A fold is not a streaming reader — it
-interleaves five passes, writes as much as it reads, and spends real time in Roaring and Arrow. P3's
+interleaves its passes, writes as much as it reads, and spends real time in Roaring and Arrow. P3's
 figure is the upper bound it was always described as; this is the operation.
 
 On the hint itself the two pairs disagree about sign at 12–26%, against a `quiet-after` drift that
@@ -1094,7 +1122,7 @@ route off.
 | `tessera-authz` | ✔ the bitmap-shaped `encode_posting` sibling; ✔ pass 2 — `sweep_term_postings`, which hands `pairs.parquet`'s relation to a callback because this crate cannot reach the Parquet writer (see below); ✔ `FragmentCache::rotate` and the identity a `FrozenFragment` carries (spec §4) |
 | `tessera-build` | a consumer of `PairsParquetWriter` now rather than its owner (see the rule below) — still the only crate that *builds* a bundle from source, and still the only Parquet reader |
 | `tessera-lifecycle` | ✔ `Overlay::retire` — Rule F's one route out of `deleted`, with no sibling for `suppressed` (spec §5) |
-| `tessera-engine::compact` | ✔ the plan (`plan_fold`, pure, on the executor — the two pre-flight refusals included, against host figures its caller measures so it stays pure), the five passes (`execute`, on one dedicated thread) and their memory staircase, the next-prefix rule and Rule F's `executed` derivation — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
+| `tessera-engine::compact` | ✔ the plan (`plan_fold`, pure, on the executor — the two pre-flight refusals included, against host figures its caller measures so it stays pure), the passes (`execute`, on one dedicated thread) and their memory staircase, the next-prefix rule and Rule F's `executed` derivation — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
 | `tessera-engine::write` | ✔ `dispatch_fold` (its own thread, and the suspension of merge and coalesce), `publish_fold` (spec §4's seven steps in order), the interval floor's two origins, the deferred reclamation and the startup sweep (spec §7, §8), and the live external-id map's prune, which is the half of Rule F that lives in memory rather than in a file |
 | `tessera-engine::session` | ✔ the seam: `bundle_identity`, the fragment cache and the external-id index onto `Generation`; `GeometryPublication` and its `PrefixRotation`; `publish_rotated_prefix`; the bundle root in place of a captured prefix directory |
 | `tessera-server` | ✔ the schedule's eight `[ingest].compaction_*` keys, parsed into the `CompactionSchedule` the executor reads; ✔ `POST /control/compact` and the `compaction` block on `/control/status` — counters, the last fold's wall clock, its pass staircase, and the trigger's own gauges |
@@ -1523,7 +1551,7 @@ writers; **r11 narrowed it and answered it** (spec §8): the fold syncs what it 
 is the only operation that destroys the fallback the other producers rely on.
 
 **r9 (2026-08-07) — the fold is built, and §1–§5 and §8 become description.** Not a review round.
-The plan, the dedicated thread, all five passes, §4's publication in order, retirement's `executed`
+The plan, the dedicated thread, every pass, §4's publication in order, retirement's `executed`
 derivation and §8's reclamation landed together, because they are one ordering and the fail-open
 lives inside it. Six things this round found or settled that the document did not say:
 
@@ -1538,7 +1566,7 @@ lives inside it. Six things this round found or settled that the document did no
   swap or a lawful re-ingest is refused 409, permanently. §3 pass 3 already said "either alone
   leaves the other path answering" and nothing owned it; it is now at §5 and at the code.
 - **Pass 5 cannot digest as it writes**, and the claim that it does is withdrawn (§3, pass 5). None
-  of the five writers it composes assembles its output before `finish`, so the fold re-reads — which
+  of the writers it composes assembles its output before `finish`, so the fold re-reads — which
   is what `tessera-build` does, and is a stage rather than a rounding error.
 - **The r3 interleaving arises from the tick's own ordering** (§7): a tick dispatches a flush and
   then the fold, so a carried-forward segment's declared range can name a `D₀` entity that has no
@@ -1585,7 +1613,7 @@ generation, closing the deny-publication data-loss path; and §4 step 5's fourth
 `open_written_prefix`, which skips the digest sweep and `validate_rows` and nothing else. Two things
 this round added that §4 did not ask for and both are guards on rules it states: a publication whose
 watermark regresses is refused rather than trusted, and `publish_rotated_prefix` refuses a prefix
-`CURRENT` does not name. **What is still obligation**: everything else — the plan, the five passes,
+`CURRENT` does not name. **What is still obligation**: everything else — the plan, the passes,
 retirement's `executed` derivation, reclamation, the operator surface. §5's route is built; its rule
 is not.
 
@@ -1726,7 +1754,7 @@ Spec §12's test obligations were also missing from r1 and are added.
 ruled at r33. Every obligation §8 accumulated is answered in the body: Rule F's three gaps
 (spec §4), the evaluate-entry descriptor rule (spec §3, pass 2 — since dissolved), the
 post-snapshot deletion (spec §2), the immortal overlay (spec §5), `overlay_soft_limit`'s missing
-lever (spec §9), the dictionary's monotone length (spec §3, pass 4), the never-reused `seg_id`
+lever (spec §9), the dictionary's monotone length (spec §3, pass 4b), the never-reused `seg_id`
 namespace (spec §4), decision 0043 (spec §3's dedicated thread), the carried-forward suppression
 set (spec §2), and I2's forward obligation (spec §11). Not reviewed; the Status line names the
 gate.

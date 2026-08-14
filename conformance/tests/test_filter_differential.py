@@ -151,31 +151,36 @@ def test_the_filter_columns_are_decorrelated_from_the_grant_structure(catalogue_
 def test_meta_publishes_the_filter_operands(catalogue_server):
     """`/v1/meta` must say what each column accepts (contracts §3.2), or a client is left
     inferring the operator table — and a conforming independent implementation could not know
-    which leaf is a `422` before sending it."""
+    which leaf is a `422` before sending it.
+
+    The expected surface lives in **one place**, `oracle.catalogue.filter_operands_expected`,
+    and equality against it is the assertion — so its exactness also pins the absences that
+    matter now: the blob-resident columns (`note`, `pages`) publish no operand, because records
+    §3 gives them no query surface, and the render-only category (`shelf`) is absent until the
+    row-space route lands (records §6.2, decision 0068), at which point that function gains its
+    line and this test follows without an edit here.
+
+    Two of the individual facts the expectation encodes are worth their own words. **The route
+    is invisible on the wire**: `archive` is `public` and `department` is `per_viewer`, so
+    decision 0063 answers the first from its derived postings and the second by scanning — and
+    the published family and operand list are identical for both, because routing is a property
+    of the deployment's declaration, never of the query surface. And a string column's family is
+    `"keyword"` — the type's own name, now that `keyword` is the only declarable string family and
+    the retired `utf8` no longer needs a family word covering both (filter-index §2.6's family
+    table). The name the wire publishes is the name the operand parse accepts, from one derivation,
+    so `/v1/meta` cannot advertise a family a request would be refused for."""
     token = catalogue_server.authorise([])["token"]
     operands = catalogue_server.meta(token)["filter_operands"]
     by_column = {entry["column"]: entry for entry in operands}
+    expected = cat.filter_operands_expected()
 
-    assert set(by_column) == {"department", "archive", "title"}, (
-        f"filter_operands names {sorted(by_column)} — the three declared filter columns, no more "
-        "(fx_key is render-only) and no fewer"
+    assert set(by_column) == set(expected), (
+        f"filter_operands names {sorted(by_column)}, expected {sorted(expected)} — no more "
+        "(render-only and blob-resident columns publish no operand today) and no fewer"
     )
-    assert by_column["department"]["family"] == "category"
-    assert set(by_column["department"]["operands"]) == {"eq", "in"}
-    # **The route is invisible on the wire, and that is the assertion.** `archive` is `public` and
-    # `department` is `per_viewer`, so decision 0063 answers the first from its derived postings and
-    # the second by scanning — and `/v1/meta` publishes the same family and the same operand list
-    # for both. A client cannot see which route it will take, and must not be able to: the routing
-    # is a property of the deployment's declaration, never of the query surface.
-    assert by_column["archive"]["family"] == "category"
-    assert set(by_column["archive"]["operands"]) == {"eq", "in"}
-    # "string", not "utf8": the *type* is `utf8` and the *family* is string (filter-index §2.6's
-    # family table). Contracts §3.2 names the block but not the family spellings, so the design's
-    # family vocabulary is the authority this asserts.
-    assert by_column["title"]["family"] == "string"
-    # `in` is `eq` over a list, which is not a category-only generalisation — a string column
-    # takes it too, and the published list is what the parser holds a client to.
-    assert set(by_column["title"]["operands"]) == {"eq", "in", "prefix", "contains"}
+    for column, (family, operators) in expected.items():
+        assert by_column[column]["family"] == family, column
+        assert set(by_column[column]["operands"]) == set(operators), column
 
 
 # ---------------------------------------------------------------------------------------------
@@ -525,7 +530,7 @@ def test_the_unbuilt_operators_refuse_by_name(catalogue_server, sweep_cases):
     resp = catalogue_server.viewport_request(
         token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"title": {"match": "smith"}}
     )
-    assert resp.status_code == 422, f"match on utf8: {resp.status_code} {resp.text}"
+    assert resp.status_code == 422, f"match on a keyword: {resp.status_code} {resp.text}"
     assert resp.json()["error"] == "contract"
 
 
@@ -617,7 +622,7 @@ def test_an_operator_outside_the_columns_family_refuses(catalogue_server, sweep_
     turns a client typo into a silent "no matches" and contradicts the refusal `match` already
     gets one operator over.
 
-    `in` on a `utf8` column is **no longer an example** of this: `in` is `eq` over a list, which is
+    `in` on a string column is **no longer an example** of this: `in` is `eq` over a list, which is
     not a category-only generalisation, so a string column takes it and the divergence report's
     second case was itself the bug."""
     case = sweep_cases["crossover_below"]

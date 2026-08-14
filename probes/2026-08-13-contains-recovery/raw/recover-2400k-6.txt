@@ -1,0 +1,72 @@
+# contains recovery — 2400000 rows, restart interval 16, median of 3
+
+## id — 2400000 present of 2400000 rows, 2400000 distinct keys, 150000 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 197128 | 11.09 | 31.30 | 16.55 | **1.89×** |
+| 4 | 107455 | 11.09 | 29.56 | 16.30 | **1.81×** |
+| 6 | 1080 | 11.09 | 24.77 | 15.40 | **1.61×** |
+| 8 | 10 | 11.09 | 19.56 | 15.18 | **1.29×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped probe | hoisted probe | probe per distinct | block walk | recovered |
+|---|---|---|---|---|---|---|---|---|
+| 25% contiguous | 600000 | 600000 | 37500 | 81.6 | 69.0 | 72.0 | 18.7 | **4.37×** |
+| 25% stride-4 | 600000 | 600000 | 150000 | 73.2 | 60.2 | 61.6 | 36.7 | **1.99×** |
+
+### ordinal test, ns per candidate slot (the test alone, not the traversal)
+| needle | matching keys | sorted list | domain table | recovered |
+|---|---|---|---|---|
+| 3 B | 197128 | 13.53 | 0.34 | **39.27×** |
+| 6 B | 1080 | 7.53 | 0.37 | **20.30×** |
+
+## submitter — 2399904 present of 2400000 rows, 542489 distinct keys, 33906 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 444 | 17.96 | 43.99 | 26.37 | **1.67×** |
+| 4 | 284 | 17.96 | 45.32 | 25.92 | **1.75×** |
+| 6 | 5 | 17.96 | 41.53 | 25.72 | **1.61×** |
+| 8 | 2 | 17.96 | 37.67 | 25.92 | **1.45×** |
+| 16 | — | — | *no key is long enough* | — | — |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped probe | hoisted probe | probe per distinct | block walk | recovered |
+|---|---|---|---|---|---|---|---|---|
+| 25% contiguous | 599976 | 151821 | 32267 | 145.9 | 124.1 | 36.9 | 25.2 | **5.79×** |
+| 25% stride-4 | 599976 | 278380 | 33905 | 142.7 | 123.9 | 58.6 | 33.0 | **4.32×** |
+
+### ordinal test, ns per candidate slot (the test alone, not the traversal)
+| needle | matching keys | sorted list | domain table | recovered |
+|---|---|---|---|---|
+| 3 B | 444 | 5.41 | 0.38 | **14.26×** |
+| 6 B | 5 | 1.41 | 0.37 | **3.81×** |
+
+## doi — 1026531 present of 2400000 rows, 1024837 distinct keys, 64053 blocks
+
+### broad walk, ns per dictionary key
+| needle bytes | matching keys | decode only | shipped `str::contains` | hoisted `memmem::Finder` | recovered |
+|---|---|---|---|---|---|
+| 3 | 399554 | 12.52 | 19.84 | 17.16 | **1.16×** |
+| 4 | 286679 | 12.52 | 20.33 | 17.27 | **1.18×** |
+| 6 | 234025 | 12.52 | 22.08 | 17.42 | **1.27×** |
+| 8 | 224855 | 12.52 | 22.18 | 17.20 | **1.29×** |
+| 16 | 9055 | 12.52 | 37.05 | 18.55 | **2.00×** |
+
+### narrow probe, ns per candidate entity (dictionary work only)
+| candidate | entities | distinct ordinals | blocks touched | shipped probe | hoisted probe | probe per distinct | block walk | recovered |
+|---|---|---|---|---|---|---|---|---|
+| 25% contiguous | 256632 | 256144 | 22075 | 107.4 | 97.5 | 86.5 | 32.6 | **3.30×** |
+| 25% stride-4 | 256633 | 256518 | 63392 | 111.9 | 111.4 | 92.8 | 58.1 | **1.92×** |
+
+### ordinal test, ns per candidate slot (the test alone, not the traversal)
+| needle | matching keys | sorted list | domain table | recovered |
+|---|---|---|---|---|
+| 3 B | 399554 | 27.72 | 0.35 | **79.46×** |
+| 6 B | 234025 | 20.29 | 0.35 | **57.73×** |
+| 9 B | 224855 | 20.08 | 0.35 | **57.67×** |
+

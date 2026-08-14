@@ -1,0 +1,16 @@
+read 2,400,000 titles, 250,000 abstracts (snapshot order = entity order)
+
+    field      scale  tok/e  ent/e  uni vocab UNI B/e    bi vocab bi sgl   BI B/e  bidic TF B/e POS B/e
+    title    250,000   10.3    9.9     57,033    21.9     617,645  67.1%     60.1   15.3    9.9    10.3
+    title  1,000,000   10.5   10.1    124,758    21.9   1,804,827  64.8%     59.8   10.7   10.1    10.5
+    title  2,400,000   10.8   10.4    269,801    22.6   3,795,775  65.0%     61.7    9.3   10.4    10.8
+ abstract    100,000  128.0   78.4    101,044   139.0   2,097,331  66.2%    518.4  111.8   78.4   140.9
+ abstract    250,000  131.3   80.0    165,520   135.4   3,987,568  63.6%    500.0   82.6   80.0   145.1
+
+UNI B/e = unigram hybrid postings + front-coded dictionary (the shipped-design index).
+BI B/e  = the same pair for token bigrams — option 2's whole additional cost.
+TF B/e  = one u8 term frequency per (term, doc) entry — what a scored match adds.
+POS B/e = exact delta-varint bytes of every token position — option 3's payload, excluding
+          the posting-format change that is its real price.
+Tokeniser is the probe convention (lowercase, [a-z0-9]+): adequate for cost shape on this
+English corpus; vocabulary shape under a UAX#29 segmenter or on a CJK corpus is NOT measured.

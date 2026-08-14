@@ -28,6 +28,13 @@ tessera-lifecycle = { path = "../tessera-lifecycle" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-build = { path = "../tessera-build" }
 tessera-server = { path = "../tessera-server" }
+# `record_blob_ratio` writes and reads the record blob through its own shipped writer and reader
+# rather than a transcription of the format — which is the whole point of measuring the *built*
+# ratio rather than re-measuring the probe. `check-layers.sh`'s deny list forbids
+# `tessera-filter -> tessera-store`, `-> tessera-spatial` and `tessera-filter -> tessera-filter-write`;
+# nothing there constrains this crate, which already sits above every other.
+tessera-filter = { path = "../tessera-filter" }
+tessera-filter-write = { path = "../tessera-filter-write" }
 
 croaring = { workspace = true }
 # Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
@@ -38,6 +45,11 @@ croaring = { workspace = true }
 # and both are transitive dependencies of this crate already.
 tessera-wire = { path = "../tessera-wire" }
 arrow = { workspace = true }
+# `utf8_retirement_fence` searches dictionary keys for a substring, which is the same question the
+# flat column's `scan_text_contains` answers — and it must ask it with the same searcher, or the
+# two sides of that comparison would differ by their string algorithm as well as by their format.
+# `tessera-filter` already takes this exact version for that scan.
+memchr = "2"
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

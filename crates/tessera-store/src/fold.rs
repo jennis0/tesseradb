@@ -133,6 +133,10 @@ pub struct FoldRowSpaceSpec<'a> {
 
 /// What [`fold_row_space`] produced.
 pub struct FoldRowSpaceOutput {
+    /// The render columns this fold wrote a presence bitmap for, in `scalar_schema` order — the
+    /// caller names and digests `presence/<column>.roaring` under the output segment for each.
+    /// Empty where no surviving row is missing a value, which is when no file was written.
+    pub presence_columns: Vec<String>,
     /// Rows actually emitted — every live row minus every tombstoned one. Never assume this
     /// equals any input's row count, or the sum of them minus `tombstones.cardinality()`: an
     /// entity named by `tombstones` that has no row anywhere in `inputs` costs nothing (see the
@@ -189,6 +193,35 @@ pub fn fold_row_space(
     let mut writer = SegmentWriter::create(output_dir, spec.scalar_schema).map_err(columns_io)?;
     let mut permutation =
         PermutationWriter::create(permutation_path, spec.permutation_bound).map_err(perm_io)?;
+
+    // ---- the render columns' presence (decision 0064) ---------------------------------------
+    //
+    // A fold both permutes rows and drops them, so an input's bitmap describes rows that have
+    // moved — and carrying one across unchanged fails *open*, an item with no value matching a
+    // range containing zero again.
+    //
+    // **Accumulated as the rows that are absent, streamed, rather than through
+    // `RenderPresence::permuted`.** Permuting needs the whole old→new mapping materialised, and a
+    // fold's span is the entire row space: that is a second `u32` per row beside `row_entity` and
+    // the mapped permutation, which is exactly the term compaction §3's memory rule keeps out of
+    // this pass. Recording the absences as they are emitted needs no mapping at all, and absence
+    // is the sparse side. The present set is the complement, taken once at the end against the row
+    // count only this loop knows.
+    //
+    // Only columns some input records an absence in are tracked, which is every category excluded
+    // (its absence is the reserved code 0, in the column itself) along with every column that has
+    // no absence anywhere.
+    let mut absent: Vec<(usize, Bitmap)> = spec
+        .scalar_schema
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| {
+            cursors
+                .iter()
+                .any(|cursor| cursor.columns.presence(name).bitmap().is_some())
+        })
+        .map(|(column, _)| (column, Bitmap::new()))
+        .collect();
 
     // The merged order, from a heap over one key per live cursor — identical shape to
     // `execute_merge`'s, and for the same reason: `tessera_id` is a bijection and each live
@@ -248,6 +281,12 @@ pub fn fold_row_space(
             .map_err(columns_io)?;
         permutation.set(entity, row_count).map_err(perm_io)?;
         row_entity.push(entity_u32);
+        for (column, absent_rows) in &mut absent {
+            let (name, _) = &spec.scalar_schema[*column];
+            if !cursors[index].columns.presence(name).contains(row as u32) {
+                absent_rows.add(row_count);
+            }
+        }
         row_count = row_count
             .checked_add(1)
             .ok_or_else(|| StoreError::MalformedBundle {
@@ -257,6 +296,23 @@ pub fn fold_row_space(
 
     let rows = writer.finish().map_err(columns_io)?;
     debug_assert_eq!(rows as u32, row_count);
+
+    // The present set is the complement of what this pass recorded, over the rows it actually
+    // emitted. A column whose absent rows were all dropped by a tombstone has none left and gets
+    // no file — the fold is where a bundle stops paying for an absence nobody can see any more.
+    let mut presence_columns = Vec::new();
+    for (column, absent_rows) in absent {
+        if absent_rows.is_empty() {
+            continue;
+        }
+        let (name, _) = &spec.scalar_schema[column];
+        let mut present = Bitmap::new();
+        present.add_range(0..row_count);
+        present.andnot_inplace(&absent_rows);
+        if crate::flush::write_render_presence(output_dir, name, present, row_count)?.is_some() {
+            presence_columns.push(name.clone());
+        }
+    }
     permutation.finish().map_err(perm_io)?;
     crate::row_entity::write_row_entity(row_entity_path, &row_entity).map_err(|source| {
         StoreError::Io {
@@ -269,5 +325,172 @@ pub fn fold_row_space(
     // parallel is one less thing a reader has to reconcile between the two functions.
     drop(cursors);
 
-    Ok(FoldRowSpaceOutput { row_count })
+    Ok(FoldRowSpaceOutput {
+        row_count,
+        presence_columns,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_spatial::tiler::ScalarValue;
+    use tessera_types::EntityId;
+
+    use crate::flush::{write_flush_segment, FlushInput, FlushRow};
+    use crate::manifest::Quantisation;
+    use crate::read::{ColumnsRef, ScalarSlice};
+    use crate::render_presence::RENDER_PRESENCE_DIR;
+
+    const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
+
+    fn key() -> IdentityKey {
+        IdentityKey::from_hex(KEY_HEX).expect("test key")
+    }
+
+    fn schema() -> [(String, ScalarType); 1] {
+        [("score".to_string(), ScalarType::I32)]
+    }
+
+    /// One input segment, laid out along x alone so that Morton order is x order — which is what
+    /// lets the fixtures below say exactly which row each surviving item lands at.
+    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f32, ScalarValue)]) -> FoldSegmentInput {
+        let flush_rows: Vec<FlushRow> = rows
+            .iter()
+            .map(|(entity, x, score)| FlushRow {
+                entity_id: EntityId::new(*entity),
+                external_id: None,
+                x: *x,
+                y: 0.0,
+                scalars: vec![score.clone()],
+            })
+            .collect();
+        write_flush_segment(
+            dir,
+            "p",
+            "s",
+            FlushInput {
+                seg_id,
+                rows: flush_rows,
+                quantisation: Quantisation {
+                    x_min: 0.0,
+                    x_max: 1.0,
+                    y_min: 0.0,
+                    y_max: 1.0,
+                },
+                identity_key: &key(),
+                shard_id: 0,
+                scalar_schema: &schema(),
+                row_base: 0,
+            },
+        )
+        .expect("flush");
+        FoldSegmentInput {
+            seg_id: seg_id.to_string(),
+            dir: dir.join(format!("partitions/p/slices/s/segments/{seg_id}")),
+        }
+    }
+
+    fn fold(dir: &Path, inputs: &[FoldSegmentInput], tombstones: &Bitmap) -> FoldRowSpaceOutput {
+        let out_dir = dir.join("folded");
+        std::fs::create_dir_all(&out_dir).expect("output dir");
+        fold_row_space(
+            &out_dir,
+            &out_dir.join("permutation.bin"),
+            &out_dir.join("row-entity.u32"),
+            FoldRowSpaceSpec {
+                inputs,
+                identity_key: &key(),
+                shard_id: 0,
+                scalar_schema: &schema(),
+                tombstones,
+                permutation_bound: 8,
+            },
+        )
+        .expect("fold")
+    }
+
+    /// A fold both permutes rows and **drops** them, and the bitmap owes both.
+    ///
+    /// The inputs interleave in Morton space, so segment A's four rows would merge to rows 0, 2, 4
+    /// and 6 — its two valueless items among them, at A's own rows 1 and 3. Tombstoning entity 5
+    /// then takes a row from between those two, so the second lands at row 5 rather than 6. A
+    /// bitmap recorded against input rows names {1, 3}; one permuted without re-counting the drop
+    /// names {2, 6}; the truth is {2, 5}. Each wrong answer calls a row with a value absent and —
+    /// the direction that matters — a valueless row present.
+    #[test]
+    fn a_fold_records_absence_against_the_rows_that_survived_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = segment(
+            dir.path(),
+            "seg-a",
+            &[
+                (0, 0.00, ScalarValue::I32(11)),
+                (1, 0.20, ScalarValue::Null),
+                (2, 0.40, ScalarValue::I32(13)),
+                (3, 0.60, ScalarValue::Null),
+            ],
+        );
+        let b = segment(
+            dir.path(),
+            "seg-b",
+            &[
+                (4, 0.10, ScalarValue::I32(21)),
+                (5, 0.30, ScalarValue::I32(22)),
+                (6, 0.50, ScalarValue::I32(23)),
+                (7, 0.70, ScalarValue::I32(24)),
+            ],
+        );
+        let mut tombstones = Bitmap::new();
+        tombstones.add(5);
+
+        let out = fold(dir.path(), &[a, b], &tombstones);
+        assert_eq!(out.row_count, 7);
+        assert_eq!(out.presence_columns, vec!["score".to_string()]);
+
+        let columns = ColumnsRef::load(&dir.path().join("folded/columns.arrow")).expect("columns");
+        let ScalarSlice::I32(scores) = columns.scalar("score").expect("score column") else {
+            panic!("score is declared i32");
+        };
+        assert_eq!(
+            scores,
+            [11, 21, 0, 13, 23, 0, 24],
+            "the fixture must interleave and lose entity 5, or this is not a test about either"
+        );
+
+        let presence = columns.presence("score");
+        assert!(
+            !presence.contains(2) && !presence.contains(5),
+            "rows 2 and 5 are the valueless items, at the rows the fold left them at"
+        );
+        assert!((0..7)
+            .filter(|row| ![2, 5].contains(row))
+            .all(|row| presence.contains(row)));
+    }
+
+    /// The fold is where a bundle stops paying for an absence nobody can see any more: tombstone
+    /// the valueless item and the surviving rows all carry a value, so no file is written and the
+    /// reader answers "present" for every row of the new segment.
+    #[test]
+    fn a_fold_that_drops_every_absence_writes_no_bitmap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = segment(
+            dir.path(),
+            "seg-a",
+            &[
+                (0, 0.00, ScalarValue::I32(11)),
+                (1, 0.20, ScalarValue::Null),
+            ],
+        );
+        let mut tombstones = Bitmap::new();
+        tombstones.add(1);
+
+        let out = fold(dir.path(), &[a], &tombstones);
+        assert_eq!(out.row_count, 1);
+        assert!(out.presence_columns.is_empty());
+        assert!(!dir.path().join("folded").join(RENDER_PRESENCE_DIR).exists());
+
+        let columns = ColumnsRef::load(&dir.path().join("folded/columns.arrow")).expect("columns");
+        assert!(columns.presence("score").contains(0));
+    }
 }

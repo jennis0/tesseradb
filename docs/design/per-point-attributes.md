@@ -1,21 +1,29 @@
 # Per-point attributes and categories — design
 
 **Date:** 2026-08-02
-**Status:** **Provisional — reviewed, no open decisions.** The `render` placement is **built**
-(2026-08-07): a `schema.toml` compiles into the manifest, both build implementations emit the
-columns, flush, merge and the fold carry them, and `/v1/categories` serves the values a code stands
-for (contracts r25). `listing = "per_viewer"` is **filtered** by §3.3's predicate, against the column's
-per-`(column, code)` membership sets unioned with the value-column extents a flush writes, so the
-disclosure control is enforced in both directions. To become normative: the §6 amendments
-folded into `architecture.md` and `contracts.md` — **read §6 as a status list**, since building the
-render half settled questions this document was written before, and three of its amendments would
-now deliver something decided against. Appendix A's residency *ceiling* is **ruled: there is none**
-(owner, 2026-08-07); §2.3's "it reports; it cannot refuse" therefore stands unqualified.
+**Status:** **Provisional — reviewed, no open decisions.** **A field is declared by a `type` and
+three booleans** — `render`, `index`, `multi`, each defaulting false —
+[`records-and-search.md`](records-and-search.md) §2–§3 being the design that owns the declaration
+and the three homes; this document owns the category, its vocabulary and its disclosure controls.
+`render` and `index` are **built**: a `schema.toml` compiles into the manifest, both build
+implementations emit the columns, flush, merge and the fold carry them, and `/v1/categories` serves
+the values a code stands for (contracts r25). `listing = "per_viewer"` is **filtered** by §3.3's
+predicate, against the column's per-`(column, code)` membership sets unioned with the value-column
+extents a flush writes, so the disclosure control is enforced in both directions. To become
+normative: the §6 amendments folded into `architecture.md` and `contracts.md` — **read §6 as a
+status list**, since building the render half settled questions this document was written before,
+and three of its amendments would now deliver something decided against. Appendix A's residency
+*ceiling* is **ruled: there is none** (owner, 2026-08-07); §2.3's "it reports; it cannot refuse"
+therefore stands unqualified.
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
 Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
-§5.4; `slices-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
+§5.4; [`records-and-search.md`](records-and-search.md) §2–§3, §4.2, §5 (cited as **records §n**);
+`slices-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
 `system-architecture.md` §7; design memo 2026-07-29 (secondary attribute indexing);
-decision [0013](../decisions/0013-mark-specified-vs-implemented.md).
+decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
+[0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
+[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
+[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
 
@@ -23,18 +31,23 @@ cited as **spec §n**.
 
 ## 1. Summary
 
-Per-point data is declared once by what it is **used for** — render, filter, inspect — and the
-system derives where it lives from §10.3's routing principle. The caller never names a placement.
+Per-point data is declared once by what it **is** — a type, and whether it draws on the map and
+whether it is indexed — and the system derives where it lives from §10.3's routing principle. The
+caller never names a placement, and a field that claims neither flag still has a home: the record
+blob (records §3), which is what a drill-down reads.
 
 Categories are the first-class case: a fixed-width code on the hot path, a term posting in entity
 space for filtering and vocabulary visibility, and a vocabulary table carrying presentation. Codes
 are **scattered, not dense** (§3.4), so a visible code is not a lower bound on how many values a
 principal cannot see.
 
-> **The `render` placement is built** (2026-08-07). A `schema.toml` declares columns, the build
-> compiles them into `MANIFEST.declared_scalars` and a `vocabularies` table and emits the tail, and
-> flush, merge and the compaction fold carry it — each taking its writer schema from the manifest
-> rather than from the segment it rewrites. Declared vocabularies work end to end.
+> **The declaration surface is built.** A `schema.toml` declares columns, the build compiles them
+> into `MANIFEST.declared_scalars` — each carrying its `render` and `index` flags — and a
+> `vocabularies` table, and emits the tail; flush, merge and the compaction fold carry it, each
+> taking its writer schema from the manifest rather than from the segment it rewrites. Declared
+> vocabularies work end to end. A column claiming neither flag is **blob-resident**: it occupies no
+> row and no entity-space structure, its values live in the record blob under `attrs/record/`, and
+> drill-down returns them beside the values the other two homes hold (records §3).
 >
 > **Discovered vocabularies are built too** ([#82], 2026-08-07). A value the corpus supplies and no
 > author declared acquires a scattered code — drawn from the declared width's unused space, recorded
@@ -56,31 +69,33 @@ principal cannot see.
 >
 > **Vocabulary visibility is built.** §3.3's predicate runs against the per-value member sets — a
 > postings artifact keyed by `(column, code)`, measured at 0.31–1.01× the column it indexes, which a
-> `per_viewer` category gets whatever its `used_for` says — unioned with the value-column extents a
+> `per_viewer` category gets whatever its flags say — unioned with the value-column extents a
 > flush writes, so a value carried only by entities ingested since the build is still offered.
 > `listing` is enforced in both directions: `public` publishes as authored, `per_viewer` is filtered
 > per principal, and a column whose member sets cannot be read is refused rather than served empty,
 > which would be indistinguishable from a correctly-computed empty answer.
 >
-> **⊘ Specified, not implemented.** *`filter`:* §8.3's
-> postings; *`inspect`:* §10.3's cold sidecar, whose slot's first occupant — the external-ID store —
-> is explicitly transitional; and *multi-valued attributes* (§3.7): each declarable and each
-> **refused at parse**.
+> **⊘ Specified, not implemented: `multi = true`** (§3.7, records §5) — declarable and **refused at
+> parse**, naming the epic that lifts it. `inspect` is gone as a placement rather than deferred:
+> §10.3's per-interaction cadence is served by the record blob, so there is nothing left to opt
+> into, and the external-ID store that occupied that slot stays transitional on its own terms
+> (contracts §2.4).
 
 ---
 
-## 2. Declare the use, derive the placement
+## 2. Declare what it is, derive the placement
 
 §10.3 places data by access ratio: per **rendered mark** to a fixed-width hot column; per **query**
-to an entity-space bitmap behind §8.2's filter contract; per **interaction** to a cold sidecar.
-Those three cadences are what a caller already wants to say — **render**, **filter**, **inspect** —
-so an attribute is declared once with a `used_for` set and the placements follow. Entries are
-orthogonal and additive: all three yields a hot column *and* a posting *and* a sidecar row.
+to an entity-space structure behind §8.2's filter contract; per **interaction** to storage a
+drill-down reads and nothing else. Two booleans name the first two cadences — `render = true` and
+`index = true`, orthogonal and additive — and the third needs no word, because a field claiming
+neither flag is already in the record blob, which is exactly the per-interaction home (records
+§2–§3). The caller names no file and no structure; the placement follows.
 
-This corrects a present flaw. Contracts §2.2's `declared_scalars` conflates "per-item column" with
-"on the hot path", so there is no way to declare a field for drill-down only — which per §10.3 is
-where most per-point metadata belongs. The current surface can express only the most expensive
-placement.
+The two words are the whole surface, and `index` is deliberately Elasticsearch's (§4.5): an ES
+reader's expectation of `index: false` — *not searchable, still stored, still returned* — is
+precisely what the blob does here. The one divergence is worth stating rather than discovering: an
+unindexed field feeds no aggregate either, Tessera's aggregates arising only through filters.
 
 ### 2.1 Derive what is cheap to re-derive; declare what is baked into rows
 
@@ -102,7 +117,7 @@ corpus — I9's side of the line.
 | Append a vocabulary value | Safe. New code assigned, never reusing a retired one |
 | Retire a vocabulary value | Safe. Moves to `reserved`, never reassigned |
 | Amend a value's properties | Safe, no rebuild — control-plane upsert (§5) |
-| Add `inspect` or `filter` | Build pass; no row rewrite |
+| Add `index` | Build pass; no row rewrite — a derivation pass over the record blob where the field was blob-resident |
 | Add `render` | Rewrites every segment |
 | Change `width`, reuse a reserved code, change type | **Refused.** Rebuild |
 
@@ -300,8 +315,9 @@ access.
 
 ### 3.7 Single- and multi-valued
 
-**Multi-valued is a slow-path shape**: admissible under `filter` and `inspect`, never under
-`render`. A rendered mark has one colour, so declaring `render` on a multi-valued attribute is
+**Multi-valued is a slow-path shape**: admissible wherever a field does not draw on the map — an
+indexed column or a blob-resident one — and never with `render = true`. A rendered mark has one
+colour, so declaring `render` on a multi-valued attribute is
 refused at parse with that reason — and **no projection, derived value or summary of one earns a
 hot column on its behalf either** (decision [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md)).
 A caller who wants to colour by a value drawn from a multi-valued field declares an ordinary
@@ -319,10 +335,12 @@ so a principal who knows their only visible value on a point and reads that bit 
 point carries at least one value they cannot see — §3.4's property, defeated in item space rather
 than in vocabulary space.
 
-⊘ **Multi-valued attributes are specified and not built.** They are memo §6.2's keyword case —
-postings only, one per (item, value), no fixed width for a column — so deferring them costs no
-format change. `multi = true` is refused at parse. The rule above is stated now so that lifting
-that refusal for `filter` and `inspect` cannot quietly acquire a `render` path.
+⊘ **Multi-valued attributes are specified and not built.** Records §5 is the specification — CSR
+offsets above the presence bitmap, uniformly in every family, and a length-prefixed list in the
+blob row where the field is unindexed — so deferring them costs no format change. `multi = true` is
+refused at parse naming that section and the epic that lifts it; `render` with `multi = true` is
+refused ahead of it naming decision 0039, because that fence survives the epic and a caller who set
+both must hear the permanent refusal rather than the temporary one.
 
 ### 3.8 Listing, and where a gate comes from
 
@@ -392,15 +410,18 @@ published one. Refused at parse.
 per attribute — which for two non-overlapping slices is a mostly-empty rectangle worth real
 gigabytes at 10⁸ + 10⁸ entities. What is shared is attribute-major and sparse, which is what the
 term index already is: vocabulary and postings in entity space, one posting per value; hot columns
-in row space, dense only over a slice's own rows; cold `inspect` data per entity, absent for
-entities carrying none. Slices §51's "shared metadata" therefore means *shared vocabulary and
-postings*, not that every entity has every attribute.
+in row space, dense only over a slice's own rows; blob rows per entity, absent for entities
+carrying no blob-resident field. Slices §51's "shared metadata" therefore means *shared vocabulary
+and postings*, not that every entity has every attribute.
 
-**`render` is per-slice; `filter` and `inspect` are not.** They are entity-space, declared once,
+**`render` is per-slice; `index` and the blob are not.** They are entity-space, declared once,
 applying everywhere. `render` is row-space, so an attribute declared for a document corpus would
 otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor slice — slices §53
-already permits per-slice columns. `render_in` names the slices carrying the column; omitted means
-every slice, which is the expensive default and therefore one the plan step warns about (§2.3).
+already permits per-slice columns. ⊘ **`render_in` is refused at parse**: `MANIFEST.declared_scalars`
+is one flat bundle-wide list, so accepting it would put the column in every slice anyway and
+silently, which is the opposite of what it asks for. Omitting it *is* every slice — the expensive
+default, and the one the plan step warns about (§2.3). Per-slice enumeration needs contracts §2.6
+and belongs with the slices epic (§6).
 
 **Codes are shared across slices**, being vocabulary-scoped and entity-space, so the same code means
 the same key in every slice that renders the attribute. A legend built for one slice is correct for
@@ -430,8 +451,8 @@ paths in the schema**; file locations are CLI bindings (§4.3).
 name       = "severity"
 type       = "category"
 width      = "u8"
-used_for   = ["render", "filter"]
-render_in  = ["docs_2024", "docs_2025"]
+render     = true
+index      = true                     # legal on a category at any flag combination (§3.7, records §4.2)
 vocabulary = "declared"
 listing    = "public"                 # legal: the value set is authored below
 
@@ -446,7 +467,8 @@ listing    = "public"                 # legal: the value set is authored below
 name       = "department"
 type       = "category"
 width      = "u16"
-used_for   = ["render", "filter"]
+render     = true
+index      = true
 vocabulary = "declared"
 values_key = "departments"            # authored, bound at build
 listing    = "per_viewer"
@@ -455,7 +477,7 @@ listing    = "per_viewer"
 name       = "reviewing_department"
 type       = "category"
 width      = "u16"
-used_for   = ["filter"]
+index      = true                     # indexed, never drawn
 vocabulary = "declared"
 values_of  = "department"             # shared keys, codes and properties
 listing    = "per_viewer"             # must match the referent (§3.9)
@@ -463,7 +485,11 @@ listing    = "per_viewer"             # must match the referent (§3.9)
 [[attribute]]
 name       = "ingested_at"
 type       = "timestamp_us"
-used_for   = ["filter"]
+index      = true
+
+[[attribute]]
+name       = "notes"
+type       = "keyword"                # neither flag: blob-resident, returned at drill-down alone
 ```
 
 ```
@@ -476,22 +502,55 @@ tessera build --schema schema.toml \
 
 SA §7's rule governs: *performance knobs default; disclosure controls do not*.
 
-**Required for every attribute:** `name`, `type`, `used_for` (it sets the cost).
+**Required for every attribute:** `name` and `type`, and nothing else — every placement flag
+defaults `false`, which is the cheapest home, made more expensive only by an explicit word.
 
 **Required for `type = "category"`:** `width` (an unsupported migration — §3.6); `listing` (a
 disclosure control, so absence is a build error exactly as `[disclosure]`'s absence is a startup
 error); `vocabulary` (it decides whether `public` is even legal, and a safe default there is a
 decision nobody made).
 
-**Defaulted:** `render_in` = every slice; `multi` = false.
+**Defaulted:** `render`, `index` and `multi`, each `false`.
 
-**Refused at parse:** `render` with `multi = true`, and `multi = true` at all (⊘, §3.7); `render` on
-a non-fixed-width type; `listing = "public"` with `vocabulary = "discovered"`; more than one of
-`[attribute.values]`, `values_key`, `values_of`; code `0` in a `values` block, since it is the
-*absent* sentinel and `low = 0` would make every value-less row a member of `low`; a code appearing
-in both `reserved` and the live set; disagreement with a `values_of` referent on `listing`,
-`vocabulary` or `width`; `inspect` (⊘, §1) and any other unimplemented `used_for` entry, each naming
-itself per decision 0013.
+**A declaration claiming neither flag is legal.** It is blob-resident (records §3):
+no hot-column slot, no entity-space structure, no operand on `/v1/meta`, and its values in the
+record blob for drill-down to return. The old *"a declaration must name a placement"* refusal is
+deleted rather than reworded — it existed because `inspect` had nowhere to put data, and the blob
+is that place.
+
+**Refused at parse**, each naming what is absent per decision 0013:
+
+- `render` with `multi = true` — decision 0039's fence, checked before the next rule so that a
+  caller who set both hears the permanent refusal;
+- `multi = true` at all (⊘, §3.7, records §5);
+- `index` on a **rendered number or datetime** (⊘ — decision 0064's render half). Store-once serves
+  that filter from the hot column, which stores an absent value as zero, so an item with no value
+  would match every range containing zero. `index` alone filters now, against an entity-space
+  column that carries presence; `render` alone draws now;
+- `render` on `keyword`, the one declarable string family (`utf8` is retired as a declared type —
+  `records-and-search.md` §4.3). The refusal is of the *placement*, not of the type: `index = true`
+  puts the string in entity space and costs the hot column nothing. Its storage form *is*
+  fixed-width — a `u32` ordinal — so "not fixed-width" is not the argument. The argument is that the
+  hot column is served: a rendered keyword would put either the value's bytes in every row, at
+  0.93 GiB per byte per row per 10⁹, or an ordinal that is a position in one layer's dictionary and
+  an index internal that never crosses the trust boundary (**I10**);
+- `render_in` (⊘, §3.9);
+- `record` as a column name — `attrs/record/` is the record blob's namespace, so a column of that
+  name would address the blob's files as its own;
+- a column named for a filter combinator — `all_of`, `any_of`, `none_of` — since a filter
+  expression names columns directly (decision 0062), and a column shadowing a fixed, reserved or
+  already-declared name;
+- `width`, `listing`, `vocabulary` or a value set on a non-category, refused rather than ignored: an
+  ignored `listing` is a disclosure control its author believes is set;
+- more than one of `[attribute.values]`, `values_key`, `values_of`; code `0` in a `values` block,
+  since it is the *absent* sentinel and `low = 0` would make every value-less row a member of `low`;
+  a code appearing in both `reserved` and the live set; and disagreement with a `values_of` referent
+  on `listing`, `vocabulary` or `width`.
+
+`listing = "public"` with `vocabulary = "discovered"` is **warned about, not refused** (§3.8, owner
+ruling 2026-08-07). The retired placement key is refused by the parser's unknown-field rule rather
+than aliased to the booleans that replaced it — decision 0048's shape, and the same rule that keeps
+a mistyped `listing` from reading as an absent one.
 
 ### 4.4 Binding vocabulary files
 
@@ -515,7 +574,7 @@ which — and seeded-but-open is still open, so §3.8's rule still forbids `publ
 
 | Convention | Source |
 |---|---|
-| Per-field use flags | Elasticsearch mappings (`index`, `doc_values`, `store`) |
+| Per-field placement booleans, `index` among them by name | Elasticsearch mappings (`index`, `doc_values`, `store`) |
 | *Mappings are immutable; you reindex* | Elasticsearch |
 | Explicit codes in the declaration | ClickHouse `Enum8('low'=1,…)` |
 | `reserved` for retired codes | Protobuf `reserved 3;` |
@@ -589,7 +648,7 @@ describe**. Nothing here is waiting on someone to type it out.
 
 | Amendment | Status |
 |---|---|
-| **contracts §2.2** — `declared_scalars` becomes the compiled per-placement attribute record | **Delivered, narrower** (contracts r22). There is no *per-placement* record: `filter` and `inspect` are refused at parse, so the compiled form is the hot-column list plus a `vocabularies` table. It regains a placement dimension only when a second placement exists |
+| **contracts §2.2** — `declared_scalars` becomes the compiled per-placement attribute record | **Delivered.** Each entry carries `render` and `index`, neither defaulted, and a `vocabularies` table beside them; the two flags are the whole placement, the third home being their joint absence rather than a field (records §3). The blob's own extents are not column-keyed and sit in `record_extents` (contracts §2.3) |
 | **contracts §2.4** — the attribute dictionary namespace and its postings file, and an attribute `dict_extents` counterpart | **Changed, and mostly not needed.** A *category* needs no attribute dictionary: the vocabulary already enumerates every value and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard — an attribute descriptor byte-equal to a satisfied auth descriptor — cannot arise. What §3.3's visibility wants is a postings file keyed by `(column, code)`, sized at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`). A dictionary is for attribute terms that are *not* categories, which nothing declares |
 | **contracts §2.6** — attribute columns and their widths, **per slice** | **Delivered without the per-slice half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-slice declaration would put the column in every slice anyway, silently. Per-slice enumeration belongs with the slices epic, which the roadmap already pairs it with |
 | **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Delivered, less the gate** (contracts r25; the empty-operand rule delivered at r26). The relationship to `/v1/meta` resolves as a **schema/values split**: `/v1/meta` carries the column descriptor and `/v1/categories/{column}` carries the values, in two forms — resolve named codes, or page by value key. That is what answers §3.8's size worry, since the viewer's normal path names the codes it drew and never fetches a set. Visibility is `listing`'s, fail-closed: `public` publishes, `per_viewer` is filtered per principal by §3.3's membership predicate, and a column whose member sets cannot be read is refused rather than served empty. The authored per-value gate (§3.8, C23) is ⊘ unbuilt, so membership-derivation is the only gate a value has. The empty-operand rule belonged to the filter surface and is **delivered** (contracts §3.2 r26, decision 0062): an unknown *value* is an empty operand, where an unknown column — or an operator outside the column's family — is a `422`. The split is which side of the trust boundary the fact sits on |
@@ -609,7 +668,8 @@ describe**. Nothing here is waiting on someone to type it out.
 
 - **No aggregation.** Category counts are C8's existing shape; a breakdown surface is a separate
   design against §8.2.
-- **No multi-valued attributes** (⊘, §3.7) and no cold `inspect` sidecar (⊘, §1).
+- **No multi-valued attributes** (⊘, §3.7). No cold `inspect` sidecar either — the placement is
+  gone rather than deferred, the record blob having taken over §10.3's per-interaction intention.
 - **No server-side multi-slice composition** (§3.9).
 - **No vocabulary cardinality limit.** §3.6's guidance is judgement, not measurement, and §8's
   authorise arm must run before any number becomes a documented limit.
@@ -635,6 +695,19 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-12 — corrected against the built declaration surface.** The placement set this document
+introduced is gone: a field is a `type` and three booleans, `render` and `index` are the two words a
+caller writes, and a declaration claiming neither is **blob-resident** rather than refused. Records
+§2–§3 owns that rule and the three homes; this document keeps the category, its vocabulary and its
+disclosure controls. `inspect` disappears as a placement and not as a capability — §10.3's
+per-interaction cadence is the record blob's, so there is nothing left to opt into. Three claims
+were false against the parser and are now marked at the site: `render_in` is refused rather than
+defaulted (§3.9), `listing = "public"` on a discovered vocabulary warns rather than refuses (§4.3),
+and `index` on a **rendered** number or datetime is admitted, decision 0064's presence bitmap beside the hot column being what the row route needs to tell an absence from a stored zero
+(§4.3) — a combination that worked under the old surface, walked back deliberately, since
+store-once would answer that filter from a hot column storing absence as zero. No rule of this
+design changed.
 
 **2026-08-07 — corrected against the built `render` placement, and against five owner rulings.**
 No rule of this design changed; what changed is which of its claims are still true.

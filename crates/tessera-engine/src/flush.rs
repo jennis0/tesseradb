@@ -46,7 +46,7 @@ use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{BufferedItem, Overlay};
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_store::manifest::{DictExtent, FileDigest, Quantisation};
+use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::{write_flush_segment, FlushInput, FlushRow};
@@ -185,6 +185,14 @@ pub(crate) struct FlushContext {
     /// is the *render* tail the segment writer takes, this one is entity-space and never reaches a
     /// row (per-point-attributes §3.9).
     pub(crate) filter_schema: Vec<FilterColumnSpec>,
+    /// The blob-resident columns — neither indexed nor rendered, and never a category
+    /// (records §4.2) — and where each one's value sits in a buffered row's positional scalar
+    /// list. The third home's schema, beside the other two's.
+    pub(crate) record_schema: Vec<RecordColumnSpec>,
+    /// The indexed `text` columns, each with the analyser its declaration resolved. Separate from
+    /// [`FlushContext::filter_schema`] because a text column has no value column for that pass to
+    /// write — its extent is a dictionary, postings and presence, and nothing per entity.
+    pub(crate) text_schema: Vec<TextColumnSpec>,
     /// The dictionary the plan's terms were resolved against, and the one promotion extends.
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every **extension** term id this plan's items carry (§3.2).
@@ -240,6 +248,18 @@ pub(crate) struct CompletedFlush {
     /// (`filter-index.md` §2.1). Their digests are already in `files`, and each is opened on the
     /// pool so that publication composes a pointer rather than doing file IO on the executor.
     pub(crate) filter_extents: Vec<FlushedExtent>,
+    /// This flush's record-blob extent — the flushed entities' blob rows in their own blocks,
+    /// has-row bitmap and directory (records §7) — or `None` where the schema declares no
+    /// blob-resident column, in which case the file set owes nothing (the set stays a function of
+    /// the schema, index §2.5's property). The three files' digests are already in `files`;
+    /// publication pushes this entry onto the manifest's `record_extents` and nothing more —
+    /// unlike a filter extent, no live reader composes it, because drill-down opens the stack
+    /// from the manifest.
+    pub(crate) record_extent: Option<RecordExtent>,
+    /// This flush's text layers, one per indexed `text` column. Composed onto the live generation
+    /// at publication, exactly as a filter extent is: a `match` over a batch flushed since the
+    /// build must see it without waiting for a fold.
+    pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
@@ -300,8 +320,9 @@ pub(crate) fn execute_flush(
     for (entity, item) in &plan.items {
         let mut scalars = Vec::with_capacity(ctx.render_indices.len());
         // `scalar_schema` is positionally parallel to `render_indices` — both are the render subset
-        // in declaration order — so this zip pairs each value with its own column's type.
-        for (&index, (_, ty)) in ctx.render_indices.iter().zip(&ctx.scalar_schema) {
+        // in declaration order — so this zip takes exactly the render subset's values, in the
+        // order the writer's own schema names them.
+        for (&index, _) in ctx.render_indices.iter().zip(&ctx.scalar_schema) {
             let value = item.scalars.get(index).ok_or_else(|| {
                 FlushFailed(format!(
                     "a buffered row carries {} scalars, but a render column is declared at \
@@ -309,11 +330,13 @@ pub(crate) fn execute_flush(
                     item.scalars.len()
                 ))
             })?;
-            // Non-nullable on the render side (contracts R4): an item that carries no value for
-            // this column is drawn at the type's zero until decision 0064's render half lands. The
-            // *filter* extent written from the same buffered row does record the absence, which is
-            // the narrowing disagreement `or_render_placeholder` documents.
-            scalars.push(to_scalar_value(value).or_render_placeholder(*ty));
+            // **The absence travels, and is not resolved here.** `write_flush_segment` records it
+            // in the column's presence bitmap and only then writes the type's zero into the
+            // non-nullable column (contracts R4, decision 0064) — and it must, because the bitmap
+            // is over rows and the sort that decides them happens inside that call. Substituting
+            // the zero here would leave the writer nothing to tell "scores zero" from "has no
+            // score".
+            scalars.push(to_scalar_value(value));
         }
         rows.push(FlushRow {
             entity_id: *entity,
@@ -382,7 +405,42 @@ pub(crate) fn execute_flush(
     // ---- the filter columns' extents (filter-index §2.1) ------------------------------------
     let filter_extents = write_filter_extents(&plan, &ctx)?;
     for extent in &filter_extents {
-        for rel in [&extent.values_rel, &extent.presence_rel] {
+        // The dictionary is digested with the pair it belongs to, not beside it: a keyword
+        // extent's ordinals cannot be read at all without it, so a bundle whose manifest named the
+        // values and omitted the dictionary would be one this check called complete (records §7).
+        for rel in [&extent.values_rel, &extent.presence_rel]
+            .into_iter()
+            .chain(extent.dict_rel.as_ref())
+        {
+            files.insert(
+                rel.clone(),
+                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+            );
+        }
+    }
+
+    // ---- the record-blob extent (records §7) ------------------------------------------------
+    let record_extent = write_record_extent(&plan, &ctx)?;
+    let text_extents = write_text_extents(&plan, &ctx)?;
+    if let Some(extent) = &record_extent {
+        for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+            files.insert(
+                rel.clone(),
+                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+            );
+        }
+    }
+    // **All three files of every text extent, and the omission was not cosmetic.** A digest is not
+    // only an integrity check here: `publish_fold` carries a flight extent forward by looking its
+    // digest up in the live manifests and *discards the whole fold* when it finds none. So a
+    // deployment with an indexed text column and continuous ingest would have folded, spent minutes
+    // to hours rewriting the corpus, discarded at the last step, left an orphan prefix, and retired
+    // no deletion — for ever, since the next trigger re-plans into the same wall. The three travel
+    // together for the reason the manifest entry states: an extent's postings are positions in its
+    // own dictionary, and its presence is what stops an entity whose prose analysed to no terms
+    // reading as absent.
+    for extent in &text_extents {
+        for rel in [&extent.dict, &extent.postings, &extent.presence] {
             files.insert(
                 rel.clone(),
                 digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
@@ -413,6 +471,8 @@ pub(crate) fn execute_flush(
         locator_extent: out.locator_extent,
         dict_extent,
         filter_extents,
+        record_extent,
+        text_extents,
         files,
         tier,
         tier_path: tier_rel,
@@ -589,12 +649,26 @@ pub(crate) struct FilterColumnSpec {
 }
 
 /// One flush's extent for one column: durable, digested by the caller, and open.
+///
+/// **The three paths travel together because the layer's files must swap atomically** (records §7,
+/// review B2). An extent's ordinals are positions in *that extent's own* dictionary, so a reader
+/// that saw a new dictionary beside old ordinals would recolour the window's values with no error
+/// anywhere. Carrying the dictionary here — rather than letting the publication rediscover it from
+/// a path convention — is what puts all three in one manifest record.
 pub(crate) struct FlushedExtent {
     pub(crate) column: String,
     pub(crate) values_rel: String,
     pub(crate) presence_rel: String,
+    /// The extent's own sorted dictionary — keyword columns only, `None` for every family whose
+    /// values file carries the values themselves.
+    pub(crate) dict_rel: Option<String>,
     /// Opened here on the pool, so publication is a pointer push on the executor thread.
     pub(crate) values: Arc<tessera_filter::ValueColumn>,
+    /// The dictionary those values are ordinals into, opened on the pool for the reason beside
+    /// it — and travelling with them, because an extent's ordinals mean nothing against any other
+    /// dictionary. Publication takes the pair or neither (`filter.rs`'s composition refuses a
+    /// half), which is the in-process half of the atomic swap `AttrExtent` makes on disc.
+    pub(crate) dict: Option<Arc<tessera_filter::SortedDict>>,
 }
 
 /// Write one extent per filterable column, covering exactly the entities this flush publishes.
@@ -607,18 +681,30 @@ pub(crate) struct FlushedExtent {
 /// **A deleted entity is already gone from the plan**, so it acquires no slot here any more than it
 /// acquires a row — which is what keeps write-path §5.4's Rule F the only route by which a deletion
 /// touches an artefact, rather than this pass quietly becoming a second one.
+///
+/// **A keyword's sort and front-code happen here, on the pool, and that placement is load-bearing**
+/// (records §7, review N9; write-path §4.3). This function runs at flush *execution*; the serial
+/// group-commit section write-path §2.3 defines is upstream of it and its latency is shared by
+/// every ingest and every deny in flight. A batch's distinct values are bounded by the batch, and
+/// there is no shared dictionary to promote into — which is what makes the near-unique-string
+/// quadratic hazard (filter-index §5's history) impossible here rather than merely avoided.
 fn write_filter_extents(
     plan: &FlushPlan,
     ctx: &FlushContext,
 ) -> Result<Vec<FlushedExtent>, FlushFailed> {
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
-        let (codes, presence) = extent_values(spec, plan)?;
+        let column = extent_values(spec, plan)?;
         let column_rel = format!("partitions/{}/attrs/{}", ctx.partition, spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
-        let (values_path, presence_path) =
-            tessera_filter::write_extent(&column_dir, &ctx.seg_id, &codes, &presence)
-                .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+            &column_dir,
+            &ctx.seg_id,
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
+        )
+        .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
         // Derived from the paths just written rather than formatted a second time: the manifest
         // names what is on disk, or it names nothing.
         let rel = |path: &PathBuf| -> Result<String, FlushFailed> {
@@ -633,13 +719,29 @@ fn write_filter_extents(
                     ))
                 })
         };
-        let values = tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
-            .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        let values = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Mapped,
+        )
+        .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        let dict = dict_path
+            .as_ref()
+            .map(|path| {
+                tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
+                    .map(Arc::new)
+                    .map_err(|e| {
+                        FlushFailed(format!("keyword dictionary for '{}': {e}", spec.name))
+                    })
+            })
+            .transpose()?;
         out.push(FlushedExtent {
             column: spec.name.clone(),
             values_rel: rel(&values_path)?,
             presence_rel: rel(&presence_path)?,
+            dict_rel: dict_path.as_ref().map(rel).transpose()?,
             values: Arc::new(values),
+            dict,
         });
     }
     Ok(out)
@@ -661,10 +763,10 @@ fn write_filter_extents(
 /// dropped: the commit window narrows a category key to its declared width before the row is
 /// buffered, so a mismatch here is a defect on the write path and not caller input, and filtering
 /// on a value this code invented is worse than not flushing.
-fn extent_values(
+fn extent_values<'a>(
     spec: &FilterColumnSpec,
-    plan: &FlushPlan,
-) -> Result<(tessera_filter::Codes, croaring::Bitmap), FlushFailed> {
+    plan: &'a FlushPlan,
+) -> Result<ExtentColumn<'a>, FlushFailed> {
     use tessera_filter::Codes;
 
     let mut presence = croaring::Bitmap::new();
@@ -694,11 +796,12 @@ fn extent_values(
         ))
     };
 
-    if spec.ty == ScalarType::Utf8 {
-        let mut held: Vec<String> = Vec::with_capacity(entities.len());
+    if spec.ty == ScalarType::Keyword {
+        // The batch's own present values, in entity order — the slot sequence. A keyword arrives
+        // as a string on the wire and in the WAL (records §7): the ordinal is minted below, here,
+        // and exists nowhere upstream of this layer.
+        let mut held: Vec<&str> = Vec::with_capacity(entities.len());
         for (entity, value) in entities {
-            // No slot for an absent value — the k-th set bit's value is at slot k, so a
-            // placeholder here would shift every later entity's string onto its neighbour.
             if matches!(value, WalScalar::Null) {
                 continue;
             }
@@ -706,9 +809,30 @@ fn extent_values(
                 return Err(wrong(value));
             };
             presence.add(entity);
-            held.push(text.clone());
+            held.push(text.as_str());
         }
-        return Ok((Codes::text(held), presence));
+        // **This extent's own dictionary, over this batch alone** (records §7). Its ordinals are
+        // positions in it and are not comparable with the base's or any other extent's; the
+        // coalesce remaps them and the fold rebuilds them from nothing, which is what keeps term
+        // identity layer-scoped and never durable.
+        let mut keys: Vec<&str> = held.clone();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut ordinals = Vec::with_capacity(held.len());
+        for text in held {
+            let ordinal = keys.binary_search(&text).map_err(|_| {
+                FlushFailed(format!(
+                    "column '{}': the value {text:?} is absent from the dictionary built from it",
+                    spec.name
+                ))
+            })?;
+            ordinals.push(ordinal as u32);
+        }
+        return Ok(ExtentColumn {
+            codes: Codes::U32(ordinals.into()),
+            presence,
+            dict_keys: Some(keys),
+        });
     }
 
     if spec.category {
@@ -740,7 +864,7 @@ fn extent_values(
             }
             _ => Codes::U32(held.into()),
         };
-        return Ok((codes, presence));
+        return Ok(ExtentColumn::flat(codes, presence));
     }
 
     // A plain numeric: absent where the item carried no value, present otherwise — the same rule
@@ -785,9 +909,316 @@ fn extent_values(
         ScalarType::F32 => gather!(F32, Codes::F32),
         ScalarType::F64 => gather!(F64, Codes::F64),
         ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
-        ScalarType::Utf8 => unreachable!("utf8 is handled above"),
+        ScalarType::Keyword => unreachable!("a keyword is handled above"),
+        // **Text owes no value column at all**, so it never reaches this gather — its flush extent
+        // is a token dictionary, postings and a presence bitmap, written by `write_text_extents`
+        // on its own track. `filter::owes_value_column` is where that is decided and
+        // `write::filter_schema_of` is what applies it, which is what makes this arm unreachable
+        // rather than a panic waiting for a declaration.
+        ScalarType::Text => unreachable!("text owes no value column, so it has no extent column"),
+        // `utf8` survives as the *wire* type of a keyword's value and of a category's key
+        // (`DeclaredScalar::wire_type`); the schema parse refuses it as a declared type, so no
+        // column's storage is one.
+        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
     };
-    Ok((codes, presence))
+    Ok(ExtentColumn::flat(codes, presence))
+}
+
+/// One column's extent content: the values, the entities that carry one, and the dictionary those
+/// values are ordinals into where the family has one.
+///
+/// A struct rather than a tuple because the third field is only meaningful beside the first: a
+/// keyword's `codes` are positions in `dict_keys` and nothing else, so returning them apart would
+/// invite a caller to write one without the other.
+struct ExtentColumn<'a> {
+    codes: tessera_filter::Codes,
+    presence: croaring::Bitmap,
+    /// Sorted and distinct, `Some` for keyword columns only.
+    dict_keys: Option<Vec<&'a str>>,
+}
+
+impl ExtentColumn<'_> {
+    /// A column whose values file carries the values themselves — every family but keyword.
+    fn flat(codes: tessera_filter::Codes, presence: croaring::Bitmap) -> Self {
+        ExtentColumn {
+            codes,
+            presence,
+            dict_keys: None,
+        }
+    }
+}
+
+/// One blob-resident column, and where its value sits in a buffered row's positional scalar list.
+///
+/// The index is positional against `MANIFEST.declared_scalars` — [`FilterColumnSpec`]'s contract,
+/// for its reason — and it is also the row's **field tag**: the blob's format tags a field by the
+/// column's position in the declaration (records §3), which is the same identity the build's blob
+/// stage writes, so a flushed row and a built one carry one tag for one column.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordColumnSpec {
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) ty: ScalarType,
+}
+
+/// Write this flush's record-blob extent — the flushed entities' blob rows, in their own blocks,
+/// has-row bitmap and directory under `attrs/record/extents/` — or nothing where the schema
+/// declares no blob-resident column (records §7).
+///
+/// **Written whenever the schema owes it, even if no flushed entity carries a blob value**: an
+/// empty extent is a valid blob (zero blocks, zero rows) and costs a few hundred bytes, and the
+/// file set stays a function of the schema rather than of the data — `write_filter_extents`'
+/// property, kept here for the same operator-predictability reason.
+///
+/// **A deleted entity is already gone from the plan**, so its row is never written — which keeps
+/// Rule F the only route by which a deletion touches the blob, exactly as it keeps it the only
+/// route for the value columns. A suppressed entity's row **is** written: the blob must hold what
+/// a later unsuppress reveals, and Rule S forbids this pass any opinion about it.
+///
+/// The extent is reopened before it is named, so a writer defect refuses the flush here rather
+/// than publishing a manifest whose extent the fail-closed reader then refuses on every
+/// drill-down.
+/// One indexed `text` column, for the flush's own pass over it.
+///
+/// The analyser is carried rather than looked up per row: constructing one deserialises the
+/// segmenter's dictionaries, and a flush that built one per value would pay that per value.
+#[derive(Clone)]
+pub(crate) struct TextColumnSpec {
+    /// Position in a buffered row's scalar list.
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) analyser: std::sync::Arc<tessera_analyse::Analyser>,
+}
+
+/// This flush's text layers: per indexed `text` column, its own dictionary over the terms this
+/// batch produced, postings against that dictionary, and the entities it holds a value for.
+///
+/// **Its own dictionary, not the base's** — the ordinals are positions in *this* extent's term set
+/// and name nothing against another's, which is what makes the three files one atomic manifest
+/// record (§7, review B2). A flushed batch is bounded and there is no shared dictionary to promote
+/// into, which is what keeps the near-unique-string quadratic hazard structurally impossible rather
+/// than merely avoided.
+///
+/// **Presence is stored rather than derived from the postings**, because an entity whose text
+/// analyses to no terms at all — an empty string, a field of pure punctuation — carries a value and
+/// appears in no posting. Deriving coverage from the postings would report it absent.
+///
+/// The analysis runs here, at flush execution on the pool (write-path §4.3), and never on the
+/// serial group-commit section whose latency both the ingest and the deny lane share.
+fn write_text_extents(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<Vec<tessera_store::manifest::TextExtent>, FlushFailed> {
+    if ctx.text_schema.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(ctx.text_schema.len());
+    for spec in &ctx.text_schema {
+        let rel_dir = format!(
+            "partitions/{}/attrs/{}/extents",
+            ctx.partition, spec.name
+        );
+        let dir = ctx.prefix_dir.join(&rel_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
+
+        let mut terms: std::collections::BTreeMap<String, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        let mut presence = croaring::Bitmap::new();
+        for (entity, row) in &plan.items {
+            let entity = entity.raw() as u32;
+            let value = row.scalars.get(spec.index);
+            let prose = match value {
+                Some(WalScalar::Utf8(s)) => s.as_str(),
+                // Absence carries no value and no terms; anything else is a buffered row whose
+                // shape disagrees with the declaration, which the flush refuses rather than guesses
+                // at.
+                Some(WalScalar::Null) | None => continue,
+                Some(other) => {
+                    return Err(FlushFailed(format!(
+                        "column '{}' is text but a buffered row carries {other:?}",
+                        spec.name
+                    )))
+                }
+            };
+            presence.add(entity);
+            for token in spec.analyser.tokens(prose) {
+                let postings = terms.entry(token).or_default();
+                if postings.last() != Some(&entity) {
+                    postings.push(entity);
+                }
+            }
+        }
+
+        // **A batch that carried no value for this column publishes no layer at all.** An empty
+        // extent is not free: nothing coalesces text layers, so every one of them survives until
+        // the next fold and every `match` pays a dictionary resolve and a posting read per token
+        // against it — a per-query cost, permanent until compaction, buying an answer that is
+        // always the empty set. Presence is checked rather than the term map, because an entity
+        // whose prose analysed to no terms still carries a value and a layer is owed for it.
+        if presence.is_empty() {
+            continue;
+        }
+
+        let dict_rel = format!("{rel_dir}/{}-dict.bin", ctx.seg_id);
+        let postings_rel = format!("{rel_dir}/{}-postings.arrow", ctx.seg_id);
+        let presence_rel = format!("{rel_dir}/{}-presence.roaring", ctx.seg_id);
+        tessera_filter::write_sorted_dict(
+            &ctx.prefix_dir.join(&dict_rel),
+            terms.keys().map(String::as_str),
+        )
+        .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
+        let per_term: Vec<Vec<u32>> = terms.into_values().collect();
+        tessera_authz::postings::write_postings(
+            &ctx.prefix_dir.join(&postings_rel),
+            &per_term,
+            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        )
+        .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
+        std::fs::write(
+            ctx.prefix_dir.join(&presence_rel),
+            presence.serialize::<croaring::Portable>(),
+        )
+        .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
+
+        out.push(tessera_store::manifest::TextExtent {
+            column: spec.name.clone(),
+            dict: dict_rel,
+            postings: postings_rel,
+            presence: presence_rel,
+        });
+    }
+    Ok(out)
+}
+
+fn write_record_extent(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<Option<RecordExtent>, FlushFailed> {
+    if ctx.record_schema.is_empty() {
+        return Ok(None);
+    }
+    let extents_rel = format!("partitions/{}/attrs/record/extents", ctx.partition);
+    let extents_dir = ctx.prefix_dir.join(&extents_rel);
+    std::fs::create_dir_all(&extents_dir)
+        .map_err(|e| FlushFailed(format!("record extent dir: {e}")))?;
+    let extent = RecordExtent {
+        blocks: format!("{extents_rel}/{}.blocks.bin", ctx.seg_id),
+        hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
+        directory: format!("{extents_rel}/{}.directory.arrow", ctx.seg_id),
+    };
+    let blocks_path = ctx.prefix_dir.join(&extent.blocks);
+    let hasrow_path = ctx.prefix_dir.join(&extent.hasrow);
+    let directory_path = ctx.prefix_dir.join(&extent.directory);
+    let mut writer = tessera_filter_write::RecordBlobWriter::create(
+        &blocks_path,
+        &hasrow_path,
+        &directory_path,
+        tessera_filter::RECORD_BLOCK_TARGET,
+    )
+    .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+
+    let mut fields: Vec<tessera_filter::RecordField> = Vec::with_capacity(ctx.record_schema.len());
+    for (entity, item) in &plan.items {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            FlushFailed(format!(
+                "entity {} does not fit the u32 entity space (I9's ceiling)",
+                entity.raw()
+            ))
+        })?;
+        fields.clear();
+        for spec in &ctx.record_schema {
+            let value = item.scalars.get(spec.index).ok_or_else(|| {
+                FlushFailed(format!(
+                    "a buffered row carries {} scalars, but column '{}' is declared at position {}",
+                    item.scalars.len(),
+                    spec.name,
+                    spec.index
+                ))
+            })?;
+            let Some(value) = record_value_of(value, spec)? else {
+                continue;
+            };
+            let tag = u16::try_from(spec.index).map_err(|_| {
+                FlushFailed(format!(
+                    "column '{}' is declared at position {}, past the u16 field-tag space",
+                    spec.name, spec.index
+                ))
+            })?;
+            fields.push(tessera_filter::RecordField { tag, value });
+        }
+        if fields.is_empty() {
+            // An entity with no blob-resident value has no row and no has-row bit (records §3).
+            continue;
+        }
+        writer
+            .push_row(entity, &fields)
+            .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+    tessera_filter::RecordBlob::open(
+        &blocks_path,
+        &hasrow_path,
+        &directory_path,
+        tessera_filter::Access::Mapped,
+    )
+    .map_err(|e| FlushFailed(format!("record extent does not reopen: {e}")))?;
+    Ok(Some(extent))
+}
+
+/// One buffered value as the blob row carries it, or `None` where the entity carries nothing in
+/// this column — `WalScalar::Null` being the one spelling of absence every non-category family
+/// has (a category is never blob-resident, so its reserved code needs no arm here).
+///
+/// **The declared type is checked, not assumed.** The ingest plane validated the batch against
+/// the declaration, so a mismatch here is a defect on the write path — and storing a value this
+/// code mis-transcribed would serve it at every later drill-down, so it fails the flush exactly
+/// as `extent_values`' `wrong` does.
+fn record_value_of(
+    value: &WalScalar,
+    spec: &RecordColumnSpec,
+) -> Result<Option<tessera_filter::RecordValue>, FlushFailed> {
+    use tessera_filter::RecordValue;
+    let wrong = || {
+        FlushFailed(format!(
+            "column '{}' is declared {:?} but a buffered row carries {value:?}",
+            spec.name, spec.ty
+        ))
+    };
+    macro_rules! expect {
+        ($variant:ident) => {
+            match value {
+                WalScalar::$variant(x) => RecordValue::$variant(*x),
+                WalScalar::Null => return Ok(None),
+                _ => return Err(wrong()),
+            }
+        };
+    }
+    Ok(Some(match spec.ty {
+        ScalarType::Bool => expect!(Bool),
+        ScalarType::U8 => expect!(U8),
+        ScalarType::U16 => expect!(U16),
+        ScalarType::U32 => expect!(U32),
+        ScalarType::U64 => expect!(U64),
+        ScalarType::I8 => expect!(I8),
+        ScalarType::I16 => expect!(I16),
+        ScalarType::I32 => expect!(I32),
+        ScalarType::I64 => expect!(I64),
+        ScalarType::F32 => expect!(F32),
+        ScalarType::F64 => expect!(F64),
+        ScalarType::TimestampUs => expect!(TimestampUs),
+        // **A blob-resident keyword stores its bytes, not an ordinal.** The blob is the values'
+        // only home when a column has no other (records §3), so there is no dictionary beside it
+        // and no layer for an ordinal to be a position in; the row carries what the wire carried,
+        // which is why this shares the arm of `utf8`, that same wire type
+        // (`DeclaredScalar::wire_type`).
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => match value {
+            WalScalar::Utf8(text) => RecordValue::Utf8(text.clone()),
+            WalScalar::Null => return Ok(None),
+            _ => return Err(wrong()),
+        },
+    }))
 }
 
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it
@@ -919,7 +1350,7 @@ mod tests {
 
     fn generation_of(overlay: Overlay, buffer: IngestBuffer) -> Generation {
         let manifest = Manifest {
-            bundle_format: 1,
+            bundle_format: 2,
             created_at: "2026-08-02T00:00:00Z".to_string(),
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),
@@ -1065,5 +1496,204 @@ mod tests {
         let plan = plan(&generation).unwrap();
         let ids: Vec<u64> = plan.items.iter().map(|(e, _)| e.raw()).collect();
         assert_eq!(ids, vec![3, 7, 9]);
+    }
+
+    // ---- the keyword family's extent (records §4.3, §7) ------------------------------------
+
+    /// One item carrying a keyword value, or none at all.
+    fn keyword_item(value: Option<&str>) -> BufferedItem {
+        let mut buffered = item(&[1]);
+        buffered.scalars = vec![match value {
+            Some(text) => WalScalar::Utf8(text.to_string()),
+            None => WalScalar::Null,
+        }];
+        buffered
+    }
+
+    fn keyword_spec() -> FilterColumnSpec {
+        FilterColumnSpec {
+            index: 0,
+            name: "doi".to_string(),
+            ty: ScalarType::Keyword,
+            category: false,
+        }
+    }
+
+    /// The three things one flush's keyword column produces: a sorted, **distinct** dictionary of
+    /// this batch's values, one `u32` ordinal per present entity naming a position in it, and the
+    /// presence bitmap that says which entities those slots belong to.
+    ///
+    /// The repeated value is the point of the fixture: two entities carrying `zeta` share one key
+    /// and one ordinal, which is the interning the family's byte win rests on.
+    #[test]
+    fn a_keyword_extent_interns_its_batchs_values_and_stores_ordinals() {
+        let generation = generation_with(
+            &[
+                (3, keyword_item(Some("zeta"))),
+                (5, keyword_item(Some("alpha"))),
+                (7, keyword_item(None)),
+                (9, keyword_item(Some("zeta"))),
+            ],
+            &[],
+        );
+        let plan = plan(&generation).expect("the batch flushes");
+        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+
+        assert_eq!(
+            column.dict_keys.as_deref(),
+            Some(&["alpha", "zeta"][..]),
+            "sorted and distinct — the writer refuses anything else"
+        );
+        assert_eq!(
+            column.presence.iter().collect::<Vec<_>>(),
+            vec![3, 5, 9],
+            "the entity carrying nothing occupies no slot"
+        );
+        match &column.codes {
+            tessera_filter::Codes::U32(ordinals) => {
+                assert_eq!(
+                    ordinals.as_ref(),
+                    &[1, 0, 1],
+                    "slot k belongs to the k-th set bit: zeta, alpha, zeta"
+                );
+            }
+            other => panic!("a keyword extent stores u32 ordinals, not {other:?}"),
+        }
+    }
+
+    /// **The pair, through the files.** An extent's ordinals are positions in *that extent's own*
+    /// dictionary, so what has to hold is that the two files this flush writes reconstruct the
+    /// values the batch carried — read back through the readers that will serve them.
+    #[test]
+    fn a_keyword_extent_round_trips_through_the_files_it_writes() {
+        let generation = generation_with(
+            &[
+                (3, keyword_item(Some("zeta"))),
+                (5, keyword_item(Some("alpha"))),
+                (7, keyword_item(None)),
+                (9, keyword_item(Some("zeta"))),
+            ],
+            &[],
+        );
+        let plan = plan(&generation).expect("the batch flushes");
+        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+            dir.path(),
+            "flush-1",
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
+        )
+        .expect("the extent writes");
+        let dict_path = dict_path.expect("a keyword extent names a dictionary");
+
+        let values = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Mapped,
+        )
+        .expect("the values reopen");
+        let dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Mapped)
+            .expect("the dictionary reopens");
+        dict.self_check().expect("the dictionary is well formed");
+
+        let mut scratch = Vec::new();
+        for (entity, expected) in [(3u32, Some("zeta")), (5, Some("alpha")), (9, Some("zeta"))] {
+            let ordinal = values
+                .value_of(entity)
+                .expect("a present entity has a slot");
+            assert_eq!(
+                dict.key_of(ordinal.raw(), &mut scratch)
+                    .expect("it decodes"),
+                expected.expect("present"),
+                "entity {entity}"
+            );
+        }
+        assert_eq!(values.value_of(7), None, "the absent entity has no slot");
+    }
+
+    /// **The file set is a function of the schema, not of the batch.** A flush whose items carry no
+    /// value in a keyword column still writes the dictionary — empty — so an operator can predict
+    /// what a flush produces from the manifest alone, and so the manifest record that names all
+    /// three files never names one that is not there.
+    #[test]
+    fn a_keyword_extent_with_no_values_still_writes_an_empty_dictionary() {
+        let generation = generation_with(&[(3, keyword_item(None)), (5, keyword_item(None))], &[]);
+        let plan = plan(&generation).expect("the batch flushes");
+        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+        assert_eq!(column.dict_keys.as_deref(), Some(&[][..]));
+
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let (_, _, dict_path) = tessera_filter::write_extent(
+            dir.path(),
+            "flush-1",
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
+        )
+        .expect("the extent writes");
+        let dict = tessera_filter::SortedDict::open(
+            &dict_path.expect("named even when empty"),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("an empty dictionary opens");
+        assert!(dict.is_empty());
+    }
+
+    /// **Ordinals are per layer**, which is exactly what makes them unusable across layers. Two
+    /// flushes of the same column mint their own numbering over their own batch, so the same
+    /// ordinal names different values in the two — the property the read and lifecycle tracks must
+    /// never assume away, and the reason a layer's files are one manifest record.
+    #[test]
+    fn two_flushes_of_one_column_mint_independent_numberings() {
+        let first = plan(&generation_with(
+            &[
+                (3, keyword_item(Some("alpha"))),
+                (5, keyword_item(Some("zeta"))),
+            ],
+            &[],
+        ))
+        .expect("the first batch flushes");
+        let second = plan(&generation_with(
+            &[
+                (11, keyword_item(Some("zeta"))),
+                (13, keyword_item(Some("omega"))),
+            ],
+            &[],
+        ))
+        .expect("the second batch flushes");
+
+        let spec = keyword_spec();
+        let a = extent_values(&spec, &first).expect("gathers");
+        let b = extent_values(&spec, &second).expect("gathers");
+
+        assert_eq!(a.dict_keys.as_deref(), Some(&["alpha", "zeta"][..]));
+        assert_eq!(b.dict_keys.as_deref(), Some(&["omega", "zeta"][..]));
+        // Ordinal 0 is `alpha` in one layer and `omega` in the other. Resolving the first
+        // extent's ordinals against the second's dictionary would answer `omega` to a scan
+        // looking for `alpha` — a recolouring with no error anywhere, which is why the two
+        // travel in one manifest record and why nothing caches an ordinal across layers.
+        assert_eq!(a.dict_keys.as_deref().unwrap()[0], "alpha");
+        assert_eq!(b.dict_keys.as_deref().unwrap()[0], "omega");
+    }
+
+    /// A dictionary beside anything but an ordinal column is a pair that cannot be read together,
+    /// and the extent writer refuses it rather than leaving a scan to read a `u64` as an ordinal.
+    #[test]
+    fn a_dictionary_beside_a_non_ordinal_column_is_refused() {
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let mut presence = croaring::Bitmap::new();
+        presence.add(3);
+        let error = tessera_filter::write_extent(
+            dir.path(),
+            "flush-1",
+            &tessera_filter::Codes::I64(vec![7i64].into()),
+            &presence,
+            Some(&["alpha"]),
+        )
+        .expect_err("the mismatch is refused");
+        assert!(error.to_string().contains("not u32 ordinals"), "{error}");
     }
 }

@@ -8,7 +8,11 @@ tessera-filter = { path = "../tessera-filter" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-types = { path = "../tessera-types" }
 croaring = { workspace = true }
+# The record blob's writer half (records-and-search §3): the block directory is an Arrow batch
+# and the blocks are zstd frames. The read side lives in `tessera-filter`; this crate is separate
+# for the codegen reason the module doc gives, not because the formats differ.
+arrow = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-arrow = { workspace = true }

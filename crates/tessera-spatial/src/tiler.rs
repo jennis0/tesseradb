@@ -44,18 +44,24 @@ impl ScalarValue {
     /// This value as a **render** column holds it — `columns.arrow`, which is contractually
     /// non-nullable (contracts R4) and has nowhere to put [`ScalarValue::Null`].
     ///
-    /// ⊘ **Absence is lost here, deliberately and visibly.** [Decision 0064] rules that a render
-    /// column records absence in a presence bitmap beside it, exactly as a filter column does, and
-    /// **defers the render half while the client is under active development**: it needs a file, a
-    /// manifest entry, a way for the points batch to say "absent", and a client that understands
-    /// it. Until that lands an absent number is drawn at the type's zero, so the two artefacts
-    /// disagree — the filter says an item has no score while the map draws it at 0. That is a
-    /// *narrowing* disagreement (**I12**: the filter shows fewer items, never more), which is why
-    /// it is a stated residual rather than a blocker.
+    /// **The zero still goes in the column; what changed is that something now records it was a
+    /// substitution.** [Decision 0064] rules that a render column keeps absence in a presence
+    /// bitmap *beside* it — declining the validity buffer precisely so this array stays flat,
+    /// dense and non-nullable — so this substitution is not a loss any more and the call sites
+    /// stay. `tessera_store::render_presence` is the bitmap; every producer of a segment writes it
+    /// beside the column, and the row-space filter route reads it, so an item with no number
+    /// matches no range (the 2026-08-11 defect, closed on this side too).
     ///
-    /// This function is the one place that substitution happens, so the three render paths — the
-    /// linear build, the streaming build and the flush — cannot come to disagree about it, and so
-    /// the render half has one call site to delete when it lands.
+    /// ⊘ **What remains deferred is the wire and the client**: the points batch has no way to say
+    /// "absent", so a client still draws an absent number at the type's zero while the filter
+    /// treats it as having no value. The two artefacts therefore still disagree, in the
+    /// *narrowing* direction (**I12**: the filter shows fewer items, never more), which is why it
+    /// stays a stated residual rather than a blocker. 0064 defers that half while the client is
+    /// under active development, and it is the half this substitution is visible in.
+    ///
+    /// This function is the one place the substitution happens, so the three render paths — the
+    /// linear build, the streaming build and the flush — cannot come to disagree about it, and
+    /// each pairs it with the bitmap write that says which rows it touched.
     ///
     /// [Decision 0064]: ../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md
     pub fn or_render_placeholder(&self, ty: ScalarType) -> ScalarValue {
@@ -75,10 +81,12 @@ impl ScalarValue {
             ScalarType::F32 => ScalarValue::F32(0.0),
             ScalarType::F64 => ScalarValue::F64(0.0),
             ScalarType::TimestampUs => ScalarValue::TimestampUs(0),
-            // Unreachable in practice — `render` on `utf8` is refused at schema parse — and the
-            // empty string rather than a panic, because this function's whole job is to keep a
+            // Unreachable in practice — `render` on a string type is refused at schema parse — and
+            // the empty string rather than a panic, because this function's whole job is to keep a
             // non-nullable column writable.
-            ScalarType::Utf8 => ScalarValue::Utf8(String::new()),
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                ScalarValue::Utf8(String::new())
+            }
         }
     }
 }
@@ -121,6 +129,29 @@ pub enum ScalarType {
     F64,
     TimestampUs,
     Utf8,
+    /// A short string with no vocabulary, matched exactly (`records-and-search.md` §4.3). Its
+    /// *value* is a [`ScalarValue::Utf8`] — the ingest wire carries a keyword as a string and knows
+    /// nothing of the storage — and what the type names is the storage the filter index gives it: a
+    /// per-layer front-coded dictionary of the distinct values, with a `u32` ordinal into it per
+    /// present entity, in place of the flat string column `Utf8` gets.
+    ///
+    /// **There is no `ScalarValue::Keyword`, deliberately.** An ordinal is a position in one
+    /// layer's dictionary and means nothing outside it, so a value in flight — in a points file, in
+    /// a buffered row, in the WAL — has no ordinal to carry and must not appear to. The ordinal is
+    /// minted where the layer is written and nowhere else.
+    Keyword,
+    /// Prose, matched by what it says rather than by its bytes (`records-and-search.md` §4.4).
+    ///
+    /// Its *value* is a [`ScalarValue::Utf8`] for the same reason a keyword's is — the ingest wire
+    /// carries text as a string — and what the type names is the storage: the value lives in the
+    /// record blob whether or not the field is indexed, and `index = true` adds a per-layer token
+    /// dictionary and postings over the terms a **named analyser** produced (decision 0070).
+    ///
+    /// **The analyser is part of the column's declaration, not of this type.** Two `text` columns
+    /// may be analysed differently, and a column's resolved analyser identity is recorded against
+    /// it in the manifest, because an index built by one analyser and queried by another matches
+    /// on precisely the strings whose segmentation differs — with no error anywhere.
+    Text,
 }
 
 impl ScalarType {
@@ -147,6 +178,8 @@ impl ScalarType {
             ScalarType::F64 => "f64",
             ScalarType::TimestampUs => "timestamp_us",
             ScalarType::Utf8 => "utf8",
+            ScalarType::Keyword => "keyword",
+            ScalarType::Text => "text",
         }
     }
 
@@ -167,16 +200,23 @@ impl ScalarType {
             "f64" => ScalarType::F64,
             "timestamp_us" => ScalarType::TimestampUs,
             "utf8" => ScalarType::Utf8,
+            "keyword" => ScalarType::Keyword,
+            "text" => ScalarType::Text,
             _ => return None,
         })
     }
 
-    /// **Bits**, not bytes, this column adds to every row — `None` for [`ScalarType::Utf8`],
-    /// whose cost depends on the data.
+    /// **Bits**, not bytes, this column adds to every row — `None` for the two string types.
     ///
     /// Bits because [`ScalarType::Bool`] costs one, and a byte-denominated figure would have to
     /// round it to either 0 or 1 — the first hiding the cost, the second reporting eight times it
     /// and erasing the reason to declare a `bool` at all.
+    ///
+    /// The `None`s are not all the same `None`. A [`ScalarType::Utf8`] column has a row cost that
+    /// depends on the data; a [`ScalarType::Keyword`] and a [`ScalarType::Text`] have no row cost
+    /// at all, because neither is ever in a row — `render` on both is refused at the declaration,
+    /// and their storage is a `u32` ordinal in entity space and a blob row respectively. None is a
+    /// number this can report, so all three decline.
     pub fn row_bits(self) -> Option<u64> {
         Some(match self {
             ScalarType::Bool => 1,
@@ -184,7 +224,9 @@ impl ScalarType {
             ScalarType::U16 | ScalarType::I16 => 16,
             ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 32,
             ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 64,
-            ScalarType::Utf8 => return None,
+            // Neither is ever in a row: `render` is refused on both at the declaration, and their
+            // storage is entity-space (a keyword's ordinal) or the record blob (a text value).
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => return None,
         })
     }
 

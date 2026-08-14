@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (23 rows)
+## Leak register (24 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -60,6 +60,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C21** | Mask-staleness hint (write-path §4.6) | Low | Accepted — C15 shape |
 | **C22** | A category code discloses vocabulary size | Low | Accepted — owner ruling |
 | **C23** | An authored gate label on a vocabulary value | Medium | Accepted — caller's control (⊘ not built) |
+| **C24** | Filter execution time on a public category column | Low | Accepted — condition of decision 0063 |
 
 ## Documents
 
@@ -67,13 +68,14 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r41 | 22 |
+| `architecture.md` | Normative — r41 | 21 |
 | `caching.md` | Provisional — under review |  |
+| `client-architecture.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
-| `concurrency-lifecycle.md` | Normative — r8 | 14 |
+| `concurrency-lifecycle.md` | Normative — r9 | 14 |
 | `conformance.md` | Normative — r9 | 15 |
-| `contracts.md` | Normative — r26 | 20 |
+| `contracts.md` | Normative — r28 | 19 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `delta-serving.md` | Provisional — under review | 3 |
@@ -83,8 +85,11 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
-| `per-point-attributes.md` | Provisional — under review | 7 |
+| `per-point-attributes.md` | Provisional — under review | 8 |
+| `performance-suite.md` | Provisional — under review | 8 |
+| `records-and-search.md` | Provisional — under review | 21 |
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
-| `system-architecture.md` | Normative — r14 | 24 |
+| `streamed-serving.md` | Normative — r2 |  |
+| `system-architecture.md` | Normative — r15 | 24 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
 | `write-path.md` | Normative for the write path. Owner sign | 22 |

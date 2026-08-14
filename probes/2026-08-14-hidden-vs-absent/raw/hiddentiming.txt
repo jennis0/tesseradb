@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running `probes/2026-08-14-hidden-vs-absent/hiddentiming/target/release/hiddentiming --snapshot /home/joe/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json --scales 400000,1000000`
+reading 1000000 abstracts…
+| entities | terms | stratum | posting(s) | absent med/min ns | hidden med/min ns | visible ns | hidden/absent | separation |
+|---|---|---|---|---|---|---|---|---|
+CONJ | entities | terms | words | postings read | ns med/min | answer |
+| 400000 | 264919 | 1-word conjunction | 393834 |              3959 / 3865 | 393834 |
+| 400000 | 264919 | 2-word conjunction | 785063 |              77167 / 76895 | 386737 |
+| 400000 | 264919 | 4-word conjunction | 1500737 |              44052 / 43916 | 317505 |
+| 400000 | 264919 | 8-word conjunction | 2799206 |              81475 / 80264 | 165162 |
+| 400000 | 264919 | singleton (`halfcar`) | 1 | 498 / 489 | 524 / 511 | 681 | 1.05× | +22 ns |
+| 400000 | 264919 | small (`decentralised`) | 22 | 503 / 493 | 794 / 790 | 1583 | 1.58× | +297 ns |
+| 400000 | 264919 | mid (`psi`) | 2362 | 501 / 489 | 2325 / 2306 | 2664 | 4.64× | +1816 ns |
+| 400000 | 264919 | head (`this`) | 221655 | 508 / 501 | 8059 / 7987 | 19485 | 15.85× | +7485 ns |
+CONJ | entities | terms | words | postings read | ns med/min | answer |
+| 1000000 | 476423 | 1-word conjunction | 986409 |              8247 / 8050 | 986409 |
+| 1000000 | 476423 | 2-word conjunction | 1967520 |              152057 / 149165 | 970877 |
+| 1000000 | 476423 | 4-word conjunction | 3787361 |              98465 / 97961 | 820969 |
+| 1000000 | 476423 | 8-word conjunction | 7107409 |              121103 / 120810 | 453807 |
+| 1000000 | 476423 | singleton (`hammingdistance`) | 1 | 478 / 471 | 718 / 701 | 913 | 1.50× | +230 ns |
+| 1000000 | 476423 | small (`wads`) | 21 | 475 / 468 | 594 / 587 | 1611 | 1.25× | +119 ns |
+| 1000000 | 476423 | mid (`indicators`) | 2392 | 474 / 468 | 2917 / 2885 | 3821 | 6.15× | +2417 ns |
+| 1000000 | 476423 | head (`new`) | 158126 | 477 / 466 | 11450 / 11364 | 43363 | 24.02× | +10898 ns |

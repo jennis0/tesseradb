@@ -10,6 +10,9 @@ libc = "0.2"
 tessera-types = { path = "../tessera-types" }
 tessera-plugin = { path = "../tessera-plugin" }
 tessera-spatial = { path = "../tessera-spatial" }
+# The text family's analysers, resolved at schema parse so a name this build does not carry is
+# refused where its author can read the message (decision 0070).
+tessera-analyse = { path = "../tessera-analyse" }
 tessera-store = { path = "../tessera-store" }
 tessera-authz = { path = "../tessera-authz" }
 # The build writes the filter artefact through the crate that reads it, exactly as it writes
@@ -30,6 +33,11 @@ toml = "0.8"
 chrono = { workspace = true }
 
 [dev-dependencies]
+# The read route, for the text index's end-to-end test only: a build crate that depended on the
+# engine in anger would invert the layer graph, which `check-layers.sh` denies. A dev-dependency is
+# the same shape the engine's own tests use to reach the build.
+tessera-engine = { path = "../tessera-engine" }
+croaring = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 

@@ -17,20 +17,26 @@ the **whole write side**: a flush appends one extent per filterable column and t
 reader composes base with extents (§5); the **extent coalesce** bounds their number between folds,
 as the fourth axis of the engine's entity-space pass (§5.2); and the **fold's attribute pass** folds
 what survives back into one base, blanks the deleted entities and rebuilds the derived postings
-(§6.2). What remains unbuilt is two operands and one family: lists, `none_of` and `match` are
-specified and refuse by name. Marked at each claim.
+(§6.2). `none_of` is built to §5's positivity rule (decision 0066). **The `text` family is built**, on a
+shape of its own — no value column, a token dictionary and postings instead — and its fold pass is
+a merge rather than a rebuild (§2.6). What remains unbuilt is one family: lists are specified and
+refuse by name. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4, §6, §9;
-[`per-point-attributes.md`](per-point-attributes.md) §2–§3; design memo 2026-07-29 (secondary
-attribute indexing); decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
+[`per-point-attributes.md`](per-point-attributes.md) §2–§3;
+[`records-and-search.md`](records-and-search.md) §2–§3, §5, §6.2 (cited as **records §n**); design
+memo 2026-07-29 (secondary attribute indexing); decisions
+[0013](../decisions/0013-mark-specified-vs-implemented.md),
 [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
 [0042](../decisions/0042-a-dictionary-extent-never-repeats-a-descriptor.md),
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
 [0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md),
 [0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
 [0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
-[0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md);
+[0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
+[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
+[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md);
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **index §n**. The companion read-side design is
@@ -40,20 +46,32 @@ cited as **index §n**. The companion read-side design is
 
 ## 1. Summary
 
-A per-item attribute declared `used_for = "filter"` is stored as a **flat entity-space value column**:
+A per-item attribute declared `index = true` is stored as a **flat entity-space value column**:
 values addressed by entity id, scanned under the viewer's authorised set to produce a bitmap, composed
 by intersection under the filter contract (§8.2). Where a family's values have an integer identity of
 their own and repeat heavily — which is **categories, and only categories** — a Roaring posting per
 value is derived on top as an accelerator. This document owns the artefact and its lifecycle. What a
 query does with it is [`filter-surface.md`](filter-surface.md).
 
-**The flat column is the record; every accelerator is derived from it.** That is the whole organising
-rule, and three things follow that an inverted-postings design could not give. A derived structure is
-**self-retiring** — rebuilt whole at the fold, never a second durable identity, so no ordinal has to
-stay stable across ingest and the C11 hazard that shape carries does not arise. `entity → value` is one
-array index, so the conformance oracle's relation *is* the artefact rather than a side output the fold
-could forget, and substring matching needs no trigram index — it is a region search over the values a
-contiguous candidate covers, measured at 1.7 ns per candidate entity (§2.2). And the work a scan does is a function of
+**Which declarations reach this artefact, and which do not.** `index = true` is the plain one. A
+category whose vocabulary is `listing = "per_viewer"` owes the column and its postings whatever its
+flags say, because that disclosure control is membership-derived (§2.3). A column with neither
+`render` nor `index` is **blob-resident** and owns nothing here — its values are the record blob's
+and it is no operand at all (records §3). And a **rendered category** is filterable over the
+request's own rows against the hot column, which is a second evaluation space rather than a second
+artefact: decision 0068's operand kind, owned by surface §4 and records §6.2. A rendered *number*
+is filterable, decision 0064's presence bitmap beside the hot column having removed the reason it was refused at parse — without it the row route reads absence out of a hot column that stores it as the type's zero. The hot column
+storing an absent value as zero (records §6.2).
+
+**The entity-ordered value column is the record; every accelerator is derived from it.** That is the
+whole organising rule, and three things follow that an inverted-postings design could not give. A
+derived structure is **self-retiring** — rebuilt whole at the fold, never a second durable identity, so
+no ordinal has to stay stable across ingest and the C11 hazard that shape carries does not arise. A
+keyword's dictionary is inside that rule rather than an exception to it: it is per layer and rebuilt at
+the fold, so its ordinals are durable for no longer than the layer is. `entity → value` is one array
+index — one index and one dictionary probe for a keyword — so the conformance oracle's relation *is*
+the artefact rather than a side output the fold could forget, and substring matching needs no trigram
+index (§2.2). And the work a scan does is a function of
 the candidate mask and the column, never of the value — which is what makes a hidden value and a
 nonexistent one indistinguishable **in work**, as per-point-attributes §3.8 requires (§2.2).
 
@@ -69,21 +87,23 @@ of it (§7).
 > `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
 > them (§2.3). A flush appends an extent per column and a generation composes them (§5), and the
 > **fold folds them back in**, blanks the deleted entities' slots and rebuilds the postings from the
-> folded column (§6.2). Lists, `none_of` and `match` are unbuilt and marked at their claims.
+> folded column (§6.2), and merges a text column's layers into one index (§2.6). Lists are unbuilt
+> and marked at their claims.
 > Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
 > nothing, and a postings file or an extent that will not open refuses rather than reading as "those
 > entities carry no value".
 
 ### 1.1 What this deliberately does not do
 
-**No trigram index.** Substring matching over a `filter` string column is a **masked scan predicate**,
-needing no index and no per-value loop: a contiguous candidate's values are adjacent bytes, so the
-search runs over the region and maps its hits back through the offsets (§2.2). An earlier revision cut substring to [#44] because a trigram
-conjunction returns a superset needing verification against the stored value, and an inverted-postings
-design gave a filter-only attribute no `entity → value` route to verify against. That premise was a
-consequence of the design, not a requirement; under a flat column the route is an array index. What
-remains at [#44] is the *trigram acceleration* of substring, which is a different question from whether
-substring is expressible.
+**No trigram index.** Substring matching over a `filter` string column is a **masked scan predicate**:
+the needle is sought in the layer's own dictionary keys and the matching ordinals are then scanned
+for, or — where the candidate is narrower than the dictionary — each candidate entity's key is probed
+and searched directly (§2.2). An earlier revision cut substring to [#44] because a trigram conjunction
+returns a superset needing verification against the stored value, and an inverted-postings design gave
+a filter-only attribute no `entity → value` route to verify against. That premise was a consequence of
+the design, not a requirement; the ordinal *is* that route, resolvable in the dictionary written beside
+it. What remains at [#44] is the *trigram acceleration* of substring, which is a different question
+from whether substring is expressible.
 
 **No column's values are enumerated except a category's.** `/v1/categories` serves a category's value
 set because a category *has* one. No other family does, so none acquires a listing surface: no value
@@ -161,55 +181,56 @@ every 64 Ki entities, which caps the transient buffer at 512 KB: it was previous
 the result, **1.1 GB for a filter matching a quarter of the corpus, per concurrent request**, for a
 quantity the compute-admission gate rations CPU for and knows nothing about (probe arm 7).
 
-**A text column costs about fourteen times that, and the design must size against its own number**
-rather than borrowing the fixed-width one (probe arm 6, at 10⁸):
+**A string column is scanned at the constants above**, because its values are `u32` ordinals: a
+`keyword`'s storage is a per-layer sorted dictionary plus one ordinal per present entity
+(`records-and-search.md` §4.3), so `eq`, `in` and `prefix` each resolve the needle in the layer's
+dictionary and then run the *fixed-width* scan — exact match against one ordinal, `in` against a
+sorted ordinal list, `prefix` against the contiguous ordinal range a prefix occupies. String
+equality stops paying string prices.
 
-| | contiguous | scattered |
-|---|---|---|
-| `eq` | 3.5 ns | 30 ns |
-| `prefix` | 4.3 ns | 47–56 ns |
-| `in` (5 values) | 8.2 ns | 61 ns |
-| `contains` | **1.7 ns** | 96 ns |
+`contains` cannot be an ordinal question, and takes one of two routes chosen by a crossover on the
+candidate's cardinality against the layer's dictionary size — the principal's own quantity against a
+schema-derived one, neither of them a statistic about what the principal's data contains (§6's rule)
+and neither of them the needle. The **broad** route decodes and searches every key in the
+dictionary, then scans for the matching ordinals; the **narrow** route probes the dictionary for one
+key per candidate entity. Their constants: **11.0–18.8 ns to decode one key**, *measured* over three
+real arXiv columns through the shipped reader
+([the dictionary campaign](../../probes/2026-08-13-keyword-dict/results.md)), which is decode alone
+and does not include the substring search over the decoded key; and ~0.1–0.3 µs per probe,
+**modelled**, the bottom of which is what the restart interval was chosen against. At 10⁹ unique
+keys the broad route is therefore 11–19 s single-threaded before the search, divided by cores and
+milliseconds on a repeat-heavy vocabulary — and that is an extrapolation from 2.4M keys, so cache
+behaviour at 400× the size is not in it.
 
-The ratio is what the storage is: per value the scan streams two 8-byte offsets and the value's
-bytes, about 22 against a `u32` column's 4.
+⊘ **The regression fence is owed and is not here.** Both routes are built; what is not yet recorded
+is either of them measured against the flat scan they replace. Until that measurement lands, this
+section quotes no per-candidate figure for `contains`.
 
-**`contains` is outside the budget on a broad candidate of either shape, and by more than the
-scattered column alone suggests.** At 9.7 ns a *contiguous* 25% candidate at 10⁹ is 2.4 s by this
-table's own arithmetic — measured directly at 2,868 ms, and 3,890 ms for a needle many values share
-(probe arm 12). The scattered column is worse still: 96 ns is ~1 s per 10⁷ candidate entities. An
-earlier revision of this section read the scattered figure as the only cell over budget and did not
-do the multiplication for the contiguous one; the correction matters, because the two have different
-fixes.
+> **The retired flat column's figures**, kept because they are the baseline that fence measures
+> against and are otherwise unrecoverable — the machinery is deleted. A `utf8` column stored its
+> values concatenated with an offset array, streaming ~22 B per value against a `u32` column's 4,
+> and measured (probe arm 6, at 10⁸) 3.5 ns contiguous / 30 ns scattered for `eq`, 4.3 / 47–56 for
+> `prefix`, 8.2 / 61 for a five-value `in`, and 1.7 / 96 for `contains`. `contains` was outside the
+> budget on a broad candidate of *either* shape: a contiguous 25% candidate at 10⁹ measured 2,868 ms
+> (3,890 ms for a needle many values shared, arm 12), and the scattered column ~1 s per 10⁷
+> candidate entities. The contiguous case ran the substring search over the concatenated region
+> rather than per value — 9.7 → 1.7 ns — discarding matches straddling a value boundary, since the
+> concatenation joins unrelated values and `"ab" ++ "cd"` contains the bytes `bc` while neither
+> value does. Two negative results from the same campaign outlive the column and still bound any
+> per-candidate string scan: **no candidate-driven scan brings a broad *scattered* principal inside
+> the budget**, because one random cache line per candidate entity is ~13–15 ns and 10⁸ candidates
+> is ≥1.5 s before any comparison; and a packed descriptor of offset, length and a trigram summary
+> in one word measured 92.5 → 39 ns at **+8 GB per 10⁹ column**, which is a storage price and a
+> disclosure question both.
 
-Where the time goes was measured rather than assumed (arm 11), and it inverts between the two
-shapes. Scattered, the 96 ns is ~31 ns of cache-line fetches for the offsets and the value's bytes
-and ~52 ns of scanning, and the scanning increment is itself mostly latency on a value's second
-line — so a faster inner loop recovers only 10–20%. Contiguous, memory is nearly free (1.1 ns of
-10.9) and the loop is ~80% of the cost.
-
-Two consequences follow, and the second is a floor rather than a gap:
-
-- **A contiguous candidate does not need a per-value loop at all, and no longer uses one.** The
-  values it covers are *adjacent bytes*, so the substring search runs over the concatenated region
-  and maps its hits back through the offsets, discarding matches that straddle a boundary — the
-  concatenation joins unrelated values, so `"ab" ++ "cd"` contains the bytes `bc` and neither value
-  does. Measured 9.7 → 1.7 ns per candidate entity, which takes the 25% cell above from 2,868 ms to
-  ~430 ms, at no storage cost. **Built.**
-- **No candidate-driven scan brings a broad *scattered* principal inside the budget**, whatever the
-  predicate does, because one random cache line per candidate entity is ~13–15 ns and 10⁸ candidates
-  is therefore ≥1.5 s before any comparison. Closing that needs the per-value memory traffic to
-  shrink — a packed descriptor of offset, length and a trigram summary in one word measured
-  92.5 → 39 ns, at **+8 GB per 10⁹ column** — or an index, which is a disclosure question as well as
-  a storage one. ⊘ **Neither is built**, and a scattered candidate therefore still scans per value.
-
-**A `text` type is where this is expected to be revisited, and the split is deliberate.** `utf8` is
-row data: its values are compared, never enumerated, and it is fastest at the predicates that
-compare — exact match and prefix, at 3.5 and 4.5 ns. A separate **`text` type optimised for
-in-query filtering** is the natural home for the structures priced above, because they buy substring
-and phrase matching at a storage cost only a column declared for that purpose should pay. ⊘ **`text`
-is not specified and not built**; today `contains` on a `utf8` column is the scan described here,
-which is inside the budget for every candidate shape but a broad scattered one.
+**A `text` type is where substring matching is expected to be revisited, and the split is
+deliberate.** A `keyword` is an identifier: matched whole or by fragment, never analysed, and
+`contains` keeps meaning substring. A **`text` type optimised for in-query filtering** is the
+natural home for token and phrase structures, because they buy their matching at a storage cost only
+a column declared for that purpose should pay. **`text` is built** (`records-and-search.md` §4.4):
+`type = "text"` declares prose, names an analyser, and buys a token index and `match` — with none
+of the four string predicates, which is the point of the split. ⊘ Exact phrase is not built (§4.5
+there).
 
 **Set membership costs what equality costs where the domain allows a table.** A `u8` or `u16`
 category's whole code domain fits in 32 bytes or 8 KB, so `in` is a constant-time lookup built once
@@ -325,9 +346,8 @@ only if the principal can see an item carrying it (per-point-attributes §3.3). 
 *are* these postings. Deriving them instead by scanning the value column per request is inside a
 *filter's* latency budget but not inside `/v1/categories`', and it would falsify contracts §3.2's
 compute-admission justification for that endpoint — "no mask composition, no projection, no file IO".
-So a `per_viewer` category gets postings whatever its `used_for` says, where a `public` one gets them
-only from `used_for = "filter"` — a published value set is served as authored and derives no membership
-at all.
+So a `per_viewer` category gets postings whatever its flags say, where a `public` one gets them only
+from `index = true` — a published value set is served as authored and derives no membership at all.
 
 **The postings answer a filter only under `listing = "public"`** (decision 0063). Under `per_viewer`
 they exist for the membership question above and the *filter* is answered by the masked scan, for the
@@ -415,9 +435,9 @@ which is the wrong answer that looks exactly like a right one.
 
 **One record batch per value column**, which is what lets the reader map the file and borrow the
 values out of it rather than copying them (§8). A second batch is refused rather than concatenated,
-because concatenating is exactly the copy the mapping exists to avoid. A `utf8` column is written
-`LargeUtf8`: 32-bit offsets cap the concatenated bytes at 2 GiB, which a 10⁹-entity column passes at
-two bytes a value.
+because concatenating is exactly the copy the mapping exists to avoid. **Every value column is
+fixed-width** — a keyword's values are `u32` ordinals and its keys live in the dictionary file beside
+them — so there is no variable-width case and no offset array to map alongside the values.
 
 **Per column, not per column group**, and the reason is a format constraint rather than a preference:
 per-column presence makes the compact value arrays *different lengths*, and one Arrow record batch
@@ -441,7 +461,8 @@ forbids the repair. Per-column files remove the arithmetic rather than defending
 | Family | Stored as | Predicates | Accelerator |
 |---|---|---|---|
 | **Category** | flat code column, `u8`/`u16`/`u32` | equality, set membership | **one Roaring posting per value** (§2.3) |
-| **String** | flat UTF-8 column | equality, set membership, prefix, substring — all scan predicates | none |
+| **Keyword** | per-layer sorted dictionary + `u32` ordinal column | equality, set membership, prefix, substring — the first three resolve to an ordinal question and scan; `contains` takes §2's two routes | none; ⊘ per-term postings admitted by decision 0067 for whole-value operators only, unbuilt |
+| **Text** | per-layer token dictionary + one posting per term; **no value column** — the prose is a record-blob row | `match` and its m-of-n form; `phrase`, whose postings conjunction is narrowed by re-reading each survivor's prose from the blob; **no negation** — there is no per-item value for `none_of`'s presence half, so one is refused | the postings *are* the index; there is no scan to accelerate |
 | **Numeric / timestamp** | flat column in the native encoding | equality, range | none built; §3 states the open corner |
 | **List** | flat list column | as the element family | as the element family |
 
@@ -451,8 +472,9 @@ one-presence-bit-one-slot rule, on which the affine-rank traversal, §6.2's blan
 merge are all built — so the list family needs its own addressing (a per-entity value count or
 offset beside presence) before any of those specifications extend to it, and none of them claims
 to cover it meanwhile. Lifting the parse refusal is therefore an addressing design plus a schema
-and build change, and it lifts **for `filter` only** — `inspect` has no sidecar to place data in,
-and decision 0013 requires an unimplemented placement to stay refused naming itself.
+and build change, and it lifts **for every placement but `render`** (records §5): an indexed list
+gets the CSR addressing above, an unindexed one is a length-prefixed list in its blob row and needs
+no addressing at all, and decision 0039's fence keeps the rendered combination refused permanently.
 
 Decision 0039's fence stands, restated because this is where someone will look for permission to cross
 it: a multi-valued attribute is **never** `render`, and **no projection, derived value or summary of one
@@ -469,12 +491,14 @@ value set, and therefore only a category has a `listing`: the `per_viewer` contr
 of a value name* (C11), and a string column has no name to gate, publishes no value list, and
 contributes no C11 surface.
 
-Under a flat column that distinction also stops costing anything. A string needs **no dictionary, no
-FST and no index** — nothing has to manufacture an integer identity for it, so the "interning is not a
-vocabulary" argument an earlier revision needed is moot. Prefix and substring return **matching
-entities**, which intersect `M_auth` like any operand and whose every count is masked, so a caller
-walking `sm` → `smi` → `smit` learns only about rows they could already see. They do not return
-suggestions.
+**A keyword's dictionary does not make it a vocabulary**, and the distinction survives the storage
+change intact. The dictionary is an index internal: it is per *layer*, so a key's ordinal is not even
+stable across the extents of one column, it is never served, and there is no `/v1/categories`
+counterpart, no value list and no autocomplete. Interning here manufactures no durable identity, which
+is what keeps the C11 ordinal hazard out of it — the hazard lives in identity that persists, and a
+layer-scoped position does not. Prefix and substring return **matching entities**, which intersect
+`M_auth` like any operand and whose every count is masked, so a caller walking `sm` → `smi` → `smit`
+learns only about rows they could already see. They do not return suggestions.
 
 ---
 
@@ -488,7 +512,8 @@ is false. A NaN is therefore absent from every range result without a rule being
 
 **The level tree and range-encoded bit slicing are both cut from the base design.** Meilisearch's
 `facet_id_f64_docids` level tree decomposes a range over *per-value postings*; range-encoded BSI is
-FeatureBase's answer *because* FeatureBase is a bitmap engine. Neither premise survives a flat column,
+FeatureBase's answer *because* FeatureBase is a bitmap engine. Neither premise survives an
+entity-ordered column,
 and an earlier revision specified both — along with a probe to calibrate the crossover between them,
 which is no longer a question that exists.
 
@@ -597,19 +622,24 @@ candidate the layer has already narrowed, and the layer count is a property of t
 of what is asked for — the work stays a function of `(candidate, column)`, which is what §2.2's
 timing property requires.
 
-That is the whole of it, and the absences are the point:
+That is the whole of it, and the absences are the point. **A keyword column does have a dictionary,
+and every absence below survives it**, because that dictionary is scoped to one *layer*: a flush sorts
+and front-codes its own batch, the coalesce merges two of them and renumbers, and the fold rebuilds
+from the survivors. No structure is shared between layers, so nothing here is about a dictionary
+moving under anything.
 
-- **No dictionary, so no promotion and no resolver.** Nothing has to mint an identity for a value at
-  admission, so there is no extension-id space, no resolve-then-intern at flush, and no discard-and-replan
-  when a dictionary moves under a promoting flush. An earlier revision specified all of it.
-- **No `max_distinct_values` bound.** It existed to stop an unbounded dictionary. A flat column's cost is
-  its values, whatever their cardinality.
+- **No shared dictionary, so no promotion and no resolver.** Nothing mints an identity that outlives
+  the layer that minted it, so there is no extension-id space, no resolve-then-intern against a
+  corpus-wide structure, and no discard-and-replan when a dictionary moves under a promoting flush. An
+  earlier revision specified all of it.
+- **No `max_distinct_values` bound.** It existed to stop an unbounded *shared* dictionary. A layer's
+  dictionary is bounded by the batch that produced it.
 - **No quadratic near-unique-string hazard.** The shape that broke the previous design — a near-unique
   string column, where a map-backed dictionary clones its lookup map per promoting flush at a *measured*
-  7.1 GB per copy at 1.17×10⁸ terms, against a dictionary growing at ingest rate — does not arise.
-  Appending strings to a flat column is O(bytes) whatever the cardinality.
+  7.1 GB per copy at 1.17×10⁸ terms, against a dictionary growing at ingest rate — does not arise: no
+  map spans flushes, so there is nothing to clone per flush.
 - **No per-flush delta tiers for the record.** A tier existed so a posting could be extended without
-  rewriting it. A column is extended by appending.
+  rewriting it. A column is extended by appending a layer.
 
 **A category's derived postings do not extend.** They cover `[0, fold_watermark)`; entities above the
 watermark are answered by scanning the appended extents and unioning the result in. At the owner's stated
@@ -650,7 +680,7 @@ it negates, and two columns give two answers to which; `all_of: [{none_of: [A]},
 the same set and says which presence each clause requires, so nothing is lost but the ambiguity.
 
 > **⊘ Built, and the accelerator's tail is answered by scanning it.** A flush writes one extent per
-> column that **owes a value column** — `used_for = "filter"`, *or* a category whose vocabulary is
+> column that **owes a value column** — `index = true`, *or* a category whose vocabulary is
 > `listing = "per_viewer"`, which is the build's own `postings_are_owed` rule mirrored on the write
 > side (§2.3). It writes one for a column no flushed entity carries a value in too, so the file set
 > is a function of the schema rather than of the data; it names both files in the partition's
@@ -660,7 +690,7 @@ the same set and says which presence each clause requires, so nothing is lost bu
 > **The two halves of that rule have to agree, and for a while they did not.** The build owed a
 > `per_viewer` render-only category its postings — that column's postings are not an accelerator but
 > the evidence §3.3's visibility predicate is derived from — while the flush selected extents on
-> `used_for` alone. A value first carried by an entity ingested after the build then existed in no
+> the placement flag alone. A value first carried by an entity ingested after the build then existed in no
 > artefact any reader consults, so `/v1/categories` could never offer it, permanently and with no
 > symptom. One predicate now serves the flush's selection and the reader's open.
 >
@@ -736,7 +766,10 @@ The mechanics, against the pass's existing shape:
   never-repeat guard: the output presence is the union of the inputs', refused unless the union's
   cardinality equals the sum of the inputs' — O(containers), checked before any value is written.
   Values merge by family: a fixed-width column concatenates its inputs' slices in entity order; a
-  text column concatenates value bytes and rebases offsets. **Lists are excluded** until §2.6's
+  keyword column additionally merges its inputs' dictionaries and **renumbers every ordinal**
+  against the merged key set, under a guard of its own — recolouring every value changes no
+  cardinality, so the union-equals-sum check above passes over a window whose every key has moved.
+  **Lists are excluded** until §2.6's
   addressing for them exists — they refuse at parse today, so nothing is fail-open — and the
   output is the one record batch §2.5 requires, via the streaming writer §6.2 makes a deliverable.
 - **Output lands under `coalesced/<id>/attrs/<column>/`**, on contracts §2.1's existing precedent
@@ -972,9 +1005,9 @@ for exactly pass 2's reason. The pass is single-threaded like the rest of the fo
 excluded by owner ruling and not further discussed.
 
 **Memory: banding bounds the transient only because the writers stream — ✔ and they do.** The
-writers this design called for are built (2026-08-10): `ValueColumnWriter` spools value bytes, and
-a text column's offsets, and assembles the single record batch at `finish` with the spool mapped as
-the array's own buffer; `KeyedPostingsSpool` appends encoded records band by band and assembles the
+writers this design called for are built (2026-08-10): `ValueColumnWriter` spools values and
+assembles the single record batch at `finish` with the spool mapped as the array's own buffer —
+one spool, every family being fixed-width; `KeyedPostingsSpool` appends encoded records band by band and assembles the
 same way, its strictly-ascending-key check comparing across band boundaries and not only within
 one. Both are on the repo's own spool-then-assemble discipline, both are byte-identical to the
 whole-column writers they replace at every chunking tested, and the batch build is ported onto them
@@ -1117,34 +1150,22 @@ resident and resides only what a request touches. Those scan figures are warm-pa
 a cold-start claim; what the comparison establishes is that the read path pays its I/O for every
 declared column while the mapped path pays it for the columns actually scanned.
 
-> **⊘ A text column is resident at open where a fixed-width one is not — but it is *clean page
-> cache*, and the distinction is the whole finding.** Measured per column at 2.5×10⁷ on real data
-> (`probes/2026-08-10-filter-lifecycle/`), resident bytes at open: a 203 MB `i64` column **98 KB**,
-> three category columns 111–143 KB, and a 365 MB `utf8` column **362 MB** — the whole file. That
-> looks like the mapping failing for text, and it is not. Splitting the figure (arm 15,
-> `textresident`, a 475 MB column at 2×10⁷): **`RssAnon` delta 0, `RssFile` delta 472 MB.** Nothing
-> is copied to the heap; the mapping does exactly what §8 claims. What happens is that every page is
-> *touched* — the reader decodes a `LargeStringArray` and Arrow validates UTF-8 across the values
-> buffer — so the pages become resident, and being clean and file-backed they are evictable under
-> pressure, which is the property mapping exists to give.
+> **No value column has the shape this warning was written about**, and the finding is kept because
+> the mechanism outlives the column. The retired flat `utf8` column was fully resident at open where
+> a fixed-width one is not: measured per column at 2.5×10⁷ on real data
+> (`probes/2026-08-10-filter-lifecycle/`), a 203 MB `i64` column resided **98 KB**, three category
+> columns 111–143 KB, and a 365 MB `utf8` column **362 MB** — the whole file. That was not the
+> mapping failing. Split (arm 15, `textresident`, a 475 MB column at 2×10⁷): **`RssAnon` delta 0,
+> `RssFile` delta 472 MB** — nothing copied to the heap, every page merely *touched*, because the
+> reader decoded a `LargeStringArray` and Arrow validated UTF-8 across the values buffer. Clean,
+> file-backed and evictable, so the cost was open time and page-cache pressure rather than memory
+> that cannot be reclaimed: ~40 ms per 475 MB column.
 >
-> So the residual cost is **open time and page-cache pressure, not memory that cannot be
-> reclaimed**: ~40 ms per 475 MB column, which extrapolates to ~1.6 s for a 19 GB text column at
-> 10⁹ (*modelled*, and the extrapolations in this campaign have a poor record). Fixed-width columns
-> are untouched by any of this and behave exactly as the table says.
->
-> **Do not "fix" this with `skip_validation` alone.** Nothing here depends on Arrow's UTF-8
-> guarantee — `text_at` converts with a checked `from_utf8` and the byte predicates compare bytes —
-> so that half is redundant, and no unvalidated string can reach a bundle in the first place (every
-> route in is a Rust `String` or a validated Arrow array). But the same switch drops the **offset**
-> validation, and a corrupt offset pair would then reach `&bytes[lo..hi]` and panic on a request
-> path where today it refuses at open. It would also buy less than it appears to: `verify_files`
-> hashes every named file in full at open regardless, so Arrow's pass is the *second* read of bytes
-> already in cache. Removing that first read by deferring the digest to first touch was **considered
-> and declined** (§8, owner ruling 2026-08-10): every declared column is opened at generation build,
-> so the deferral pays only for columns nobody filters on while charging a multi-second hash of a
-> 4 GB column to the first filter of every column somebody does. The sweep is parallelised instead,
-> which is where its wall clock actually went.
+> **The rule to carry forward: a reader that touches every page at open resides the whole file,
+> whatever the mapping promises.** Every column today is fixed-width and borrowed without a
+> per-value pass, and a keyword's dictionary is binary-searched from its restart table rather than
+> walked, so nothing in the tree has this shape. A future family whose open decodes or validates
+> per value would reacquire it, and the figure to expect is the file.
 >
 > **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
 > column here, and by decision 0063 they are now on the serving path for a `public` listing. That is
@@ -1204,10 +1225,14 @@ relation lets the oracle derive the same set by direct scan. A filter's definiti
 
 An inverted-postings design could not supply that from its own artefact, so an earlier revision specified
 a *separate* relation, optional for serving and required for a conformance run, re-emitted by the fold as
-a side output. **The flat column removes that entirely**: it already is the relation, so the oracle reads
-the artefact under test rather than a parallel emission, and the differential stops depending on a
-re-emission the fold could forget. This is one of the strongest arguments for the flat shape and belongs
-in any reconsideration of it.
+a side output. **The value column removes that entirely**: it already is the relation, so the oracle
+reads the artefact under test rather than a parallel emission, and the differential stops depending on a
+re-emission the fold could forget. A keyword column keeps the property with one indirection — its
+ordinal resolves in the dictionary beside it, which is the same artefact under test — and that
+indirection is exactly what the conformance differential must *not* learn: the oracle holds the strings
+the fixture planted, so an implementation that interned wrongly and then answered consistently by its
+own wrong ordinals disagrees rather than being agreed with. This is one of the strongest arguments for
+the entity-ordered column and belongs in any reconsideration of it.
 
 **The filter machinery is its own crate, `tessera-filter`** (owner ruling, 2026-08-08). Both indexes are
 entity-space and neither mentions row IDs, so a module inside `tessera-authz` would have been cheaper —
@@ -1230,6 +1255,14 @@ the dependency one-way and the read crate's codegen a function of its own source
 ---
 
 ## Appendix R — review trail
+
+**2026-08-12 — re-read against the built declaration surface.** The placement key this document
+spelt is gone: a column earns its value column from `index = true`, or from being a `per_viewer`
+category, and §1 now says which declarations reach the artefact and which do not — a blob-resident
+column owning nothing here, and a rendered category filterable over the request's own rows through
+a second evaluation space rather than a second artefact (decision 0068). §2.6's list refusal lifts
+for every placement but `render` rather than for one placement, an unindexed list needing no
+addressing at all. No mechanism of this design moved.
 
 **2026-08-10 (r7) — adversarial review, two lenses, dispositioned in one pass.** Both lenses held
 the shape and attacked load-bearing claims; every finding was accepted except one whose *remedy*

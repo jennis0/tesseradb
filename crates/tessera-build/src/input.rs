@@ -865,7 +865,7 @@ enum BatchValues {
     U64(Vec<u64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
-    /// A per-item string, for a `filter`-only `utf8` column.
+    /// A per-item string, for an `index`-only `utf8` column.
     ///
     /// **Not a category**, and the distinction is the data model rather than the encoding: a
     /// category's value is a vocabulary entry with an identity, a pinned code and a lifecycle,
@@ -980,10 +980,20 @@ impl BatchColumn {
                     return Err(mismatch());
                 })
             }
-            // Reached only by a `filter`-only column: `render` on `utf8` is still refused at parse
-            // (§4.3 — a non-fixed-width type in the hot column), but a filter column lives in
-            // entity space and costs the hot column nothing.
-            ScalarType::Utf8 => BatchValues::Text(
+            // Reached only by an `index`-only column: `render` on either string type is still
+            // refused at parse (§4.3 — the hot column is a fixed-width slot per row), but an
+            // indexed column lives in entity space and costs the hot column nothing.
+            //
+            // **A keyword reads exactly as a `utf8` does, and that is the family's whole input
+            // contract.** The dictionary and the ordinal are storage, minted where the layer is
+            // written; a points file carries the values themselves, so there is nothing here to
+            // resolve and no ordinal to be wrong about (records §7, "ingest wire").
+            //
+            // **Text reads the same way, for the same reason and one more.** Its terms are minted
+            // by an analyser at index time and its prose goes to the record blob, so what a points
+            // file carries is the prose and nothing else — there is no term column to supply and
+            // no analyser to run this side of the declaration (records §4.4).
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => BatchValues::Text(
                 any.downcast_ref::<arrow::array::StringArray>()
                     .ok_or_else(mismatch)?
                     .clone(),

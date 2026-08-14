@@ -110,6 +110,8 @@ pub fn build_bundle(root: &Path, n: u64) {
         deltas: vec![],
         dict_extents: vec![],
         attr_extents: Vec::new(),
+        record_extents: Vec::new(),
+        text_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
         tombstones: vec![],
@@ -124,7 +126,7 @@ pub fn build_bundle(root: &Path, n: u64) {
     .expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 1,
+        bundle_format: 2,
         created_at: "2026-08-02T00:00:00Z".to_string(),
         data_plugin_hash: "builtin:passthrough:1".to_string(),
         declared_bounds: serde_json::json!({}),

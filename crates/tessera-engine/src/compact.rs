@@ -79,8 +79,9 @@ use croaring::Bitmap;
 use tessera_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{
-    AttrExtent, DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor,
+    AttrExtent, DeclaredScalar, FileDigest, ManifestVocabulary, RecordExtent, SegmentDescriptor,
 };
+use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::{
     fold_external_id_runs, fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
 };
@@ -477,6 +478,13 @@ pub(crate) struct FoldPlan {
     /// the fold can afford, and makes the folded state a function of deletion history rather than
     /// of the schema.
     pub(crate) attr_extents: Vec<AttrExtent>,
+    /// Every record-blob extent the side-manifest named at the snapshot — **all** consumed and
+    /// folded into the new base blob, under [`FoldPlan::attr_extents`]'s all-or-nothing argument:
+    /// the folded state is a function of the schema, never of deletion history.
+    pub(crate) record_extents: Vec<RecordExtent>,
+    /// Every text extent the side-manifest named at the snapshot — **all** consumed and merged into
+    /// the new base index, under the same all-or-nothing argument.
+    pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
     /// `D₀` — the plan's tombstone clone. Handed to passes 1–3 whole; never [`executed`].
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity **with a row anywhere in this partition** at the snapshot — the
@@ -743,6 +751,8 @@ pub(crate) fn plan_fold(
             .map(|extent| extent.path.clone())
             .collect(),
         attr_extents: manifest.attr_extents.clone(),
+        record_extents: manifest.record_extents.clone(),
+        text_extents: manifest.text_extents.clone(),
         tombstones,
         entity_bound,
         dict_len,
@@ -961,6 +971,15 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             written.push((format!("{segment_rel}/{name}"), path));
         }
         base_segment_bytes = base_segment_bytes.max(slice_bytes);
+        // The render columns' presence bitmaps beside the new segment (decision 0064), named by
+        // the pass that decided which columns still have an absence after the drops. Not counted
+        // into `slice_bytes`, which is the two mapped files step 3's headroom check is about.
+        for column in &out.presence_columns {
+            written.push((
+                format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
+                tessera_store::render_presence::render_presence_path(&segment_dir, column),
+            ));
+        }
         written.push((permutation_rel, permutation_path));
         written.push((row_entity_rel, row_entity_path));
 
@@ -1094,6 +1113,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     let mut attr_written = 0u64;
     let file_len = |path: &std::path::Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
+    // **A text column's index, merged and blanked.** Its own pass, before the value columns,
+    // because this family owes no value column at all — its whole index is a token dictionary and
+    // postings over it, and the generic merge below would have nothing to merge.
+    fold_text_columns(&plan, &ctx, &mut written, &mut attr_read, &mut attr_written)?;
+
     for scalar in ctx
         .declared_scalars
         .iter()
@@ -1132,24 +1156,82 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         }
         let layers: Vec<&tessera_filter::ValueColumn> =
             std::iter::once(&base).chain(extents.iter()).collect();
+        // A keyword layer's dictionary, opened beside its ordinals and in the same order, because
+        // an ordinal names a position in *its own* layer's dictionary and nothing anywhere else.
+        // Empty for every other family, which is what selects the generic fold below.
+        let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
+        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+            keyword_dicts.push(
+                tessera_filter::SortedDict::open_dir(
+                    &from_dir,
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
+            );
+            for extent in plan.attr_extents.iter().filter(|e| e.column == scalar.name) {
+                let Some(dict_rel) = extent.dict.as_ref() else {
+                    return Err(FoldFailed(format!(
+                        "pass 4a (attributes): keyword column '{}' has an extent with no \
+                         dictionary; its ordinals name nothing",
+                        scalar.name
+                    )));
+                };
+                keyword_dicts.push(
+                    tessera_filter::SortedDict::open(
+                        &ctx.from_prefix_dir.join(dict_rel),
+                        tessera_filter::Access::MappedSequential,
+                    )
+                    .map_err(|e| failed("pass 4a (attributes: an extent dictionary)", &e))?,
+                );
+            }
+        }
 
         let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
         let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
+        let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
         let values_path = ctx.to_prefix_dir.join(&values_rel);
         let presence_path = ctx.to_prefix_dir.join(&presence_rel);
-        let partial = tessera_filter_write::fold_value_column(
-            &layers,
-            &plan.tombstones,
-            // The snapshot's entity space, which is what the folded column covers. A column dense
-            // to this bound writes no presence bitmap at all — the reader's "the entity id is the
-            // array index" — and one deletion below it is what takes that away.
-            u32::try_from(plan.entity_bound).map_err(|_| {
-                FoldFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
-            })?,
-            &values_path,
-            &presence_path,
-        )
-        .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?;
+        let dict_path = ctx.to_prefix_dir.join(&dict_rel);
+        // The snapshot's entity space, which is what the folded column covers. A column dense to
+        // this bound writes no presence bitmap at all — the reader's "the entity id is the array
+        // index" — and one deletion below it is what takes that away.
+        let bound = u32::try_from(plan.entity_bound).map_err(|_| {
+            FoldFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
+        })?;
+        // **A keyword folds through its own pass, because its values are ordinals.** The generic
+        // fold carries values through byte-preserved, which is exactly wrong for a column whose
+        // dictionary is rebuilt from the survivors and whose ordinals must be renumbered against
+        // it — a key whose only carrier was blanked leaves the corpus, which is the retention
+        // argument reaching dictionary keys (records §7). The two passes are otherwise the same
+        // merge under the same guards.
+        let partial = if keyword_dicts.is_empty() {
+            tessera_filter_write::fold_value_column(
+                &layers,
+                &plan.tombstones,
+                bound,
+                &values_path,
+                &presence_path,
+            )
+            .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?
+        } else {
+            let keyword_layers: Vec<tessera_filter_write::KeywordLayer<'_>> = layers
+                .iter()
+                .zip(keyword_dicts.iter())
+                .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
+                .collect();
+            let partial = tessera_filter_write::fold_keyword_column(
+                &keyword_layers,
+                &plan.tombstones,
+                bound,
+                &values_path,
+                &presence_path,
+                &dict_path,
+            )
+            .map_err(|e| failed("pass 4a (attributes: the keyword merge)", &e))?;
+            attr_written += file_len(&dict_path);
+            written.push((dict_rel, dict_path.clone()));
+            partial
+        };
         attr_written += file_len(&values_path);
         written.push((values_rel, values_path.clone()));
         if partial {
@@ -1184,6 +1266,94 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
         attr_written += file_len(&postings_path);
         written.push((postings_rel, postings_path));
+    }
+
+    // ---- pass 4a, continued — the record blob --------------------------------------------------
+    //
+    // records §7: the blob is rewritten without the blanked entities' rows, base plus every
+    // snapshot extent streamed in entity order into one new base — *remove, emit no bytes*, so a
+    // deleted entity's prose is physically absent from the folded artefact. That retention
+    // asymmetry is why the blob lives under `attrs/` and folds with everything else rather than
+    // in a store the fold does not touch. **Rule F only**: the set blanked here is exactly `D₀`,
+    // the same set every other pass took, and a suppression is not in it — a suppressed entity's
+    // row streams through byte-preserved like any survivor's.
+    //
+    // The blob exists iff the schema declares a blob-resident column — the build's own predicate
+    // (`write_record_blob`), so base presence is a function of the schema exactly as the column
+    // artefacts' is. The mismatch arms are unreachable by construction and refuse loudly rather
+    // than silently dropping extents' bytes.
+    let blob_resident = ctx
+        .declared_scalars
+        .iter()
+        .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
+    if !blob_resident && !plan.record_extents.is_empty() {
+        return Err(FoldFailed(
+            "pass 4a (record blob): the manifest names record extents but the schema declares no \
+             blob-resident column; folding would drop their bytes silently, so it is refused"
+                .to_string(),
+        ));
+    }
+    if blob_resident {
+        let record_rel = format!("partitions/{}/attrs/record", plan.partition);
+        let from_dir = ctx.from_prefix_dir.join(&record_rel);
+        let to_dir = ctx.to_prefix_dir.join(&record_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (record blob)", &e))?;
+
+        // The fold's own mappings, advised sequential like the value columns above (decision
+        // 0052): each layer streams exactly once, block by block.
+        let base = tessera_filter::RecordBlob::open_dir(
+            &from_dir,
+            tessera_filter::Access::MappedSequential,
+        )
+        .map_err(|e| failed("pass 4a (record blob: the base)", &e))?;
+        for name in [
+            tessera_filter::RECORD_BLOCKS_FILE,
+            tessera_filter::RECORD_HASROW_FILE,
+            tessera_filter::RECORD_DIRECTORY_FILE,
+        ] {
+            attr_read += file_len(&from_dir.join(name));
+        }
+        let mut extents = Vec::with_capacity(plan.record_extents.len());
+        for extent in &plan.record_extents {
+            extents.push(
+                tessera_filter::RecordBlob::open(
+                    &ctx.from_prefix_dir.join(&extent.blocks),
+                    &ctx.from_prefix_dir.join(&extent.hasrow),
+                    &ctx.from_prefix_dir.join(&extent.directory),
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (record blob: an extent)", &e))?,
+            );
+            for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+                attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+            }
+        }
+        let layers: Vec<&tessera_filter::RecordBlob> =
+            std::iter::once(&base).chain(extents.iter()).collect();
+
+        let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
+        let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
+        let directory_rel = format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE);
+        let blocks_path = ctx.to_prefix_dir.join(&blocks_rel);
+        let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
+        let directory_path = ctx.to_prefix_dir.join(&directory_rel);
+        tessera_filter_write::fold_record_blob(
+            &layers,
+            &plan.tombstones,
+            &blocks_path,
+            &hasrow_path,
+            &directory_path,
+            tessera_filter::RECORD_BLOCK_TARGET,
+        )
+        .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
+        for (rel, path) in [
+            (blocks_rel, blocks_path),
+            (hasrow_rel, hasrow_path),
+            (directory_rel, directory_path),
+        ] {
+            attr_written += file_len(&path);
+            written.push((rel, path));
+        }
     }
 
     record("4a attributes", &mut cost, &mut mark);
@@ -1239,6 +1409,286 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         attr_bytes_read: attr_read,
         attr_bytes_written: attr_written,
     })
+}
+
+/// Rebuild each indexed `text` column's index from the layers the snapshot named, minus `D₀`.
+///
+/// # Why this family needs a pass of its own
+///
+/// Every other indexed family stores one value per entity, so folding it is a merge of value
+/// slices and a presence subtraction, and its postings are then *re-derived* from the folded
+/// column. A text column has no value column: its prose is a record-blob row and its index is a
+/// token dictionary plus postings over it, so there is nothing for that merge to take. Deriving
+/// the postings the same way — re-analysing every surviving row out of the folded blob — would
+/// work and is what the family's other writers do, but it pays the analyser over the whole corpus
+/// at every fold to reproduce a term set the layers already hold. **The postings are merged
+/// instead**, which is a union per term and a subtraction, and reaches the same artefact because
+/// the analyser is a pure function of the prose and every layer's terms came from it.
+///
+/// # Rule F, and the retention statement this pass carries
+///
+/// The blanked set is `D₀`, whole, the same set every other pass takes — a suppression is not in it
+/// and touches no artefact here (Rule S). What `andnot` leaves is the whole of the deletion's
+/// effect on this family, and it reaches further than the postings: **a term whose only carriers
+/// were deleted is not written to the merged dictionary at all**, so the word itself leaves the
+/// corpus. That is the same retention the keyword fold states for a dictionary key, and this is the
+/// only place a deleted document's vocabulary can go.
+///
+/// Carrying the index forward untouched instead would leave a deleted entity's terms in the
+/// postings while the fold retired its overlay entry — a `match` naming an entity nothing else in
+/// the bundle admits exists, which is Rule F broken silently and fail-open.
+///
+/// # Streaming, and what it costs
+///
+/// One term at a time: the layers' dictionaries are merged by a k-way scan, each surviving term's
+/// posting is encoded and appended to a spool, and the dictionary is written through
+/// [`tessera_filter::SortedDictWriter`] as the merge decides each key. Resident cost is one term's
+/// bitmap plus the spool's 8 B/term offsets buffer — the shape pass 2 takes, and the reason neither
+/// pass materialises a `Vec<Vec<u32>>` the way the batch writers do.
+///
+/// ⊘ The spool's offsets buffer for these dictionaries is **not** in [`memory_estimate`], which
+/// charges 8 B per *term-dictionary* ordinal only. A text column's vocabulary is a different and
+/// smaller number — 991k terms over 2.4M abstracts, measured — and the estimate's ×2 safety factor
+/// covers it at that scale; a deployment with many wide text columns would want it counted.
+///
+/// The merge decodes each key through `key_of`, which re-decodes its block prefix — `interval / 2`
+/// discarded decodes per key, ~8 at the shipped interval. That is deliberate rather than
+/// overlooked: a sequential cursor over the reader would be a fourth way to walk a dictionary, and
+/// at 11–19 ns a decode the whole overhead is ~0.1 s per million terms per layer, against a pass
+/// whose other terms are IO.
+///
+/// # What the folded layer does *not* carry
+///
+/// **No presence bitmap.** A flush extent stores one because an entity whose prose analysed to no
+/// terms — an empty string, a line of punctuation — carries a value and appears in no posting, so
+/// its layer would otherwise report it absent. The base build writes none, and the folded base is
+/// the base: after this pass, "carries a value" is answered from the record blob, which holds the
+/// prose itself. Nothing reads a text layer's presence today; when something does, the base owes
+/// one and so does this pass.
+fn fold_text_columns(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    written: &mut Vec<(String, PathBuf)>,
+    attr_read: &mut u64,
+    attr_written: &mut u64,
+) -> Result<(), FoldFailed> {
+    let file_len = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
+
+    for scalar in ctx
+        .declared_scalars
+        .iter()
+        .filter(|d| d.arrow_type == ScalarType::Text && d.index)
+    {
+        let column_rel = format!("partitions/{}/attrs/{}", plan.partition, scalar.name);
+        let from_dir = ctx.from_prefix_dir.join(&column_rel);
+        let to_dir = ctx.to_prefix_dir.join(&column_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (text)", &e))?;
+
+        // The base build's layer first, then one per published extent — the same files and the
+        // same order `FilterColumns::open` composes, so the merge sees exactly what a request
+        // would. Order decides nothing about the answer (the union is commutative and the layers
+        // are disjoint in entity space by **I9**); it is kept because a manifest whose bytes depend
+        // on an iteration order is a bundle identity that depends on one.
+        //
+        // The dictionaries are advised sequential, and they are the fold's own mappings rather
+        // than the request path's (decision 0052): the merge streams each one exactly once, in
+        // order. The postings are not — `ColumnPostings::open` takes no `Access`, and the merge's
+        // access to them is *not* sequential anyway: it reads record `at[i]` of whichever layers
+        // hold the least key, which walks each file in ordinal order but interleaved across
+        // layers. `MADV_SEQUENTIAL`'s drop-behind would be wrong for that, not merely absent.
+        let mut dicts = vec![tessera_filter::SortedDict::open_dir(
+            &from_dir,
+            tessera_filter::Access::MappedSequential,
+        )
+        .map_err(|e| failed("pass 4a (text: the base dictionary)", &e))?];
+        let mut postings =
+            vec![
+                tessera_filter::ColumnPostings::open(&from_dir.join("postings.arrow"), true)
+                    .map_err(|e| failed("pass 4a (text: the base postings)", &e))?,
+            ];
+        *attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
+            + file_len(&from_dir.join("postings.arrow"));
+        for extent in plan.text_extents.iter().filter(|e| e.column == scalar.name) {
+            dicts.push(
+                tessera_filter::SortedDict::open(
+                    &ctx.from_prefix_dir.join(&extent.dict),
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (text: an extent's dictionary)", &e))?,
+            );
+            postings.push(
+                tessera_filter::ColumnPostings::open(
+                    &ctx.from_prefix_dir.join(&extent.postings),
+                    true,
+                )
+                .map_err(|e| failed("pass 4a (text: an extent's postings)", &e))?,
+            );
+            *attr_read += file_len(&ctx.from_prefix_dir.join(&extent.dict))
+                + file_len(&ctx.from_prefix_dir.join(&extent.postings))
+                + file_len(&ctx.from_prefix_dir.join(&extent.presence));
+        }
+        // **A layer whose two halves disagree about how many records they hold is refused rather
+        // than merged.** Posting *i* is term *i*'s, so a postings file one record short of its
+        // dictionary would silently attribute every term after the gap to the wrong word — and the
+        // merge would then write that mis-attribution into the base, where no later pass could
+        // find it.
+        for (i, (dict, posting)) in dicts.iter().zip(postings.iter()).enumerate() {
+            if dict.len() != posting.record_count() {
+                return Err(FoldFailed(format!(
+                    "pass 4a (text): column '{}' layer {i} has {} terms but {} postings records; \
+                     an ordinal names a position in its own layer's dictionary, so merging these \
+                     would attribute terms to the wrong words",
+                    scalar.name,
+                    dict.len(),
+                    posting.record_count()
+                )));
+            }
+        }
+
+        let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
+        let postings_rel = format!("{column_rel}/postings.arrow");
+        let dict_path = ctx.to_prefix_dir.join(&dict_rel);
+        let postings_path = ctx.to_prefix_dir.join(&postings_rel);
+        let spool_path = to_dir.join("postings.spool");
+
+        let outcome = merge_text_layers(
+            &dicts,
+            &postings,
+            &plan.tombstones,
+            &dict_path,
+            &postings_path,
+            &spool_path,
+        );
+        // A fold's own spool files go on every exit path (compaction §8). `finish` removes it on
+        // success; on failure it is this function's.
+        if outcome.is_err() {
+            let _ = std::fs::remove_file(&spool_path);
+        }
+        outcome?;
+
+        *attr_written += file_len(&dict_path) + file_len(&postings_path);
+        written.push((dict_rel, dict_path));
+        written.push((postings_rel, postings_path));
+    }
+    Ok(())
+}
+
+/// The k-way merge itself: every term of every layer, in sorted order, with `tombstones` subtracted
+/// from each one's postings and an emptied term dropped.
+///
+/// Split out from [`fold_text_columns`] so the spool's cleanup has exactly one `Result` to hang
+/// off, and so the merge can be read without the file bookkeeping around it.
+fn merge_text_layers(
+    dicts: &[tessera_filter::SortedDict],
+    postings: &[tessera_filter::ColumnPostings],
+    tombstones: &Bitmap,
+    dict_path: &Path,
+    postings_path: &Path,
+    spool_path: &Path,
+) -> Result<(), FoldFailed> {
+    let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
+
+    let mut writer = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(
+        std::fs::File::create(dict_path)
+            .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?,
+    ))
+    .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?;
+    let mut spool =
+        PostingsSpool::create(spool_path).map_err(|e| failed("pass 4a (text: the spool)", &e))?;
+
+    // One decode buffer for the whole merge, and one owned key per layer: `key_of` borrows the
+    // scratch it decodes into, and a cursor has to hold its key across the comparisons that pick
+    // the least. `None` is an exhausted layer.
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut at: Vec<u32> = vec![0; dicts.len()];
+    let mut current: Vec<Option<String>> = Vec::with_capacity(dicts.len());
+    for dict in dicts {
+        current.push(cursor_key(dict, 0, &mut scratch)?);
+    }
+
+    let mut least = String::new();
+    loop {
+        // Linear over the layers rather than through a heap: the layer count is one base plus the
+        // flush extents published since the last fold, so it is small, and a heap would cost a
+        // clone per term to save a comparison per term.
+        let mut chosen: Option<usize> = None;
+        for (i, key) in current.iter().enumerate() {
+            let Some(key) = key else { continue };
+            if chosen.is_none_or(|c| key < current[c].as_ref().expect("a chosen layer has a key")) {
+                chosen = Some(i);
+            }
+        }
+        let Some(chosen) = chosen else { break };
+        least.clear();
+        least.push_str(
+            current[chosen]
+                .as_ref()
+                .expect("the chosen layer has a key"),
+        );
+
+        // **Every layer holding this term, not the first**: a word in two layers is one term of the
+        // merged index, and its posting is the union of theirs.
+        let mut entities = Bitmap::new();
+        for i in 0..dicts.len() {
+            if current[i].as_deref() != Some(least.as_str()) {
+                continue;
+            }
+            entities |= postings[i]
+                .entities(tessera_types::AttrLocalId::new(at[i]))
+                .map_err(|e| failed("pass 4a (text: reading a posting)", &e))?;
+            at[i] += 1;
+            current[i] = cursor_key(&dicts[i], at[i], &mut scratch)?;
+        }
+        entities.andnot_inplace(tombstones);
+        // **The retention statement.** A term every one of whose carriers was blanked is not
+        // written — not as an empty posting, not as a dictionary key — so the word leaves the
+        // corpus with the documents that used it.
+        if entities.is_empty() {
+            continue;
+        }
+        // The writer refuses a key that does not ascend strictly, so a merge that lost its order
+        // stops here rather than publishing a dictionary whose ordinals mean nothing.
+        writer
+            .push(&least)
+            .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?;
+        // **The default threshold, not the bundle's `small_term_threshold`.** That field is the
+        // term dictionary's, chosen for authorisation postings; the three writers that produce a
+        // text index — the build, the flush and this — all take the crate default, and a fold that
+        // took the other would re-tag every posting on the boundary and stop reproducing the build
+        // it is supposed to agree with.
+        let record = tessera_authz::postings::encode_posting_bitmap(
+            &entities,
+            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        )
+        .map_err(|e| failed("pass 4a (text: encoding a posting)", &e))?;
+        spool
+            .append(&record)
+            .map_err(|e| failed("pass 4a (text: the spool)", &e))?;
+    }
+
+    writer
+        .finish()
+        .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?;
+    spool
+        .finish(postings_path)
+        .map_err(|e| failed("pass 4a (text: the merged postings)", &e))?;
+    Ok(())
+}
+
+/// The key at `ordinal`, owned, or `None` where the ordinal is past the dictionary's end.
+fn cursor_key(
+    dict: &tessera_filter::SortedDict,
+    ordinal: u32,
+    scratch: &mut Vec<u8>,
+) -> Result<Option<String>, FoldFailed> {
+    if ordinal >= dict.len() {
+        return Ok(None);
+    }
+    let key = dict
+        .key_of(ordinal, scratch)
+        .map_err(|e| FoldFailed(format!("pass 4a (text: decoding a term): {e}")))?;
+    Ok(Some(key.to_string()))
 }
 
 /// The next `v#####` prefix name under `bundle_root` — one past the highest already present.

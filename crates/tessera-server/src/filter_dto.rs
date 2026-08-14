@@ -78,7 +78,9 @@ fn parse_node(
     match name.as_str() {
         combinator @ ("all_of" | "any_of" | "none_of") => {
             let arr = body.as_array().ok_or_else(|| {
-                bad(format!("`{combinator}` takes an array of filter expressions"))
+                bad(format!(
+                    "`{combinator}` takes an array of filter expressions"
+                ))
             })?;
             let kids = arr
                 .iter()
@@ -137,12 +139,13 @@ fn parse_operand(
     let applies = family.operands().contains(&op.as_str());
     if !applies {
         return Err(match op.as_str() {
-            // ⊘ Named rather than folded into the generic refusal: `match` is the analysed-token
-            // operator a `text` column would take, and that type is not declarable yet (#44), so
-            // this names what is absent rather than refusing generically (decision 0013).
+            // Named rather than folded into the generic refusal, because the mistake it catches
+            // is a schema one rather than a syntax one: the caller wants word matching and the
+            // column they named does not store words. Saying which declaration would give it to
+            // them is the difference between a fixable error and a puzzling one.
             "match" => bad(format!(
-                "column '{column}': `match` needs a column of declared type `text`, whose \
-                 analysed-token matching is specified and not built"
+                "column '{column}': `match` matches analysed words and needs a column declared \
+                 `type = \"text\"`. `/v1/meta` lists which columns are text"
             )),
             other => bad(format!(
                 "column '{column}' is a {} column, which takes {:?}; it does not take '{other}'",
@@ -166,8 +169,16 @@ fn parse_operand(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FilterOperand::In(codes))
         }
-        (Family::Text, "eq") => Ok(FilterOperand::TextEquals(text_value(column, op, value)?)),
-        (Family::Text, "in") => {
+        // **The operand kinds are the request's string predicates, not one family's storage.** The
+        // four mean byte-exact equality, prefix and substring over the value the item carries;
+        // which of them a dictionary resolve answers and which an ordinal scan does is the
+        // *column's* business, not the request's. Keeping them named for the predicate rather than
+        // for the family is what stops the wire shape depending on a storage choice the client is
+        // not told about and cannot act on. The `text` family joined without a wire change of its
+        // own for the same reason, bringing one operand rather than a second spelling of these
+        // four (records §4.4).
+        (Family::Keyword, "eq") => Ok(FilterOperand::TextEquals(text_value(column, op, value)?)),
+        (Family::Keyword, "in") => {
             let arr = value
                 .as_array()
                 .ok_or_else(|| bad(format!("column '{column}': `in` takes an array")))?;
@@ -177,8 +188,77 @@ fn parse_operand(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FilterOperand::TextIn(needles))
         }
-        (Family::Text, "prefix") => Ok(FilterOperand::TextPrefix(text_value(column, op, value)?)),
-        (Family::Text, "contains") => Ok(FilterOperand::TextContains(text_value(column, op, value)?)),
+        (Family::Keyword, "prefix") => {
+            Ok(FilterOperand::TextPrefix(text_value(column, op, value)?))
+        }
+        (Family::Keyword, "contains") => {
+            Ok(FilterOperand::TextContains(text_value(column, op, value)?))
+        }
+        // **`match` carries the query text, not tokens.** The engine analyses it with the column's
+        // own analyser, taken from the identity the manifest recorded when the index was built, so
+        // the query and the index cannot be segmented by different pipelines (decision 0070). A
+        // parser that tokenised here would be a second place that choice lives.
+        //
+        // The scalar form is plain `match`: every token must appear. The object form names
+        // `minimum_should_match` beside the query — Elasticsearch's own key, semantics intact.
+        (Family::Text, "match") => {
+            if let Some(query) = value.as_str() {
+                return Ok(FilterOperand::Match {
+                    query: query.to_string(),
+                    minimum: None,
+                });
+            }
+            let obj = value.as_object().ok_or_else(|| {
+                bad(format!(
+                    "column '{column}': `match` takes a string, or an object with `query` and \
+                     optionally `minimum_should_match`"
+                ))
+            })?;
+            let query = obj
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad(format!("column '{column}': `match` needs a `query` string")))?
+                .to_string();
+            let minimum = match obj.get("minimum_should_match") {
+                None => None,
+                Some(v) => {
+                    let n = v.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                        bad(format!(
+                            "column '{column}': `minimum_should_match` is a positive whole number \
+                             of tokens"
+                        ))
+                    })?;
+                    Some(u32::try_from(n).map_err(|_| {
+                        bad(format!("column '{column}': `minimum_should_match` is too large"))
+                    })?)
+                }
+            };
+            for key in obj.keys() {
+                if key != "query" && key != "minimum_should_match" {
+                    return Err(bad(format!(
+                        "column '{column}': `match` takes `query` and `minimum_should_match`, not \
+                         '{key}'"
+                    )));
+                }
+            }
+            Ok(FilterOperand::Match { query, minimum })
+        }
+        // **`phrase` takes a string and nothing else.** There is no m-of-n form of a phrase — "at
+        // least two of these words, adjacent, in order" is not a question with one answer — so the
+        // object form is refused rather than accepted and ignored. The query is carried unanalysed
+        // for `match`'s reason, and its word *order* is what distinguishes the two operands: the
+        // engine deduplicates and sorts a `match`'s tokens and keeps a phrase's exactly as the
+        // analyser produced them.
+        (Family::Text, "phrase") => Ok(FilterOperand::Phrase {
+            query: value
+                .as_str()
+                .ok_or_else(|| {
+                    bad(format!(
+                        "column '{column}': `phrase` takes a string. There is no                          `minimum_should_match` for a phrase — adjacency is not a count"
+                    ))
+                })?
+                .to_string(),
+        }),
         (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value)?)),
         (Family::Numeric, "in") => {
             let arr = value
@@ -265,7 +345,9 @@ fn numeric_value(column: &str, value: &Value) -> Result<Scalar, ApiError> {
             } else if let Some(f) = n.as_f64() {
                 Ok(Scalar::Float(f))
             } else {
-                Err(bad(format!("column '{column}': '{n}' is not a number this build can compare")))
+                Err(bad(format!(
+                    "column '{column}': '{n}' is not a number this build can compare"
+                )))
             }
         }
         _ => Err(bad(format!(
@@ -315,8 +397,8 @@ mod tests {
         move |c: &str| {
             if c == name {
                 Some(Family::Category)
-            } else if c == "title" {
-                Some(Family::Text)
+            } else if c == "title" || c == "submitter" {
+                Some(Family::Keyword)
             } else if c == "score" {
                 Some(Family::Numeric)
             } else {
@@ -373,14 +455,20 @@ mod tests {
         let FilterExpr::Leaf { operand, .. } = expr else {
             panic!("expected a leaf")
         };
-        assert_eq!(operand, FilterOperand::Equals(AttrLocalId::new(UNRESOLVABLE)));
+        assert_eq!(
+            operand,
+            FilterOperand::Equals(AttrLocalId::new(UNRESOLVABLE))
+        );
     }
 
     /// An unknown *column* is the opposite: a caller error, and safe to name.
     #[test]
     fn an_unknown_column_is_refused() {
         let err = parse_str(r#"{"nope": {"eq": "eng"}}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("not a filterable column"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("not a filterable column"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -396,8 +484,8 @@ mod tests {
     /// A node with two keys is refused rather than given an implicit operator between them.
     #[test]
     fn a_two_key_node_is_refused() {
-        let err = parse_str(r#"{"department": {"eq": "eng"}, "title": {"prefix": "x"}}"#)
-            .unwrap_err();
+        let err =
+            parse_str(r#"{"department": {"eq": "eng"}, "title": {"prefix": "x"}}"#).unwrap_err();
         assert!(format!("{err:?}").contains("exactly one key"), "{err:?}");
     }
 
@@ -421,7 +509,10 @@ mod tests {
     #[test]
     fn a_misspelt_combinator_is_an_unknown_column() {
         let err = parse_str(r#"{"non_of": [{"department": {"eq": "eng"}}]}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("not a filterable column"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("not a filterable column"),
+            "{err:?}"
+        );
     }
 
     /// `in` over a string column is `eq` over a list — the same generalisation a category gets,
@@ -445,7 +536,10 @@ mod tests {
     fn an_operator_outside_the_family_is_refused() {
         let err = parse_str(r#"{"department": {"prefix": "al"}}"#).unwrap_err();
         assert!(format!("{err:?}").contains("category column"), "{err:?}");
-        assert!(format!("{err:?}").contains("does not take 'prefix'"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("does not take 'prefix'"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -503,13 +597,68 @@ mod tests {
     #[test]
     fn range_on_a_string_column_is_refused() {
         let err = parse_str(r#"{"title": {"range": {"gte": 3}}}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("does not take 'range'"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("does not take 'range'"),
+            "{err:?}"
+        );
     }
 
+    /// `match` on a column that is not `text` names the declaration that would give it, rather
+    /// than refusing generically: the caller wants word matching and the column they picked does
+    /// not store words, which is a schema mistake and not a syntax one.
     #[test]
-    fn match_names_the_absent_text_type() {
+    fn match_on_a_non_text_column_names_the_declaration_it_needs() {
         let err = parse_str(r#"{"title": {"match": "smith"}}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("declared type `text`"), "{err:?}");
+        let text = format!("{err:?}");
+        assert!(text.contains(r#"`type = \"text\"`"#), "{text}");
+        assert!(
+            !text.contains("not built"),
+            "the operator is built; a refusal saying otherwise sends the caller to look for a \
+             missing feature instead of at their column: {text}"
+        );
+    }
+
+    /// **A keyword column parses exactly as a `utf8` one does.** The four string predicates carry
+    /// the same meaning over both, and which of them a dictionary answers is the column's business:
+    /// a client that had to send a different operand shape for a keyword would be told a storage
+    /// choice it cannot act on.
+    #[test]
+    fn a_keyword_column_takes_the_four_string_operators() {
+        for (op, expected) in [
+            (
+                r#"{"submitter": {"eq": "hep-th"}}"#,
+                FilterOperand::TextEquals("hep-th".into()),
+            ),
+            (
+                r#"{"submitter": {"prefix": "hep"}}"#,
+                FilterOperand::TextPrefix("hep".into()),
+            ),
+            (
+                r#"{"submitter": {"contains": "p-t"}}"#,
+                FilterOperand::TextContains("p-t".into()),
+            ),
+            (
+                r#"{"submitter": {"in": ["hep-th", "cs"]}}"#,
+                FilterOperand::TextIn(vec!["hep-th".into(), "cs".into()]),
+            ),
+        ] {
+            let FilterExpr::Leaf { operand, .. } = parse_str(op).unwrap() else {
+                panic!("expected a leaf")
+            };
+            assert_eq!(operand, expected, "{op}");
+        }
+    }
+
+    /// A keyword takes no `range`, and the refusal names the family — which is what makes the
+    /// family worth publishing separately from `string` even though the operator lists match.
+    #[test]
+    fn range_on_a_keyword_column_is_refused() {
+        let err = parse_str(r#"{"submitter": {"range": {"gte": 3}}}"#).unwrap_err();
+        assert!(format!("{err:?}").contains("keyword column"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("does not take 'range'"),
+            "{err:?}"
+        );
     }
 
     /// An operator no family has is refused by the same family check — the message names what
@@ -517,7 +666,10 @@ mod tests {
     #[test]
     fn an_unknown_operator_is_refused() {
         let err = parse_str(r#"{"title": {"regex": "s.*"}}"#).unwrap_err();
-        assert!(format!("{err:?}").contains("does not take 'regex'"), "{err:?}");
-        assert!(format!("{err:?}").contains("string column"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("does not take 'regex'"),
+            "{err:?}"
+        );
+        assert!(format!("{err:?}").contains("keyword column"), "{err:?}");
     }
 }

@@ -1,0 +1,20 @@
+[package]
+name = "placement"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: not a member of the repo workspace, for the reason `layoutprobe` gives — the gate's
+# `cargo test --workspace` should never build a probe harness.
+[workspace]
+
+[dependencies]
+croaring = "2"
+# **The shipped entity-space scan**, so route E is measured against the code that would actually
+# run rather than against a model of it. Route R has no shipped counterpart to call — there is no
+# row-space filter — so its loop is written here, which is what a probe preceding a design is for.
+tessera-filter = { path = "../../../crates/tessera-filter" }
+tessera-types = { path = "../../../crates/tessera-types" }
+
+[profile.release]
+opt-level = 3
+debug = false

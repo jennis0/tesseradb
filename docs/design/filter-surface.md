@@ -9,10 +9,13 @@ accepting that rule, and the served-surface sections (§6–§7) re-read against
 three lenses (Appendix R).
 **Reads against:** architecture §4 (I2, I3, I7, I12), §8.1–§8.5, §10.2–§10.4, Appendix C (C8, C11, C22);
 [`contracts.md`](contracts.md) §3.2; [`per-point-attributes.md`](per-point-attributes.md) §3.3, §3.8;
+[`records-and-search.md`](records-and-search.md) §2–§3, §6.2 (cited as **records §n**);
 [`conformance.md`](conformance.md) §3–§4; decisions
 [0008](../decisions/0008-candidate-list-route-declined.md),
 [0041](../decisions/0041-pins-become-a-staleness-stamp.md),
-[0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md).
+[0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md),
+[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
+[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **surface §n**. The companion write-side design is
 [`filter-index.md`](filter-index.md), cited as **index §n**.
@@ -21,7 +24,8 @@ cited as **surface §n**. The companion write-side design is
 
 ## 1. Summary
 
-A filter operand resolves to an **entity-space Roaring bitmap**, and composition is intersection. That is
+A filter operand resolves to an **entity-space Roaring bitmap** — or, where the column renders, to a
+row-space set bounded by the request's own domain (decision 0068) — and composition is intersection. That is
 §8.2's contract in full, and this document is what it takes to honour it: how an operand is evaluated,
 what the authorised set does when pushed into that evaluation, how a bitmap over entities becomes ranges
 over rows without paying a cost the system cannot afford, and which counts a filter may produce.
@@ -44,21 +48,32 @@ Three things decide the design, and none of them is the index.
 > publishes `filter_operands` from the schema's filterable columns, a viewport request carries an
 > operand, and a filtered request crosses into row space by whichever of §4's two routes the rule
 > chooses. `listing = "per_viewer"` is filtered at `/v1/categories` by §3.3's membership predicate.
+> **Both operand kinds are built**: the row-space leaf of §2 runs inside the per-tile sweep for a
+> rendered category, and a differential asserts the two routes agree over the domain either can
+> answer for.
 
 ---
 
 ## 2. The operand
 
-**Every filter returns a set of entity IDs as a bitmap, and composition is intersection.** New filter
-forms add operands rather than changing the shape of the call, which is what keeps the retrieval surface
-enumerable — and Appendix C is exhaustive *because* the surface is.
+**Every filter returns a set the composition can intersect, and there are exactly two kinds**
+(decision 0068). New filter forms add operands rather than changing the shape of the call, which is
+what keeps the retrieval surface enumerable — and Appendix C is exhaustive *because* the surface is.
 
 ```rust
 fn resolve(op: &FilterOperand, idx: &FilterIndex, candidates: Option<&Bitmap>)
-    -> io::Result<Bitmap>          // entity space, always
+    -> io::Result<Bitmap>          // entity space
 ```
 
-The four rules §8.2 places on that signature:
+The second kind is a **row-space set bounded by the request's own domain**: a rendered column's
+values are already in the hot column, so its leaf is evaluated over the rows the request asks about,
+exactly over that domain and silent outside it. It is an amendment to §8.2's contract shape and no
+wider — not a general row-space operand, and never a route a statistic chooses. A tree naming both
+kinds evaluates its entity-space sub-tree, crosses once by §4's measured rule, evaluates the
+row-space leaves over the crossing's domain and combines there (records §6.2). Both kinds carry §5.1's
+rule unchanged: the set they are evaluated against is the **composed verdict**, never a raw fragment.
+
+The four rules §8.2 places on the signature above:
 
 **Threshold, never top-*k*.** An operand whose result depends on what else is in the query cannot be
 composed independently. No family here is ranked, so this binds nothing today — it binds the vector
@@ -502,7 +517,7 @@ descending its nodes *against the mask*.
 
 | Surface | What changes |
 |---|---|
-| `/v1/meta` | `filter_operands` stops being an empty list and enumerates the declared operands |
+| `/v1/meta` | `filter_operands` stops being an empty list and enumerates each filterable column with its family's operator names: every column declared `index = true`, **plus every rendered category**, whose leaf is answered over the request's own rows (decision 0068). A rendered **number** is present too: decision 0064's presence bitmap beside the hot column is what lets the row scan tell an absence from a stored zero, so the combination is no longer refused at the schema. A blob-resident column is absent because it is no operand at all. One predicate serves this list and the viewport's parse gate, so a client is never published a surface its requests are not held to |
 | Viewport request | Carries operands, composing with either viewport form — a bounding box or an explicit tile list, which the request already validates as an exactly-one-of pair. Operands extend that validation rather than sitting beside a bbox check. A filter naming an invisible or nonexistent value contributes an empty operand (§2.1) |
 | Viewport response | The two-layer form of §8.5 — see below |
 | `/v1/categories` | Gains the per-viewer gate it is currently refused for (§7) |
@@ -588,10 +603,10 @@ exist. And any cache of the result is keyed by `(auth fingerprint, generation, o
 generation carries the overlay version, which moves on every accepted change, and an overlay-blind cache row
 is fail-open by another route.
 
-**A category carrying `per_viewer` gets its member sets, whatever its `used_for` says** (owner ruling,
+**A category carrying `per_viewer` gets its member sets, whatever its flags say** (owner ruling,
 2026-08-08). A membership set is not an optional *filter placement* that a disclosure control smuggles in
 past §10.3's routing rule — it is **what a category is in entity space**, as its code is what it is in row
-space. `used_for = ["filter"]` decides whether the *operand* reaches the query surface; it does not decide
+space. `index = true` decides whether the operand is answered from entity space; it does not decide
 whether the category has members. So a `render`-only category declared `per_viewer` is served, not refused,
 and the cost is **reported, never refused**, per per-point-attributes §2.3: the plan step names the member
 sets, their measured size against the column they index (0.31–1.01×), and the total across attributes.
@@ -672,6 +687,13 @@ needs and the arm as declared does not carry:
 ---
 
 ## Appendix R — review trail
+
+**2026-08-12 — the second operand kind lands** (decision 0068). §2 gains the row-space set bounded by
+the request's own domain, which a rendered column's leaf resolves to, and §6 records what `/v1/meta`
+therefore publishes: the columns declared `index = true`, plus every **rendered category**. §5.1's
+composed-verdict rule binds the new leaf exactly as it binds a scan, and is stated at §2 so the
+route that would be convenient to exempt is not. Nothing else moved — a rendered *number* is not an
+operand at all. A rendered number is an operand — 0064's presence bitmap makes its row scan able to distinguish absence from the type's zero — and only the *wire* half of 0064, how a client is told a rendered value is absent, is still deferred.
 
 **2026-08-08 (r3, third pass) — §5–§8 re-read against the artefact, and two registered channels
 withdrawn.** §5.1's *rule* survives — a filter is applied above composition, per range, never folded into

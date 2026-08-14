@@ -1,0 +1,4 @@
+n=10000000 mean=2 domain=200: building
+n=10000000 mean=5 domain=400000: building
+n=100000000 mean=2 domain=200: building
+n=100000000 mean=5 domain=400000: building
