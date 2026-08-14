@@ -679,17 +679,18 @@ struct TextLayer {
     /// text that analyses to no terms — an empty string, a field of pure punctuation — carries a
     /// value and appears in no posting.
     ///
-    /// ⊘ Read by nobody yet, and **not by the fold either**: that pass rebuilds the base index by
-    /// merging the layers' postings and subtracting the deleted set, which needs no coverage.
-    /// `match` unions across layers and needs none either, the layers being disjoint by **I9**.
-    /// What it is here for is the coverage check a coalesce would owe, and the day a text column
-    /// gains an `exists` predicate — at which point the *base* owes a presence bitmap too, since it
-    /// carries none and the fold therefore writes none.
-    #[allow(dead_code)]
+    /// **Read by the coalesce's replacement rule** ([`FilterColumns::with_coalesced`]): a
+    /// coalesced layer must stand for exactly the entities its inputs did, and presence is the only
+    /// thing that says so. Not read by the fold, which rebuilds the base by merging postings and
+    /// subtracting the deleted set and needs no coverage; not by `match`, which unions across
+    /// layers that are disjoint by **I9**.
+    ///
+    /// ⊘ **Empty for the base**, which writes no presence file — so it is a layer's coverage and
+    /// not the column's. The day a text column gains a presence predicate the base owes one too
+    /// ([#123](https://github.com/jennis0/tessera-index/issues/123)).
     present: Bitmap,
     /// The manifest path that named this layer, or `None` for the base build's index — the identity
     /// a coalesce or fold names a layer by, for [`Layer::values_rel`]'s reason.
-    #[allow(dead_code)]
     dict_rel: Option<String>,
 }
 
@@ -731,6 +732,12 @@ fn text_layer(
 #[derive(Debug, Clone)]
 pub struct TextExtentPaths {
     pub column: String,
+    /// **The manifest path, which is the layer's identity** — what `text_extents` lists and what a
+    /// later coalesce names its inputs by. Distinct from `dict` below, which is that path resolved
+    /// against the prefix directory: a composition storing the resolved one would leave the two
+    /// producers of a layer (a flush's, and `open`'s at startup) naming the same layer differently,
+    /// and a coalesce's lookup would find the layer after a restart and miss it after a flush.
+    pub dict_rel: String,
     pub dict: std::path::PathBuf,
     pub postings: std::path::PathBuf,
     pub presence: std::path::PathBuf,
@@ -764,6 +771,20 @@ pub struct CoalescedWindow {
     /// The coalesced extent's values path.
     pub values_rel: String,
     pub values: Arc<ValueColumn>,
+}
+
+/// One text column's window of extents, and the coalesced extent that replaces them.
+///
+/// Named by dictionary path on both sides — a text layer's identity, and the never-reused one
+/// [`CoalescedWindow`] takes for its own reason. The replacement carries its three files rather
+/// than an opened layer because a text layer is composed from paths wherever it enters, the flush's
+/// extents included ([`FilterColumns::with_extents`]).
+#[derive(Debug, Clone)]
+pub struct CoalescedTextWindow {
+    /// The consumed extents' dictionary paths, as `text_extents` names them.
+    pub consumed: Vec<String>,
+    /// The replacement, named exactly as a flush's extent is — the column included.
+    pub paths: TextExtentPaths,
 }
 
 /// A filter expression routed for one request (decision 0068) — see
@@ -1521,9 +1542,9 @@ impl FilterColumns {
                 SortedDict::open(&text.dict, self.access)?,
                 ColumnPostings::open(&text.postings, self.access != tessera_filter::Access::Read)?,
                 &text.column,
-                &text.dict.display().to_string(),
+                &text.dict_rel,
                 Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&text.presence)?),
-                Some(text.dict.display().to_string()),
+                Some(text.dict_rel.clone()),
             )?);
         }
         for (column, values_rel, extent, dict) in extents {
@@ -1554,7 +1575,18 @@ impl FilterColumns {
     /// [`CoalescedWindow`] carries no dictionary to go with them, and installing the layer without
     /// one would leave the column's ordinals resolving against a dictionary that no longer numbers
     /// them — the recolouring records §7 makes the remap's verification condition about.
-    pub fn with_coalesced(&self, windows: &[CoalescedWindow]) -> std::io::Result<FilterColumns> {
+    ///
+    /// **A text column is not refused, and the difference is the manifest record rather than the
+    /// family.** A text layer's dictionary, postings and presence are one entry, replaced together
+    /// — so the coalesced layer's new ordinals arrive with the dictionary that minted them and
+    /// nothing outside the three files ever held one. `texts` carries those windows; the coverage
+    /// equality above is checked for them too, against `TextLayer::present`, which is exactly what
+    /// a flush extent stores and what makes the check expressible for this family.
+    pub fn with_coalesced(
+        &self,
+        windows: &[CoalescedWindow],
+        texts: &[CoalescedTextWindow],
+    ) -> std::io::Result<FilterColumns> {
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
@@ -1630,6 +1662,67 @@ impl FilterColumns {
             // `covered` is unchanged by construction — the equality above is what says so — so it
             // is neither recomputed nor adjusted here.
         }
+        for window in texts {
+            let column = &window.paths.column;
+            let Some(layers) = next.columns.get_mut(column) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("a coalesce names text column '{column}', which this generation does not hold"),
+                ));
+            };
+            let mut union = Bitmap::new();
+            for rel in &window.consumed {
+                let Some(layer) = layers
+                    .text
+                    .iter()
+                    .find(|l| l.dict_rel.as_deref() == Some(rel.as_str()))
+                else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "a coalesce for text column '{column}' consumed extent '{rel}', which \
+                             this generation holds no layer for"
+                        ),
+                    ));
+                };
+                union |= &layer.present;
+            }
+            // Opened before anything is removed, so a replacement that will not open leaves the
+            // consumed layers standing rather than a column short of a window's worth of terms.
+            let replacement = text_layer(
+                SortedDict::open(&window.paths.dict, self.access)?,
+                ColumnPostings::open(
+                    &window.paths.postings,
+                    self.access != tessera_filter::Access::Read,
+                )?,
+                column,
+                &window.paths.dict_rel,
+                Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&window.paths.presence)?),
+                Some(window.paths.dict_rel.clone()),
+            )?;
+            // The attribute axis's replacement rule, and this family can state it because a text
+            // extent stores presence: the replacement must stand for **exactly** the entities its
+            // inputs did. A merge that dropped a layer answers every later `match` short of that
+            // layer's documents, silently, and no cardinality anywhere else would move.
+            if union != replacement.present {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "the coalesced text extent for column '{column}' is present for {} \
+                         entities where the {} layers it replaces cover {}",
+                        replacement.present.cardinality(),
+                        window.consumed.len(),
+                        union.cardinality()
+                    ),
+                ));
+            }
+            layers.text.retain(|l| {
+                l.dict_rel
+                    .as_ref()
+                    .is_none_or(|rel| !window.consumed.contains(rel))
+            });
+            layers.text.push(replacement);
+        }
         Ok(next)
     }
 
@@ -1645,6 +1738,18 @@ impl FilterColumns {
     /// catch on the delta axis.
     pub fn layer_count(&self, column: &str) -> Option<usize> {
         self.columns.get(column).map(|c| c.layers.len())
+    }
+
+    /// How many **text** layers this generation serves `column` from — the base plus one per live
+    /// extent. A separate count because a text column has no value layers at all: its index is
+    /// postings over terms and it owes no value column ([`FilterColumns::open`]), so
+    /// [`FilterColumns::layer_count`] answers `1` for one however many flushes have published.
+    ///
+    /// Read for the coalesce's bound, on [`FilterColumns::layer_count`]'s argument: a pass that
+    /// edited the manifest without replacing the live layers is a bound that arrives at the next
+    /// restart.
+    pub fn text_layer_count(&self, column: &str) -> Option<usize> {
+        self.columns.get(column).map(|c| c.text.len())
     }
 
     /// Entities in `candidate` whose value for `column` satisfies `operand`.

@@ -4,10 +4,17 @@
 //!
 //! **The fold's pass is live; the coalesce's is not, and the reason is the engine's, not this
 //! module's.** `fold_keyword_column` is called from the engine's fold, over layers the base build
-//! and the flush both write. The engine's coalesce still declines a column whose layers carry
-//! dictionaries — ⊘ not for want of this merge but because that seam does not exist yet — so
-//! `coalesce_keyword_extents` is exercised by this module's tests alone, and a keyword column's
-//! extents wait for the fold, which is a bounded steady state and not a leak.
+//! and the flush both write. The engine's coalesce still declines a keyword column — ⊘ not for want
+//! of this merge but because a coalesced `AttrExtent` is composed as *values alone*, so the merged
+//! dictionary would have nowhere to be installed and the renumbered ordinals would resolve against
+//! the dictionaries of the extents they replaced. So `coalesce_keyword_extents` is exercised by
+//! this module's tests alone, and a keyword column's extents wait for the fold, which is a bounded
+//! steady state and not a leak.
+//!
+//! The **text** family has the same renumbering and is coalesced ([`crate::coalesce_text_extents`]),
+//! because a text layer's dictionary, postings and presence are one manifest record replaced
+//! together — which is the seam this family lacks, stated here so the asymmetry reads as a
+//! difference in the composition rather than in the merge.
 //!
 //! # This merge changes the bytes, and that is a different correctness shape
 //!

@@ -5363,7 +5363,27 @@ impl Executor {
                 values: Arc::clone(&attr.values),
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_coalesced(&windows) {
+        // The text axis's windows, named by dictionary path on both sides. The paths are resolved
+        // against the live prefix here, on the executor, and opened inside the composition — the
+        // flush's arrangement for a text extent, and for its reason: a text layer is three files
+        // that must be installed together.
+        let prefix_dir = self.prefix_dir(&live);
+        let text_windows: Vec<crate::filter::CoalescedTextWindow> = completed
+            .texts
+            .iter()
+            .zip(&completed.plan.texts)
+            .map(|(extent, window)| crate::filter::CoalescedTextWindow {
+                consumed: window.extents.iter().map(|e| e.dict.clone()).collect(),
+                paths: crate::filter::TextExtentPaths {
+                    column: extent.column.clone(),
+                    dict_rel: extent.dict.clone(),
+                    dict: prefix_dir.join(&extent.dict),
+                    postings: prefix_dir.join(&extent.postings),
+                    presence: prefix_dir.join(&extent.presence),
+                },
+            })
+            .collect();
+        let filter_columns = match live.filter_columns.with_coalesced(&windows, &text_windows) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health
@@ -7316,6 +7336,7 @@ impl Executor {
             .iter()
             .map(|e| crate::filter::TextExtentPaths {
                 column: e.column.clone(),
+                dict_rel: e.dict.clone(),
                 dict: record_dir.join(&e.dict),
                 postings: record_dir.join(&e.postings),
                 presence: record_dir.join(&e.presence),

@@ -1528,38 +1528,32 @@ fn fold_text_columns(
                 + file_len(&ctx.from_prefix_dir.join(&extent.postings))
                 + file_len(&ctx.from_prefix_dir.join(&extent.presence));
         }
-        // **A layer whose two halves disagree about how many records they hold is refused rather
-        // than merged.** Posting *i* is term *i*'s, so a postings file one record short of its
-        // dictionary would silently attribute every term after the gap to the wrong word — and the
-        // merge would then write that mis-attribution into the base, where no later pass could
-        // find it.
-        for (i, (dict, posting)) in dicts.iter().zip(postings.iter()).enumerate() {
-            if dict.len() != posting.record_count() {
-                return Err(FoldFailed(format!(
-                    "pass 4a (text): column '{}' layer {i} has {} terms but {} postings records; \
-                     an ordinal names a position in its own layer's dictionary, so merging these \
-                     would attribute terms to the wrong words",
-                    scalar.name,
-                    dict.len(),
-                    posting.record_count()
-                )));
-            }
-        }
-
         let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
         let postings_rel = format!("{column_rel}/postings.arrow");
         let dict_path = ctx.to_prefix_dir.join(&dict_rel);
         let postings_path = ctx.to_prefix_dir.join(&postings_rel);
         let spool_path = to_dir.join("postings.spool");
 
-        let outcome = merge_text_layers(
-            &dicts,
-            &postings,
+        // **The layers' presence is not passed and there is nothing to pass it to.** This pass
+        // writes a base, and a base carries no presence bitmap; the two-halves check the merge
+        // makes on every input is the one guard a fold shares with the coalesce.
+        let inputs: Vec<tessera_filter_write::TextLayerRef<'_>> = dicts
+            .iter()
+            .zip(postings.iter())
+            .map(|(dict, postings)| tessera_filter_write::TextLayerRef {
+                dict,
+                postings,
+                present: None,
+            })
+            .collect();
+        let outcome = tessera_filter_write::merge_text_layers(
+            &inputs,
             &plan.tombstones,
             &dict_path,
             &postings_path,
             &spool_path,
-        );
+        )
+        .map_err(|e| failed(&format!("pass 4a (text: column '{}')", scalar.name), &e));
         // A fold's own spool files go on every exit path (compaction §8). `finish` removes it on
         // success; on failure it is this function's.
         if outcome.is_err() {
@@ -1572,123 +1566,6 @@ fn fold_text_columns(
         written.push((postings_rel, postings_path));
     }
     Ok(())
-}
-
-/// The k-way merge itself: every term of every layer, in sorted order, with `tombstones` subtracted
-/// from each one's postings and an emptied term dropped.
-///
-/// Split out from [`fold_text_columns`] so the spool's cleanup has exactly one `Result` to hang
-/// off, and so the merge can be read without the file bookkeeping around it.
-fn merge_text_layers(
-    dicts: &[tessera_filter::SortedDict],
-    postings: &[tessera_filter::ColumnPostings],
-    tombstones: &Bitmap,
-    dict_path: &Path,
-    postings_path: &Path,
-    spool_path: &Path,
-) -> Result<(), FoldFailed> {
-    let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
-
-    let mut writer = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(
-        std::fs::File::create(dict_path)
-            .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?,
-    ))
-    .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?;
-    let mut spool =
-        PostingsSpool::create(spool_path).map_err(|e| failed("pass 4a (text: the spool)", &e))?;
-
-    // One decode buffer for the whole merge, and one owned key per layer: `key_of` borrows the
-    // scratch it decodes into, and a cursor has to hold its key across the comparisons that pick
-    // the least. `None` is an exhausted layer.
-    let mut scratch: Vec<u8> = Vec::new();
-    let mut at: Vec<u32> = vec![0; dicts.len()];
-    let mut current: Vec<Option<String>> = Vec::with_capacity(dicts.len());
-    for dict in dicts {
-        current.push(cursor_key(dict, 0, &mut scratch)?);
-    }
-
-    let mut least = String::new();
-    loop {
-        // Linear over the layers rather than through a heap: the layer count is one base plus the
-        // flush extents published since the last fold, so it is small, and a heap would cost a
-        // clone per term to save a comparison per term.
-        let mut chosen: Option<usize> = None;
-        for (i, key) in current.iter().enumerate() {
-            let Some(key) = key else { continue };
-            if chosen.is_none_or(|c| key < current[c].as_ref().expect("a chosen layer has a key")) {
-                chosen = Some(i);
-            }
-        }
-        let Some(chosen) = chosen else { break };
-        least.clear();
-        least.push_str(
-            current[chosen]
-                .as_ref()
-                .expect("the chosen layer has a key"),
-        );
-
-        // **Every layer holding this term, not the first**: a word in two layers is one term of the
-        // merged index, and its posting is the union of theirs.
-        let mut entities = Bitmap::new();
-        for i in 0..dicts.len() {
-            if current[i].as_deref() != Some(least.as_str()) {
-                continue;
-            }
-            entities |= postings[i]
-                .entities(tessera_types::AttrLocalId::new(at[i]))
-                .map_err(|e| failed("pass 4a (text: reading a posting)", &e))?;
-            at[i] += 1;
-            current[i] = cursor_key(&dicts[i], at[i], &mut scratch)?;
-        }
-        entities.andnot_inplace(tombstones);
-        // **The retention statement.** A term every one of whose carriers was blanked is not
-        // written — not as an empty posting, not as a dictionary key — so the word leaves the
-        // corpus with the documents that used it.
-        if entities.is_empty() {
-            continue;
-        }
-        // The writer refuses a key that does not ascend strictly, so a merge that lost its order
-        // stops here rather than publishing a dictionary whose ordinals mean nothing.
-        writer
-            .push(&least)
-            .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?;
-        // **The default threshold, not the bundle's `small_term_threshold`.** That field is the
-        // term dictionary's, chosen for authorisation postings; the three writers that produce a
-        // text index — the build, the flush and this — all take the crate default, and a fold that
-        // took the other would re-tag every posting on the boundary and stop reproducing the build
-        // it is supposed to agree with.
-        let record = tessera_authz::postings::encode_posting_bitmap(
-            &entities,
-            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
-        )
-        .map_err(|e| failed("pass 4a (text: encoding a posting)", &e))?;
-        spool
-            .append(&record)
-            .map_err(|e| failed("pass 4a (text: the spool)", &e))?;
-    }
-
-    writer
-        .finish()
-        .map_err(|e| failed("pass 4a (text: the merged dictionary)", &e))?;
-    spool
-        .finish(postings_path)
-        .map_err(|e| failed("pass 4a (text: the merged postings)", &e))?;
-    Ok(())
-}
-
-/// The key at `ordinal`, owned, or `None` where the ordinal is past the dictionary's end.
-fn cursor_key(
-    dict: &tessera_filter::SortedDict,
-    ordinal: u32,
-    scratch: &mut Vec<u8>,
-) -> Result<Option<String>, FoldFailed> {
-    if ordinal >= dict.len() {
-        return Ok(None);
-    }
-    let key = dict
-        .key_of(ordinal, scratch)
-        .map_err(|e| FoldFailed(format!("pass 4a (text: decoding a term): {e}")))?;
-    Ok(Some(key.to_string()))
 }
 
 /// The next `v#####` prefix name under `bundle_root` — one past the highest already present.

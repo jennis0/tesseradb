@@ -725,6 +725,16 @@ a *file-count* axis rather than a query axis, and the system already has the pas
 merge is `tessera_filter_write::coalesce_attr_extents`, the replace is `FilterColumns::with_coalesced`,
 and everything below is what runs.
 
+⊘ **A `text` column joined it as a sixth axis (2026-08-14); a `keyword` column has not, and the
+difference is where a merged dictionary can be installed.** Both families renumber, so both need
+the guard this section describes. A text layer's dictionary, postings and presence are one manifest
+record, composed together and replaced together, so its new ordinals arrive with the dictionary that
+minted them and nothing outside the three files ever held one — `tessera_filter_write::coalesce_text_extents`,
+selected over `text_extents` on this section's per-column policy. A coalesced `AttrExtent` is
+composed as *values alone*, so a keyword column's renumbered ordinals would resolve against the
+dictionaries of the extents they replaced: the merge exists (`coalesce_keyword_extents`) and the
+seam does not, and such a column waits for the fold.
+
 The engine's entity-space coalesce (write-path §7; `tessera-engine`'s `coalesce` module) already
 bounds three per-flush, entity-space, accumulating axes — delta postings tiers, dictionary extents,
 external-id runs — as a **content-preserving re-encode**: no `segments_version` bump, no cache key

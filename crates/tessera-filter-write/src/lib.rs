@@ -77,6 +77,7 @@
 
 mod keyword;
 mod record;
+mod text;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -91,6 +92,7 @@ use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
 
 pub use keyword::{coalesce_keyword_extents, fold_keyword_column, KeywordLayer};
 pub use record::{coalesce_record_extents, fold_record_blob, RecordBlobWriter};
+pub use text::{coalesce_text_extents, merge_text_layers, TextLayerRef};
 
 /// The vocabulary's reserved *absent* code: never drawn, never bound to a key, and carried by
 /// exactly the entities that carry no value.

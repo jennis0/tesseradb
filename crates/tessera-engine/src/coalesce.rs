@@ -48,6 +48,16 @@
 //!   `(entity, row)` pairs — which [`tessera_filter_write::coalesce_record_extents`] preserves
 //!   exactly while re-blocking small flush blocks toward the format's 256 KiB target. It retires
 //!   nothing, spellably: the merge has no tombstone parameter (Rule S / Rule F, write-path §5.4).
+//! - **Text extents** take the attribute axis's per-column policy over their own manifest list, and
+//!   are the one axis whose output **renumbers**: the merged dictionary is a new key set and every
+//!   ordinal in the coalesced postings is a position in it. That is safe here and not on the
+//!   attribute axis, and the difference is the *manifest record* rather than the family — a
+//!   `TextExtent` names its dictionary, its postings and its presence together, composed together
+//!   and replaced together, so the renumbering never leaves the layer and nothing outside the three
+//!   files ever held a text ordinal. What must not change is the set of `(entity, term)` pairs,
+//!   which [`tessera_filter_write::coalesce_text_extents`] preserves exactly. Without it a text
+//!   column accumulates one dictionary-and-postings pair per prose-carrying flush until the next
+//!   fold, and every `match` pays a resolve and a posting read per token *per layer*.
 //!
 //! ## What it must never take
 //!
@@ -69,7 +79,7 @@ use std::sync::Arc;
 use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
 use tessera_store::coalesce_external_id_runs;
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, FileDigest, LocatorExtent, RecordExtent, SegmentsManifest,
+    AttrExtent, DictExtent, FileDigest, LocatorExtent, RecordExtent, SegmentsManifest, TextExtent,
 };
 use tessera_store::merge::size_tier;
 
@@ -136,6 +146,9 @@ pub(crate) struct CoalescePlan {
     /// pseudo-column (`record`) on the attribute axis's policy (records §7). Empty if the axis
     /// did not qualify.
     pub(crate) records: Vec<RecordExtent>,
+    /// Consumed `text_extents` entries, one window per text column — the sixth axis, on the
+    /// attribute axis's per-column policy over its own manifest list.
+    pub(crate) texts: Vec<TextWindow>,
 }
 
 /// One column's contiguous window of its own `attr_extents` subsequence.
@@ -145,6 +158,13 @@ pub(crate) struct AttrWindow {
     pub(crate) extents: Vec<AttrExtent>,
 }
 
+/// One text column's contiguous window of its own `text_extents` subsequence.
+#[derive(Debug, Clone)]
+pub(crate) struct TextWindow {
+    pub(crate) column: String,
+    pub(crate) extents: Vec<TextExtent>,
+}
+
 impl CoalescePlan {
     pub(crate) fn is_empty(&self) -> bool {
         self.tiers.is_empty()
@@ -152,6 +172,7 @@ impl CoalescePlan {
             && self.dicts.is_empty()
             && self.attrs.is_empty()
             && self.records.is_empty()
+            && self.texts.is_empty()
     }
 }
 
@@ -322,6 +343,52 @@ pub(crate) fn plan_coalesce(
         }
     }
 
+    // ---- text extents: per column, over that column's own subsequence of a separate list -------
+    //
+    // The attribute axis's policy, and **not** its dictionary exclusion. That exclusion is about
+    // where a merged dictionary can be installed: a coalesced `AttrExtent` is composed as values
+    // alone, so a keyword column's renumbered ordinals would resolve against dictionaries that no
+    // longer number them. A `TextExtent` names its dictionary, its postings and its presence as one
+    // record, composed together and replaced together, so the renumbering never leaves the layer.
+    //
+    // Without this axis a text column accumulates one dictionary-and-postings pair per
+    // prose-carrying flush until the next fold, and every `match` pays a resolve and a posting read
+    // per token *per layer* — a read cost that grows linearly in the flush count with nothing
+    // reducing it between folds.
+    {
+        let mut by_column: BTreeMap<&str, Vec<&TextExtent>> = BTreeMap::new();
+        for extent in &manifest.text_extents {
+            by_column
+                .entry(extent.column.as_str())
+                .or_default()
+                .push(extent);
+        }
+        for (column, extents) in by_column {
+            // All three files, for the attribute axis's reason: the merge holds a term's postings
+            // from every input at once and streams both dictionaries, so a cap that watched one
+            // half would bound the postings while the vocabulary — which for prose is the larger
+            // half at a long singleton tail — grew unwatched.
+            let size = |extent: &&TextExtent| {
+                Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
+            };
+            let uncapped = CoalescePolicy {
+                max_input_bytes: u64::MAX,
+                ..policy
+            };
+            let selected = select_window(&extents, policy.width, uncapped, size).and_then(|_| {
+                (2..=policy.width)
+                    .rev()
+                    .find_map(|width| select_window(&extents, width, policy, size))
+            });
+            if let Some(window) = selected {
+                plan.texts.push(TextWindow {
+                    column: column.to_string(),
+                    extents: extents[window].iter().map(|e| (*e).clone()).collect(),
+                });
+            }
+        }
+    }
+
     (!plan.is_empty()).then_some(plan)
 }
 
@@ -396,6 +463,10 @@ pub(crate) struct CompletedCoalesce {
     /// The extent was reopened on the pool before completion, so the entry names files the
     /// fail-closed reader has already accepted.
     pub(crate) record: Option<RecordExtent>,
+    /// One coalesced extent per window the text axis took. The entry only, not a reader: a text
+    /// layer is composed from its three paths (`FilterColumns::with_extents` does the same for a
+    /// flush's), and the entry names files this pass has already reopened and checked.
+    pub(crate) texts: Vec<TextExtent>,
     /// Every file this pass wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: BTreeMap<String, FileDigest>,
 }
@@ -631,6 +702,112 @@ pub(crate) fn execute_coalesce(
         Some(extent)
     };
 
+    // ---- text extents: the window merged into one layer, dictionary and all (records §7) -------
+    //
+    // The one axis whose output *renumbers*, and the one where that is contained: the merged
+    // dictionary is written beside the postings it numbers and the presence they stand for, as one
+    // `TextExtent`, so the layer is self-describing exactly as the flush's is. Nothing per entity
+    // stores a text ordinal, so nothing outside the three files needs remapping — which is what
+    // separates this from the keyword window the attribute axis declines above.
+    let mut texts = Vec::with_capacity(plan.texts.len());
+    for window in &plan.texts {
+        let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
+        let column_dir = ctx.prefix_dir.join(&column_rel);
+        std::fs::create_dir_all(&column_dir)
+            .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
+
+        // Sequential, and it is the merge's own access rather than a request's (decision 0052):
+        // each dictionary is streamed exactly once, in order. The postings are not advised — the
+        // merge reads record `at[i]` of whichever layers hold the least key, which walks each file
+        // in ordinal order but interleaved across layers, and drop-behind would be wrong for that.
+        let dicts: Vec<tessera_filter::SortedDict> = window
+            .extents
+            .iter()
+            .map(|extent| {
+                tessera_filter::SortedDict::open(
+                    &ctx.prefix_dir.join(&extent.dict),
+                    tessera_filter::Access::MappedSequential,
+                )
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|e: tessera_filter::DictError| {
+                CoalesceFailed(format!("text extent for '{}': {e}", window.column))
+            })?;
+        let postings: Vec<tessera_filter::ColumnPostings> = window
+            .extents
+            .iter()
+            .map(|extent| {
+                tessera_filter::ColumnPostings::open(&ctx.prefix_dir.join(&extent.postings), true)
+            })
+            .collect::<std::io::Result<_>>()
+            .map_err(|e| CoalesceFailed(format!("text extent for '{}': {e}", window.column)))?;
+        let presences: Vec<croaring::Bitmap> = window
+            .extents
+            .iter()
+            .map(|extent| {
+                std::fs::read(ctx.prefix_dir.join(&extent.presence))
+                    .map(|bytes| croaring::Bitmap::deserialize::<croaring::Portable>(&bytes))
+            })
+            .collect::<std::io::Result<_>>()
+            .map_err(|e| CoalesceFailed(format!("text presence for '{}': {e}", window.column)))?;
+        let inputs: Vec<tessera_filter_write::TextLayerRef<'_>> = dicts
+            .iter()
+            .zip(postings.iter())
+            .zip(presences.iter())
+            .map(|((dict, postings), present)| tessera_filter_write::TextLayerRef {
+                dict,
+                postings,
+                present: Some(present),
+            })
+            .collect();
+
+        let extent = TextExtent {
+            column: window.column.clone(),
+            dict: format!("{column_rel}/{}", tessera_filter::DICT_FILE),
+            postings: format!("{column_rel}/postings.arrow"),
+            presence: format!("{column_rel}/presence.roaring"),
+        };
+        let dict_path = ctx.prefix_dir.join(&extent.dict);
+        let postings_path = ctx.prefix_dir.join(&extent.postings);
+        let presence_path = ctx.prefix_dir.join(&extent.presence);
+        // The pass's own scratch, removed on every exit path — the fold's discipline, and for the
+        // same reason: a spool left behind is a file nothing references and nothing cleans.
+        let spool_path = column_dir.join("postings.spool");
+        let outcome = tessera_filter_write::coalesce_text_extents(
+            &inputs,
+            &dict_path,
+            &postings_path,
+            &presence_path,
+            &spool_path,
+        );
+        let _ = std::fs::remove_file(&spool_path);
+        outcome
+            .map_err(|e| CoalesceFailed(format!("text coalesce for '{}': {e}", window.column)))?;
+        drop(inputs);
+        drop(postings);
+        drop(dicts);
+
+        for rel in [&extent.dict, &extent.postings, &extent.presence] {
+            files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(rel))?);
+        }
+        // Reopened before the manifest can name it, the record axis's posture: the two halves are
+        // checked against each other here, so a merge defect refuses the pass rather than
+        // publishing a layer whose ordinals name the wrong words on every later `match`.
+        let reopened_dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read)
+            .map_err(|e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")))?;
+        let reopened_postings = tessera_filter::ColumnPostings::open(&postings_path, false)
+            .map_err(|e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")))?;
+        if reopened_dict.len() != reopened_postings.record_count() {
+            return Err(CoalesceFailed(format!(
+                "the coalesced text extent for '{}' holds {} terms and {} postings records",
+                window.column,
+                reopened_dict.len(),
+                reopened_postings.record_count()
+            )));
+        }
+        texts.push(extent);
+    }
+
     Ok(CompletedCoalesce {
         plan,
         prefix: ctx.prefix,
@@ -639,6 +816,7 @@ pub(crate) fn execute_coalesce(
         dict,
         attrs,
         record,
+        texts,
         files,
     })
 }
@@ -712,11 +890,43 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         None => return false,
     };
 
+    // The text axis, on the attribute axis's rule: a contiguous window of one column's own
+    // subsequence, keyed by the dictionary path — the never-reused identity a text layer is named
+    // by, and the one the composition finds a layer with.
+    if plan.texts.len() != completed.texts.len() {
+        return false;
+    }
+    let mut text_positions: Vec<Vec<usize>> = Vec::with_capacity(completed.texts.len());
+    for window in &plan.texts {
+        let subsequence: Vec<usize> = manifest
+            .text_extents
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.column == window.column)
+            .map(|(i, _)| i)
+            .collect();
+        let listed: Vec<&str> = subsequence
+            .iter()
+            .map(|i| manifest.text_extents[*i].dict.as_str())
+            .collect();
+        let consumed: Vec<&str> = window.extents.iter().map(|e| e.dict.as_str()).collect();
+        let Some(at) = window_of(&listed, &consumed, |s| s) else {
+            return false;
+        };
+        text_positions.push(subsequence[at].to_vec());
+    }
+
     let attr_paths: Vec<String> = plan
         .attrs
         .iter()
         .flat_map(|w| w.extents.iter())
         .flat_map(|e| [e.values.clone(), e.presence.clone()])
+        .collect();
+    let text_paths: Vec<String> = plan
+        .texts
+        .iter()
+        .flat_map(|w| w.extents.iter())
+        .flat_map(|e| [e.dict.clone(), e.postings.clone(), e.presence.clone()])
         .collect();
     let record_files: Vec<String> = plan
         .records
@@ -731,6 +941,7 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         .chain(&dict_paths)
         .chain(&attr_paths)
         .chain(&record_files)
+        .chain(&text_paths)
     {
         manifest.files.remove(rel);
     }
@@ -782,6 +993,28 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
             }
         }
         manifest.attr_extents = next;
+    }
+    if !completed.texts.is_empty() {
+        // The attribute axis's splice, over `text_extents`. Each coalesced entry lands where its
+        // window began, for that axis's reason: nothing reads the list by position — the layers are
+        // disjoint (I9) and `match` unions them — but a manifest whose bytes depend on when a pass
+        // ran is a bundle identity that does.
+        let removed: BTreeSet<usize> = text_positions.iter().flatten().copied().collect();
+        let inserts: BTreeMap<usize, &TextExtent> = text_positions
+            .iter()
+            .zip(&completed.texts)
+            .map(|(positions, extent)| (positions[0], extent))
+            .collect();
+        let mut next = Vec::with_capacity(manifest.text_extents.len());
+        for (i, extent) in manifest.text_extents.iter().enumerate() {
+            if let Some(coalesced) = inserts.get(&i) {
+                next.push((*coalesced).clone());
+            }
+            if !removed.contains(&i) {
+                next.push(extent.clone());
+            }
+        }
+        manifest.text_extents = next;
     }
     true
 }
@@ -1054,6 +1287,7 @@ mod tests {
             }),
             attrs,
             record: None,
+            texts: Vec::new(),
             files: [("c/delta.arrow".to_string(), digest(3072))]
                 .into_iter()
                 .collect(),
@@ -1260,6 +1494,7 @@ mod tests {
             dict: None,
             attrs,
             record: None,
+            texts: Vec::new(),
             files,
             plan,
             prefix: "v00000".to_string(),
@@ -1315,6 +1550,7 @@ mod tests {
             dict: None,
             attrs,
             record: None,
+            texts: Vec::new(),
             files: BTreeMap::new(),
             plan,
             prefix: "v00000".to_string(),
@@ -1381,6 +1617,7 @@ mod tests {
             dict: None,
             attrs,
             record: Some(coalesced.clone()),
+            texts: Vec::new(),
             files,
             plan,
             prefix: "v00000".to_string(),
@@ -1430,6 +1667,7 @@ mod tests {
             dict: None,
             attrs,
             record: None,
+            texts: Vec::new(),
             files: BTreeMap::new(),
             plan,
             prefix: "v00000".to_string(),
