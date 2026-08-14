@@ -130,12 +130,17 @@ enum Command {
     /// through the *same* pipeline the index was built with; reimplementing it in Python would
     /// test PyICU's ICU4C against icu4x rather than testing Tessera. This verb is that access, on
     /// the harness's existing drive-the-CLI precedent.
+    ///
+    /// It is also how a client diagnoses an empty `match`: `/v1/meta` publishes each text column's
+    /// analyser identity (`declared_scalars[].analyser`), and running the query text through the
+    /// analyser that identity names shows whether it segmented the way the index did.
     Tokenise {
         /// Text to analyse. Repeatable. With none given, reads one input per line from stdin.
         #[arg(long = "text")]
         text: Vec<String>,
         /// Which analyser, by declared name (decision 0070). A column records the identity this
-        /// resolves to, and an unknown name is refused rather than defaulted.
+        /// resolves to — `/v1/meta` publishes it per column — and an unknown name is refused
+        /// rather than defaulted.
         #[arg(long, default_value = tessera_analyse::UNICODE)]
         analyser: String,
         /// Print the analyser's identity and exit — what a column records, and what a rebuild moves.

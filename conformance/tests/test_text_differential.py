@@ -288,6 +288,33 @@ def test_the_manifest_records_the_analyser_the_oracle_tokenises_with(catalogue_b
     assert recorded.startswith("unicode/")
 
 
+def test_meta_publishes_the_analyser_identity_a_client_would_need(
+    catalogue_server, catalogue_bundle, cases
+):
+    """**The identity is on the wire, not only in the manifest** (contracts §3.1, decision 0070).
+
+    A client sends query text raw and the server segments it, so an empty `match` is ambiguous
+    between *no document says this* and *your query segmented differently from the index* — and for
+    CJK or Thai the second is the likely one. The identity is what separates them, and a client that
+    has it can reproduce the segmentation through `tessera tokenise`.
+
+    Asserted against the **manifest's** own field rather than a literal, since the two being the
+    same string is the whole point; and against a non-text column, whose `null` is what makes the
+    field's presence mean something.
+    """
+    token = catalogue_server.authorise(list(cases["full_100pct"].grants))["token"]
+    published = {s["name"]: s for s in catalogue_server.meta(token)["declared_scalars"]}
+    declared = {d["name"]: d for d in catalogue_bundle.manifest["declared_scalars"]}
+
+    assert published["abstract"]["analyser"] == declared["abstract"]["analyser"]
+    assert published["abstract"]["analyser"] == txt.identity(CLI_BIN)
+    for name in ("submitter", "department", "pages"):
+        assert published[name]["analyser"] is None, (
+            f"{name} is not a text column and has no analyser — publishing one would invite a "
+            "client to reproduce a segmentation that was never applied"
+        )
+
+
 def test_meta_publishes_text_with_exactly_its_two_operands(catalogue_server, cases):
     """`/v1/meta` names `abstract` a `text` column taking `match` and `phrase`, and **not** the four
     string predicates — the operand list is what a client is held to, and a family that published

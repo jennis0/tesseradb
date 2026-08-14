@@ -180,6 +180,22 @@ async fn meta(
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
                 "category": category,
+                // **The analyser that produced a `text` column's terms**, as the full
+                // `<name>/<version>` identity the manifest records (decision 0070); `null` for
+                // every other type, which genuinely has none.
+                //
+                // The wire carries query text unanalysed and the server segments it, which is the
+                // right split — a client cannot reproduce a pipeline it cannot see. The cost is
+                // that an empty answer is ambiguous: *no document says this* and *your query
+                // segmented differently from the index* look identical, and the second is the
+                // likely one for CJK or Thai. The identity is what separates them — `tessera
+                // tokenise --analyser <identity's name> --identity` reproduces the segmentation
+                // locally — so withholding it leaves a client with a dead end rather than a
+                // diagnosis.
+                //
+                // It discloses nothing: deployment schema, identical for every principal, the same
+                // class as `arrow_type` and `family` beside it.
+                "analyser": s.analyser,
                 // The column's compiled placement (records §3): `render` — a slot in every row of
                 // the hot column; `index` — an entity-space search structure. Neither set means
                 // blob-resident: stored, returned at drill-down, not filterable — derived from
