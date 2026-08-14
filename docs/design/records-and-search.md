@@ -1,12 +1,14 @@
 # Records and search — design
 
-**Date:** 2026-08-13 (r6 — the keyword family built, and §4.3's `contains` band corrected to the
-shipped one; Appendix R)
+**Date:** 2026-08-14 (r8 — the text family built end to end, and the corpus's status claims
+corrected against it; Appendix R)
 **Status:** **Provisional — nothing remains open; promotion awaits only the §13 amendments pass,
-which is an editing round rather than a decision.** Its **first two epics are built** — §2's
+which is an editing round rather than a decision.** Its **first three epics are built** — §2's
 declaration, §3's record blob through the whole lifecycle, drill-down's assembly from the three
-homes, §6.2's row-space route, and §4.3's keyword family in place of the deleted `utf8` column;
-every other mechanism below is ⊘ unless it names an existing one. The adversarial review
+homes, §6.2's row-space route, §4.3's keyword family in place of the deleted `utf8` column, and
+§4.4's text family: the icu4x analyser, the token index through all three of its producers, and
+`match` with its m-of-n form. What remains is **exact phrase** (§4.5), **multi-value** (§5) and
+**scoring** — in that order, and every mechanism below is ⊘ unless it names an existing one. The adversarial review
 ([`2026-08-12-records-and-search-review.md`](../evidence/memos/2026-08-12-records-and-search-review.md))
 found the security argument sound, the read-side cost argument sound with figure corrections, and
 the seams not yet survivable; every finding was applied per its recommendation, and the six
@@ -98,7 +100,7 @@ The families, and where each mechanism stands:
 | **datetime** | `timestamp_us` (`i64`) flat column + presence | masked scan: `eq`, `in`, `range` | the column itself | scan **built** |
 | **category** | code column + vocabulary + derived postings — **always** (§4.2) | scan; postings per decision 0063 | the column + vocabulary | **built** |
 | **keyword** | sorted per-layer dictionary + `u32` ordinal column | dictionary resolve → fixed-width scan; ⊘ postings for the privileged tail | dictionary + ordinals | dictionary, ordinals and every operator **built**; ⊘ **no producer emits keyword postings**, so `eq` is the ordinal scan (§4.3, §6.1) |
-| **text** | token dictionary + per-token postings | `match` (+ m-of-n) over token postings | its rows in the record blob | ⊘ unbuilt (§4.4) |
+| **text** | token dictionary + per-token postings | `match` (+ m-of-n) over token postings | its rows in the record blob | **built** — declaration, analyser, all three producers and the read route; ⊘ no phrase (§4.5), and `none_of` is refused (§4.4) |
 
 An unindexed, unrendered field of any family but category lives in the record blob and has no
 operators. `bool` remains the degenerate number. The `utf8` family is **deleted** and `keyword`
@@ -452,13 +454,19 @@ boundary.
 
 ### 4.4 Text
 
-**Partly built.** A `text` field is prose: matched by what it says, not by its bytes. The
-declaration, the analyser and the base build's token index are implemented; ⊘ the read route, the
-flush extent, the fold and exact phrase are not, and §4.5 remains specification throughout.
+**Built, end to end.** A `text` field is prose: matched by what it says, not by its bytes. The
+declaration, the analyser, all three producers of the index — the base build, the flush and the
+compaction fold — and the `match` read route are implemented; ⊘ exact phrase is not (§4.5 remains
+specification throughout), and a negation over a text column is **refused** rather than answered,
+there being no per-item value for `none_of`'s presence half to subtract from.
 
 **Storage is a token index; the values live in the record blob** (§3) whether or not the field is
-indexed — `index = true` adds only the per-layer token dictionary and hybrid postings (a singleton
-posting is a bare `u32`, measured 4.4× smaller on singleton-heavy vocabularies). Measured on real
+indexed — `index = true` adds only the per-layer token dictionary and hybrid postings. **The
+singleton encoding is worth about 4% here, not the 4.4× the keyword family measures.** That figure
+is `id` and `doi`'s ([`keyword-and-list-storage`](../../probes/2026-08-12-keyword-and-list-storage/),
+18.0 → 4.1 B/entity), where nearly every value has exactly one carrier; a prose vocabulary has a
+long singleton tail under a head that dominates the bytes, and the shipped hybrid writer measures
+22.58 B/entity against plain serialised Roaring's 23.55 on the same column and scale. Measured on real
 titles at three scales ([`string-storage`](../../probes/2026-08-12-string-storage/) arm 3, whose accounting
 [`text-index-bytes`](../../probes/2026-08-13-text-index-bytes/) then confirmed through the shipped
 writers at 21.75–22.97 across three scales — the model was conservative by up to 8%): the
@@ -640,10 +648,15 @@ calibrated by construction. So:
 
 ## 5. Multi-valued fields
 
-**`multi = true` is admissible in every family, and never with `render = true`.** Decision 0039's
-fence is unchanged and this design does not approach it: no projection, derived value or summary of
-a list earns a hot column, and the parse refusal for `render` + `multi` names 0039. Everything
-else lifts.
+⊘ **Specification throughout. `multi = true` is refused at the schema parse today, in every
+family**, and the whole of this section describes what lifting that refusal would mean rather than
+what a corpus can declare (§13 item 4; epic #87). It is written in the present tense below because
+it is a design, and the reader should hold that every claim in it is a claim about the design.
+
+**`multi = true` would be admissible in every family, and never with `render = true`.** Decision
+0039's fence is unchanged and this design does not approach it: no projection, derived value or
+summary of a list earns a hot column, and the parse refusal for `render` + `multi` names 0039 —
+that half is built and permanent. Everything else lifts.
 
 **An unindexed multi field needs no addressing at all**: it is a length-prefixed list in the
 entity's blob row (§3). Everything below concerns indexed lists.
@@ -712,11 +725,11 @@ of a statistic about what the principal's data contains (§8.2).
 
 The masked scan serves every family as §4 specifies: fixed-width constants for numbers, datetimes,
 categories and keyword ordinals; CSR constants for lists; the dictionary walk or per-candidate
-probe for keyword `contains`. The postings serve categories under 0063. ⊘ **Keyword and text term
-postings are specified and unbuilt**: 0067 admits them for whole-value operators only (§4.3), and
-no producer emits one — the manifest's per-layer postings slot is written by nobody, and the build
-derives postings for the vocabulary-bearing family alone. So a keyword `eq` is answered by the
-dictionary resolve and the ordinal scan, and text has no route at all. Per layer, unioned, disjoint
+probe for keyword `contains`. The postings serve categories under 0063 and **text**, whose
+token postings three producers emit — the base build, each flush, and the fold that merges them.
+⊘ **Keyword term postings remain specified and unbuilt**: 0067 admits them for whole-value
+operators only (§4.3), and no producer emits one, so a keyword `eq` is answered by the dictionary
+resolve and the ordinal scan. Per layer, unioned, disjoint
 by I9 — unchanged from index §5.
 
 ### 6.2 Row space: the render column is filterable
@@ -820,10 +833,12 @@ case the operand exists for — is unaffected either way, having no alternative 
 ### 6.3 The aggregate surface, and the row-bounded string route
 
 Coarse-zoom counts, densities and legends are the product, and I2 requires each computable from
-inside `M_auth` alone. For every scanned family the scan serves them (that is what it is for); ⊘ for
-text only the postings can (§4.4), and ⊘ for keywords the postings would close the one scan cell
-over budget (0067). Neither posting exists (§6.1), so text has no aggregate surface today and a
-keyword's broad `contains` is priced at the dictionary walk §6.4 carries. Nothing new is owed in
+inside `M_auth` alone. For every scanned family the scan serves them (that is what it is for); for
+text only the postings can (§4.4), and they exist — a `match` narrows the candidate and every
+aggregate is then computed over the narrowed set exactly as for any other family, from inside
+`M_auth` throughout. ⊘ For keywords the postings would close the one scan cell over budget (0067)
+and none exists (§6.1), so a keyword's broad `contains` is priced at the dictionary walk §6.4
+carries. Nothing new is owed in
 mechanism — a term lookup lands in the same `postings ∩ candidate` construction the category
 accelerator already takes — but nothing produces the postings it would land in.
 
@@ -870,8 +885,14 @@ write-path §5.4's Rule S and Rule F remain the whole of the removal model, ever
 is rebuilt whole at the fold, and a suppression touches no attribute artefact, ever.
 
 **Flush.** A flush writes, per indexed column, one extent holding whatever the family stores: the
-value slice (plus CSR offsets where multi), and for keyword and text the extent's **own** sorted
-dictionary, ordinals against it, and postings where the family derives them. The analyser and the
+value slice (plus CSR offsets where multi), and for keyword the extent's **own** sorted dictionary
+with ordinals against it. A **text** extent is the shape without a value column at all: its own
+sorted token dictionary, postings over that dictionary, and a presence bitmap — no per-entity slot,
+there being many terms per entity and no single ordinal to hold. Presence is stored rather than
+derived from the postings because prose analysing to no terms — an empty string, a line of
+punctuation — carries a value and appears in no posting. A batch with no value for the column at
+all publishes **no layer**, an empty one being a permanent per-query cost until the next fold. The
+analyser and the
 keyword sort-and-front-code run at **flush execution on the pool** (write-path §4.3) — never on
 the serial group-commit section write-path §2.3 defines, whose latency both lanes share (review
 N9). A flushed batch is bounded, and there is no shared dictionary to promote into — which is what
@@ -951,7 +972,7 @@ entities have no record":
 ```
 attrs/<column>/values.arrow        indexed numbers/datetimes/categories: native values; keyword: u32 ordinals
 attrs/<column>/offsets.arrow       indexed multi only: CSR offsets above presence
-attrs/<column>/presence.roaring    indexed columns, as today
+attrs/<column>/presence.roaring    indexed columns except text — see below
 attrs/<column>/dict.bin            keyword, text: the layer's front-coded sorted dictionary
 attrs/<column>/postings.arrow      categories (built); keyword/text terms — hybrid singleton encoding
 attrs/record/blocks.bin            the record blob: zstd blocks in entity order (§3)
@@ -1005,9 +1026,8 @@ already covers. **Phrase verify adds no row**: it decompresses only survivors, w
 the composed candidate by construction (§6); its result-bound cost is index §2.2's accepted class.
 **The blob adds one coarse surface to name rather than discover** (review X1): a drill-down
 block's decompression time reflects the content of a positional run of entities, invisible
-neighbours included — single-interaction, C4-shape, weak. It is registered alongside 0067's row in
-the owed Appendix C amendment (§13) rather than argued away, because the register is exhaustive
-only if new surfaces are named.
+neighbours included — single-interaction, C4-shape, weak. It is registered as **C26** beside 0067's own C25, rather
+than argued away, because the register is exhaustive only if new surfaces are named.
 
 **What stays refused, verbatim**: no value listing for any non-category family, no prefix
 autocomplete (index §1.1 — an index the server never exposes publishes nothing, and the refusal is
@@ -1023,9 +1043,13 @@ relevance (§4.5). Decision 0039's fence stands unmoved (§5).
 - **No corpus-global relevance statistics, ever** — the load-bearing half of §8.3, unchanged. No
   ranked list responses either: score order appears in exactly one place, the match layer's cap
   selection (§4.5), computed from mask-local statistics.
-- **No analyser configuration**: one pipeline, no stemming, no stopwords, no diacritic folding, no
-  synonyms, no per-column language settings. Each is a conformance surface and a config surface
-  bought before anyone asks; the first real need reopens §4.4 with a measurement in hand.
+- **No analyser *configuration***: no stemming, no stopwords, no diacritic folding, no synonyms,
+  no per-column language settings. Each is a conformance surface and a config surface bought before
+  anyone asks; the first real need reopens §4.4 with a measurement in hand. What decision 0070
+  changed is *selection*, not this — an analyser is named and declared per column, and a column
+  records the identity that indexed it — but each analyser is a built-in pipeline with no knobs and
+  there is no plugin route. A second one is a variant in the binary, with its own golden vectors
+  and its own version.
 - **No positional payloads in v1** — record-verify serves exact phrase; the rank-aligned sidecar
   is the one specified upgrade (§4.5), bought only on demonstrated need. No fuzzy matching, no
   regular expressions.
@@ -1193,15 +1217,18 @@ direction — so the ones an epic has already falsified are made as it lands rat
 promotion, and each bullet says where it stands. **The architecture's three are the whole of what
 is still owed**; everything below them is made or is waiting on machinery that does not exist yet.
 
-- **⊘ architecture §8.2–§8.3** — the ruled second operand kind (decision 0068) and the ruled
-  sharpening (decision 0069), and §8.3's text paragraph:
-  `utf8` → `keyword`/`text` with their operators. **Owed.**
+- **architecture §8.3** — **made**: the text paragraph names `keyword` and `text` with their
+  operators, records that `utf8` is retired and refused, and carries text's two ⊘ (no exact phrase,
+  no negation). ⊘ **§8.2's** ruled second operand kind (decision 0068) and ruled sharpening
+  (decision 0069) are still **owed**.
 - **⊘ architecture §10.3** — the routing-rule sentence gains the three-home rule and `index`; the
   "single adopted store" intention is superseded for per-interaction metadata by the record blob
   (vectors stay). **Owed.**
-- **⊘ architecture Appendix C** — 0067's row (both figures, both possession bounds — §8), and the
-  blob drill-down timing note (review X1). **Appendix A** — the new artefacts join the sizing
-  tables. **Owed**, and 0067's row waits on a first implementation by the ruling's own condition.
+- **architecture Appendix C** — **made**: 0067's row is **C25**, carrying its measured figures
+  ([`hidden-vs-absent`](../../probes/2026-08-14-hidden-vs-absent/results.md), §11 item 1) and both
+  possession bounds stated separately, the text arm's being the near-vacuous one review X2 required
+  it not read tighter than; the blob drill-down timing note (review X1) is **C26**. ⊘ **Appendix A**
+  — the new artefacts joining the sizing tables — is still **owed**.
 - **per-point-attributes §2, §4** — **made**: the `used_for` surface and the example schema are
   rewritten to §2's declaration, and the refusal list carries the `render` reason that is true of
   an ordinal. The `multi = true` refusal itself stays until §13 item 4 lifts it.
@@ -1221,6 +1248,24 @@ is still owed**; everything below them is made or is waiting on machinery that d
 ---
 
 ## Appendix R — review trail
+
+**2026-08-14 (r8) — the text family is built, and the corpus said otherwise in eight places.** A
+three-lens adversarial review over the implementation found the design's status claims trailing it
+badly: §4.4's own header called the read route, the flush extent and the fold unbuilt; §1's family
+table read "⊘ unbuilt"; §6.1 said "text has no route at all" and §6.3 that it "has no aggregate
+surface today"; and outside this document `architecture.md` §8.3 still named the retired `utf8`
+family, `filter-index.md` §2 said a schema naming `text` was refused, and `contracts.md` omitted
+`text` from `arrow_type`'s enumerated set while the build wrote it — so a second reader
+implementing the contract would have refused every manifest this build produces. All corrected
+here and there. Three claims were **wrong rather than stale** and are now stated: the 4.4× singleton
+figure quoted in §4.4 is a *keyword* measurement (`id`, `doi` — near-unique vocabularies) and is
+worth about 4% on prose; §7's flush paragraph gave a text extent "ordinals against it", which it
+cannot have, having no per-entity slot; and §7's file list promised a `presence.roaring` the text
+base does not write. §9's "no analyser configuration" was superseded by decision 0070 and now
+distinguishes *selection* from *configuration*. §5 is marked ⊘ throughout — it was written in the
+present tense over machinery the parse refuses. Appendix C gained **C26** for the blob drill-down
+timing note review X1 named, and **C25** its measured figures and the second possession bound
+review X2 required.
 
 **2026-08-13 (r7) — analysers are named and declared per column** (owner ruling,
 [decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md)). §4.4's "one

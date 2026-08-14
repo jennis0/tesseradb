@@ -17,8 +17,10 @@ the **whole write side**: a flush appends one extent per filterable column and t
 reader composes base with extents (§5); the **extent coalesce** bounds their number between folds,
 as the fourth axis of the engine's entity-space pass (§5.2); and the **fold's attribute pass** folds
 what survives back into one base, blanks the deleted entities and rebuilds the derived postings
-(§6.2). `none_of` is built to §5's positivity rule (decision 0066). What remains unbuilt is one
-operand and one family: lists and `match` are specified and refuse by name. Marked at each claim.
+(§6.2). `none_of` is built to §5's positivity rule (decision 0066). **The `text` family is built**, on a
+shape of its own — no value column, a token dictionary and postings instead — and its fold pass is
+a merge rather than a rebuild (§2.6). What remains unbuilt is one family: lists are specified and
+refuse by name. Marked at each claim.
 **Reads against:** architecture §4 (I2, I7, I9, I12), §9, §10.2–§10.4, Appendix A;
 [`contracts.md`](contracts.md) §2.1–§2.4; [`write-path.md`](write-path.md) §2.1–§2.5, §4.3–§4.5,
 §5.3–§5.4, §7; [`compaction.md`](compaction.md) §2–§4, §6, §9;
@@ -85,7 +87,8 @@ of it (§7).
 > `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
 > them (§2.3). A flush appends an extent per column and a generation composes them (§5), and the
 > **fold folds them back in**, blanks the deleted entities' slots and rebuilds the postings from the
-> folded column (§6.2). Lists and `match` are unbuilt and marked at their claims.
+> folded column (§6.2), and merges a text column's layers into one index (§2.6). Lists are unbuilt
+> and marked at their claims.
 > Present behaviour is fail-closed throughout: a filter that cannot be expressed narrows
 > nothing, and a postings file or an extent that will not open refuses rather than reading as "those
 > entities carry no value".
@@ -224,9 +227,10 @@ section quotes no per-candidate figure for `contains`.
 deliberate.** A `keyword` is an identifier: matched whole or by fragment, never analysed, and
 `contains` keeps meaning substring. A **`text` type optimised for in-query filtering** is the
 natural home for token and phrase structures, because they buy their matching at a storage cost only
-a column declared for that purpose should pay. ⊘ **`text` is specified and not built**
-(`records-and-search.md` §4.4); until it is, there is no declarable type for prose, and a schema
-that names one is refused rather than given a keyword.
+a column declared for that purpose should pay. **`text` is built** (`records-and-search.md` §4.4):
+`type = "text"` declares prose, names an analyser, and buys a token index and `match` — with none
+of the four string predicates, which is the point of the split. ⊘ Exact phrase is not built (§4.5
+there).
 
 **Set membership costs what equality costs where the domain allows a table.** A `u8` or `u16`
 category's whole code domain fits in 32 bytes or 8 KB, so `in` is a constant-time lookup built once
@@ -458,6 +462,7 @@ forbids the repair. Per-column files remove the arithmetic rather than defending
 |---|---|---|---|
 | **Category** | flat code column, `u8`/`u16`/`u32` | equality, set membership | **one Roaring posting per value** (§2.3) |
 | **Keyword** | per-layer sorted dictionary + `u32` ordinal column | equality, set membership, prefix, substring — the first three resolve to an ordinal question and scan; `contains` takes §2's two routes | none; ⊘ per-term postings admitted by decision 0067 for whole-value operators only, unbuilt |
+| **Text** | per-layer token dictionary + one posting per term; **no value column** — the prose is a record-blob row | `match`, and its m-of-n form; **no negation** — there is no per-item value for `none_of`'s presence half, so one is refused | the postings *are* the index; there is no scan to accelerate |
 | **Numeric / timestamp** | flat column in the native encoding | equality, range | none built; §3 states the open corner |
 | **List** | flat list column | as the element family | as the element family |
 
