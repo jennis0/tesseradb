@@ -32,6 +32,10 @@ ingesting deployment, not a transient, since a batch is acked and so in `M_auth`
 commit window before flush gives it rows. [`visible_total`] counts segment rows, which is that
 reading.
 
+One clause arrives from outside §7.2: a request carrying a filter evaluates the definition with
+the threshold **saturated** (§8.5's match-layer rule — every match served, up to the cap), which
+[`Selection.served_rows`] exposes as `filtered=True`. The anchor above is untouched by it.
+
 ## What is literal here, and what is not — the line is drawn deliberately
 
 **Literal, and required to stay so:** the selection itself. A literal sort of the tile's visible
@@ -215,6 +219,7 @@ class Selection:
         cap: int,
         v_total: int,
         m_target: int,
+        filtered: bool = False,
     ) -> list[int]:
         """§7.2's `served(T)`, as row ids in served order (ascending `tessera_id`).
 
@@ -229,11 +234,18 @@ class Selection:
         points batch is ordered ascending by `tessera_id` within each tile). The nesting argument's
         client-truncation clause depends on the served set being a prefix, so the order is
         contract, not presentation.
+
+        `filtered=True` is §8.5's match-layer count rule: a request carrying a filter evaluates
+        this same definition over `M_sel` with the threshold **saturated**, so `C_θ = |vis(T)|`
+        and every match is served up to the cap. θ's *anchor* never re-anchors on `M_sel`
+        (filter-surface §5.2 forbids a threshold that moves as the viewer types); the filtered
+        selection simply does not consult it. The caller passes `vis(T)` already filtered — this
+        module holds one visible set per `Selection` and no filter machinery of its own.
         """
         identities = self.segment.tessera_id
         rows = sorted(self.rows_by_tile.get(tile, ()), key=lambda row: int(identities[row]))
 
-        cut = theta_cut(v_total, m_target, self.depth)
+        cut = SATURATED if filtered else theta_cut(v_total, m_target, self.depth)
         if cut is None:
             c_theta = len(rows)
         else:
