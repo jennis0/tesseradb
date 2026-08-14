@@ -910,10 +910,12 @@ fn extent_values<'a>(
         ScalarType::F64 => gather!(F64, Codes::F64),
         ScalarType::TimestampUs => gather!(TimestampUs, Codes::I64),
         ScalarType::Keyword => unreachable!("a keyword is handled above"),
-        // ⊘ Text has no flush extent yet (#116). `write::filter_schema_of` excludes it, which is
-        // what makes this arm unreachable rather than a panic waiting for a declaration; the
-        // exclusion carries the reason.
-        ScalarType::Text => unreachable!("text is excluded from the flush's filter schema"),
+        // **Text owes no value column at all**, so it never reaches this gather — its flush extent
+        // is a token dictionary, postings and a presence bitmap, written by `write_text_extents`
+        // on its own track. `filter::owes_value_column` is where that is decided and
+        // `write::filter_schema_of` is what applies it, which is what makes this arm unreachable
+        // rather than a panic waiting for a declaration.
+        ScalarType::Text => unreachable!("text owes no value column, so it has no extent column"),
         // `utf8` survives as the *wire* type of a keyword's value and of a category's key
         // (`DeclaredScalar::wire_type`); the schema parse refuses it as a declared type, so no
         // column's storage is one.
