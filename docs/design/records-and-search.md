@@ -1112,8 +1112,9 @@ epic's start**. Item 1 populates the ruled row. Items 4–6 are owed but do not 
 
 1. ~~**Work at vocabulary scale**~~ — **measured**
    ([`hidden-vs-absent`](../../probes/2026-08-14-hidden-vs-absent/results.md), 2026-08-14), and
-   Appendix C's C25 now carries the figures. Hidden costs the absent arm **+155 ns** at one carrier
-   and **+46 µs** at 158k, over 265,867 and 478,282 terms through `FilterColumns::resolve`. The
+   Appendix C's C25 now carries the figures. Hidden costs the absent arm **+22 to +230 ns** at one
+   carrier and **+10.9 µs** at 158k, over 264,919 and 476,423 terms through
+   `FilterColumns::resolve`. The
    item's own premise is the negative result: **vocabulary scale is not what drives it**. The
    absent arm is flat across a 1.8× vocabulary growth — a failed dictionary search grows
    logarithmically — and the separation is a function of the queried term's posting alone, so

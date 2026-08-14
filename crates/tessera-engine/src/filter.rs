@@ -2383,28 +2383,88 @@ fn text_match(
     if minimum as usize > tokens.len() {
         return Ok(Bitmap::new());
     }
-    let mut per_token: Vec<Bitmap> = Vec::with_capacity(tokens.len());
+    // Each token's ordinal, resolved before any posting is read. Cheap — a binary search over a
+    // front-coded dictionary — and separating it from the reads is what lets the conjunction below
+    // narrow token by token without a second dictionary pass.
+    let mut ordinals: Vec<Option<u32>> = Vec::with_capacity(tokens.len());
     for token in tokens {
-        let entities = match dict
-            .resolve(token)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?
-        {
-            Some(ordinal) => postings.entities(AttrLocalId::new(ordinal))?,
-            None => Bitmap::new(),
-        };
-        per_token.push(entities.and(candidate));
+        ordinals.push(
+            dict.resolve(token)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
+        );
     }
 
-    // Plain `match` is the intersection, which is the common case and the cheap one: a
-    // `and_inplace` per token, narrowing as it goes. Reached at equality only — a `minimum` above
-    // the token count was answered empty above, and `None` becomes exactly the token count at the
-    // call site.
+    // ---- plain `match`: one running set, narrowed token by token ------------------------------
+    //
+    // **The accumulator is the whole memory argument.** Materialising every token's answer and
+    // intersecting at the end holds `n` bitmaps at once; carrying one running set holds one, and
+    // that set only ever *shrinks*. It starts at the candidate — the entities this principal may
+    // see — so the answer is inside `M_sel` from the first step rather than from a final
+    // intersection, which is I2 by construction and one fewer place to forget it.
+    //
+    // It is also faster, for the reason the cost model gives: a bitmap operation costs
+    // O(containers touched), so every step after the first works against an already-narrowed set.
+    //
+    // **What it does not do is short-circuit on empty**, and that is deliberate rather than
+    // overlooked: `text_match`'s contract is that an unresolved token reads its place rather than
+    // stopping, so the *shape* of the work does not distinguish "no document has this word" from
+    // "none you may see has it" any more sharply than Appendix C's C25 already accepts. A running
+    // set that emptied at token 1 and returned would make the remaining reads a function of that
+    // distinction. The loop runs to the end; the reads it makes past an emptied set are cheap by
+    // the same container arithmetic, `narrow` taking an empty candidate as an immediate answer.
     if minimum as usize == tokens.len() {
-        let mut out = per_token.swap_remove(0);
-        for rest in &per_token {
-            out.and_inplace(rest);
+        // **The candidate is borrowed for the first step, never cloned**, and the difference is
+        // measurable rather than tidy: a clone of a million-entity mask costs ~800 ns, which is
+        // most of a one-word query's whole budget. The first `narrow` reads the candidate and
+        // writes the answer; every step after it reads the previous answer.
+        let mut live: Option<Bitmap> = None;
+        for ordinal in &ordinals {
+            match live.as_mut() {
+                // The first token reads the candidate — **borrowed, never cloned**, which the
+                // measurement forced: a clone of a million-entity mask is ~800 ns, most of a
+                // one-word query's whole budget.
+                None => {
+                    live = Some(match ordinal {
+                        Some(ordinal) => postings.narrow(AttrLocalId::new(*ordinal), candidate)?,
+                        // A token no dictionary holds is carried by nothing, so the conjunction is
+                        // empty from here on — reached by narrowing to nothing rather than by
+                        // returning, per the paragraph above.
+                        None => Bitmap::new(),
+                    });
+                }
+                // Every token after it narrows the running set **in place**, which allocates
+                // nothing. Chaining the out-of-place form instead measured 19–51% slower than the
+                // route this replaced, on a full-coverage principal intersecting common words —
+                // see `ColumnPostings::narrow_inplace`.
+                Some(live) => match ordinal {
+                    Some(ordinal) => postings.narrow_inplace(AttrLocalId::new(*ordinal), live)?,
+                    None => live.clear(),
+                },
+            }
         }
+        // `tokens` is non-empty here, so the loop ran at least once; the default is the fail-safe
+        // reading of a state the guards above have already excluded.
+        let mut out = live.unwrap_or_default();
+        // Once, at the end. The narrowing steps deliberately skip it — run-optimising a set the
+        // next intersection is about to shrink is work thrown away.
+        out.run_optimize();
         return Ok(out);
+    }
+
+    // ---- m-of-n: the per-token answers, each already inside the candidate ----------------------
+    //
+    // This shape genuinely needs every token's answer at once — a count cannot be accumulated into
+    // one set — so it holds `n` bitmaps. Each is bounded by the **candidate** rather than by the
+    // posting, `narrow` never assembling the corpus-wide set, so the peak is `n × |M_sel|` and not
+    // `n × |corpus|`.
+    let mut per_token: Vec<Bitmap> = Vec::with_capacity(tokens.len());
+    for ordinal in &ordinals {
+        per_token.push(match ordinal {
+            Some(ordinal) => postings.narrow(AttrLocalId::new(*ordinal), candidate)?,
+            // An unresolved token still takes its place in the count, or `match` of three tokens
+            // with `minimum = 2` would silently become a two-token question when one is absent.
+            None => Bitmap::new(),
+        });
     }
 
     // m-of-n: how many of the tokens each candidate entity carries. Counted over the union rather

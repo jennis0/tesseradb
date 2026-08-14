@@ -112,6 +112,135 @@ impl ColumnPostings {
     pub fn entities(&self, value: AttrLocalId) -> io::Result<Bitmap> {
         resolve_union(self, &[value])
     }
+
+    /// `candidate ∩ (the entities carrying value)` — **without ever materialising the posting**.
+    ///
+    /// # Why this exists beside [`Self::entities`]
+    ///
+    /// A posting is a *corpus-wide* set: every entity carrying the value, including every one the
+    /// asking principal may not see. `entities` returns it as an owned bitmap, so a caller that
+    /// wanted only the visible part paid a heap allocation the size of the whole thing and then
+    /// threw most of it away. At 10⁹ entities a common term's posting is hundreds of megabytes of
+    /// **anonymous** memory — the kind the kernel cannot reclaim under pressure — held per value
+    /// being read, on the request path, with nothing in the request bounding how many values it
+    /// names.
+    ///
+    /// The postings file is mapped, and `croaring` deserialises the portable format as a *view*
+    /// over those bytes with no copy. Intersecting against the view leaves the corpus-wide set
+    /// where it already is — file-backed page cache the kernel may drop — and allocates only the
+    /// answer, which is bounded by `candidate` rather than by the posting.
+    ///
+    /// **The distributive step is what makes this exact across tiers**: a value's entities are the
+    /// *union* of its base record and every tier's, and `(A ∪ B) ∩ C = (A ∩ C) ∪ (B ∩ C)`. So each
+    /// source is narrowed as it is read and the results unioned, which never assembles the
+    /// unnarrowed union at all. The tag-0 case materialises, and may: it is a sorted `u32` array of
+    /// at most `small_term_threshold` entities — 32 by default — so "materialising" it is a handful
+    /// of words.
+    ///
+    /// The answer is identical to `entities(value).and(candidate)`, and
+    /// `narrowing_is_the_same_answer_as_intersecting_afterwards` holds it to that.
+    ///
+    /// **Neither this nor [`Self::narrow_inplace`] run-optimises**, where [`resolve_union`] does.
+    /// A run-optimise is a storage choice about a bitmap's containers, and these two exist to be
+    /// chained — optimising a set the next intersection is about to shrink is work thrown away.
+    /// The caller does it once, at the end, if the result is going anywhere that cares.
+    pub fn narrow(&self, value: AttrLocalId, candidate: &Bitmap) -> io::Result<Bitmap> {
+        // A candidate with nothing in it intersects to nothing, whatever the posting holds — and
+        // taking that here means a principal who can see none of this slice reads no posting bytes
+        // at all rather than reading them to intersect them away.
+        if candidate.is_empty() {
+            return Ok(Bitmap::new());
+        }
+        let mut out = Bitmap::new();
+        for posting in self.sources(value)? {
+            match posting {
+                // The view derefs to a `Bitmap` whose storage is the mapped file's bytes, so this
+                // reads them and writes only the intersection.
+                PostingRef::Roaring(view) => out |= candidate.and(&view),
+                PostingRef::Array(bytes) => {
+                    // Bounded by `small_term_threshold`, so the membership test is over a handful
+                    // of entities and needs no bitmap of its own.
+                    for chunk in bytes.chunks_exact(4) {
+                        let entity = u32::from_le_bytes(chunk.try_into().unwrap());
+                        if candidate.contains(entity) {
+                            out.add(entity);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Self::narrow`] with the running set narrowed **in place** — `live ∩= the value's entities`.
+    ///
+    /// # Why a second entry point rather than `live = narrow(value, &live)`
+    ///
+    /// It was measured. Chaining `narrow` allocates a fresh bitmap at every step, and over a
+    /// conjunction of common terms that allocation dominates: the out-of-place chain measured
+    /// **19–51% slower** than the route it replaced on a full-coverage principal intersecting head
+    /// terms, wiping out the gain it made everywhere else
+    /// (`probes/2026-08-14-hidden-vs-absent/`). `and_inplace` mutates the running set's containers
+    /// and allocates nothing, which is what makes the chain cheaper *as well as* smaller.
+    ///
+    /// **The in-place path needs a single source, and that is a property of the caller's family
+    /// rather than an assumption.** A value's entities are the union of its base record and every
+    /// live tier, and `live ∩ (A ∪ B)` cannot be done by intersecting `live` with each in turn —
+    /// the first would delete the entities only the second holds. Where there are several sources
+    /// this falls back to the distributive form, which allocates once and is exactly what `narrow`
+    /// does. A **text** column has no tiers at all, so it always takes the in-place path; a
+    /// category column with live tiers takes the other and is no worse off than before.
+    pub fn narrow_inplace(&self, value: AttrLocalId, live: &mut Bitmap) -> io::Result<()> {
+        if live.is_empty() {
+            return Ok(());
+        }
+        let sources = self.sources(value)?;
+        match sources.len() {
+            // No record at all: nothing carries the value, so nothing survives.
+            0 => live.clear(),
+            1 => match &sources[0] {
+                PostingRef::Roaring(view) => live.and_inplace(view),
+                PostingRef::Array(bytes) => {
+                    let mut small = Bitmap::new();
+                    for chunk in bytes.chunks_exact(4) {
+                        small.add(u32::from_le_bytes(chunk.try_into().unwrap()));
+                    }
+                    live.and_inplace(&small);
+                }
+            },
+            _ => {
+                let mut out = Bitmap::new();
+                for posting in &sources {
+                    match posting {
+                        PostingRef::Roaring(view) => out |= live.and(view),
+                        PostingRef::Array(bytes) => {
+                            for chunk in bytes.chunks_exact(4) {
+                                let entity = u32::from_le_bytes(chunk.try_into().unwrap());
+                                if live.contains(entity) {
+                                    out.add(entity);
+                                }
+                            }
+                        }
+                    }
+                }
+                *live = out;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every record holding `value`, base first then the tiers in serving order.
+    ///
+    /// The value's entities are the **union** of these; nothing here unions them, which is the
+    /// whole point — both narrowing entries intersect each source instead.
+    fn sources(&self, value: AttrLocalId) -> io::Result<Vec<PostingRef<'_>>> {
+        let mut out = Vec::with_capacity(1 + self.tiers.len());
+        out.extend(self.base.posting_at(value.raw())?);
+        for tier in &self.tiers {
+            out.extend(tier.posting_at(value.raw())?);
+        }
+        Ok(out)
+    }
 }
 
 /// The entities carrying **any** of `values`, unioned across the base and every live tier.
@@ -185,6 +314,139 @@ mod tests {
         let base = dir.join("postings.arrow");
         write_postings(&base, per_value, SMALL).unwrap();
         ColumnPostings::open(&base, false).unwrap()
+    }
+
+    /// **`narrow` answers exactly what intersecting afterwards answers**, across every shape the
+    /// two encodings and the tier stack produce.
+    ///
+    /// The whole point of `narrow` is that it never assembles the corpus-wide posting, so its
+    /// agreement with the obvious construction is the thing that has to be checked rather than
+    /// assumed — and checked at the boundary between the encodings, since the two are read by
+    /// different code (`small_term_threshold` decides which, and a value either side of it takes a
+    /// different arm).
+    ///
+    /// **Mutations this kills:** intersecting only the base and dropping the tiers; unioning the
+    /// tag-0 array without testing membership; taking the union of the *narrowed* sets as an
+    /// intersection.
+    #[test]
+    fn narrowing_is_the_same_answer_as_intersecting_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        // Value 0 is tag-0 (small, an array); value 1 is over the threshold and tag-1 (a Roaring
+        // view); value 2 is empty; value 3 sits exactly on the boundary.
+        let wide: Vec<u32> = (0..500).map(|i| i * 3).collect();
+        let boundary: Vec<u32> = (0..SMALL).collect();
+        let column = column_with(
+            &[vec![1, 2, 3, 900], wide.clone(), vec![], boundary.clone()],
+            dir.path(),
+        );
+
+        let candidates = [
+            Bitmap::new(),
+            Bitmap::of(&[2]),
+            Bitmap::of(&[1, 3, 900, 6, 12, 4_000]),
+            Bitmap::from_range(0..1_500),
+            Bitmap::of(&[999_999]),
+        ];
+        for (value, expected_source) in [
+            (0u32, vec![1u32, 2, 3, 900]),
+            (1, wide.clone()),
+            (2, vec![]),
+            (3, boundary.clone()),
+        ] {
+            let whole = Bitmap::of(&expected_source);
+            for candidate in &candidates {
+                let narrowed = column.narrow(AttrLocalId::new(value), candidate).unwrap();
+                assert_eq!(
+                    narrowed,
+                    whole.and(candidate),
+                    "value {value} against a candidate of {} entities",
+                    candidate.cardinality()
+                );
+                // And the answer never names an entity the candidate did not, which is the
+                // property the request path leans on.
+                assert!(narrowed.andnot(candidate).is_empty());
+            }
+        }
+    }
+
+    /// **In-place narrowing agrees with out-of-place**, over the same shapes.
+    ///
+    /// The two take different code — one `and_inplace` against the mapped view, the other the
+    /// distributive union — and only one of them is on the conjunction's hot path, so a divergence
+    /// would show as a wrong answer for multi-word queries and a right one for single-word.
+    #[test]
+    fn narrowing_in_place_agrees_with_narrowing_out_of_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let wide: Vec<u32> = (0..500).map(|i| i * 3).collect();
+        let column = column_with(&[vec![1, 2, 3, 900], wide, vec![]], dir.path());
+
+        for value in [0u32, 1, 2, 7] {
+            for candidate in [
+                Bitmap::new(),
+                Bitmap::of(&[2]),
+                Bitmap::of(&[1, 3, 900, 6, 12, 4_000]),
+                Bitmap::from_range(0..1_500),
+            ] {
+                let mut live = candidate.clone();
+                column
+                    .narrow_inplace(AttrLocalId::new(value), &mut live)
+                    .unwrap();
+                assert_eq!(
+                    live,
+                    column.narrow(AttrLocalId::new(value), &candidate).unwrap(),
+                    "value {value} against {} entities",
+                    candidate.cardinality()
+                );
+            }
+        }
+
+        // And a chain of them is the conjunction — the property the request path is built on.
+        let mut live = Bitmap::from_range(0..1_500);
+        column.narrow_inplace(AttrLocalId::new(0), &mut live).unwrap();
+        column.narrow_inplace(AttrLocalId::new(1), &mut live).unwrap();
+        let a = column.entities(AttrLocalId::new(0)).unwrap();
+        let b = column.entities(AttrLocalId::new(1)).unwrap();
+        assert_eq!(live, a.and(&b).and(&Bitmap::from_range(0..1_500)));
+    }
+
+    /// The same agreement with a **delta tier** stacked over the base, which is where the
+    /// distributive step earns its keep: the value's entities are a union across sources, and
+    /// `narrow` intersects each source rather than the union.
+    #[test]
+    fn narrowing_agrees_across_a_tier_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("postings.arrow");
+        write_postings(&base, &[vec![1, 5, 9], vec![2]], SMALL).unwrap();
+        let tier_path = dir.path().join("tier.arrow");
+        write_delta_tier_at(&tier_path, &[(0, vec![4, 5, 20])], SMALL).unwrap();
+        let column = ColumnPostings::open(&base, false)
+            .unwrap()
+            .with_tiers(vec![std::sync::Arc::new(
+                tessera_authz::DeltaTier::open(&tier_path).unwrap(),
+            )]);
+
+        for candidate in [
+            Bitmap::from_range(0..100),
+            Bitmap::of(&[5]),
+            Bitmap::of(&[4, 9]),
+            Bitmap::of(&[7]),
+            Bitmap::new(),
+        ] {
+            let want = column.entities(AttrLocalId::new(0)).unwrap().and(&candidate);
+            assert_eq!(
+                column.narrow(AttrLocalId::new(0), &candidate).unwrap(),
+                want,
+                "a value whose entities span the base and a tier"
+            );
+            // **The in-place path must take the distributive fallback here**, two sources being
+            // present: narrowing against each in turn would delete the entities only the other
+            // holds, which is the one way this optimisation can be wrong.
+            let mut live = candidate.clone();
+            column
+                .narrow_inplace(AttrLocalId::new(0), &mut live)
+                .unwrap();
+            assert_eq!(live, want, "in place, across a tier stack");
+        }
     }
 
     #[test]

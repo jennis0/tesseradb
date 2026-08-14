@@ -102,7 +102,7 @@ fn main() {
     assert_eq!(abstracts.len(), limit, "the snapshot is shorter than --scales");
 
     println!(
-        "| entities | terms | stratum | posting | absent med/min ns | hidden med/min ns | \
+        "| entities | terms | stratum | posting(s) | absent med/min ns | hidden med/min ns | \
          visible ns | hidden/absent | separation |"
     );
     println!("|---|---|---|---|---|---|---|---|---|");
@@ -188,6 +188,8 @@ fn run(abstracts: &[String]) {
         ("head", 100_000, usize::MAX),
     ];
 
+    multiword(&columns, &terms, &by_size, abstracts.len(), term_count);
+
     for (label, lo, hi) in strata {
         let Some((term, size)) = pick(&by_size, lo, hi) else {
             println!(
@@ -229,6 +231,83 @@ fn run(abstracts: &[String]) {
             hidden_min - absent_min
         );
     }
+}
+
+/// **A multi-word conjunction's cost as the token count grows** — the arm the accumulator rewrite
+/// was made for.
+///
+/// Two things were stacked before it. Every token's answer was held at once, so a query of *n*
+/// words held *n* bitmaps; and each token's **corpus-wide** posting was materialised as an owned
+/// bitmap before being narrowed to the candidate, so the transient peak was the posting's size
+/// rather than the answer's. The rewrite carries one running set, narrowed token by token, and
+/// intersects against the mapped posting *view* so the corpus-wide set is never assembled at all.
+///
+/// What this measures is the wall clock, which is the half a harness can see from outside: the
+/// resident half needs a peak-RSS reading the shipped process does not take. The prediction is
+/// that time falls too — a bitmap operation costs O(containers touched), so every step after the
+/// first works against an already-narrowed set — and a measurement that showed it flat would mean
+/// the container arithmetic is not where the cost is.
+fn multiword(
+    columns: &FilterColumns,
+    terms: &BTreeMap<String, Vec<u32>>,
+    by_size: &[(&String, usize)],
+    entities: usize,
+    term_count: usize,
+) {
+    // Head words, which is where a conjunction is expensive: each posting is large, so a route
+    // that materialised them all held the most and a route that narrows as it goes saves the most.
+    let heads: Vec<&str> = by_size
+        .iter()
+        .rev()
+        .take(8)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    let mut all = Bitmap::new();
+    all.add_range(0..=(entities as u32 - 1));
+
+    println!("CONJ | entities | terms | words | postings read | ns med/min | answer |");
+    for n in [1usize, 2, 4, 8] {
+        let query = heads[..n].join(" ");
+        // The postings this query reads, summed — the quantity the old route's peak tracked.
+        let posting_sum: usize = heads[..n].iter().map(|t| terms[*t].len()).sum();
+        let (median, min) = time_conjunction(columns, &query, &all);
+        let hits = columns
+            .resolve(
+                COLUMN,
+                &FilterOperand::Match {
+                    query: query.clone(),
+                    minimum: None,
+                },
+                &all,
+            )
+            .expect("resolve")
+            .cardinality();
+        println!(
+            "| {entities} | {term_count} | {n}-word conjunction | {posting_sum} |              {median:.0} / {min:.0} | {hits} |",
+        );
+    }
+}
+
+/// Nanoseconds per multi-word `resolve`, median and minimum over [`TRIALS`] runs.
+fn time_conjunction(columns: &FilterColumns, query: &str, candidate: &Bitmap) -> (f64, f64) {
+    let operand = FilterOperand::Match {
+        query: query.to_string(),
+        minimum: None,
+    };
+    for _ in 0..16 {
+        let _ = columns.resolve(COLUMN, &operand, candidate).expect("resolve");
+    }
+    let reps = 200u32;
+    let mut runs: Vec<f64> = Vec::with_capacity(TRIALS);
+    for _ in 0..TRIALS {
+        let start = Instant::now();
+        for _ in 0..reps {
+            let _ = columns.resolve(COLUMN, &operand, candidate).expect("resolve");
+        }
+        runs.push(start.elapsed().as_nanos() as f64 / f64::from(reps));
+    }
+    runs.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+    (runs[runs.len() / 2], runs[0])
 }
 
 /// A term whose posting size is in `[lo, hi]`, taken from the middle of the band.
