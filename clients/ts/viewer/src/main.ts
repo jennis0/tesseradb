@@ -612,6 +612,9 @@ function bindControls() {
     store.update((s) => {
       s.budget = Number(budgetInput.value);
     });
+    // The driver holds its own copy of the budget — the store's is only seed and display — so the
+    // change must be handed over before the reschedule or the plan replays the old depth.
+    controller?.setBudget(Number(budgetInput.value));
     controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
   });
 }

@@ -177,6 +177,21 @@ export class Driver {
     return {mTarget: this.mTarget, visibleInView: this.lastVisibleInView};
   }
 
+  /**
+   * Adopt a new marks-on-screen budget mid-session. Construction-time options are otherwise
+   * final, and the budget was frozen with them — which left the viewer's budget control changing
+   * a store field no plan ever read again.
+   *
+   * The depth hold is suspended so a one-step depth change is taken on the very next plan. The
+   * hold exists to absorb calibration wobble the user never asked for; a budget they just set is
+   * the opposite case, and holding it until the next settle banks reads as the control being dead.
+   */
+  setBudget(budget: number): void {
+    if (!Number.isFinite(budget) || budget <= 0 || budget === this.o.budget) return;
+    this.o.budget = budget;
+    this.holdSuspended = true;
+  }
+
   /** The presented-frame handle, for a consumer deciding whether its own drawn state matches. */
   get presentedFrame() {
     return this.presented;
