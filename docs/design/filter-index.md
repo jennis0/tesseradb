@@ -462,7 +462,7 @@ forbids the repair. Per-column files remove the arithmetic rather than defending
 |---|---|---|---|
 | **Category** | flat code column, `u8`/`u16`/`u32` | equality, set membership | **one Roaring posting per value** (§2.3) |
 | **Keyword** | per-layer sorted dictionary + `u32` ordinal column | equality, set membership, prefix, substring — the first three resolve to an ordinal question and scan; `contains` takes §2's two routes | none; ⊘ per-term postings admitted by decision 0067 for whole-value operators only, unbuilt |
-| **Text** | per-layer token dictionary + one posting per term; **no value column** — the prose is a record-blob row | `match`, and its m-of-n form; **no negation** — there is no per-item value for `none_of`'s presence half, so one is refused | the postings *are* the index; there is no scan to accelerate |
+| **Text** | per-layer token dictionary + one posting per term; **no value column** — the prose is a record-blob row | `match` and its m-of-n form; `phrase`, whose postings conjunction is narrowed by re-reading each survivor's prose from the blob; **no negation** — there is no per-item value for `none_of`'s presence half, so one is refused | the postings *are* the index; there is no scan to accelerate |
 | **Numeric / timestamp** | flat column in the native encoding | equality, range | none built; §3 states the open corner |
 | **List** | flat list column | as the element family | as the element family |
 

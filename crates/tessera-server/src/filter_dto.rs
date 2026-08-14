@@ -243,6 +243,22 @@ fn parse_operand(
             }
             Ok(FilterOperand::Match { query, minimum })
         }
+        // **`phrase` takes a string and nothing else.** There is no m-of-n form of a phrase — "at
+        // least two of these words, adjacent, in order" is not a question with one answer — so the
+        // object form is refused rather than accepted and ignored. The query is carried unanalysed
+        // for `match`'s reason, and its word *order* is what distinguishes the two operands: the
+        // engine deduplicates and sorts a `match`'s tokens and keeps a phrase's exactly as the
+        // analyser produced them.
+        (Family::Text, "phrase") => Ok(FilterOperand::Phrase {
+            query: value
+                .as_str()
+                .ok_or_else(|| {
+                    bad(format!(
+                        "column '{column}': `phrase` takes a string. There is no                          `minimum_should_match` for a phrase — adjacency is not a count"
+                    ))
+                })?
+                .to_string(),
+        }),
         (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value)?)),
         (Family::Numeric, "in") => {
             let arr = value

@@ -240,9 +240,7 @@ impl Family {
             Family::Category => &["eq", "in"],
             Family::Keyword => &["eq", "in", "prefix", "contains"],
             Family::Numeric => &["eq", "in", "range"],
-            // ⊘ `phrase` is #118's and is absent until it is built — publishing an operator the
-            // parse gate would refuse is the drift this list exists to prevent.
-            Family::Text => &["match"],
+            Family::Text => &["match", "phrase"],
         }
     }
 
@@ -341,6 +339,21 @@ pub enum FilterOperand {
     /// index segmented by another matches on precisely the strings where they differ, with no error
     /// anywhere. Analysing at the wire would put the choice in a second place, free to drift.
     Match { query: String, minimum: Option<u32> },
+    /// **Exact phrase**: the query's tokens appear in the field *in this order and adjacent*.
+    ///
+    /// Carried unanalysed for [`FilterOperand::Match`]'s reason, and answered in two stages
+    /// (`records-and-search.md` §4.5). The postings narrow: an item can only carry the phrase if it
+    /// carries every word in it, so the conjunction inside the candidate is an exact
+    /// over-approximation of the answer. Then each survivor's own prose is read out of the record
+    /// blob, re-analysed, and its token sequence searched for the query's — which is what makes the
+    /// answer *exact* rather than a word-bag approximation, and what makes the operand cost **no
+    /// storage at all**.
+    ///
+    /// **Token-bigram terms are refuted and must not be re-derived**: 3.8M distinct pairs over 2.4M
+    /// titles at 61.7 B/entity, 2.7× the unigram index they would sit beside
+    /// (`probes/2026-08-12-string-storage/`). The verify buys exactness for zero bytes; the index
+    /// would buy latency for a multiple of the family's whole storage cost.
+    Phrase { query: String },
     /// Numeric equality.
     NumEquals(Scalar),
     /// Numeric set membership.
@@ -596,6 +609,13 @@ enum Route {
 /// re-open it.
 #[derive(Debug, Clone)]
 struct Layers {
+    /// This column's position in the manifest's `declared_scalars`.
+    ///
+    /// **An index internal, and the record blob's addressing key**: a blob row tags each field by
+    /// this number rather than by name, so a route that must read a column's *value* out of the
+    /// blob — the phrase verify — has no other way to pick its field out of a row. Never
+    /// serialised anywhere; drill-down resolves the same tag against the same list.
+    declared_index: usize,
     layers: Vec<Layer>,
     /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
     /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
@@ -1099,7 +1119,7 @@ impl FilterColumns {
         let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
-        for scalar in declared {
+        for (declared_index, scalar) in declared.iter().enumerate() {
             // The route affordances, from the compiled declaration alone (decision 0068). A
             // rendered column always affords the row route — its values are in the hot column,
             // and both families that reach it can express absence there. The entity route needs an
@@ -1196,6 +1216,7 @@ impl FilterColumns {
                 columns.insert(
                     scalar.name.clone(),
                     Layers {
+                        declared_index,
                         layers: Vec::new(),
                         covered: Bitmap::new(),
                         filterable: true,
@@ -1241,6 +1262,7 @@ impl FilterColumns {
             columns.insert(
                 scalar.name.clone(),
                 Layers {
+                    declared_index,
                     layers: vec![Layer {
                         values_rel: None,
                         values: base,
@@ -1660,10 +1682,19 @@ impl FilterColumns {
             // An operator outside this family is refused at the parse gate, which asks
             // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
             // line of defence and the direction that narrows.
-            let FilterOperand::Match { query, minimum } = operand else {
-                return Ok(Bitmap::new());
+            let (query, minimum, phrase) = match operand {
+                FilterOperand::Match { query, minimum } => (query, *minimum, false),
+                FilterOperand::Phrase { query } => (query, None, true),
+                // An operator outside this family is refused at the parse gate, which asks
+                // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
+                // line of defence and the direction that narrows.
+                _ => return Ok(Bitmap::new()),
             };
-            let mut tokens = analyser.tokens(query);
+            // **Order and duplicates survive the analyser, and a phrase needs both** — which is why
+            // the sort and the deduplication happen here, on the copy the postings take, rather
+            // than in `Analyser::tokens`.
+            let ordered = analyser.tokens(query);
+            let mut tokens = ordered.clone();
             tokens.sort();
             tokens.dedup();
             let minimum = minimum.unwrap_or(tokens.len() as u32);
@@ -1675,7 +1706,13 @@ impl FilterColumns {
                         detail: e.to_string(),
                     })?;
             }
-            return Ok(out);
+            // A one-word phrase *is* a `match`, and short-circuiting it is worth stating: the
+            // verify below decompresses a record block per survivor, and for the commonest phrase
+            // shape there is nothing for it to establish that the conjunction has not.
+            if !phrase || ordered.len() < 2 {
+                return Ok(out);
+            }
+            return self.verify_phrase(name, column, &ordered, out, candidate);
         }
 
         // **The routed pair, and the split between them is the whole of decision 0063.** The base
@@ -1931,6 +1968,82 @@ impl FilterColumns {
         }
     }
 
+    /// Keep only the entities whose prose actually carries the phrase, by reading it (§4.5).
+    ///
+    /// # Why the answer is exact, and why it costs no storage
+    ///
+    /// The postings answer *which items use all these words*, which is a superset of *which items
+    /// say them in this order and adjacent*: an item cannot carry the phrase without carrying every
+    /// word in it, so the conjunction is an over-approximation that is never short. This pass then
+    /// reads each survivor's own prose out of the record blob, runs it through the **same analyser
+    /// the index was built with**, and looks for the query's token sequence contiguously in the
+    /// document's. Same pipeline both sides, so a phrase is found exactly where the words the index
+    /// holds are adjacent — no positional payload, no bigram terms, no second artefact.
+    ///
+    /// The refuted alternative is worth naming at the site, because it is the one a reader reaches
+    /// for: **token-bigram terms cost 61.7 B/entity over 2.4M titles, 2.7× the whole unigram index
+    /// they would sit beside** (`probes/2026-08-12-string-storage/`). They are not to be
+    /// re-derived.
+    ///
+    /// # What it costs, and the class that cost belongs to
+    ///
+    /// One record-block decompression and one analysis per **surviving** entity — result-bound, not
+    /// corpus-bound. Measured at 236–270 µs per block through the built reader on selective
+    /// phrases. It is unbounded on an unselective one — `of the` survives the conjunction almost
+    /// everywhere, so almost every visible item is read — which is the same accepted class as
+    /// `filter-index.md` §2.2's unselective predicates and not a new one: the work is a function of
+    /// the candidate and the query, both of which the caller already holds.
+    ///
+    /// # The gate, discharged rather than assumed
+    ///
+    /// The verify decompresses a block on behalf of each survivor, so a survivor outside the
+    /// candidate would be a block read for an entity this principal may not see. `text_match`
+    /// intersects with the candidate as it reads each posting, so this cannot happen — and it is
+    /// checked anyway, before a single block is touched, because "cannot happen" is what an
+    /// intersection moved one line would make false with no other symptom.
+    fn verify_phrase(
+        &self,
+        name: &str,
+        column: &Layers,
+        phrase: &[String],
+        survivors: Bitmap,
+        candidate: &Bitmap,
+    ) -> Result<Bitmap, FilterError> {
+        if survivors.andnot(candidate).cardinality() != 0 {
+            return Err(FilterError::PostingsUnreadable {
+                column: name.to_string(),
+                detail: "the phrase conjunction named an entity outside the candidate, so the                          verify would decompress a record block on behalf of an item this                          principal may not see"
+                    .to_string(),
+            });
+        }
+        let Some(analyser) = column.analyser.as_ref() else {
+            return Ok(Bitmap::new());
+        };
+        let tag = u16::try_from(column.declared_index).unwrap_or(u16::MAX);
+        let mut out = Bitmap::new();
+        for entity in survivors.iter() {
+            // **A row that will not read excludes the item rather than refusing the request.** The
+            // conjunction has already established that the item's words are in the index, so a
+            // missing or malformed blob row is a bundle defect — but the fail-closed reading of it
+            // here is exclusion, which narrows, where drill-down's is a refusal because it is about
+            // to *serve* the row. Two different questions about the same bytes.
+            let Ok(Some(fields)) = self.records.fields_of(entity) else {
+                continue;
+            };
+            let Some(RecordValue::Utf8(prose)) = fields
+                .into_iter()
+                .find(|f| f.tag == tag)
+                .map(|f| f.value)
+            else {
+                continue;
+            };
+            if contains_phrase(&analyser.tokens(&prose), phrase) {
+                out.add(entity);
+            }
+        }
+        Ok(out)
+    }
+
     /// The entities of `candidate` that carry a value in `column` — the presence half of a
     /// negation, unioned across the layers exactly as a scan is.
     ///
@@ -2156,7 +2269,9 @@ fn keyword_ordinals(
         // `match` is the text family's and reaches no keyword layer: the parse gate refuses an
         // operator outside a column's family, so this is the second line of defence and the
         // sentinel — which scans and matches nothing — is the fail-closed reading.
-        FilterOperand::Match { .. } => OrdinalPredicate::Eq(NO_SUCH_ORDINAL),
+        FilterOperand::Match { .. } | FilterOperand::Phrase { .. } => {
+            OrdinalPredicate::Eq(NO_SUCH_ORDINAL)
+        }
         FilterOperand::TextEquals(needle) => {
             OrdinalPredicate::Eq(dict.resolve(needle)?.unwrap_or(NO_SUCH_ORDINAL))
         }
@@ -2210,6 +2325,23 @@ fn scan_ordinals(values: &ValueColumn, predicate: &OrdinalPredicate, candidate: 
             }),
         ),
     }
+}
+
+/// Does `document`'s token sequence contain `phrase`'s contiguously and in order?
+///
+/// **Both sides come from the same analyser**, so this is a comparison of the index's own units and
+/// not of raw text: a phrase found here is one whose words the index holds adjacent. A repeated
+/// word is not collapsed on either side — `"the the"` matches a document that says it twice in a
+/// row and not one that says it once — which is what distinguishes a phrase from the word-bag the
+/// conjunction already answered.
+fn contains_phrase(document: &[String], phrase: &[String]) -> bool {
+    // An empty phrase is refused upstream, and a phrase longer than the document cannot occur —
+    // `windows` would panic on a zero length and yields nothing past the end, so both are stated
+    // rather than left to it.
+    if phrase.is_empty() || phrase.len() > document.len() {
+        return false;
+    }
+    document.windows(phrase.len()).any(|w| w == phrase)
 }
 
 /// `match` over one text column: intersect the tokens' postings inside the candidate, or count
@@ -2647,7 +2779,8 @@ fn scan(values: &ValueColumn, operand: &FilterOperand, candidate: &Bitmap) -> Bi
         | FilterOperand::TextContains(_)
         // `match` never reaches a value column: the text family has none, and the parse gate
         // refuses the operator elsewhere. Empty is the same fail-safe reading the string arms take.
-        | FilterOperand::Match { .. } => Bitmap::new(),
+        | FilterOperand::Match { .. }
+        | FilterOperand::Phrase { .. } => Bitmap::new(),
         FilterOperand::NumEquals(n) => values.scan_num_eq(candidate, *n),
         FilterOperand::NumIn(ns) => values.scan_num_in(candidate, ns),
         FilterOperand::Range { lo, hi } => values.scan_range(candidate, *lo, *hi),
@@ -2680,6 +2813,60 @@ pub fn candidate(
         }
     }
     live
+}
+
+#[cfg(test)]
+mod phrase_tests {
+    use super::contains_phrase;
+
+    fn t(words: &str) -> Vec<String> {
+        if words.is_empty() {
+            return Vec::new();
+        }
+        words.split(' ').map(str::to_string).collect()
+    }
+
+    /// **Adjacency and order, at the two boundaries and past them.**
+    ///
+    /// Run over the token *sequence* rather than through the analyser, because what this predicate
+    /// owns is the sequence comparison — the analyser has its own golden vectors and mixing the two
+    /// would make a segmentation change fail here.
+    #[test]
+    fn a_phrase_is_a_contiguous_run_in_order() {
+        let doc = t("the quick brown fox jumps");
+        assert!(contains_phrase(&doc, &t("quick brown")));
+        assert!(contains_phrase(&doc, &t("the quick")), "at the start");
+        assert!(contains_phrase(&doc, &t("jumps")), "the last word alone");
+        assert!(contains_phrase(&doc, &t("fox jumps")), "at the end");
+        assert!(contains_phrase(&doc, &doc), "the whole document");
+
+        assert!(!contains_phrase(&doc, &t("brown quick")), "order is a term");
+        assert!(
+            !contains_phrase(&doc, &t("quick fox")),
+            "both words, not adjacent — the conjunction's answer and not this one"
+        );
+        assert!(!contains_phrase(&doc, &t("the fox")));
+    }
+
+    /// **A repeated word is evidence twice over, on both sides.** This is what separates a phrase
+    /// from the deduplicated word-bag `match` resolves: `"the the"` is a claim about a document
+    /// saying it twice in a row, and the conjunction that narrows to it cannot tell the difference.
+    #[test]
+    fn a_repeated_word_is_not_collapsed() {
+        assert!(contains_phrase(&t("had had had had"), &t("had had")));
+        assert!(!contains_phrase(&t("the cat the hat"), &t("the the")));
+        assert!(contains_phrase(&t("the the cat"), &t("the the")));
+    }
+
+    /// A phrase longer than the document, and an empty one on either side. `windows(0)` panics and
+    /// `windows(n > len)` yields nothing, so both are decided before the walk rather than by it.
+    #[test]
+    fn the_degenerate_shapes_are_decided_before_the_walk() {
+        assert!(!contains_phrase(&t("one two"), &t("one two three")));
+        assert!(!contains_phrase(&[], &t("anything")));
+        assert!(!contains_phrase(&t("a document"), &[]), "an empty phrase is not everywhere");
+        assert!(!contains_phrase(&[], &[]));
+    }
 }
 
 #[cfg(test)]
@@ -2754,6 +2941,7 @@ mod keyword_tests {
         columns.insert(
             name.to_string(),
             Layers {
+                declared_index: 0,
                 layers,
                 covered,
                 filterable: true,

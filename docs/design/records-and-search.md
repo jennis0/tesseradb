@@ -7,8 +7,9 @@ which is an editing round rather than a decision.** Its **first three epics are 
 declaration, §3's record blob through the whole lifecycle, drill-down's assembly from the three
 homes, §6.2's row-space route, §4.3's keyword family in place of the deleted `utf8` column, and
 §4.4's text family: the icu4x analyser, the token index through all three of its producers, and
-`match` with its m-of-n form. What remains is **exact phrase** (§4.5), **multi-value** (§5) and
-**scoring** — in that order, and every mechanism below is ⊘ unless it names an existing one. The adversarial review
+`match` with its m-of-n form and `phrase` verified against the record blob. What remains is
+**multi-value** (§5) and **scoring** (§4.5) — in that order, and every mechanism below is ⊘ unless
+it names an existing one. The adversarial review
 ([`2026-08-12-records-and-search-review.md`](../evidence/memos/2026-08-12-records-and-search-review.md))
 found the security argument sound, the read-side cost argument sound with figure corrections, and
 the seams not yet survivable; every finding was applied per its recommendation, and the six
@@ -100,7 +101,7 @@ The families, and where each mechanism stands:
 | **datetime** | `timestamp_us` (`i64`) flat column + presence | masked scan: `eq`, `in`, `range` | the column itself | scan **built** |
 | **category** | code column + vocabulary + derived postings — **always** (§4.2) | scan; postings per decision 0063 | the column + vocabulary | **built** |
 | **keyword** | sorted per-layer dictionary + `u32` ordinal column | dictionary resolve → fixed-width scan; ⊘ postings for the privileged tail | dictionary + ordinals | dictionary, ordinals and every operator **built**; ⊘ **no producer emits keyword postings**, so `eq` is the ordinal scan (§4.3, §6.1) |
-| **text** | token dictionary + per-token postings | `match` (+ m-of-n) over token postings | its rows in the record blob | **built** — declaration, analyser, all three producers and the read route; ⊘ no phrase (§4.5), and `none_of` is refused (§4.4) |
+| **text** | token dictionary + per-token postings | `match` (+ m-of-n) over token postings; `phrase` verified against the blob (§4.5) | its rows in the record blob | **built** — declaration, analyser, all three producers, `match` and `phrase`; ⊘ no scoring (§4.5), and `none_of` is refused (§4.4) |
 
 An unindexed, unrendered field of any family but category lives in the record blob and has no
 operators. `bool` remains the degenerate number. The `utf8` family is **deleted** and `keyword`
@@ -552,7 +553,7 @@ re-derives independently; here independence lives in the vectors, not a second i
 tokeniser's version is part of the manifest; changing it is a rebuild, exactly as changing a
 category width is.
 
-**Operators: `match`, and its m-of-n form.** Built. `match` is *every named token appears in the
+**Operators: `match`, its m-of-n form, and `phrase`.** All built. `match` is *every named token appears in the
 field*, evaluated as an intersection of per-token postings inside the candidate;
 `minimum_should_match` (ES's own name, semantics intact) relaxes it to *at least m of n*, evaluated
 as a counting union — no statistics, no new storage. **The wire carries the query text, not
@@ -578,8 +579,9 @@ substring over prose is the trigram-postings design, refused with its measured s
 
 ### 4.5 Scoring and exact phrase
 
-⊘ **Unbuilt and unscheduled beyond what §13 stages; specified here because both hang off one
-upgrade and one rule.**
+**Exact phrase is built** — v1, verify-against-the-record, as specified below. ⊘ **Scoring is
+unbuilt and unscheduled beyond what §13 stages**, and the two are specified together because they
+hang off one upgrade and one rule.
 
 **The rule that makes scoring safe: every statistic a score reads is a function of
 `(M_auth, query)` — score as if the visible corpus were the whole corpus.** Corpus-global inverse
@@ -618,12 +620,19 @@ calibrated by construction. So:
 **Exact phrase: one measured refutation, one v1 answer, one shared upgrade**
 ([`phrase-cost`](../../probes/2026-08-12-phrase-cost/)).
 
-- **v1 is verify-against-the-record**: AND the phrase tokens' postings inside the candidate, then
-  decompress the survivors' blob blocks and check adjacency there — zero storage, exact, and
-  result-bound: 236–270 µs per block on selective phrases (§3 — the built reader's figure; the
-  phrase probe's 169 µs was a decompression rate), unbounded on `"of the"`, which is the same
-  accepted class as index §2.2's unselective predicates. Survivors are inside the composed
-  candidate by construction (§6), so the verify reads nothing a filter result would not.
+- **v1 is verify-against-the-record**, and is **built**: AND the phrase tokens' postings inside the
+  candidate, then decompress the survivors' blob blocks and check adjacency there — zero storage,
+  exact, and result-bound: 236–270 µs per block on selective phrases (§3 — the built reader's
+  figure; the phrase probe's 169 µs was a decompression rate), unbounded on `"of the"`, which is
+  the same accepted class as index §2.2's unselective predicates. Survivors are inside the composed
+  candidate by construction (§6), so the verify reads nothing a filter result would not — and the
+  implementation **checks that** before it touches a block rather than resting on the construction,
+  since a survivor outside the candidate would be a block read on behalf of an item the principal
+  may not see, which is worse than a wrong answer. Both sides of the adjacency test come from the
+  same analyser, so a phrase is found exactly where the words the index holds are adjacent; word
+  order and repetition survive on both sides, which is what distinguishes `phrase "the the"` from
+  the deduplicated bag `match` resolves. A one-word phrase is a `match` and short-circuits the
+  verify entirely.
 - **Token-bigram terms are refuted**, and recorded so the idea is not re-derived: the pair
   vocabulary explodes (3.8M distinct over 2.4M titles, ~65% singletons at every scale measured),
   costing 61.7 B/entity on titles — **2.7× the 22.6 B/entity unigram index it would sit beside,

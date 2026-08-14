@@ -33,7 +33,11 @@ const N: u64 = 64;
 fn prose_of(e: u64) -> String {
     match e % 4 {
         0 => "the quick brown fox".to_string(),
-        1 => "quick silver fox".to_string(),
+        // Carries `quick` and `brown` **not adjacent**, and `fox brown` in the order source 0 has
+        // reversed — the two shapes that separate a phrase from the word-bag conjunction that
+        // narrows to it. Every assertion in this file derives its expectation from this function,
+        // so the corpus can carry them without a second fixture.
+        1 => "quick silver fox brown".to_string(),
         2 => "日本語のテキスト quick".to_string(),
         _ => "brown bear".to_string(),
     }
@@ -549,4 +553,166 @@ fn a_negation_over_a_text_column_is_refused() {
             .cardinality()
             > 0
     );
+}
+
+/// **A phrase is where the words are adjacent and in order — the conjunction only narrows to it.**
+///
+/// The two-stage route (§4.5): the tokens' postings intersect inside the candidate to an exact
+/// over-approximation, then each survivor's own prose is read out of the record blob, re-analysed
+/// and searched for the query's token sequence. What this pins is that the second stage does
+/// something — a route that returned the conjunction would pass every `match` assertion in this
+/// file and answer `phrase` wrongly wherever a document happens to use the words apart.
+///
+/// The fixture carries both separating shapes. Source 0 says *the quick brown fox*; source 1 says
+/// *quick silver fox brown*, which holds the same two words at a distance and holds `fox brown` in
+/// the order source 0 reverses.
+///
+/// **Mutations this kills:** returning the conjunction unverified (source 1 matches `quick brown`);
+/// comparing the phrase's tokens as a set rather than a sequence (`fox brown` and `brown fox`
+/// answer alike); sorting or deduplicating the phrase's tokens as `match` does (same); an
+/// off-by-one window (a phrase at the very start or end of a document is missed).
+#[test]
+fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
+    use tessera_engine::filter::FilterOperand;
+
+    let dir = build_with(text_schema(true));
+    let out = dir.path().join("bundle");
+    let columns = open_columns(&out);
+    let source_of = source_to_entity(&out);
+    let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
+    let sources = |operand: FilterOperand| -> Vec<u64> {
+        let hits = columns
+            .resolve("abstract", &operand, &all)
+            .expect("a declared text column resolves");
+        let mut v: Vec<u64> = (0..N).filter(|e| hits.contains(source_of[e])).collect();
+        v.sort_unstable();
+        v
+    };
+    let phrase = |q: &str| FilterOperand::Phrase { query: q.to_string() };
+    // The oracle: the corpus's own prose, analysed and searched for the word sequence. Upstream of
+    // anything the build stored, which is the relation every assertion in this file checks against.
+    let saying = |words: &[&str]| -> Vec<u64> {
+        let a = tessera_analyse::Analyser::new();
+        let want: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        (0..N)
+            .filter(|e| a.tokens(&prose_of(*e)).windows(want.len()).any(|w| w == want))
+            .collect()
+    };
+    let matches = |q: &str| FilterOperand::Match {
+        query: q.to_string(),
+        minimum: None,
+    };
+
+    // The separating case. Both sources carry both words; only source 0 says them together.
+    let with_both = sources(matches("quick brown"));
+    assert!(
+        with_both.contains(&0) && with_both.contains(&1),
+        "the fixture must have a document that uses both words apart: {with_both:?}"
+    );
+    let adjacent = sources(phrase("quick brown"));
+    assert!(adjacent.contains(&0), "source 0 says 'quick brown'");
+    assert!(
+        !adjacent.contains(&1),
+        "source 1 says both words apart, and a phrase is not a conjunction: {adjacent:?}"
+    );
+
+    // Order is a term. Source 0 says 'brown fox'; source 1 says 'fox brown'.
+    assert!(sources(phrase("brown fox")).contains(&0));
+    assert!(!sources(phrase("brown fox")).contains(&1));
+    assert!(sources(phrase("fox brown")).contains(&1));
+    assert!(!sources(phrase("fox brown")).contains(&0));
+
+    // At the very start and the very end of a document, which is where a window walk goes wrong.
+    assert!(sources(phrase("the quick")).contains(&0), "the first two words");
+    assert!(sources(phrase("silver fox")).contains(&1));
+    assert!(sources(phrase("brown bear")).contains(&3), "the whole document");
+    // And exhaustively, against the corpus's own prose rather than against three spot checks: the
+    // route's answer *is* the set of documents saying the words in that order.
+    for probe in [
+        vec!["quick", "brown"],
+        vec!["brown", "fox"],
+        vec!["fox", "brown"],
+        vec!["the", "quick", "brown", "fox"],
+        vec!["brown", "bear"],
+    ] {
+        assert_eq!(
+            sources(phrase(&probe.join(" "))),
+            saying(&probe),
+            "phrase {probe:?}"
+        );
+    }
+
+    // **The verify's own answer, not an empty intersection.** Source 1 says *quick silver*, so the
+    // conjunction for `silver quick` is non-empty and names it; the phrase is the reverse order and
+    // matches nothing. Stated with the conjunction asserted first, because "empty" is what a route
+    // that had simply stopped working would also return.
+    assert_eq!(
+        sources(matches("silver quick")),
+        (0..N).filter(|e| e % 4 == 1).collect::<Vec<_>>(),
+        "the conjunction names every document using both words"
+    );
+    assert_eq!(
+        sources(phrase("silver quick")),
+        Vec::<u64>::new(),
+        "the words are there and in the other order, which is not this phrase"
+    );
+    assert_eq!(
+        sources(phrase("quick silver")),
+        saying(&["quick", "silver"]),
+        "and this one is exactly the documents whose own prose says it"
+    );
+
+    // A one-word phrase is a `match`, and a word no document carries is empty either way.
+    assert_eq!(sources(phrase("quick")), sources(matches("quick")));
+    assert_eq!(sources(phrase("zzzznope")), Vec::<u64>::new());
+    assert_eq!(sources(phrase("quick zzzznope")), Vec::<u64>::new());
+
+    // The query is analysed by the column's own analyser here exactly as for `match`, so case and
+    // width fold, and a CJK phrase works without spaces to split on.
+    assert_eq!(sources(phrase("QUICK BROWN")), sources(phrase("quick brown")));
+    assert!(
+        !sources(phrase("日本語のテキスト")).is_empty(),
+        "a CJK phrase is a sequence of segmented words, not one token"
+    );
+}
+
+/// **The candidate bounds a phrase's answer, and the verify never reads outside it.**
+///
+/// The verify decompresses a record block per survivor, so an entity outside the candidate reaching
+/// it would be a block read on behalf of an item the principal may not see — a different and worse
+/// thing than a wrong answer. The route checks that before it touches a block rather than trusting
+/// the intersection two functions above, and this is the case that would notice if both were wrong
+/// together.
+#[test]
+fn a_phrase_never_answers_or_reads_outside_the_candidate() {
+    use tessera_engine::filter::FilterOperand;
+
+    let dir = build_with(text_schema(true));
+    let out = dir.path().join("bundle");
+    let columns = open_columns(&out);
+    let source_of = source_to_entity(&out);
+    let operand = FilterOperand::Phrase {
+        query: "quick brown".to_string(),
+    };
+
+    let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
+    let wide = columns.resolve("abstract", &operand, &all).unwrap();
+    assert!(
+        wide.cardinality() > 1,
+        "the fixture must have something to narrow: {}",
+        wide.cardinality()
+    );
+
+    // A candidate holding one carrier of the phrase and one item that carries neither word.
+    let narrow: croaring::Bitmap = [source_of[&0], source_of[&3]].into_iter().collect();
+    let got = columns.resolve("abstract", &operand, &narrow).unwrap();
+    assert!(
+        got.andnot(&narrow).is_empty(),
+        "the answer named an entity the candidate did not"
+    );
+    assert_eq!(got.cardinality(), 1, "source 0 carries the phrase, source 3 does not");
+
+    // A candidate holding no carrier answers empty rather than reading anything.
+    let none: croaring::Bitmap = [source_of[&3]].into_iter().collect();
+    assert!(columns.resolve("abstract", &operand, &none).unwrap().is_empty());
 }
