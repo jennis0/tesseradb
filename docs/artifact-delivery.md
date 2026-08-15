@@ -92,7 +92,7 @@ material is written; what is missing is the disposition.
 | Implement [0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) — slot reuse | **deferred, deliberately** *(owner, 2026-08-15)* | nothing here | not a dependency: artifacts need identity, the deny lane and the opaque identifier, none of which need reuse. Deferring **removes** the recycled-slot fail-open rather than carrying it; the membership-reconciliation clause ships with it whenever it lands |
 | **The signature-sort tiebreak** (rep §12) | ✔ **ruled 2026-08-15** — [decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) | Stage 1 | taken: allocation becomes `(signature, morton_code, source_id)`. Free in the format and *measured* so; what it costs in the build's batch plan is named there and sized in Stage 1 |
 | The descent change (model §6) — per-artifact test replacing §7.5's tree walk | open | Stage 5 | contradicts a normative document |
-| The label ladder reduced to guidance (model §2.3 / §7.7) | open | Stage 3 | ditto |
+| The label ladder reduced to guidance | ✔ **ruled** — [decision 0078](decisions/0078-the-service-takes-no-opinion-on-which-variation.md) | Stage 3 | the service resolves a caller-supplied ordering and chooses nothing. **A variation is a general artifact property**, not a label one |
 | The three gate modes (model §5) | open | Stage 2 | substitutive disables `min_visible_members` by one schema word — the register row is part of the ruling |
 | The suppression-across-regeneration refusal (rep §5.0.2) | open | Stage 7 | makes the stable key mandatory once a layer has taken a suppression |
 | Membership as a filter (rep §7) | open | Stage 8 | a disclosure question, not a cost one |

@@ -95,3 +95,4 @@ prevent.
 | [0075](0075-the-masked-count-is-an-existence-criterion.md) | 2026-08-15 | The masked count is an existence criterion, declared absolute or proportional |
 | [0076](0076-an-artifact-is-served-whole-or-not-at-all.md) | 2026-08-15 | An artifact is served whole or not at all |
 | [0077](0077-supplied-content-lives-in-the-record-blob.md) | 2026-08-15 | Artifact supplied content lives in the record blob |
+| [0078](0078-the-service-takes-no-opinion-on-which-variation.md) | 2026-08-15 | The service takes no opinion on which variation is served; the caller supplies the ordering |
