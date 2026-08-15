@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 356" width="860" height="356" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>Five request stages left to right, a bar showing selection dominating measured time, and the measured cost model: nanoseconds per visible row, uncorrelated with points returned.</title>
+<rect x="0" y="0" width="860" height="356" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="ar5" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One viewport request, and where its time goes — measured at 10⁹ items</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="46" width="150" height="56" rx="2"/>
+          <rect x="188" y="46" width="150" height="56" rx="2"/>
+          <rect x="356" y="46" width="150" height="56" rx="2"/>
+          <rect x="524" y="46" width="150" height="56" rx="2"/>
+          <rect x="692" y="46" width="150" height="56" rx="2"/>
+        </g>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="95" y="68">compose mask</text>
+          <text x="263" y="68">tiles &#8594; ranges</text>
+          <text x="431" y="68">count per tile</text>
+          <text x="599" y="68">select per tile</text>
+          <text x="767" y="68">gather + emit</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="95" y="84">session projection</text>
+          <text x="95" y="96">+ overlay diffs</text>
+          <text x="263" y="84">binary search,</text>
+          <text x="263" y="96">~300 tiles</text>
+          <text x="431" y="84">range bit-counts,</text>
+          <text x="431" y="96">no file read</text>
+          <text x="599" y="84">walk visible rows,</text>
+          <text x="599" y="96">keep lowest priority</text>
+          <text x="767" y="84">columns &#8594; Arrow,</text>
+          <text x="767" y="96">opaque IDs out</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar5)">
+          <line x1="172" y1="74" x2="184" y2="74"/>
+          <line x1="340" y1="74" x2="352" y2="74"/>
+          <line x1="508" y1="74" x2="520" y2="74"/>
+          <line x1="676" y1="74" x2="688" y2="74"/>
+        </g>
+
+        <text x="20" y="152" font-size="11.5" fill="#5b6a75" letter-spacing="1">MEASURED SHARE OF THE REQUEST</text>
+        <g stroke="#b7c2c9">
+          <rect x="20"  y="164" width="16"  height="34" fill="#f1f4f5"/>
+          <rect x="36"  y="164" width="41"  height="34" fill="#e9e4f0"/>
+          <rect x="77"  y="164" width="706" height="34" fill="#dcedf3" stroke="#0e6f8a"/>
+          <rect x="783" y="164" width="49"  height="34" fill="#f4ecd7"/>
+        </g>
+        <text x="430" y="186" font-size="12.5" fill="#101820" text-anchor="middle">selection — 83–89%</text>
+        <g font-size="11" fill="#5b6a75">
+          <text x="20" y="216">compose ≈0%</text>
+          <text x="130" y="216">counting 3–6%</text>
+          <text x="700" y="216">gather 5–6%</text>
+        </g>
+        <line x1="28" y1="204" x2="28" y2="198" stroke="#9aa8b1"/>
+        <line x1="57" y1="204" x2="57" y2="198" stroke="#9aa8b1"/>
+        <line x1="807" y1="204" x2="807" y2="198" stroke="#9aa8b1"/>
+
+        <text x="20" y="258" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE MEASURED COST MODEL</text>
+        <text x="20" y="282" font-size="13" fill="#101820">request time ≈ 4.0–4.5 ns × <tspan fill="#0e6f8a">visible rows in the viewport</tspan> (correlation 0.83–0.999)</text>
+        <text x="20" y="304" font-size="13" fill="#101820">latency: <tspan fill="#0e6f8a">p50 123 ms · p99 158–191 ms</tspan> per viewport — hundreds of milliseconds at 10⁹, not single-digit</text>
+        <text x="20" y="326" font-size="12" fill="#5b6a75">uncorrelated with points returned (−0.08): raising the mark budget 20× moves p50 by ~20% — returning more is nearly free, seeing more is not</text>
+        <text x="20" y="345" font-size="12" fill="#5b6a75">the quantity to design against: a viewer granted 42% of the corpus averages ~25M visible rows per viewport, max ~145M</text>
+      
+
+</svg>
