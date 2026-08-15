@@ -69,6 +69,17 @@
 //! `ExternalIdSidecar::deferred_from_manifest` also derives the base locator's path from
 //! `external_id_runs[0]`, which stops resolving the moment that entry is not the build's.
 //!
+//! **The digest home identifies the build's artefacts only until the first fold.** A fold
+//! digest-names every carried file in the new prefix's `MANIFEST.json` — durability for a hard
+//! link (compaction §4), not authorship — so on the one axis a fold does not rebuild, the
+//! dictionary, eligibility is positional instead: the base dictionary is always the first entry,
+//! and everything after it was written by a flush or an earlier coalesce and stays takeable
+//! whichever files map digests it. Neither of the two reasons above reaches a carried extent —
+//! its listing home is still this side-manifest list, so retiring it edits no `MANIFEST.json`,
+//! and the consumed file outlives its entry on disc, digest still true, until the next fold
+//! reclaims the prefix. Judged by digest home instead, every extent alive at a fold froze for
+//! ever and the axis grew linearly in the fold count.
+//!
 //! **A merge retires nothing.** No tombstone is applied and no posting is dropped for a deleted
 //! entity. A pass here that did either has left this module and entered compaction's.
 
@@ -248,13 +259,32 @@ pub(crate) fn plan_coalesce(
     }
 
     // ---- dictionary extents: contiguous and in place, because ordinals are positions ----------
-    if let Some(window) = select_window(
-        &manifest.dict_extents,
-        policy.width,
-        policy,
-        |extent: &DictExtent| (!is_build(&extent.path)).then(|| size_of(&extent.path)),
-    ) {
-        plan.dicts = manifest.dict_extents[window].to_vec();
+    //
+    // **Eligibility here is positional — everything after the first entry — not the `is_build`
+    // test the tier and run axes use.** The one entry on this axis a prefix's builder ever writes
+    // is the base dictionary, and it is always first: `tessera build` writes exactly one extent,
+    // a fold writes none (pass 4b carries the list forward verbatim), flushes append and this
+    // pass splices in place, so position 0 names the build's dictionary for the lineage's life.
+    // That entry stays untakeable — write-path §7's build-artefact exclusion.
+    //
+    // Every later entry was written by a flush or an earlier coalesce, and stays takeable across
+    // folds even though a fold digest-names it in the new prefix's `MANIFEST.json`: that digest
+    // home is durability for a hard link (compaction §4), not authorship. Consuming one rewrites
+    // no file the bundle manifest names — the merge writes a *new* extent and retires the
+    // consumed entry from this side-manifest list, the consumed file staying on disc with its
+    // digest still true until the next fold drops it with the prefix. Judged by digest home
+    // instead, every extent alive at a fold froze for ever, and since the dictionary is the one
+    // guarded axis a fold does not rebuild, the frozen head grew by each cycle's residue: the
+    // list ratcheted linearly in the fold count (the endurance tier's pinned ratchet) with
+    // nothing ever draining it. What holds the extents positional is unchanged: the window is
+    // consecutive entries of the live list, lands in place, and the merge is an
+    // ordinal-preserving concatenation (contracts §2.4; decision 0042).
+    if let Some((_base, promoted)) = manifest.dict_extents.split_first() {
+        if let Some(window) = select_window(promoted, policy.width, policy, |extent: &DictExtent| {
+            Some(size_of(&extent.path))
+        }) {
+            plan.dicts = manifest.dict_extents[window.start + 1..window.end + 1].to_vec();
+        }
     }
 
     // ---- attribute extents: per column, over that column's own subsequence -------------------
@@ -1196,7 +1226,8 @@ mod tests {
     /// base locator's ordinals are positions in the build's runs, so consuming one renumbers the
     /// whole reverse direction for every entity the build knew about.
     ///
-    /// **Mutation:** drop the `is_build` guards and the plan takes run 0 and dict extent 0.
+    /// **Mutation:** drop the run axis's `is_build` guard and the plan takes run 0; drop the
+    /// dictionary axis's skip of its first entry and the plan takes dict extent 0.
     #[test]
     fn the_builds_own_run_and_dictionary_extent_are_never_selected() {
         let (manifest, build_files) = manifest_with(3);
@@ -1212,6 +1243,38 @@ mod tests {
             !plan.dicts.iter().any(|e| e.path == "terms/terms-0.dict"),
             "the build's dictionary extent: {:?}",
             plan.dicts
+        );
+    }
+
+    /// **A fold's carry-forward must not freeze the dictionary axis.** A fold digest-names every
+    /// carried file in the new prefix's `MANIFEST.json` (durability for the hard links,
+    /// compaction §4) and carries `dict_extents` forward verbatim — the one guarded axis it does
+    /// not rebuild. Judging eligibility by that digest home froze every carried extent, so the
+    /// axis ratcheted linearly in the fold count — the endurance tier measured 6 → 58 across 24
+    /// fold cycles, against write-path §7's claim that the coalesce bounds it. Eligibility is
+    /// positional instead: the base dictionary — always first — is never taken, and every later
+    /// extent stays takeable whichever files map digests it.
+    ///
+    /// **Mutation:** restore the `is_build` test on the dictionary axis and this plans no
+    /// dictionary window; admit the first entry and the window starts at the base.
+    #[test]
+    fn a_folds_carried_dictionary_extents_are_still_selected() {
+        let (mut manifest, mut build_files) = manifest_with(3);
+        // A fold's publication: every carried file's digest moves to the new prefix's
+        // `MANIFEST.json` and the side-manifest's own files map starts empty — every digest a
+        // fold publishes goes in `MANIFEST.json` (compaction §4).
+        build_files.extend(std::mem::take(&mut manifest.files));
+
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        let dicts: Vec<&str> = plan.dicts.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            dicts,
+            [
+                format!("partitions/{PARTITION}/slices/s0/segments/flush-0-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/slices/s0/segments/flush-1-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/slices/s0/segments/flush-2-1/terms-0.dict"),
+            ],
+            "the carried extents coalesce, and the base dictionary is not among them"
         );
     }
 

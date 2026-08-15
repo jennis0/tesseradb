@@ -92,21 +92,18 @@ outside their sight. The sampled cadence is the affordability trade §6 names, m
 
 ## A defect this tier found on its first run, pinned rather than tolerated silently
 
-A merge planned on the same tick as a flush publishes its side-manifest with the watermark it
-captured at *plan* time (`tessera-engine::merge`'s `rebase_into` overwrites the cloned
-manifest's watermark with `MergeSpec::watermark`), one batch behind the flush that shared its
-tick. The in-memory generation keeps the live value, but every subsequent publication that
-clones the manifest — deny, coalesce, and the fold, which passes `live_manifest.watermark`
-through "untouched" — carries the stale one, and a reboot then reports a watermark one batch
-short of what the process served before it. No answer is wrong: the boot reconstructs the
-ingest buffer from WAL rows at or above the served watermark and composition's buffer test is
-`row_of`, not the watermark, so the doubly-covered batch is served exactly once — total
-verification across the regression passes, and this run proves it does. The watermark
-assertions below therefore hold the *bound the system actually keeps* — a regression of at most
-one batch, coinciding with a reboot or a maintenance publication, with verification green
-across it — and record every use of that allowance as a named finding in the report. When the
-merge publication is fixed to reread the live watermark, the allowance stops being exercised
-and should be deleted, returning the tier to strict monotonicity.
+A merge planned on the same tick as a flush used to publish its side-manifest with the
+watermark it captured at *plan* time (`tessera-engine::merge`'s `rebase_into` overwrote the
+cloned manifest's), one batch behind the flush that shared its tick — every later publication
+cloned the stale value forward and a reboot under-reported by exactly one batch, with total
+verification green across it (the boot rebuilds the buffer by `row_of`, not the watermark).
+Fixed 2026-08-15: the rebase now keeps the cloned live manifest's values, and the engine's
+manifest-commit guard (`check_manifest_publishable`) refuses any side-manifest that would
+regress a durable scalar, so the same shape on the next field is a loud refusal rather than a
+silent regression. The one-batch allowance the assertions below carried while the defect was
+pinned is deleted: the watermark is held strictly monotone, live and durable alike, and the
+durable value may never trail the served one. The interleaving itself is pinned
+deterministically in `crates/tessera-engine/tests/merge.rs`.
 
 A second defect fell out of running long before any assertion could: the driver's spawn pipes
 the server's stdout/stderr and nothing reads it, so after roughly one pipe buffer of logging the
@@ -115,17 +112,22 @@ the same operation count three runs straight, and `/proc/<pid>/task/*/wchan` sho
 executor's thread in `anon_pipe_write`. [`PipeDrainer`] is this module's own remedy and keeps
 the tail as failure evidence; the durable fix belongs in the driver's spawn.
 
-The third is the dictionary-extent axis, and it is §6's predicted drift found in the flesh.
-Under sustained ingest alone the coalesce bounds it — this plan's fold-free ladder holds it
-oscillating under ten entries across 128 promoting flushes — but under a fold cadence it
-ratchets: the fold carries `dict_extents` verbatim (it rebuilds every other axis into its new
-base, deliberately — a fold does not renumber the dictionary), and the coalesce's window rule
-demands eight *consecutive* same-tier entries in the append-only list, so tier-0 leftovers
-stranded between tier-1 outputs block every higher window and the list grows by a few entries
-per fold cycle with nothing ever draining it — 6 to 35 across ten cycles here, linear in the
-operation count. The dictionary axis therefore gets a fold-scaled allowance below, sized so a
-*stopped* coalesce (one entry per promoting flush) still fails it by a factor of two, and every
-observation past the design's own steady-state bound is recorded as a finding.
+The third was the dictionary-extent axis, §6's predicted drift found in the flesh and since
+fixed. Under sustained ingest alone the coalesce bounded it — this plan's fold-free ladder holds
+it oscillating under ten entries across 128 promoting flushes — but under a fold cadence it
+ratcheted 6 to 58 across 24 cycles, linear in the operation count and never draining.
+
+The cause was not the one this paragraph first gave. Blaming the coalesce's eight-consecutive
+window and stranded tiers described the observed *shape*; what actually froze the entries was
+eligibility. A fold digest-names every file it carries into the new prefix's manifest, for the
+durability of its hard links, and the coalesce read "digest-named in MANIFEST" as "the build's
+own artefact, never take" — so every extent alive at a flip became permanently ineligible. The
+dictionary is the one guarded axis a fold does not rebuild into its base, which is why it alone
+ratcheted. Eligibility there is positional now: only the single extent a builder writes is
+spared. The axis asserts a flat ceiling below, like the other five.
+
+Recorded rather than quietly corrected, because a wrong diagnosis that matched the data is worth
+more to the next reader than a tidy one.
 """
 
 from __future__ import annotations
@@ -510,23 +512,17 @@ def observe(h: SuiteHarness, t: Tracker, p: Params, label: str, *, quiescent: bo
                 f"grows one per flush and only the entity-space coalesce bounds it; a working "
                 f"pass stays under ~8·log8(flushes)"
             )
-        # The pinned dictionary ratchet (module doc): the fold carries this axis verbatim and
-        # stranded lower-tier residue blocks the higher coalesce windows, so it climbs a few
-        # entries per fold cycle. The allowance scales with landed folds and still fails a
-        # stopped coalesce — one entry per promoting flush — at twice this line.
+        # The dictionary axis is bounded like the other five. It ratcheted 6 -> 58 across 24 fold
+        # cycles when this tier first ran, and the cause was not the tiering the first reading
+        # blamed: a fold digest-names every file it carries into the new prefix's MANIFEST, and
+        # the coalesce read "digest-named" as "the build's own artefact, never take", so each fold
+        # froze every extent alive at its flip. Eligibility on this axis is positional now — only
+        # the one extent a builder writes is spared — so a flat ceiling is the honest bound again.
         dicts = len(manifest["dict_extents"])
-        dict_allowance = AXIS_CEILING + 4 * t.folds_landed
-        assert dicts <= dict_allowance, (
-            f"{label}: `dict_extents` reached {dicts} entries (allowance {dict_allowance} = "
-            f"{AXIS_CEILING} + 4 per landed fold, the pinned ratchet) — the coalesce has "
-            f"stopped, not merely ratcheted"
+        assert dicts <= AXIS_CEILING, (
+            f"{label}: `dict_extents` reached {dicts} entries (ceiling {AXIS_CEILING}) — the "
+            f"coalesce has stopped bounding this axis, or a publication has frozen it again"
         )
-        if dicts > AXIS_CEILING:
-            t.findings.append(
-                f"{label}: dict_extents at {dicts}, past the steady-state bound {AXIS_CEILING} "
-                f"(pinned fold-cadence ratchet: folds carry the axis verbatim and stranded "
-                f"tiers block the coalesce windows)"
-            )
         attrs = len(manifest["attr_extents"])
         assert attrs <= ATTR_AXIS_CEILING, (
             f"{label}: `attr_extents` reached {attrs} entries (ceiling {ATTR_AXIS_CEILING})"
@@ -568,33 +564,21 @@ def observe(h: SuiteHarness, t: Tracker, p: Params, label: str, *, quiescent: bo
         f"{label}: entity high-water went backwards ({t.entity_high_water} -> {high_water}) — "
         f"the allocator floor did not survive a rotation, and re-minted ids alias old rows"
     )
-    if watermark < t.watermark:
-        # The pinned merge-publication defect (module doc): a regression is tolerated only at
-        # its known magnitude — one batch — and every use of the allowance is a reported
-        # finding. Anything wider is real coverage loss and fails here.
-        assert t.watermark - watermark <= p.rows, (
-            f"{label}: the watermark went backwards ({t.watermark} -> {watermark}) by more than "
-            f"one batch — beyond the pinned merge-publication defect, this is entity coverage "
-            f"going invisible"
-        )
-        t.findings.append(
-            f"{label}: watermark regressed {t.watermark} -> {watermark} (the pinned "
-            f"merge-publication defect: a merge sharing a tick with a flush writes its "
-            f"plan-time watermark into the side-manifest)"
-        )
+    assert watermark >= t.watermark, (
+        f"{label}: the watermark went backwards ({t.watermark} -> {watermark}) — a publication "
+        f"wrote a stale value into a side-manifest (the fixed merge-publication defect's shape, "
+        f"module doc), and entity coverage between the two values goes invisible on the next boot"
+    )
     t.entity_high_water = high_water
     t.watermark = watermark
-    # The same defect, seen where it starts: the durable watermark trailing the live one.
+    # The durable record may never trail the served one: every publication commits its manifest
+    # *before* it swaps, so at any instant disc >= wire — a shortfall here is a manifest written
+    # from plan-time state rather than live state.
     disc_watermark = min(m["watermark"] for m in view.latest.values())
-    if disc_watermark != watermark:
-        assert watermark - disc_watermark <= p.rows, (
-            f"{label}: the side-manifest watermark {disc_watermark} trails the live "
-            f"{watermark} by more than one batch"
-        )
-        t.findings.append(
-            f"{label}: durable watermark {disc_watermark} trails live {watermark} "
-            f"(pinned merge-publication defect)"
-        )
+    assert disc_watermark >= watermark, (
+        f"{label}: the side-manifest watermark {disc_watermark} trails the live {watermark} — "
+        f"the durable record under-reports, and a reboot serves it"
+    )
 
     members = _wal_members(h.wal_path)
     wal_bytes = sum(m.stat().st_size for m in members)

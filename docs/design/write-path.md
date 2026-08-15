@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r11, 2026-08-15
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r12, 2026-08-15
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -1083,9 +1083,15 @@ layers are unioned, so their division into files is immaterial — but the selec
 **column**, over that column's own subsequence of `attr_extents`, and the merge carries its own
 duplicate-entity refusal: once a window collapses into one file an overlap among its inputs is
 internal to a single layer and invisible to the between-layer disjointness check for ever. Across
-all four, **the build's own artefacts are never taken** — they are the entries `MANIFEST.json`
-digests, rewriting one means a new prefix, and the base locator's ordinals are positions in the
-build's runs.
+all four, **the build's own artefacts are never taken** — rewriting one means a new prefix, and
+the base locator's ordinals are positions in the build's runs. **How a build's own artefact is
+recognised differs by axis, and reading it as "whatever `MANIFEST.json` digests" is what let this
+axis grow without bound.** A fold digest-names every file it *carries* into the new prefix, for
+the durability of its hard links, so on the one axis a fold does not rebuild into its base — the
+dictionary — that test froze every extent alive at the flip and the list ratcheted with the fold
+count. Recognition there is **positional**: the single extent a builder writes is entry 0, and a
+fold authors none. On the tier and run axes the digest home still identifies it, their flight
+entries being consumed by the next fold rather than frozen.
 
 **The row-space half publishes too, as its own swap** (`tessera_engine::merge`). A merge shortens
 the extent list and permutes row space inside the merged span, so a row id there names a different
@@ -1384,6 +1390,21 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r12 (2026-08-15) — how a build's own artefact is recognised, corrected by measurement.** §7
+said the coalesce never takes the build's own artefacts because "they are the entries
+`MANIFEST.json` digests". That test holds on the tier and run axes and fails on the dictionary: a
+fold digest-names every file it *carries*, for the durability of its hard links, so on the one
+guarded axis a fold does not rebuild into its base, every extent alive at a flip became
+permanently ineligible and the list grew with the fold count rather than the corpus. Recognition
+there is **positional** now — the single extent a builder writes is entry 0, and a fold authors
+none.
+
+Found by the correctness suite's endurance tier, which measured the list ratchet from 6 to 58
+across 24 fold cycles; no shorter run could see it, and the first reading blamed the coalesce's
+window rule, which was the shape rather than the cause. **No mechanism moves**: the eight-
+consecutive window, the fold's verbatim carry-forward and decision 0042's positional extents all
+stand, and §14's obligations 10 and 36 become true rather than changing.
 
 **r11 (2026-08-15) — the merge knobs are live, and the coalesce width gets the key it lacked.**
 §10's `tier_width` and `segment_floor_bytes` rows described keys that were parsed, validated and
