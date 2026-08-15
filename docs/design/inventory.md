@@ -71,7 +71,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | Document | Status | ⊘ |
 |---|---|---|
 | `annotation-representation.md` | Provisional — under review | 14 |
-| `annotation-write-cycle.md` | Provisional — under review | 6 |
+| `annotation-write-cycle.md` | Provisional — under review | 9 |
 | `annotations.md` | Provisional — under review | 2 |
 | `architecture.md` | Normative — r42 | 23 |
 | `caching.md` | Provisional — under review |  |

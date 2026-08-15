@@ -434,11 +434,25 @@ the same route a point does.*
 filters, search, edge traversal, metadata. Where a route cannot afford it, the route does not exist;
 that is what §7 turns on.
 
+**The predicate carries one term beyond the artifact's own, and omitting it is fail-open**
+*(review, 2026-08-15)*. An artifact that exists only as an attachment to another — a toponymy label
+on a cluster — is **also** tested on the `verdict` of what it attaches to. Without that term the
+predicate is per-artifact by construction, so suppressing a cluster stops the *cluster* serving while
+its labels go on serving on every route that does not traverse the edge: search, a held identifier, a
+filter. Those labels name and describe the thing that was just hidden. The conjunctive rule the model
+states for edge *traversal* does not reach them, because those routes never traverse the edge — they
+reach the label directly. The term is one extra `verdict` lookup on the attachment target, on an
+identifier the label already stores, and it is the same lookup the predicate's first branch already
+performs. **The same argument covers the target's gate**, not only its deny state: a label must not
+outlive the reachability of what it labels.
+
 **Artifacts still get entity IDs**, because the deny lane, `tessera_id` and the overlay all address
 by entity. What they do not get is membership in `M_auth`, or the assumption that a bitmap
 intersection answers a visibility question. The reserved range is a **list** of 2¹⁶-aligned blocks,
-not one block: I9 forbids reuse, so each regeneration consumes ~10⁷ IDs permanently and any
-fixed block exhausts.
+not one block: each regeneration consumes ~10⁷ IDs and any fixed block exhausts. *(This section was
+written under I9's never-reuse rule. [Decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
+relaxes it — slots return to the allocator at a fold — so the exhaustion is no longer permanent, but
+the block list stands: a regeneration still needs a contiguous run it can take at once.)*
 
 ## 5. Write, update, delete
 

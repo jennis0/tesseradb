@@ -92,10 +92,18 @@ anything they hold.
 
 - **Durable entity-space structures hold slots, not identities**, so a recycled slot makes a
   generating set name the wrong document — the fail-open [`annotation-write-cycle.md`](../design/annotation-write-cycle.md)
-  §2 exists to close, arriving from the other side. The fold's reconciliation is what forbids it,
-  and the fold **already computes the list**: one `and_cardinality(G, D₀)` per generating set
-  against the tombstone clone it holds in entity space (that document's §4.2). It must now *act*
-  on that list rather than only report it.
+  §2 exists to close, arriving from the other side. Left as *"dealt with"* in an earlier revision of
+  this decision, which review found was undefined and therefore unimplementable; **it is now defined,
+  and differs by the layer's declared deletion mode** (that document's §2.1):
+  **the fold removes the deleted slot from every generating set that names it** — by dropping the
+  set with its content (strict) or by shrinking it (permissive). Which of the two is the layer's
+  declaration and does not matter here; the removal is uniform, and it is the part this decision
+  depends on. **The ordering is the safety property**: reclaim before reconcile and the
+  rebuilt operator resolves the slot to its *new* occupant, re-satisfying a containment test that was
+  supposed to fail for ever. Reconcile first and nothing durable names the slot at all, so there is
+  no stored flag to maintain and none to set wrongly. The fold already computes the list — one `and_cardinality(G, D₀)` per
+  generating set against the tombstone clone it holds in entity space (that document's §4.2) — so
+  what this adds is an action and an order, not a traversal.
 - **A buffered slot has no row, so the equality check has no stored identifier to compare
   against.** The check must consult the buffer for entities `row_of` cannot answer, or it will
   refuse identifiers the ingest ack itself issued (write-path §5.1 returns them). Refusing them is

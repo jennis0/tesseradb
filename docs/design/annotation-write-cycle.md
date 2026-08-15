@@ -1,12 +1,17 @@
 # Annotations — the write cycle
 
 **Date:** 2026-08-15
-**Status:** Provisional — **draft, not reviewed**. Companion to [`annotations.md`](annotations.md)
+**Status:** Provisional — **reviewed, and its findings dispositioned** (three independent reviews,
+2026-08-15: disclosure, write-path integration, data modelling). Companion to [`annotations.md`](annotations.md)
 (the model) and [`annotation-representation.md`](annotation-representation.md) (the representation);
 this owns how artifacts, levels and layers behave in the write cycle — their own operations (spec
-§5–§6), and what a point-side event obliges artifact-side (spec §2–§4). **To become normative:** an
-independent adversarial review; the rulings in spec §9; and the costs in spec §8 measured, of which
-generating-set storage is the one that could refute the shape. **Supersedes in scope** the sections
+§5–§6), and what a point-side event obliges artifact-side (spec §2–§4). **To become normative:** the
+costs in spec §8 measured, of which the three maintenance arms (spec §2) are the ones that could
+refute the shape, and spec §11's residue settled. The rulings in spec §9 are made. **Review found
+four fail-opens**, all now closed in the text: the fold shrinking a generating set through its row
+form; a missing merge arm; retirement retiring the entry that hid a deleted artifact before dropping
+what still served it; and — in the sibling representation document — a suppressed cluster's labels
+still serving on routes that do not traverse the edge. **Supersedes in scope** the sections
 listed in spec §10 — neither sibling document is edited here, and where they disagree with this one,
 none is normative and this is newer.
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
@@ -52,7 +57,8 @@ window. The repair is not a patch on the fold; it is that `G` was in the wrong s
 ## 2. A generating set is an identity, and it lives in entity space
 
 **Entity space is where truth is stored; row space is where every comparison happens.** A generating
-set is an immutable set of entity IDs on disk, mmapped only when specifically touched (I8, §7.6),
+set is a set of entity IDs on disk, never grown (I8) and shrunk only by the fold on a **permissive**
+layer (spec §2.1, §7.6), mmapped only when specifically touched,
 and the operator the containment test actually runs against is its row-space image, derived from that
 truth and regenerated on the events that change row space *(owner ruling, 2026-08-15)*. Membership
 takes the same shape (spec §4.1); this is one rule, not two.
@@ -62,8 +68,22 @@ base permutation plus an ordered extent list ([`write-path.md`](write-path.md) �
 *extends* it — a projection over the new generation is the previous bitmap unioned with the new
 extents' rows, *equal to* rather than an approximation of a projection over the whole space
 ([`concurrency-lifecycle.md`](concurrency-lifecycle.md) §2.2). So the maintenance an artifact operator
-needs is the maintenance the mask projection already has: **union in the new extents at flush, rebuild
-at the fold** (spec §4.1 for the fold's arm).
+needs is the maintenance the mask projection already has, and it has **three** arms, not two:
+**union in the new extents at flush, rebase over the merged span at a merge, rebuild at the fold**
+(spec §4.1).
+
+**The merge arm is the one a reader will leave out, and leaving it out is fail-open.** A merge is
+row-count preserving in that no later extent's `row_base` moves, but *inside the merged span* it is a
+merge-sort producing globally sorted output, so **a row id there names a different entity afterwards**
+([`concurrency-lifecycle.md`](concurrency-lifecycle.md) §2.1). An operator holding extent rows across
+a merge therefore names entities the caller never declared — spec §3.1's forbidden interloper, reached
+by omission rather than by range translation. The rebase is bounded by the span, not by the corpus,
+and it is the same rebase the projection already performs. ⊘ **Unbuilt and unmeasured**, like the
+other two arms.
+
+*An earlier revision of this document said the operator was "untouched by flush and by merge" and
+covered base rows only. Both halves are gone: the base-rows-only rule was wrong on its premise
+(flushed entities have rows), and "untouched by merge" was only true because of it.*
 
 **The only entities without rows are buffered ones, and I4 already governs them**: *"a buffered entity
 has no row and contributes to no row-space verb"*. That is not a gap this design opens — it is the
@@ -91,8 +111,11 @@ staleness where the system has a tick.)*
 What entity space buys is that the containment test needs no guard, because both of its operands
 already tell the truth:
 
-- **`G` never changes.** The disk form is immutable (I8), so the left operand is the declared set
-  for ever, and the fold does not touch it.
+- **`G` changes on exactly one event, and never by growing.** I8 forbids additions outright, so no
+  later arrival is ever a member and the left operand cannot be widened. The single exception is a
+  **permissive** layer losing a member, where the fold rewrites `G` without it (spec §2.1) — the
+  branch I8's own body routes to §7.6 rather than prohibits. On a strict layer the fold does not
+  touch `G` at all.
 - **A deleted member never returns to the right operand.** While the delete is pending, the member
   is outside every composed mask by the overlay entry. At the fold that executes it, its postings
   are blanked (compaction pass 2) and its row is dropped, so it is in no `token_mask`, no buffer and
@@ -129,18 +152,49 @@ make it behave like an update (decision 0047). So the service has no *edited mem
 It has a deleted member and an unrelated new one, and treating those as a continuity problem — an
 earlier draft bound `G` to caller keys to preserve one — solves a case the write path does not pose.
 
-**What the caller does declare is what a deletion means for the artifact** *(owner ruling,
-2026-08-15)*. That is a modelling choice about the object, not a policy the service is entitled to
-pick, and it is declared per layer:
+**What the caller may declare is narrower than it first appears: whether a generating set is
+allowed to shrink** *(owner ruling, 2026-08-15)*. Containment is all-or-nothing, so a generating set
+that loses a member fails for every principal, for ever — that is not a policy, it is what the test
+does. The only question is whether a caller may say *this content survives that*, and it is declared
+per layer:
 
 | Mode | A member is deleted | The kind of object it is for |
 |---|---|---|
-| **Strict** *(default)* | the artifact withdraws | a curated collection, a case file, a legally defined set — the exact membership is *what the object is*, so losing a member makes it a different object, and serving it would assert something the caller never declared |
-| **Permissive** | the member leaves the set; the artifact and its content go on serving | a clustering — membership is statistical, and one document leaving changes nothing the label asserted |
+| **Strict** *(default)* | the fold **drops the supplied content and its generating set**; the artifact keeps its derived content (model §8.6) — existence, masked count and recomputed geometry go on serving | anything whose text was written from material including the deleted document: a summary, an authored description, a label over a curated set |
+| **Permissive** | the fold **removes the member from the generating set** and the content goes on serving | a toponymy label over a clustering — the sample is statistical, and one document leaving changes nothing the label asserted |
 
-Membership and the generating set take the mode together, because both are sets of members and the
-question is the same for each. Under permissive, membership behaves as it always has (the count falls
-and nothing else happens) and the generating set *shrinks*.
+**Membership is not in scope and never was.** A deleted point simply leaves the artifact's
+membership, the masked count falls, and derived content recomputes without it — spec §3.1's delete
+row, unchanged and unaffected by the declaration. The artifact itself is never deleted, never hidden,
+and never gated differently because of this. **Only supplied corpus-derived content is at stake**,
+because only that carries a generating set.
+
+**The shrink is performed by the fold, and I8 does not forbid it** *(owner ruling, 2026-08-15:
+shrinking is explicitly what permissive is)*. I8's headline says a generating set is immutable, but
+its body forbids only *growth* — *"items arriving later are not part of it and must not be added"* —
+and routes the opposite case elsewhere: *"members leaving is an availability problem, addressed in
+§7.6."* §7.6 requires explicit sign-off and a register entry before any shrink, and design r42 gives
+both. So permissive is not an exception to the invariant; it is the branch the invariant already
+pointed at.
+
+**Where it happens is the fold, and the pass already exists.** §4.2's sweep computes
+`and_cardinality(G, D₀)` per `G`-bearing artifact to produce the caller's report; on a permissive
+layer it additionally rewrites `G` without the deleted members, in the same publication. The deny
+lane is not the place: finding which generating sets name an entity is the inverted lookup §4.5
+exists to avoid, and doing it at accept would cost the lane its O(window) bound.
+
+**So the content vanishes at the ack and returns at the fold, and that interim is the mode's real
+shape.** Between the two, the deleted member is outside every mask and containment fails for
+everyone — fail-closed, and identical to strict's behaviour. The modes diverge only at the fold.
+⊘ **A caller reading "permissive" as "nothing changes" will be surprised by the gap**, which is up to
+one fold long; it is stated here rather than smoothed over.
+
+**This is also what frees the slot.** [Decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
+requires every durable structure naming a slot to be dealt with before the allocator may reissue it,
+and left "dealt with" undefined. For a permissive layer it is defined here: the slot is dropped from
+`G` by the same fold that frees it. Without that ordering the rebuilt operator would resolve the
+slot to its **new** occupant and re-satisfy containment — §2.2's re-satisfaction unsoundness, reached
+by reuse instead of by Morton adjacency.
 
 **Permissive is not available until the register says so, and that is the whole of its cost.**
 Shrinking a generating set under deletion is **C7**, disposition **Not adopted** — *"a label
@@ -153,6 +207,36 @@ it** — C7 is *Accepted — caller's declaration, strict by default*, and §7.6
 explicit sign-off is discharged at design r42 (owner ruling, 2026-08-15). Strict remaining the
 default is what the narrowing rests on: an undeclared layer never shrinks, and the service shrinks
 nothing on its own initiative in either mode.
+
+**One action, two outcomes, and neither touches the artifact.** The fold removes the deleted entity
+from every generating set naming it — that much is uniform — and the layer's declaration decides what
+happens to the content that set generated: **strict** drops it along with the set, **permissive**
+keeps it and serves it from the smaller set. In both cases the artifact itself carries on with its
+derived content, and in both cases nothing durable still names the deleted entity.
+
+**That second property is the whole of [decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)'s
+reconciliation.** A freed slot is dangerous only while something durable names it and could resolve
+it to the next occupant. Strict drops the set; permissive shrinks it. **The ordering is the safety
+property** — reconcile, then reclaim. An earlier revision reached the same end through a stored
+`content_withdrawn` bit; it is deleted, because a bit that must be set correctly is a bit that can be
+set wrongly, and removing the member needs no state at all.
+
+**Where the fold does it, and why not earlier.** §4.2's sweep already computes
+`and_cardinality(G, D₀)` per `G`-bearing artifact to produce the caller's report; it now also
+performs the drop or the shrink, in the same publication. The deny lane is not the place: finding
+which generating sets name an entity is the inverted lookup §4.5 exists to avoid, and doing it at
+accept would cost the lane its O(window) bound.
+
+**So the content vanishes at the ack and, under permissive, returns at the fold.** Between the two
+the deleted member is outside every mask and containment fails for everyone — fail-closed, and
+identical under both declarations. They diverge only at the fold, where strict makes the withholding
+permanent by dropping the content and permissive ends it. ⊘ **A caller reading "permissive" as
+"nothing changes" will be surprised by that gap**, which is up to one fold long.
+
+**Strict is the default, and it is also what containment does unaided.** A layer that declares
+nothing gets the behaviour the test already has: the content stays withheld, and the fold merely
+makes that permanent rather than leaving a set that could later be re-satisfied. Permissive is the
+only declaration that changes an outcome, which is why it is the one the register carries.
 
 **Longer term, if a real edit is ever adopted, it needs no artifact machinery** *(owner direction,
 2026-08-15)*: editing a document has no effect on artifact visibility unless it changes the
@@ -199,7 +283,10 @@ generated from material including the removed member, and shrinking needs explic
 Axes: point events (ingest; delete; suppress;
 unsuppress) × membership source (rep §2.0: enumerated, spatial predicate, attribute predicate) ×
 content kind (model §4.1: derived; supplied corpus-derived with `G`; supplied corpus-independent) ×
-gate mode (model §5: derived threshold, substitutive, conjunctive). Content kind is orthogonal to
+gate mode (model §5: derived threshold, substitutive, conjunctive). **Versions are a fifth axis and
+they change exactly one cell** (§3.2's delete row): each version carries its own generating set, so a
+deletion consumes the versions it touches and a viewer falls through the ranking rather than dropping
+straight to derived content. Content kind is orthogonal to
 membership source: `G` is always an enumerated entity set, whatever the membership is.
 
 The vocabulary of answers: **nothing** (and why nothing is safe), **recompute** (per request, by
@@ -236,7 +323,7 @@ Two rules the enumerated column rests on, stated because each is one slip from a
 | Event | Derived (count, centroid, hull, extractive terms) | Supplied, corpus-derived (`G` declared) | Supplied, corpus-independent (`G` empty) |
 |---|---|---|---|
 | **Ingest** | **recompute per request** — nothing stored, so nothing to do; the new member (predicate sources) or non-member (enumerated) is simply in or out of `membership ∩ M_auth` | **nothing** — later arrivals are never in `G` (I8); the content is stale, not unsafe (§7.6) | **nothing** — the content asserts nothing about the corpus |
-| **Delete** of a member | correct at accept via the mask; nothing stored | **the layer's declared mode decides** (spec §2.1). **Strict** *(default)*: withdraw at accept — emergent from containment, no stored state; the artifact **degrades to its derived content** (model §8.6), so existence, masked count and recomputed geometry still serve. **Permissive**: the member leaves `G` and the content goes on serving — C7, adopted as a caller's declaration at r42. **Notify the caller at the fold** either way (spec §4.2) | **nothing** — an empty `G` intersects nothing |
+| **Delete** of a member | correct at accept via the mask; nothing stored | withheld at accept — emergent from containment, no stored state. Then the layer's declaration decides (spec §2.1): **strict** *(default)* drops that content and its set at the fold, **permissive** removes the member and resumes serving. **Where the artifact carries ranked versions** (model §2.3), the withholding applies to the version whose set lost the member and the viewer **falls through to the next version they satisfy**; the artifact degrades to derived content only when no version survives. **Notify the caller at the fold** either way (spec §4.2) | **nothing** — an empty `G` intersects nothing |
 | **Suppress** of a member | correct at accept | **withhold content while the suppression stands** — containment fails for every principal; resumes on unsuppress. No stored change (Rule S) | **nothing** |
 | **Unsuppress** | correct at accept | content serves again, to exactly those satisfying `G` — every source visible again | **nothing** |
 | **Update** of a member — *not an operation; delete + an unrelated ingest* | correct at accept / at the new life's flush | **exactly the delete row**, because that is all the write path performs (spec §2.1). Under **strict** the artifact withdraws; under **permissive** the member leaves `G`. Notified at the fold | **nothing** |
@@ -258,12 +345,13 @@ which is C12's class and a declaration-time problem (model §4.2), not a point-e
 | Consequence | When | Why this point and not another |
 |---|---|---|
 | A denied point leaves every count, hull, threshold and containment test | **accept** | the ack asserts the disposition is in force (write-path §5.2); any later point serves a hidden item inside an aggregate — fail-open |
+| A **permissive** layer's `G` loses the deleted member, and its content serves again | **the fold** (spec §2.1) | the interim is fail-closed — containment fails for everyone while the member is denied — so the only cost of waiting is availability. Earlier is the deny lane, where finding the affected sets is the inverted lookup §4.5 exists to avoid; the fold already computes the list for §4.2's report |
 | An ingested point enters predicate membership | **its flush** | counts are row-space questions and the point has no row before flush (§11.2); earlier is impossible, later is a gratuitous staleness |
 | An ingested point enters enumerated membership | **never** — regeneration | I8; the caller declared the set |
-| Anything at **merge** | **nothing artifact-side** | a merge preserves entity space, and the artifact row form references base rows only (spec §4.1), which no merge moves (write-path §7) |
+| An artifact's row operator is rebased over the merged span | **the merge that publishes it** | a merge permutes row space inside its span, so a row id there names a different entity afterwards (lifecycle §2.1); an operator holding extent rows is wrong from the publication until it is rebased. Entity space is untouched, so the ground truth needs nothing |
 | Membership row forms reconcile with executed deletes | **the fold** (rep §5.0.3's pass, minus `G`) | the interim is already enforced by the overlay — the fold changes what is *stored*, never what is *served*, so its timing is an efficiency, not a safety property |
 | A deleted `G` member's exclusion becomes structural (postings blanked) | **the fold** | the deny entry enforces it until the flip; Rule F retires the entry in the same publication that blanks the postings — no gap (compaction §4) |
-| Rule F's artifact arm — membership files, `artifacts.arrow` slots, edges of deleted artifacts | **the fold** | reclamation; served state was already closed by `verdict` from the ack |
+| Rule F's artifact arm — membership files, `artifacts.arrow` slots, edges of deleted artifacts | **the fold, before the overlay entry retires** | **not reclamation — retirement's precondition.** A deleted artifact has no rows and no postings, so compaction's derivation would otherwise place it in `executed` *vacuously* at the first fold, retiring the overlay entry that is the only thing hiding it while its slot and edges still serve. The arm must run first, and the derivation must count an artifact's own files as artefacts naming it, or the retirement is fail-open |
 | The degraded-content report | **the fold's publication**, before retirement | write-path §5.8's obligation; the interim is fail-closed, so report latency is operability, never safety |
 
 The acceptance test for the whole table: **no correctness-bearing consequence waits for the fold.**
@@ -508,7 +596,9 @@ For mechanical integration; neither sibling document is edited here.
 | rep §8, route 2 (the resolved visibility set) | **qualified** by spec §4.4: the set is candidacy, the live count decides; the drill-down interaction is reopened and carried in spec §11 |
 | rep §2.4 (`members/<ordinal>.roaring`, entity space on disk) | **confirmed and extended**: `G` joins the entity-space disk plane as ground truth, mmapped only on touch, and takes membership's shape — a derived row operator, unioned forward at flush and rebuilt at the fold (spec §2, §4.1) |
 | rep §2.1 / §2.2.1's "merge and flush cadence never touch it" | **qualified** by spec §4.1: true because the row form is bounded at base rows, which is now a stated rule rather than an assumption about who declares members |
-| model §2 / §2.1 / rep §2.3, `(layer, level, ordinal)` addressing | **contradicted at the wire only** (spec §5): the address is internal; the wire identity is `tessera_id`. Ruling pending |
+| model §2 / §2.1 / rep §2.3, `(layer, level, ordinal)` addressing | **contradicted at the wire only** (spec §5): the address is internal; the wire identity is `tessera_id`. **Ruled** (spec §9), with the control plane permitted the structured address |
+| model §5 / rep §9, layer reachability "resolved once at authorise" | **superseded** by spec §6: reachability is keyed on layer version, a gate edit bumps it, and a live `verdict` on the layer entity runs ahead of it. Resolving once at authorise held every open session on the pre-edit gate for its remaining life |
+| rep §4, "this predicate and no other" | **extended**, not contradicted: an attached artifact is additionally tested on its target's `verdict` and gate, or a suppressed cluster's labels serve on every route that does not traverse the edge (rep §4, amended) |
 | model §2.3's emergency path (suppress, edit, unsuppress) | **confirmed**, and extended to the layer (spec §6) |
 | write-path §5.8, the deletion-label bullet | **implemented, not contradicted** (spec §7); its "labels are Phase 3" marker now points at this design |
 | §7.6's availability-under-deletion paragraph | **confirmed and made permanent**: with the fold no longer able to shrink containment's operands, "fails for every principal" holds after the fold too; the notification obligation lands at spec §4.2 |
@@ -524,8 +614,9 @@ For mechanical integration; neither sibling document is edited here.
 - **The resolved set's invalidation events** — layer version and generation key are settled (rep
   §5.0.1); whether `overlay_version` participates, and at what granularity, is the same question as
   above from the cache side.
-- **The unfolded-member residue** (spec §4.1): understate-until-fold is the default; the
-  direct-eval refinement is unpriced. A product choice, not a safety one — both arms fail closed.
+- **The three arms' cost** (spec §2, §4.1): flush-union, merge-rebase and fold-rebuild are each
+  specified and none is measured. The merge arm is the one whose bound is least obvious, since it is
+  proportional to the merged span rather than to the artifact population.
 - **The runtime create/edit verb's contract shape** (rep §5.1) — carried, still contracts work.
 - **Bulk suppression of a caller-defined *subset* of a layer** (every label whose `G` touches a
   compromised source, say): expressible today as N artifact suppressions; whether a set-valued
