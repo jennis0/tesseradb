@@ -137,6 +137,9 @@ fn open_engine(root: &Path, threads: usize, tag: &str) -> Result<Engine, Box<dyn
             compute_threads: threads,
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
+            tier_width: None,
+            segment_floor_bytes: None,
+            coalesce_width: None,
             compaction: tessera_engine::CompactionSchedule::off(),
         },
     )?)

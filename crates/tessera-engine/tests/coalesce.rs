@@ -239,3 +239,71 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
         );
     }
 }
+
+/// **A configured `coalesce_width` reaches selection and changes when the pass fires.**
+///
+/// Until 2026-08-15 the width was a constant (8) with no configuration key at all, so nothing an
+/// operator wrote could move it (the correctness suite needs to — correctness-suite §12.3). The
+/// fixture is two flushed tiers — a quarter of the built-in width, which can never select a
+/// coalesce over them — so the only way this pass can fire is the configured 2 arriving at the
+/// policy, and against a regression to the constant this test fails by timeout rather than
+/// passing vacuously.
+#[test]
+fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            coalesce_width: Some(2),
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    // Held off for engine_at's reason: a merge coalesces runs and locator extents of its own.
+    engine.set_merge_for_test(false);
+
+    let mut ingested: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    for i in 0..2 {
+        let entity = ingest_novel(&engine, i);
+        ingested.push((entity, format!("ext-{i}").into_bytes()));
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    }
+    assert_eq!(manifest_of(&root).deltas.len(), 2, "one tier per flush");
+
+    engine.request_flush();
+    wait_until("the width-2 coalesce to publish", || {
+        engine.write_executor_stats().coalesces >= 1
+    });
+
+    assert_eq!(
+        manifest_of(&root).deltas.len(),
+        1,
+        "two tiers became one at the configured width"
+    );
+    for (entity, external_id) in &ingested {
+        assert_eq!(
+            engine.resolve_external_id(external_id).expect("resolvable"),
+            Some(*entity),
+            "external id {} lost its binding to the coalesce",
+            String::from_utf8_lossy(external_id)
+        );
+    }
+}

@@ -197,6 +197,16 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // Validated against write-path §7's base-segment relation in `validate_merge_size`, and
         // now delivered: before this it was checked and dropped.
         max_merged_segment_bytes: config.max_merged_segment_bytes,
+        // The other two merge knobs, delivered for the same reason: both were parsed, validated
+        // and dropped — the engine hard-coded 4 and 16 MiB — so an operator who set either got
+        // silence. `tier_width` is refused below 2 at parse (`SelectionWidthBelowTwo`): a width
+        // of 1 is not "merge eagerly", it is "never merge", silently.
+        tier_width: Some(config.tier_width),
+        segment_floor_bytes: Some(config.segment_floor_bytes),
+        // The coalesce's width never had a key at all; it gets one so the correctness suite can
+        // make a coalesce eligible at a chosen point (correctness-suite §12.3). Same below-2
+        // refusal as `tier_width`, for the same silent-non-coalesce reason.
+        coalesce_width: Some(config.coalesce_width),
         // Compaction §9's automatic trigger. The engine's own default is `off` — a fold is minutes
         // to hours of IO and a library type may not start one from a default nobody chose — so
         // this is the one place §9's defaults are applied, which is also the one place an operator

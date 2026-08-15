@@ -127,6 +127,38 @@ pub struct EngineConfig {
     /// configured value was checked and discarded. That is the inert key decision 0045 forbids,
     /// with the additional trap that validation made it look effective.
     pub max_merged_segment_bytes: Option<u64>,
+    /// `serve.tier_width` — how many adjacent, same-tier segments select a row-space merge
+    /// (write-path §7). **`None` keeps the built-in default (4)**; see [`merge_policy`].
+    ///
+    /// This key shared `max_merged_segment_bytes`' defect and is wired for its reason: the server
+    /// parsed and validated it and it reached the engine nowhere, so `merge_policy` hard-coded 4
+    /// whatever an operator set. Now it arrives here.
+    ///
+    /// **Must be at least 2 when set.** `MergePolicy::select` returns `None` below 2, so a width
+    /// of 1 is not "merge eagerly" but "never merge" — segments accumulate for ever and the
+    /// failure looks like a policy that is simply never triggered. `tessera-server`'s loader
+    /// refuses widths below 2 at startup rather than letting the first tick discover them
+    /// silently; an embedder constructing this struct directly is on its own honour, which is why
+    /// the constraint is stated here as well as in the loader.
+    pub tier_width: Option<usize>,
+    /// `serve.segment_floor_bytes` — sizes at or below this compare equal for merge selection, so
+    /// a tail of tiny flush segments forms one tier rather than a ladder of singletons that never
+    /// reaches `tier_width` (write-path §7). **`None` keeps the built-in default (16 MiB)**; see
+    /// [`merge_policy`]. Wired for [`Self::tier_width`]'s reason: parsed by the server, previously
+    /// discarded. Any value is usable — `0` simply means sizes compare by their own power-of-two
+    /// class — so unlike the widths there is nothing to refuse.
+    pub segment_floor_bytes: Option<u64>,
+    /// How many same-tier entries, per axis, select an entity-space coalesce (write-path §7).
+    /// **`None` keeps the built-in default (8)** — see [`crate::coalesce::CoalescePolicy`], whose
+    /// `Default` carries the argument for that number.
+    ///
+    /// The two merge knobs above were parsed and discarded; this one had no configuration key at
+    /// all, so the width was a constant nothing could reach. It gets a key because the correctness
+    /// suite has to be able to make a coalesce eligible at a chosen point rather than after eight
+    /// flushes (correctness-suite §12.3). **Must be at least 2 when set**, for
+    /// [`Self::tier_width`]'s reason verbatim: below 2 the pass is silently disabled, and the
+    /// server's loader refuses that at startup.
+    pub coalesce_width: Option<usize>,
     /// When a fold is dispatched with nobody asking for one — compaction §9's automatic trigger,
     /// as decision 0056 rules it.
     ///
@@ -137,12 +169,19 @@ pub struct EngineConfig {
     pub compaction: crate::compact::CompactionSchedule,
 }
 
-/// The row-space merge's policy (write-path §7).
+/// The row-space merge's policy (write-path §7), with every configured knob applied.
 ///
-/// **`tier_width` 4, floor 16 MiB, cap 256 MiB.** The floor is where per-segment overheads stop
-/// dominating, and clamping to it before taking the size class is what stops a deployment whose
-/// flushes differ by a few bytes producing a size class per flush and merging nothing at all.
-/// The cap bounds one merge's pool time and its write amplification.
+/// **Defaults: `tier_width` 4, floor 16 MiB, cap 256 MiB.** The floor is where per-segment
+/// overheads stop dominating, and clamping to it before taking the size class is what stops a
+/// deployment whose flushes differ by a few bytes producing a size class per flush and merging
+/// nothing at all. The cap bounds one merge's pool time and its write amplification.
+///
+/// **All three knobs are read from the config now; the first two used to be hard-coded here.**
+/// `serve.tier_width` and `serve.segment_floor_bytes` were parsed and validated by
+/// `tessera-server` and reached this function nowhere — the inert-key defect decision 0045
+/// forbids, the same one `max_merged_segment_bytes` had until it was wired — so an operator who
+/// set either got 4 and 16 MiB with no signal at all. An unset knob (`None`) keeps the default
+/// above, so no configuration that never named the keys changes behaviour.
 ///
 /// **The base segment is excluded twice over.** `crate::merge::plan_merge` selects from the
 /// **extent list**, and the base is the one segment with no extent (`permutation.bin` addresses
@@ -151,13 +190,26 @@ pub struct EngineConfig {
 /// still refused at startup by `tessera-server`'s config loader. Both are kept deliberately: the
 /// structural exclusion lives in one function and a refactor could lose it, and the startup
 /// refusal is what would still be standing if it did.
-/// The row-space merge's policy, with `EngineConfig::max_merged_segment_bytes` applied when set.
-fn merge_policy(max_merged_segment_bytes: Option<u64>) -> tessera_store::merge::MergePolicy {
+fn merge_policy(config: &EngineConfig) -> tessera_store::merge::MergePolicy {
     tessera_store::merge::MergePolicy {
-        tier_width: 4,
-        segment_floor_bytes: 16 << 20,
-        max_merged_segment_bytes: max_merged_segment_bytes.unwrap_or(256 << 20),
+        tier_width: config.tier_width.unwrap_or(4),
+        segment_floor_bytes: config.segment_floor_bytes.unwrap_or(16 << 20),
+        max_merged_segment_bytes: config.max_merged_segment_bytes.unwrap_or(256 << 20),
     }
+}
+
+/// The entity-space coalesce's policy, with `EngineConfig::coalesce_width` applied when set.
+///
+/// Only the width is configurable: it is the knob that decides *when* the pass becomes eligible,
+/// which is what the correctness suite has to control (correctness-suite §12.3). The floor and the
+/// input cap keep [`crate::coalesce::CoalescePolicy`]'s defaults — nothing reads them from
+/// configuration, and a key nothing needs would be minted only to become the next inert one.
+fn coalesce_policy(config: &EngineConfig) -> crate::coalesce::CoalescePolicy {
+    let mut policy = crate::coalesce::CoalescePolicy::default();
+    if let Some(width) = config.coalesce_width {
+        policy.width = width;
+    }
+    policy
 }
 
 /// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
@@ -2013,8 +2065,8 @@ impl Engine {
             queue_bound,
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
-                coalesce: crate::coalesce::CoalescePolicy::default(),
-                merge: merge_policy(self.config.max_merged_segment_bytes),
+                coalesce: coalesce_policy(&self.config),
+                merge: merge_policy(&self.config),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2067,8 +2119,8 @@ impl Engine {
             queue_bound,
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
-                coalesce: crate::coalesce::CoalescePolicy::default(),
-                merge: merge_policy(self.config.max_merged_segment_bytes),
+                coalesce: coalesce_policy(&self.config),
+                merge: merge_policy(&self.config),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.

@@ -114,6 +114,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
+            tier_width: None,
+            segment_floor_bytes: None,
+            coalesce_width: None,
             // Compaction §9's trigger is off unless a deployment configures one.
             compaction: tessera_engine::CompactionSchedule::off(),
         },

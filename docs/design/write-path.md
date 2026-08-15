@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r10, 2026-08-14
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r11, 2026-08-15
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -1055,7 +1055,8 @@ provided run 0 stays listed first — an invariant with an assertion, not a rewr
 **The entity-space half is built and published** (`tessera_engine::coalesce`). It coalesces delta
 tiers, external-id runs with their locator extents, dictionary extents, and **attribute extents**
 — each on its own axis, selected the same way `MergePolicy::select` selects segments: the first
-window of `width` (8) consecutive entries in one power-of-two size class, within an input cap. Size tiering
+window of `width` (`coalesce_width`, default 8) consecutive entries in one power-of-two size
+class, within an input cap. Size tiering
 is not decoration on any of them: without it the pass re-reads what it produced last round for
 ever, where one size class makes a byte move only as its artefact doubles. It publishes as a
 manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`, `attr_extents`
@@ -1209,7 +1210,8 @@ fold's asymmetry, the diverged-node publication gate, and the reader's honour-be
 | `overlay_soft_limit` | 500,000 | the pressure gauge; alarms, does not act — the fold has its own schedule (compaction §9) |
 | `wal_hard_limit_bytes` | 8 GiB | a **startup relation** on the command queue's worst case (+1 GiB deny headroom); ⊘ not a runtime ceiling — nothing measures the live log (ruled nice-to-have) |
 | `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection. With `tier_width`, sets where the size ladder saturates — a read-path constant (§7, decision 0049) |
-| `tier_width` | 4 | segments per size class before a merge is selected. **Widening it leaves *more* live segments**, not fewer (§7) |
+| `tier_width` | 4 | segments per size class before a merge is selected. **Widening it leaves *more* live segments**, not fewer (§7). Below 2 nothing can ever be selected, so widths below 2 are refused at startup rather than read as "merge eagerly" |
+| `coalesce_width` | 8 | same-tier entries, per entity-space axis, before a coalesce is selected (§7). Same below-2 refusal as `tier_width`, for the same silent-non-run reason |
 | `max_merged_segment_bytes` | unset (256 MiB in the engine) | cap on one merge; **must be strictly below the base segment's bytes** — refused at startup otherwise. Also the saturation size, hence live segment count ≈ corpus ÷ this. **Not raised until merge streams** — it bounds selection-time file bytes, and peak memory is a measured 4.4–4.9× those (decision 0049) |
 | `DENY_WINDOW_MAX_ENTRIES` (const) | 1,000 | the deny window, and the handler's chunk size |
 | `OVERLAY_PUBLICATION_MAX_WINDOWS` (const) | 64 | the deny-publication liveness floor |
@@ -1382,6 +1384,19 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r11 (2026-08-15) — the merge knobs are live, and the coalesce width gets the key it lacked.**
+§10's `tier_width` and `segment_floor_bytes` rows described keys that were parsed, validated and
+delivered nowhere: the engine hard-coded 4 and 16 MiB, so a configured value changed nothing,
+silently — the inert-key defect decision 0045 forbids, kept (owner-ruled, against 0045's
+delete-by-default) because the correctness suite needs the knobs (correctness-suite §12.3). Both
+now reach the merge policy, and the entity-space coalesce's width — previously a constant with no
+key at all — becomes `coalesce_width`, default 8, for the same suite's reason. One refusal joins
+them: a width below 2 can select nothing (`MergePolicy::select` returns `None`), so 1 is not
+"merge eagerly" but "never merge", and both width keys are refused below 2 at startup — the same
+refuse-rather-than-discover-silently standard as `max_merged_segment_bytes`' base-segment
+relation. Defaults are unchanged, so no configuration that never named the keys moves. §7's
+coalesce width parenthetical now names the key; no mechanism changes.
 
 **r10 (2026-08-14) — a correction: the fold retires, and three sites still said it did not.**
 Rule F's executing fold is built and normative ([`compaction.md`](compaction.md) r11, reviewed

@@ -85,6 +85,21 @@ pub enum ConfigError {
         max_merged_segment_bytes: u64,
         base_segment_bytes: u64,
     },
+    /// `serve.tier_width` or `serve.coalesce_width` below 2 — a width that can select nothing.
+    ///
+    /// Selection needs a window of at least two entries on every axis (`MergePolicy::select`
+    /// returns `None` below 2, and the coalesce's dispatch declines the same way), so 1 does not
+    /// mean "merge eagerly": it means the pass never runs, segments (or tiers, runs and dictionary
+    /// extents) accumulate for the life of the deployment, and the failure looks like a policy
+    /// that is simply never triggered. Refused at startup rather than discovered at the first
+    /// tick, and refused rather than read as "off": silently disabling a maintenance pass is the
+    /// failure this file exists to prevent, and these keys deliberately have no "off" spelling —
+    /// a deployment that wants a pass to stay out of the way sets the width above what its write
+    /// pattern can accumulate.
+    SelectionWidthBelowTwo {
+        key: &'static str,
+        width: usize,
+    },
     /// `ingest.compaction_window_start` is neither `HH:MM` nor `"off"`.
     ///
     /// Refused rather than defaulted, because the two failure directions are both bad and neither
@@ -287,6 +302,14 @@ impl std::fmt::Display for ConfigError {
                  the base -- which is compaction under another name: it pays a full permutation \
                  rewrite and re-emits every column, banks none of compaction's benefit, and leaves \
                  MANIFEST.files digesting files nothing references"
+            ),
+            ConfigError::SelectionWidthBelowTwo { key, width } => write!(
+                f,
+                "{key} = {width} can select nothing: merge and coalesce selection need a window \
+                 of at least two entries, so a width below 2 does not merge eagerly — it never \
+                 merges at all, silently, and the artefact counts grow for the life of the \
+                 deployment. Set 2 or more; to keep a pass out of the way, set the width above \
+                 what the write pattern can accumulate"
             ),
             ConfigError::Io(e) => write!(f, "config io error: {e}"),
             ConfigError::Toml(e) => write!(f, "config parse error: {e}"),
@@ -733,6 +756,8 @@ struct RawServe {
     max_merged_segment_bytes: Option<u64>,
     #[serde(default)]
     tier_width: Option<usize>,
+    #[serde(default)]
+    coalesce_width: Option<usize>,
     /// Browser origins permitted to call the viewer and session planes.
     ///
     /// **Absent means no CORS layer at all**, which is the only sensible default for a key whose
@@ -901,7 +926,18 @@ pub struct Config {
     /// [`ConfigError::MergeSizeRelation`] — so an operator cannot configure the fail-open early.
     pub max_merged_segment_bytes: Option<u64>,
     /// Segments in a tier before a merge is selected. See [`DEFAULT_TIER_WIDTH`].
+    ///
+    /// Refused below 2 ([`ConfigError::SelectionWidthBelowTwo`]): selection needs a window of at
+    /// least two segments, so 1 is "never merge", silently. This key and
+    /// [`Config::segment_floor_bytes`] were parsed here and reached the engine nowhere until
+    /// 2026-08-15 — the merge policy hard-coded 4 and 16 MiB — and are kept, wired, against
+    /// decision 0045's delete-by-default because the correctness suite drives merge eligibility
+    /// through them (correctness-suite §12.3).
     pub tier_width: usize,
+    /// Same-tier entries, per entity-space axis, before a coalesce is selected. See
+    /// [`DEFAULT_COALESCE_WIDTH`]. Same below-2 refusal as [`Config::tier_width`], for the same
+    /// silent-non-run reason; unlike that key this one is new — the width had no key at all.
+    pub coalesce_width: usize,
     /// Byte bound on the row-projection cache. See [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], and
     /// [`MEASURED_PROJECTION_BYTES_AT_1E9`] for the per-entry size the startup validation weighs it
     /// against.
@@ -1515,6 +1551,15 @@ const DEFAULT_SEGMENT_FLOOR_BYTES: u64 = 16 * 1024 * 1024;
 /// Segments in a tier before a merge is selected (§5.1).
 const DEFAULT_TIER_WIDTH: usize = 4;
 
+/// Same-tier entries, per axis, before an entity-space coalesce is selected (write-path §7).
+///
+/// The engine's own default (`tessera_engine`'s `CoalescePolicy::default` carries the argument:
+/// the same shape as `tier_width` and a little wider, because an entity-space pass costs no
+/// projection rebuild and can afford to run less often per byte moved). Restated here rather than
+/// imported because the server may not depend on the store's vocabulary, and a default that
+/// silently tracked a library's would move a deployment's behaviour without a config change.
+const DEFAULT_COALESCE_WIDTH: usize = 8;
+
 /// The **measured** serialised size of one row projection at the 10⁹ operating point: every
 /// mask at ≥25% coverage serialises to a 125.12 MB dense bound (design Appendix A quotes the
 /// same 125 MB unsharded figure). Exposed rather than private because it is the operand of
@@ -1596,8 +1641,6 @@ const DEFAULT_FRAGMENT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 /// numbers.
 const DEFAULT_EXPECTED_CONCURRENT_SESSIONS: usize = 8;
 
-/// Refuses a zero for one of the write-path knobs, naming the silent failure zero would cause.
-/// See [`ConfigError::MustBeNonZero`] for why these refuse rather than clamp.
 /// `HH:MM`, 24-hour, to seconds past UTC midnight.
 ///
 /// Strict: exactly two fields, both numeric, hour `< 24` and minute `< 60`. A lenient parser here
@@ -1643,6 +1686,8 @@ fn ratio_or_off(key: &'static str, raw: Option<&RawRatio>, default: f64) -> Resu
     Ok(Some(value))
 }
 
+/// Refuses a zero for one of the write-path knobs, naming the silent failure zero would cause.
+/// See [`ConfigError::MustBeNonZero`] for why these refuse rather than clamp.
 fn non_zero_usize(key: &'static str, value: usize, consequence: &'static str) -> Result<usize> {
     if value == 0 {
         return Err(ConfigError::MustBeNonZero { key, consequence });
@@ -1656,6 +1701,17 @@ fn non_zero_u64(key: &'static str, value: u64, consequence: &'static str) -> Res
         return Err(ConfigError::MustBeNonZero { key, consequence });
     }
     Ok(value)
+}
+
+/// The two selection widths (`serve.tier_width`, `serve.coalesce_width`) refuse anything below 2,
+/// not merely zero: selection needs a window of at least two entries, so 1 is as silently
+/// pass-disabling as 0 and [`non_zero_usize`] would wave it through. See
+/// [`ConfigError::SelectionWidthBelowTwo`].
+fn selection_width(key: &'static str, width: usize) -> Result<usize> {
+    if width < 2 {
+        return Err(ConfigError::SelectionWidthBelowTwo { key, width });
+    }
+    Ok(width)
 }
 
 pub fn load(path: &Path) -> Result<Config> {
@@ -2051,10 +2107,13 @@ fn parse(text: &str) -> Result<Config> {
         )?),
         None => None,
     };
-    let tier_width = non_zero_usize(
+    let tier_width = selection_width(
         "serve.tier_width",
         raw.serve.tier_width.unwrap_or(DEFAULT_TIER_WIDTH),
-        "a zero tier width selects a merge over no segments at all",
+    )?;
+    let coalesce_width = selection_width(
+        "serve.coalesce_width",
+        raw.serve.coalesce_width.unwrap_or(DEFAULT_COALESCE_WIDTH),
     )?;
     let row_projection_cache_bytes = non_zero_u64(
         "serve.row_projection_cache_bytes",
@@ -2159,6 +2218,7 @@ fn parse(text: &str) -> Result<Config> {
         segment_floor_bytes,
         max_merged_segment_bytes,
         tier_width,
+        coalesce_width,
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
         wal_path: raw.bundle.wal,
@@ -2605,10 +2665,52 @@ compaction_after_deletions = 9000
         );
         assert_eq!(config.segment_floor_bytes, DEFAULT_SEGMENT_FLOOR_BYTES);
         assert_eq!(config.tier_width, DEFAULT_TIER_WIDTH);
+        assert_eq!(config.coalesce_width, DEFAULT_COALESCE_WIDTH);
         assert_eq!(
             config.max_merged_segment_bytes, None,
             "no fixed default can satisfy relation 2 — it is derived from the base segment"
         );
+    }
+
+    /// A selection width below 2 can select nothing — `MergePolicy::select` returns `None`, and
+    /// the coalesce declines the same way — so a deployment that set 1 would silently never merge
+    /// (or coalesce): the same silent-failure class as the inert keys these two used to be.
+    /// Refused at load, naming the key, rather than discovered as an artefact count that never
+    /// comes down.
+    #[test]
+    fn a_selection_width_below_two_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        for key in ["tier_width", "coalesce_width"] {
+            for value in [0usize, 1] {
+                let err = parse(&valid_toml(&format!("{key} = {value}"))).unwrap_err();
+                let ConfigError::SelectionWidthBelowTwo { key: named, width } = err else {
+                    panic!("serve.{key} = {value} must be refused as SelectionWidthBelowTwo, got {err}");
+                };
+                assert_eq!(named, format!("serve.{key}"));
+                assert_eq!(width, value);
+            }
+        }
+        // 2 is the smallest width that can select, on both keys.
+        assert!(parse(&valid_toml("tier_width = 2\ncoalesce_width = 2")).is_ok());
+    }
+
+    /// An explicitly set merge or coalesce knob lands in [`Config`]. This pins the *parse*; that
+    /// the value then reaches selection and changes which segments merge is behaviour, and is
+    /// asserted where the policy lives (`tessera-engine`'s `tests/merge.rs` and
+    /// `tests/coalesce.rs`) — a key that parses into a struct nobody reads was exactly the defect
+    /// these keys had.
+    #[test]
+    fn the_merge_and_coalesce_knobs_parse_when_set() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml(
+            "tier_width = 2\nsegment_floor_bytes = 1\ncoalesce_width = 3",
+        ))
+        .expect("explicit merge knobs must load");
+        assert_eq!(config.tier_width, 2);
+        assert_eq!(config.segment_floor_bytes, 1);
+        assert_eq!(config.coalesce_width, 3);
     }
 
     #[test]

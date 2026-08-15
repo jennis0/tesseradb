@@ -710,3 +710,176 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
         "and the replacement was an extents-only re-projection, not a rebuild"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The configured policy knobs (write-path §10). Until 2026-08-15 `serve.tier_width` and
+// `serve.segment_floor_bytes` were parsed and validated by the server and reached the engine
+// nowhere — the merge policy hard-coded 4 and 16 MiB — so a configured value changed nothing,
+// silently (the inert-key defect decision 0045 forbids). These two tests are the wiring's proof,
+// and they are behavioural on purpose: a test that asserted a struct field's value would pass
+// against that exact defect.
+// ---------------------------------------------------------------------------------------------
+
+/// One flushed segment of `rows` items, at unique external ids namespaced by `tag`.
+fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> {
+    let mut batch = Vec::new();
+    for t in 0..rows {
+        let external_id = format!("cfg-{tag}-{t}");
+        let descriptors = vec![b"0".to_vec()];
+        batch.push(UnallocatedRow {
+            external_id: Some(external_id.into_bytes()),
+            slice: "s0".to_string(),
+            x: ((t % 47) * 20) as f32,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&descriptors),
+            descriptors,
+        });
+    }
+    let entities = engine
+        .accept_ingest(batch, format!("cfg-batch-{tag}"), [(101 + tag) as u8; 32])
+        .expect("ingest is accepted");
+    let flushes = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    wait_until("the flush to publish", || {
+        engine.write_executor_stats().flushes > flushes
+    });
+    entities
+}
+
+/// The live extent list as `(seg_id, entity_lo, entity_hi)`, in listed (entity) order.
+fn extents_of(engine: &Engine) -> Vec<(String, u64, u64)> {
+    engine.generation().bundle.partitions["default"].slices["s0"]
+        .row_space
+        .extents()
+        .iter()
+        .map(|e| (e.seg_id.clone(), e.entity_lo, e.entity_hi))
+        .collect()
+}
+
+/// **A configured `tier_width` reaches selection and changes when a merge fires.**
+///
+/// The fixture is two flushed extents — half the built-in width of 4, which can never select a
+/// merge over them (`MergePolicy::select` needs `tier_width` same-class segments). The only way
+/// this merge can fire is the configured 2 arriving at the policy, so against the inert-key
+/// defect this test fails by timeout rather than passing vacuously.
+#[test]
+fn a_configured_tier_width_reaches_selection_and_changes_when_a_merge_fires() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            tier_width: Some(2),
+            ..config_uncapped()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    engine.set_merge_for_test(false);
+
+    let entities: Vec<EntityId> = (0..2)
+        .flat_map(|s| flush_one_segment(&engine, s, ROWS_EACH))
+        .collect();
+    assert_eq!(extents_of(&engine).len(), 2, "one extent per flush");
+
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    wait_until("the width-2 merge to publish", || {
+        engine.write_executor_stats().merges >= 1
+    });
+    assert_eq!(
+        extents_of(&engine).len(),
+        1,
+        "two extents merged into one at the configured width"
+    );
+    let after = rows_of(&engine, &entities);
+    assert!(
+        after.iter().all(Option::is_some),
+        "every flushed entity still has a row: {after:?}"
+    );
+}
+
+/// **A configured `segment_floor_bytes` reaches selection and changes *which* segments merge.**
+///
+/// Three extents: one large (128× the rows of the small pair), then two small of one size class.
+/// With the configured floor of 1 byte, sizes compare by their own power-of-two class, so the
+/// `[large, small]` window is skipped and the merge takes the two smalls — the large extent
+/// survives. With the built-in 16 MiB floor every flush here clamps into one class and the first
+/// qualifying window is `[large, small]`, consuming the large extent — so the surviving `seg_id`
+/// is the configured floor observed at selection, not a fixture accident.
+#[test]
+fn a_configured_segment_floor_reaches_selection_and_changes_which_segments_merge() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            tier_width: Some(2),
+            segment_floor_bytes: Some(1),
+            ..config_uncapped()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    engine.set_merge_for_test(false);
+
+    let large = flush_one_segment(&engine, 0, ROWS_EACH * 128);
+    let small: Vec<EntityId> = (1..3)
+        .flat_map(|s| flush_one_segment(&engine, s, ROWS_EACH))
+        .collect();
+    let before = extents_of(&engine);
+    assert_eq!(before.len(), 3, "one extent per flush");
+    let large_seg = before[0].0.clone();
+
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    wait_until("the same-class merge to publish", || {
+        engine.write_executor_stats().merges >= 1
+    });
+
+    let after = extents_of(&engine);
+    assert_eq!(after.len(), 2, "the two same-class extents merged into one");
+    assert_eq!(
+        after[0].0, large_seg,
+        "the large extent must survive: with the floor left at its built-in 16 MiB, every flush \
+         here is one size class and the first window taken would be [large, small]"
+    );
+    assert_eq!(
+        (after[1].1, after[1].2),
+        (small[0].raw(), small[small.len() - 1].raw()),
+        "and the merged extent spans exactly the two small segments' entities"
+    );
+    let rows = rows_of(
+        &engine,
+        &large.iter().chain(&small).copied().collect::<Vec<_>>(),
+    );
+    assert!(
+        rows.iter().all(Option::is_some),
+        "every flushed entity still has a row: {rows:?}"
+    );
+}
