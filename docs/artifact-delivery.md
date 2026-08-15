@@ -83,7 +83,11 @@ material is written; what is missing is the disposition.
 | What | State | Blocks | Note |
 |---|---|---|---|
 | **Independent review** of the model and the representation | ✔ **run 2026-08-15** — three lenses, [the record](evidence/memos/2026-08-15-artifact-design-review.md) | — | the model's core survived all three; its *derived* rules did not |
-| **Disposition the review** — four fail-opens, one structural blocker, five rulings | **1 of 5 ruled**; repairs made | everything | ruling 1 is [decision 0074](decisions/0074-row-less-entities-are-allocated-downward.md) — row-less entities allocate downward. Four remain, in the record's §6 order |
+| **Review ruling 1** — where artifact entity IDs come from | ✔ **ruled** — [decision 0074](decisions/0074-row-less-entities-are-allocated-downward.md) | Stages 1–4 | row-less entities allocate downward from the top; the repairs from the review's other findings are made |
+| **Review ruling 2** — is the count threshold independent of the gate mode? | open | **Stages 1–2** | the declaration needs one field or two. *Recommend independence*: the smaller model, and the only reading under which both worked examples survive |
+| **Review ruling 3** — does a label's existence follow its content's containment? | open | **Stage 3** | *Recommend yes* — it is what normative §7.6 already does, and it is what makes the "no shell" claim true. **Subsumes the C3 question**, which was that behaviour under another name |
+| **Review ruling 4** — where does supplied content live? | open | **Stage 3** | the record blob cannot be edited in place, and in-place content edit is what the emergency withdrawal path needs. *Recommend the level's own file* |
+| **Review ruling 5** — how search gates on containment | open | Stage 8 | the term-signature conjunction is the candidate shape; the route stays withdrawn until ruled, which costs nothing before Stage 8 |
 | Implement [0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) — slot reuse | **deferred, deliberately** *(owner, 2026-08-15)* | nothing here | not a dependency: artifacts need identity, the deny lane and the opaque identifier, none of which need reuse. Deferring **removes** the recycled-slot fail-open rather than carrying it; the membership-reconciliation clause ships with it whenever it lands |
 | Disposition round two's open findings on the representation | open | Stages 2–4 | several are escalations, not repairs |
 | **The signature-sort tiebreak** (rep §12) | ✔ **ruled 2026-08-15** — [decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) | Stage 1 | taken: allocation becomes `(signature, morton_code, source_id)`. Free in the format and *measured* so; what it costs in the build's batch plan is named there and sized in Stage 1 |
@@ -92,7 +96,6 @@ material is written; what is missing is the disposition.
 | The three gate modes (model §5) | open | Stage 2 | substitutive disables `min_visible_members` by one schema word — the register row is part of the ruling |
 | The suppression-across-regeneration refusal (rep §5.0.2) | open | Stage 7 | makes the stable key mandatory once a layer has taken a suppression |
 | Membership as a filter (rep §7) | open | Stage 8 | a disclosure question, not a cost one |
-| **C3** — withheld content distinguishable from undeclared content (rep §9, §12) | open | Stage 3 | closed for labels by model §2.3; open for the degrade-to-derived case |
 | Appendix C edits: C1 gains layers as a differencing surface; a C23-shaped row for substitutive; a C12-shaped row for the corpus-independence declaration; C17 annotated; C7's disposition (already written, r42) | part done | Stages 2–4 | the register is exhaustive by construction or it is not a register |
 | `derived-artifact-gating.md` — folded into the three or retired | open | promotion | its taxonomy is superseded; leaving both standing is the "two answers" problem it was written to fix |
 
