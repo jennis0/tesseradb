@@ -284,15 +284,28 @@ else:
             f"median {int(np.median(occ)):>8,}, p99 {int(np.percentile(occ, 99)):>9,}, "
             f"max {occ.max():>10,}")
       del counts
-  distinct = 1 + int(np.count_nonzero(np.diff(key >> np.uint64(32))))
+  # Both figures come out of one chunked pass. `np.diff(key >> 32)` over the whole array is two
+  # further 8 GB temporaries at 10^9, on top of the 12 GB `key` is already holding — which fits
+  # the 47 GiB machine this was written against and is an OOM kill on a smaller one, *after* the
+  # geometry has been written and *before* scales.json has, which is the worst place to lose.
+  #
+  # `prev`/`run` carry the cell run across the chunk boundary, so both numbers are exact rather
+  # than per-chunk: a run spanning a boundary is counted once and measured at its full length.
+  distinct = 0
   maxcell = 0
+  prev = None                               # last cell of the previous chunk
+  run = 0                                   # length of the run it ended in
   for lo in range(0, N, CHUNK):             # sorted, so cell runs are local
       m = key[lo:lo + CHUNK] >> np.uint64(32)
-      if len(m) > 1:
-          b = np.flatnonzero(np.diff(m)) + 1
-          maxcell = max(maxcell, int(np.diff(np.concatenate(([0], b, [len(m)]))).max()))
+      lens = np.diff(np.concatenate(([0], np.flatnonzero(np.diff(m)) + 1, [len(m)])))
+      distinct += len(lens)
+      if prev is not None and int(m[0]) == prev:
+          distinct -= 1                     # the run continues rather than starting
+          lens[0] += run
+      maxcell = max(maxcell, int(lens.max()))
+      prev, run = int(m[-1]), int(lens[-1])
   print(f"  distinct Morton cells: {distinct:,} / {N:,} ({100 * distinct / N:.1f}%); "
-        f"max points sharing a cell: ~{maxcell:,}")
+        f"max points sharing a cell: {maxcell:,}")
 
   print("\n--- per-scale row counts (prefix corpora) ---")
   scale_rows = {}
