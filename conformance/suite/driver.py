@@ -588,18 +588,31 @@ class SuiteHarness:
                 _SCOPE_KEEPER_WRAP,
                 *argv,
             ]
+        # **The server's output goes to a file, never to a pipe nobody reads.** A pipe holds about
+        # 64 KiB; once full, the next write blocks — and the writer is the write executor's own
+        # thread, which then parks in the kernel and consumes no further tick. The engine is
+        # healthy and the run wedges, which is indistinguishable from a maintenance pass that
+        # stopped. Every short tier is immune by construction and never reaches the buffer, so this
+        # was found only by the endurance tier, three runs in a row at the same operation count.
+        # A file also outlives the process, so a crashed server's tail is still readable — which a
+        # drained pipe would have to reimplement.
+        self.log_path = self.run_dir / "server.log"
+        self._log = self.log_path.open("wb")
         self.proc = subprocess.Popen(
             argv,
             cwd=REPO_ROOT,
             env=env,
-            stdout=subprocess.PIPE,
+            stdout=self._log,
             stderr=subprocess.STDOUT,
         )
         self.server = Server(viewer_port, session_port, control_port)
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                output = self.proc.stdout.read().decode(errors="replace") if self.proc.stdout else ""
+                # The tail, not the whole log: a long run's server.log is large and the last few
+                # kilobytes carry the refusal.
+                raw = self.log_path.read_bytes()[-8192:] if self.log_path.exists() else b""
+                output = raw.decode(errors="replace")
                 raise RuntimeError(
                     f"tessera serve exited early ({self.proc.returncode}):\n{output}"
                 )
