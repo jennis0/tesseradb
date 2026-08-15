@@ -10,9 +10,14 @@ it, and the rule generalises past labels *(owner, 2026-08-15)*:
 > **Beyond ranked versions, there are no levels of restriction *within* a single artifact.**
 
 An artifact is visible to a principal, entire, or it is absent — indistinguishable from one that
-never existed. Versions remain the one exception and are not one in substance: they are the same
-artifact described at different clearances, resolved first-satisfied, and a viewer who satisfies no
-version sees no artifact.
+never existed.
+
+**Versions are not an exception to that rule; they are the shape it takes.** *(Owner clarification,
+2026-08-15.)* An artifact may carry several ranked variations, and a viewer is served **exactly one
+of them, entire, or nothing at all.** Versions are not thereby a way to serve part of an artifact:
+each is a whole description, the first the viewer satisfies is the one they get, and a viewer who
+satisfies none sees no artifact. What the rule forbids is the in-between — an artifact present with
+some of its content missing, or a variation served partially.
 
 This answers ruling 3 of [the Stage 0 review](../evidence/memos/2026-08-15-artifact-design-review.md),
 and it answers it more widely than the ruling asked.
