@@ -259,6 +259,14 @@ reports the wrong defect. The profile asserts that the run **completes and its a
 correct**; that it completes *within* a memory bound is a measurement and belongs to
 `measurement.md`.
 
+**There are three outcomes, not two, and the third is the one nothing names.** Below the limit the
+run completes; well below it the kernel kills the server and the cgroup records `oom_kill`. Between
+them lies a band where the server neither boots nor dies — the kernel reclaims its text pages
+indefinitely and the run surfaces as a timeout with `oom_kill` still zero. **The cgroup never names
+that state**, so the discrimination can only be pinned in the certain-kill band, and a constrained
+limit must carry headroom above the thrashing one rather than sitting at the edge of it. Measured
+on this host: killed at 8 MiB, thrashing at 16 MiB.
+
 > **⊘ Not implemented, and this is the largest unmeasured assumption in the system.** No test
 > constrains memory. The fold's peak resident set is measured at 4.4–4.9× of its inputs, which
 > policy caps at 256 MiB, so the fold has a bounded transient — but nothing establishes that a
@@ -809,6 +817,14 @@ superseded one. The verifier must report which it saw rather than failing the ru
 **`constrained` is an external wrapper, not a setting.** A limit a process applies to itself is not
 the limit a deployment has, and the failure modes differ — so the server is launched inside a cgroup
 scope (`systemd-run --user --scope -p MemoryMax=`) and the harness knows only the number.
+
+Three things that wrapper needs which the obvious form omits, each measured rather than reasoned:
+**`MemorySwapMax=0`**, without which the limit is porous — a process twice the cap survives it by
+swapping, and the profile silently tests nothing; **a keeper process inside the scope**, because
+systemd reaps an empty scope and takes `memory.events` with it, so the evidence of the kill dies
+with the thing that was killed; and **the bundle advised out of the page cache before the walk**,
+since a cgroup charges a file page to whoever faults it first and an already-warm harness cache
+lets the constrained run read the corpus for free.
 
 **`cold` restarts the server, then advises.** The naive form — `posix_fadvise(POSIX_FADV_DONTNEED)`
 from the driver, between stages, against a running server — evicts nothing that matters: the bundle's

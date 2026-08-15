@@ -66,10 +66,27 @@ ordinary record. The comparison then gains one disjunct in [`check`] — ``after
 ``after ≡ before + entitlement``, exactly — and nothing else changes. [`Killed`]'s own doc
 carries the argument; `test_crash_atomicity.py` carries the two limits a crash test must not
 overclaim past.
+
+## Profiles
+
+A plan may be walked under a resource [`Profile`] (§7, §12.5) — the same stages and the same
+entitlement algebra, in a different regime: `constrained` boots the server inside a user cgroup
+scope whose memory limit the harness computes and otherwise knows nothing about, `cold` stops the
+server, advises its durable state out of the page cache and boots it again between stages, and
+`single-thread` pins ``serve.compute_threads = 1``. Two of §7's rules are load-bearing enough to
+restate at the mechanism. **An invariance comparison never crosses a profile**: byte-identical
+responses are a property of one pinned thread count, an implementation detail rather than a
+guarantee (decision 0030), so each walk is judged against its own recordings and nothing here
+carries a recording from one profile to another. **A resource result is not a correctness
+result**: a server the kernel kills under the memory limit is reported as [`OutOfMemory`], read
+from the scope's own ``memory.events`` — deliberately a different type from
+[`StageInvarianceViolation`], so a run that died for want of memory can never be scored as a run
+that completed with a wrong answer.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import shutil
@@ -102,6 +119,139 @@ from .entitlement import Delta, Entity, Nothing, Rows, Unexplained, diff
 class StageInvarianceViolation(AssertionError):
     """A stage changed something it was not entitled to change — or failed to change what it
     claimed. The message carries the stage, the claim and the observed delta."""
+
+
+class OutOfMemory(Exception):
+    """The kernel killed the server under the profile's memory limit — a resource outcome, which
+    is a measurement, and deliberately **not** a correctness failure (§12.5's second rule).
+
+    A correctness failure is a *completed* run with a wrong answer, and only
+    [`StageInvarianceViolation`] says that. This type says the run did not complete and names the
+    resource that ended it, so the two triages — "the engine leaks or corrupts" versus "the
+    engine does not fit" — can never be conflated by an exception handler or a test report. It is
+    therefore not an `AssertionError` at all: nothing that catches assertion failures may sweep
+    this up. The evidence is the cgroup's own record — ``events`` is the scope's parsed
+    ``memory.events``, whose ``oom_kill`` count the harness read after the death — and the stage
+    in flight, the configured limit and the scope unit ride along for the report.
+    """
+
+    def __init__(self, stage_label: str, memory_max: int, report: dict, unit: str):
+        self.stage_label = stage_label
+        self.memory_max = memory_max
+        self.events: dict[str, int] = report.get("events", {})
+        self.peak_bytes: int | None = report.get("peak_bytes")
+        self.unit = unit
+        peak = f", peak {self.peak_bytes} bytes" if self.peak_bytes is not None else ""
+        super().__init__(
+            f"stage `{stage_label}`: the kernel's out-of-memory killer took the server under "
+            f"the profile's limit (MemoryMax={memory_max}, memory.events oom_kill="
+            f"{self.events.get('oom_kill', 0)}{peak}) — an out-of-memory outcome, which is a "
+            f"resource measurement; only a completed run with a wrong answer is a correctness "
+            f"failure (correctness-suite §12.5)"
+        )
+
+
+@dataclass(frozen=True)
+class Profile:
+    """The resource regime one plan walk runs in — §7's row, as data the harness reads.
+
+    `default` is `Profile()`: no wrapper, no restarts, the server's own thread count — the
+    baseline every other profile's *outcome* is compared against. Never its bytes: recordings are
+    compared within a walk only (decision 0030; module doc).
+
+    **`memory_max` is applied from outside the process, never as a setting** — the server is
+    launched inside a user cgroup scope (`systemd-run --user --scope -p MemoryMax=`), because a
+    limit a process applies to itself is not the limit a deployment has and the failure modes
+    differ: a cgroup evicts the process's page cache and file mappings under pressure and kills
+    it past the ceiling, where a self-imposed rlimit fails an allocation and lets the process
+    choose what that means. The harness knows only the number. The scope also pins
+    ``MemorySwapMax=0``, which §12.5 does not name and this host forced: with swap present the
+    kernel absorbs the anonymous excess instead of enforcing the ceiling, and a "constrained"
+    profile whose limit the swap device quietly extends is not constrained at all.
+
+    **`cold` restarts the server before advising, never advises in place.** The naive form —
+    `POSIX_FADV_DONTNEED` from the driver against a *running* server — evicts nothing that
+    matters, because the bundle's hot files are mapped into the server's address space and that
+    call skips mapped pages. A profile that reported a cold run which was warm is worse than no
+    profile, so the boundary is: stop the server, advise the files away, boot it again
+    (`SuiteHarness.cold_restart`). Dropping the whole page cache would be simpler and needs root,
+    which would make the profile unrunnable on the machines it is for.
+
+    **`compute_threads` reaches the server's own configuration** (``serve.compute_threads``) —
+    the one profile axis that is legitimately a setting, because the thread count is the
+    server's to choose and the profile pins the choice.
+    """
+
+    name: str = "default"
+    #: Bytes, or None for no limit. The whole of the harness's knowledge about `constrained`.
+    memory_max: int | None = None
+    #: Drop the server's durable state from the page cache between stages.
+    cold: bool = False
+    #: Pin ``serve.compute_threads``; None leaves the server's own default.
+    compute_threads: int | None = None
+
+
+def scope_runner_unavailable() -> str | None:
+    """Why `systemd-run --user --scope` cannot launch anything here — or None when it can.
+
+    The constrained profile needs a user manager willing to create a scope with a memory limit;
+    a bare container or a CI runner without a session bus refuses. Probed with `/bin/true` so the
+    answer is the runner's, not the server's, and returned as a reason rather than a bool because
+    the skip message is the only trace the profile leaves on a host that cannot run it.
+    """
+    argv = [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "-p",
+        "MemoryMax=64M",
+        "--",
+        "/bin/true",
+    ]
+    try:
+        probe = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        return "systemd-run is not installed"
+    except subprocess.TimeoutExpired:
+        return "systemd-run --user --scope hung rather than ran"
+    if probe.returncode != 0:
+        return f"systemd-run --user --scope refused: {probe.stderr.strip()}"
+    return None
+
+
+#: Scope unit names are minted fresh per spawn — a scope cannot be reused once released, and a
+#: collision with a concurrent run's unit would put two servers under one limit.
+_SCOPE_SEQ = itertools.count()
+
+#: The wrapper the scope's payload runs through: a detached keeper, then `exec` into the server.
+#: The keeper (`sleep`, detached from the stdout pipe so a dead server still delivers EOF to the
+#: harness) exists to hold the scope's cgroup **populated after the server dies** — systemd
+#: reaps an empty scope, taking `memory.events` with it, and the whole out-of-memory
+#: discrimination rests on reading that file after the kill. Finite rather than `infinity` so a
+#: harness that crashed without reaping cannot leak it past a couple of hours.
+_SCOPE_KEEPER_WRAP = 'sleep 7200 >/dev/null 2>&1 & exec "$0" "$@"'
+
+
+def _advise_out_of_page_cache(*roots: Path) -> None:
+    """Advise every file under `roots` out of the page cache — the cold boundary's eviction.
+
+    Only valid while no process maps the files (the caller stops the server first — [`Profile`]'s
+    doc carries why). Each file is fsynced before the advice because `POSIX_FADV_DONTNEED`
+    skips dirty pages, and the freshly stopped server may have written without syncing.
+    """
+    for root in roots:
+        if not root.exists():
+            continue
+        files = [root] if root.is_file() else [p for p in root.rglob("*") if p.is_file()]
+        for path in files:
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
 
 
 #: The faults build's own target directory (decision 0071). Never `target/release`, which the
@@ -144,12 +294,14 @@ def _suite_config(
     viewer_port: int,
     session_port: int,
     control_port: int,
+    compute_threads: int | None = None,
 ) -> str:
     # θ saturated and both caps above any fixture total — §10's saturation precondition, without
     # which a point-set comparison is confounded by the selection refilling behind a removed row.
     # The merge cap sits below the catalogue base segment's ~3.2 MB so the base excludes itself
     # from selection (module doc); the config loader refuses the value if the base ever shrinks
     # under it, which is the loud failure this suite wants.
+    threads_line = "" if compute_threads is None else f"compute_threads = {compute_threads}\n"
     return f"""
 [bundle]
 path = "{bundle_root}"
@@ -174,7 +326,7 @@ k_min = 2
 k_max_marks = 1000000
 theta_target_marks = 1099511627776
 max_merged_segment_bytes = 1048576
-
+{threads_line}
 [ingest]
 flush_max_age_secs = 86400
 compaction_window_start = "off"
@@ -356,6 +508,8 @@ class SuiteHarness:
     filters: dict | None = None
     zooms: tuple[int, ...] = (0, 3)
     underlay_offset: int = 2
+    #: The resource regime this walk runs in (§7, §12.5). The default is no regime at all.
+    profile: Profile = Profile()
 
     server: Server | None = None
     proc: subprocess.Popen | None = None
@@ -365,6 +519,10 @@ class SuiteHarness:
     #: battery item back to the item the fixture planted.
     fx_by_tessera: dict[int, int] = field(default_factory=dict)
     item_ids: tuple[int, ...] = ()
+    #: The scope unit currently wrapping the server (constrained profile only).
+    _scope_unit: str | None = field(default=None, init=False, repr=False)
+    #: The last scope memory reading taken before its cgroup was reaped — the walk's measurement.
+    memory_report: dict | None = field(default=None, init=False)
 
     @property
     def cache_dir(self) -> Path:
@@ -381,6 +539,12 @@ class SuiteHarness:
         Load stage is. ``faults=True`` boots the faults build from its own target directory
         (decision 0071) — only a [`Killed`] stage does this, and only for its own life; every
         other spawn is the default-features binary the oracle harness owns.
+
+        Under a constrained profile the command is wrapped in a user cgroup scope
+        (`systemd-run --user --scope`) carrying the profile's limit — [`Profile`]'s doc argues
+        the wrapper; `_SCOPE_KEEPER_WRAP`'s doc argues the keeper. `self.proc` is then
+        `systemd-run`, which forwards SIGTERM to the server and re-raises the server's own death
+        signal, so the health wait and `stop_server` read exactly as they do unwrapped.
         """
         if faults:
             ensure_faults_cli_built()
@@ -398,13 +562,34 @@ class SuiteHarness:
                 viewer_port,
                 session_port,
                 control_port,
+                compute_threads=self.profile.compute_threads,
             )
         )
         env = os.environ.copy()
         env["TESSERA_REFERENCE_SESSION_CRED"] = SESSION_CREDENTIAL
         env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
+        argv = [str(binary), "serve", "-c", str(config_path)]
+        if self.profile.memory_max is not None:
+            self._reap_scope()  # a scope cannot be reused; a stale keeper must not outlive it
+            self._scope_unit = f"tessera-suite-{os.getpid()}-{next(_SCOPE_SEQ)}"
+            argv = [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                f"--unit={self._scope_unit}",
+                "-p",
+                f"MemoryMax={self.profile.memory_max}",
+                "-p",
+                "MemorySwapMax=0",
+                "--",
+                "sh",
+                "-c",
+                _SCOPE_KEEPER_WRAP,
+                *argv,
+            ]
         self.proc = subprocess.Popen(
-            [str(binary), "serve", "-c", str(config_path)],
+            argv,
             cwd=REPO_ROOT,
             env=env,
             stdout=subprocess.PIPE,
@@ -433,14 +618,132 @@ class SuiteHarness:
             stop_server(self.proc)
             self.proc = None
             self.server = None
+        if self._scope_unit is not None:
+            report = self.scope_memory()
+            if report is not None:
+                self.memory_report = report
+            self._reap_scope()
 
     def kill(self) -> None:
         """SIGKILL — no graceful shutdown, no unwind, no drop guards. The crash half of the kill
-        modifier; `oracle.harness.kill_server` is the same call the restart-replay test uses."""
+        modifier; `oracle.harness.kill_server` is the same call the restart-replay test uses.
+        Under a scope the SIGKILL lands on `systemd-run` and cannot be forwarded, so the reap —
+        itself SIGKILL-first — takes the server with the keeper; crash semantics are preserved."""
         if self.proc is not None:
             kill_server(self.proc)
             self.proc = None
             self.server = None
+        if self._scope_unit is not None:
+            report = self.scope_memory()
+            if report is not None:
+                self.memory_report = report
+            self._reap_scope()
+
+    def cold_restart(self) -> None:
+        """The cold profile's between-stage boundary: stop the server, advise its durable state
+        out of the page cache, boot it again and wait for readiness (§12.5).
+
+        The stop comes first because advising a running server's files evicts nothing that
+        matters ([`Profile`]'s doc). Everything the next boot will read is advised — the bundle,
+        and the run directory holding the WAL family and the cache — because a stage that passes
+        only when its inputs are still resident from the stage before is exactly what this
+        profile exists to catch, and the WAL replay and cache open are boot-time reads too. The
+        session does not survive the process, so the harness re-authorises with the same grants;
+        the battery's `tessera_id`s do survive, being minted per build rather than per boot.
+        """
+        self.stop()
+        _advise_out_of_page_cache(self.bundle_root, self.run_dir)
+        self.spawn()
+        self.authorise()
+        _poll(
+            lambda: all(p["readiness"] for p in self.status()["partitions"]),
+            "the cold-booted bundle never became ready",
+            timeout=30.0,
+        )
+
+    # -- the constrained profile's scope (§12.5) ------------------------------------------------
+
+    def scope_memory(self) -> dict | None:
+        """The scope cgroup's memory record — ``{"events": {...}, "peak_bytes": ...}`` — or None
+        when there is no scope or its cgroup is already gone.
+
+        Readable after the server's death because the keeper holds the cgroup populated
+        (`_SCOPE_KEEPER_WRAP`), and resolved through the unit name rather than a path captured
+        at spawn, so a server that died before the harness ever looked is still accounted for.
+        """
+        if self._scope_unit is None:
+            return None
+        shown = subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                f"{self._scope_unit}.scope",
+                "-p",
+                "ControlGroup",
+                "--value",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        rel = shown.stdout.strip()
+        if not rel:
+            return None
+        cgroup = Path("/sys/fs/cgroup") / rel.lstrip("/")
+        try:
+            lines = (cgroup / "memory.events").read_text().splitlines()
+        except OSError:
+            return None
+        report: dict = {"events": {key: int(count) for key, count in (ln.split() for ln in lines)}}
+        try:
+            report["peak_bytes"] = int((cgroup / "memory.peak").read_text())
+        except (OSError, ValueError):
+            pass
+        return report
+
+    def _reap_scope(self) -> None:
+        """Take down whatever the scope still holds — the keeper, and any server a SIGKILL to
+        `systemd-run` orphaned — and release the unit. SIGKILL-first, because the one caller
+        with live processes left is the crash path and a graceful stop would let the server
+        unwind. Reading `scope_memory` must precede this: the reap deletes the cgroup."""
+        if self._scope_unit is None:
+            return
+        unit = f"{self._scope_unit}.scope"
+        self._scope_unit = None
+        subprocess.run(
+            ["systemctl", "--user", "kill", "--signal=SIGKILL", unit],
+            capture_output=True,
+            timeout=30,
+        )
+        subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=30)
+
+    def raise_for_resource_outcome(self, stage_label: str, cause: BaseException) -> None:
+        """§12.5's discrimination, at the only point it can be made: a stage failed — decide
+        whether the failure is the kernel's, and if so refuse to let it look like the engine's.
+
+        Reads the scope's ``memory.events``; a positive ``oom_kill`` means the server was killed
+        under the profile's limit, and the stage's failure — a refused connection, a barrier
+        timeout, an early exit — is downstream of that kill. Raises [`OutOfMemory`] from the
+        original failure so the report leads with the resource outcome and still carries what
+        the harness saw. Anything else returns, and the original failure stands on its own.
+        """
+        if self._scope_unit is None:
+            return
+        report = self.scope_memory()
+        if report is None:
+            return
+        self.memory_report = report
+        if report["events"].get("oom_kill", 0) > 0:
+            unit = self._scope_unit
+            if self.proc is not None:
+                self.proc.poll()  # reap the dead systemd-run; the scope reap below has the rest
+                self.proc = None
+            self.server = None
+            self._reap_scope()
+            raise OutOfMemory(
+                stage_label, self.profile.memory_max, report, unit
+            ) from cause
 
     def authorise(self) -> None:
         self.token = self.server.authorise(list(self.grants))["token"]
@@ -832,13 +1135,24 @@ class Rotate(Stage):
     (growth since the last rotation, then a pulled tick with nothing to flush) and observed on
     disc: the active member's sequence number rises.
 
+    **The growth must come from the boot that takes the tick.** The executor seeds its growth
+    gate from the opened WAL's position, so a freshly started node rotates only on appends made
+    in its own run (owner-ruled 2026-08-04; write-path §4.5) — residual growth from before a
+    restart is deliberately not a trigger. The bare form therefore relies on preceding stages in
+    the same boot (the stage-invariance plan's denies), and a plan whose stage boundary restarts
+    the server — the cold profile — found that reliance the first time it ran: rotate was the one
+    stage that passed only because its input was residue. Such a plan passes `grow`, a callable
+    appending WAL growth whose served-surface effect is nothing (a suppress/unsuppress pair is
+    the shape), making this §12.5's "a write shaped to cross the rotation threshold" literally.
+
     This is the WAL third of §2's rotation row. The prefix and identity rotations ride the fold
     and are exercised — and barriered — there.
     """
 
     label = "rotate"
 
-    def __init__(self):
+    def __init__(self, grow: Callable[[SuiteHarness], None] | None = None):
+        self._grow = grow
         self._snap: dict | None = None
 
     def apply(self, h: SuiteHarness) -> None:
@@ -846,6 +1160,8 @@ class Rotate(Stage):
             "member": _wal_member_index(h.wal_path),
             "flushes": h.executor()["flush"]["flushes"],
         }
+        if self._grow is not None:
+            self._grow(h)
         h.pull_tick()
 
     def barrier(self, h: SuiteHarness) -> None:
@@ -1004,15 +1320,29 @@ def run_plan(h: SuiteHarness, plan: Sequence[Stage]) -> list[StageResult]:
 
     The establishing stage (no server yet) has no before-recording and a `None` delta; its
     after-recording is the baseline. The battery is built immediately after it and never again.
+
+    The harness's profile shapes the walk without touching the comparison: a cold profile
+    interposes `cold_restart` between stages — outside both recordings, so each stage's bracket
+    still holds exactly that stage — and any stage failure under a constrained profile passes
+    through `raise_for_resource_outcome` first, so a run the kernel killed for memory surfaces
+    as [`OutOfMemory`] rather than as whatever downstream error the death happened to cause.
     """
     results: list[StageResult] = []
     for stage in plan:
-        before = record(h.server, h.token, h.battery) if h.server is not None else None
-        stage.apply(h)
-        stage.barrier(h)
-        if h.battery is None:
-            h.establish_battery()
-        after = record(h.server, h.token, h.battery)
+        try:
+            if h.profile.cold and h.server is not None:
+                h.cold_restart()
+            before = record(h.server, h.token, h.battery) if h.server is not None else None
+            stage.apply(h)
+            stage.barrier(h)
+            if h.battery is None:
+                h.establish_battery()
+            after = record(h.server, h.token, h.battery)
+        except OutOfMemory:
+            raise
+        except Exception as exc:
+            h.raise_for_resource_outcome(stage.label, exc)
+            raise
         delta = diff(before, after) if before is not None else None
         results.append(StageResult(stage.label, stage, before, after, delta))
     return results
@@ -1056,6 +1386,8 @@ __all__ = [
     "Killed",
     "Load",
     "Merge",
+    "OutOfMemory",
+    "Profile",
     "Rotate",
     "Stage",
     "StageInvarianceViolation",
@@ -1065,4 +1397,5 @@ __all__ = [
     "check",
     "ensure_faults_cli_built",
     "run_plan",
+    "scope_runner_unavailable",
 ]
