@@ -40,19 +40,21 @@ and the allocation rules keep every base item's entity id identical across build
 §4.2 wanted `fx_key` for is already an equality on a column the wire carries. `fx_key` remains
 planted-but-unserved and its strict xfail in `test_mask_catalogue.py` remains the marker for that.
 
-Canonicalisation is therefore:
+The canonicalisation itself is `suite.canonical`'s (correctness-suite §12.2), of which this module
+was the origin and onto which it is refactored — one implementation, deliberately, for the same
+reason `compare_states` is one function: a control that exercises a copy proves the copy. That
+module carries the design argument (points as served, tiles re-sorted, the underlay its own
+surface, the chunk-boundary assumption); what is asserted *here* is the premise that lets the
+comparison be of raw bytes with nothing session-dependent stripped:
+`test_the_response_body_carries_nothing_session_dependent` reissues one request under a second,
+independently-authorised session and requires the canonical forms to be identical. If a
+session-dependent field is ever added to the body, that test fails and this paragraph is wrong,
+which is the point of writing it as a test.
 
-- **the points batch: raw bytes, in served order.** Contracts §3.2 orders the served points
-  ascending by `tessera_id` within each tile, tiles in the order the tiles batch lists them — so
-  comparing as served is strictly stronger than sorting first: a reordering is a defect, not noise,
-  and sorting would hide it. (§2.6 is the bundle's *storage* order and is a different claim.)
-- **the tile batch: sorted by tile id, then re-serialised.** Emission order under a parallel gather
-  is *not* contract (§4.2), and a byte comparison that flaked on it would get "fixed" by weakening.
-- **nothing stripped from the body**, because there is nothing session-dependent left in it. This is
-  asserted rather than assumed: `test_the_response_body_carries_nothing_session_dependent` reissues
-  one request under a second, independently-authorised session and requires the bytes to be
-  identical. If a session-dependent field is ever added to the body, that test fails and this
-  paragraph is wrong, which is the point of writing it as a test.
+One strengthening arrived with the refactor: this module used to exclude the trailer wholesale as
+"the one deliberately nondeterministic region", where §12.2 drops only its elapsed-time fields —
+so the deterministic remainder (`points`, `flushes`) is now a fourth compared surface rather than
+an unwatched one.
 
 The labels batch §4.2 also names is not compared, because there is no label service and no labels
 batch. That is a gap in the system, not in this comparison, and it is recorded in §4.6 rather than
@@ -66,16 +68,12 @@ and a run at a different thread count is outside what has been argued.
 
 from __future__ import annotations
 
-import io
-
-import pyarrow as pa
-import pyarrow.ipc as ipc
 import pytest
 
 from oracle.canary_fixture import build_canary_states, verify_allocation_rules
 from oracle.harness import spawn_server, stop_server
-from oracle import wire
-from oracle.wire import decode_viewport, split_frames
+from oracle.wire import decode_viewport
+from suite.canonical import Streamed, canonicalise_viewport
 
 GRID_MAX = 65536.0
 SLICE = "s0"
@@ -146,35 +144,25 @@ def canary_servers(tmp_path_factory, canary_bundles):
         stop_server(proc)
 
 
-def _canonical_response(server, token, zoom, bbox) -> dict[str, bytes]:
-    """One viewport response, canonicalised, **as three separately-addressable surfaces**.
+def _canonical_response(server, token, zoom, bbox) -> Streamed:
+    """One viewport response, canonicalised by the shared module, **surfaces kept separate**.
 
-    Returns `{"tiles": …, "points": …, "subcells": …}`. Keeping them apart rather than concatenating
-    them is what lets the positive control assert *which* surface a difference landed on — and that
-    matters more than it sounds. When this returned one concatenated blob, dropping the points batch
-    from it left every canary test green, and so did dropping the tile batch: the control fired on
-    whichever surface remained, so §4.2's "explicitly including the points batches" was enforced by
-    nothing. Split, each of the three is pinned — replacing any one with `b""` fails the control,
-    measured in all three directions.
+    `suite.canonical` (correctness-suite §12.2) does the work and carries the argument for its
+    steps; this wrapper adds the one check that is this fixture's own premise rather than the
+    canonical form's. The `served == visible` assertion is the untruncated premise, checked rather
+    than assumed: if a cap or a live theta ever truncated a tile, the comparison would quietly
+    weaken from "the two states serve the same points" to "the two states serve the same prefix"
+    and still pass.
 
-    - **tiles** — decoded, sorted by tile id, re-serialised. Emission order under a parallel gather
-      is not contract (§4.2), and a byte comparison that flaked on it would get "fixed" by weakening.
-    - **points** — the batch's own bytes, unaltered and in served order. Contracts §3.2 orders the
-      served set ascending by `tessera_id` within each tile, so comparing it as served is strictly
-      stronger than sorting it first: a reordering is a defect, not noise.
-    - **subcells** — the §3.3 underlay's appended stream, requested explicitly. This is a per-cell
-      `mask.count_range(...)`, i.e. an exact masked cardinality, and therefore the one derived
-      aggregate in the system besides tile counts. It was absent from this comparison until an
-      independent review pointed out that an I2 defect confined to the underlay path moves no tile
-      count and no point set, so every canary comparison would have passed while §4.6 called I2
-      covered.
-
-    The `served == visible` assertion is the untruncated premise, checked rather than assumed. If a
-    cap or a live theta ever truncated a tile, the comparison would quietly weaken from "the two
-    states serve the same points" to "the two states serve the same prefix" and still pass.
+    The chunk boundaries inside the canonical points surface are not contract, but at one pinned
+    configuration they are deterministic, which is all decision 0030's argument requires of these
+    bytes (`canary_servers` does the pinning). The underlay matters here specifically: it is a
+    per-cell `mask.count_range(...)` — an exact masked cardinality, the one derived aggregate in
+    the system besides tile counts — and it was absent from this comparison until an independent
+    review pointed out that an I2 defect confined to the underlay path moves no tile count and no
+    point set, so every canary comparison would have passed while §4.6 called I2 covered.
     """
     raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
-    frames = split_frames(raw)
 
     tiles, _points = decode_viewport(raw)
     for tile, visible, _matched, served in tiles:
@@ -184,34 +172,16 @@ def _canonical_response(server, token, zoom, bbox) -> dict[str, bytes]:
             f"spawn_server overrides"
         )
 
-    # The framed body (contracts §3.2 r26) hands each surface back by kind: the points surface is
-    # the kind-3 payloads concatenated in frame order — served order, chunk boundaries and all.
-    # The chunking is not contract, but at one pinned configuration it is deterministic, which is
-    # all decision 0030's argument requires of these bytes. The trailer (kind 4) carries this
-    # run's timings and is EXCLUDED from the comparison — it is the one deliberately
-    # nondeterministic region — with its key set already validated by the shared decoder
-    # (`oracle.wire.decode_frames` via `decode_viewport` above), so exclusion here does not
-    # unguard it.
-    tile_bytes = next(payload for kind, payload in frames if kind == wire.FRAME_TILES)
-    points_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_POINTS)
-    subcell_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_SUB_CELLS)
-
-    with ipc.open_stream(io.BytesIO(tile_bytes)) as reader:
-        table = pa.Table.from_batches(list(reader), reader.schema)
-    sorted_tiles = table.sort_by([("tile", "ascending")])
-    sink = io.BytesIO()
-    with ipc.new_stream(sink, sorted_tiles.schema) as writer:
-        for batch in sorted_tiles.to_batches():
-            writer.write_batch(batch)
-
-    return {
-        "tiles": sink.getvalue(),
-        "points": points_bytes,
-        "subcells": subcell_bytes,
-    }
+    return canonicalise_viewport(raw)
 
 
-SURFACES = ("tiles", "points", "subcells")
+# The three streamed surfaces of §12.2 plus the trailer's deterministic remainder — kept apart
+# rather than concatenated, which is what lets the positive control assert *which* surface a
+# difference landed on. When this module's comparator returned one concatenated blob, dropping the
+# points batch from it left every canary test green, and so did dropping the tile batch: the
+# control fired on whichever surface remained. Split, each is pinned — replacing any one with
+# `b""` fails the control, measured in all three directions before the split was made.
+SURFACES = ("tiles", "points", "underlay", "trailer")
 
 
 def compare_states(server_a, server_b, bbox) -> list[tuple[str, str]]:
@@ -230,8 +200,8 @@ def compare_states(server_a, server_b, bbox) -> list[tuple[str, str]]:
         auth_a = server_a.authorise(terms)
         auth_b = server_b.authorise(terms)
         for zoom in ZOOM_RANGE:
-            a = _canonical_response(server_a, auth_a["token"], zoom, bbox)
-            b = _canonical_response(server_b, auth_b["token"], zoom, bbox)
+            a = _canonical_response(server_a, auth_a["token"], zoom, bbox).surfaces()
+            b = _canonical_response(server_b, auth_b["token"], zoom, bbox).surfaces()
             for surface in SURFACES:
                 if a[surface] != b[surface]:
                     differences.append(
@@ -304,7 +274,10 @@ def test_the_comparator_rejects_a_state_whose_extra_item_is_visible(canary_serve
     # Every surface must carry the difference on its own. Without this, a canonicalisation that
     # silently stopped comparing one of them would keep both canary tests green: the control would
     # fire on whichever surface was left. That is not hypothetical — it was measured before
-    # `_canonical_response` returned surfaces separately, in both directions.
+    # `_canonical_response` returned surfaces separately, in both directions. The trailer
+    # participates on the same argument: its `points` count is the served cardinality, so a
+    # visible extra item must move it, and a canonicalisation that dropped the remainder would
+    # otherwise be indistinguishable from one that kept it.
     differing = {surface for surface, _d in differences}
     for surface in SURFACES:
         assert surface in differing, (
@@ -316,13 +289,16 @@ def test_the_comparator_rejects_a_state_whose_extra_item_is_visible(canary_serve
 
 
 def test_the_response_body_carries_nothing_session_dependent(canary_servers):
-    """The premise that lets the comparison be of raw bytes with nothing stripped.
+    """The premise that lets the served surfaces be compared as raw bytes: nothing in them is a
+    function of the session.
 
-    §4.2's canonicalisation exists because per-session handle bytes made raw comparison impossible.
-    Decision 0006 retired that column; this asserts the consequence rather than assuming it. Two
-    independently-authorised sessions on the **same** server with the **same** grants must produce
-    byte-identical bodies — if a session-dependent field is ever reintroduced into the body, this
-    fails, and the module doc's claim that nothing needs stripping is caught out at once.
+    §4.2's canonicalisation exists because per-session handle bytes made raw comparison
+    impossible. Decision 0006 retired that column; this asserts the consequence rather than
+    assuming it. Two independently-authorised sessions on the **same** server with the **same**
+    grants must canonicalise identically — the only thing the shared canonicalisation strips is
+    elapsed time, which is issue-dependent, never session-dependent. If a session-dependent field
+    is ever reintroduced into the body, this fails, and the module doc's claim that nothing else
+    needs stripping is caught out at once.
     """
     free_srv, _canary_srv, _visible_srv = canary_servers
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)

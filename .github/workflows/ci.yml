@@ -108,4 +108,4 @@ jobs:
       - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
-      - run: reference/.venv/bin/pytest conformance/tests -v
+      - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v

@@ -17,6 +17,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "reference"))
+# `conformance/` itself, so `conformance/tests` can import the correctness suite's shared
+# battery-and-canonicalisation package as `suite` (the canary comparator is refactored onto
+# `suite.canonical` — correctness-suite §12.2 — rather than keeping its own copy).
+sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
 # **Every fixture in this suite is synthesised from a seed.** Nothing here reads the Phase 0
 # corpus, so the suite runs from a clean checkout with no external data — which is what lets it run
