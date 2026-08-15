@@ -107,6 +107,13 @@ declared and frozen, which is true of a clustering and false of everything geome
 | **Enumerated** — the caller declares the members | the layer is **refreshed** (⊘ by replacement today, by edit once that pass lands — [decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) | a row-space bitmap, ~1 B/member (§2) | one `and_cardinality` |
 | **Spatial predicate** — *"the points inside this shape"* | **a point is written** | the **geometry only**; row ranges derived | `range_cardinality` over its ranges |
 | **Attribute predicate** — *"the points carrying this value"* | **a point is written** | nothing new — the existing value column and postings | the existing filter machinery |
+| **Computed** — the membership *is* a function of the row id | **a point is written** | nothing at all | `range_cardinality` over one contiguous range |
+
+**The computed row is not a predicate**, which is why it is its own source rather than a spatial one
+with a cheap shape: there is nothing to intersect and nothing to scan. A Morton cell at depth *d* is
+a prefix of its members' row ids, so membership is derivable and the count is the cheapest operation
+in the system (§10). It is what the density underlay already does, and the source the layer/level
+abstraction needs in order to describe it without a special case.
 
 **A spatial predicate needs no membership storage at all.** A tile is a contiguous row range, so a
 bounding box is a small set of row ranges and a polygon decomposes into Morton cells the same way —
