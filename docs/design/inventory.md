@@ -43,7 +43,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C4** | Response timing | Low | Open |
 | **C5** | Extractive-tier background frequencies | Low | Closed |
 | **C6** | External ID gaps on the wire (r21; was "Entity ID gaps on the wire") | Medium | Accepted — caller's control |
-| **C7** | Generating-set shrinking under deletion | Medium | Not adopted |
+| **C7** | Generating-set shrinking under deletion (r42; was "Not adopted") | Medium | Accepted — caller's declaration, strict by default |
 | **C8** | Pre-intersection filter cardinality | High if exposed | Closed by construction |
 | **C9** | Text relevance scores and ranks | High if ranking added | Closed by scope |
 | **C10** | Vector similarity results and thresholds | High if post-filtered | Closed by construction |
@@ -70,14 +70,17 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r41 | 23 |
+| `annotation-representation.md` | Provisional — under review | 14 |
+| `annotation-write-cycle.md` | Provisional — under review | 6 |
+| `annotations.md` | Provisional — under review | 2 |
+| `architecture.md` | Normative — r42 | 23 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
-| `concurrency-lifecycle.md` | Normative — r10 | 13 |
-| `conformance.md` | Normative — r10 | 15 |
-| `contracts.md` | Normative — r30 | 19 |
+| `concurrency-lifecycle.md` | Normative — r11 | 13 |
+| `conformance.md` | Normative — r11 | 15 |
+| `contracts.md` | Normative — r31 | 21 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
