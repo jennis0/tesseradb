@@ -19,6 +19,7 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+pub mod deep;
 pub mod error;
 pub mod input;
 pub mod observer;
@@ -54,6 +55,7 @@ use tessera_types::{
     SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
+pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
 pub use error::{BuildError, Result};
 pub use observer::{BuildObserver, BuildStage, NoopObserver};
 
@@ -887,11 +889,17 @@ pub struct VerifyReport {
 
 /// Verify a bundle at `root`: run the read protocol (which checks every manifest digest, every
 /// file's size and SHA-256, and each permutation's bijectivity onto its segment's rows), then
-/// re-confirm the permutation covers exactly the rows the segment claims, and re-derive every
+/// re-confirm the row space covers exactly the rows the segments claim, and re-derive every
 /// row's `tessera_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
 /// row disagrees (contracts §2.6 r6: "`tessera verify` checks the whole column against" the
 /// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
+    verified_open(root).map(|(_, report)| report)
+}
+
+/// The pass behind [`verify`] and [`deep::verify_deep`], returning the opened bundle so the deep
+/// mode does not pay a second full open (the open re-hashes every named file).
+fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
     let bundle = tessera_store::read::open_bundle(root)?;
     // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
     // open) checks `construction`/`rounds`/`idset` but never parses `key`'s hex, since
@@ -907,50 +915,84 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
     for partition in bundle.partitions.values() {
         for (slice_id, slice) in &partition.slices {
             slices += 1;
-            let row_count: u32 = slice.segments.iter().map(|s| s.row_count).sum();
             segments += slice.segments.len();
-            rows += row_count as u64;
-            // `open_bundle` already ran `validate_rows` (no aliasing, no out-of-range row).
-            // The remaining half of bijectivity is surjectivity: every row must be claimed by
-            // some entity, or `columns.arrow` holds a row no entity can ever address. Built as
+            let total_rows = slice.row_space.total_rows();
+            rows += total_rows;
+            // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
+            // every extent (no aliasing, no out-of-range row). The remaining half of
+            // bijectivity is surjectivity: every row of every segment must be claimed by some
+            // entity, or `columns.arrow` holds a row no entity can ever address. Swept over the
+            // whole row space — base *and* extents — because a bundle that has flushed holds
+            // rows above the base permutation, and a sweep of the base alone refuses every such
+            // bundle as "not a bijection" (the false refusal §18 obligation 10 names). Built as
             // a row-indexed array (rather than just a count) so the identity check below can
-            // reuse it instead of inverting the permutation a second time.
-            slice.row_space.base().validate_rows(row_count)?;
-            let mut entity_of_row: Vec<Option<u64>> = vec![None; row_count as usize];
+            // reuse it instead of inverting the row space a second time.
+            slice
+                .row_space
+                .base()
+                .validate_rows(slice.row_space.base_rows())?;
+            let entity_bound = slice
+                .row_space
+                .extents()
+                .last()
+                .map(|extent| extent.entity_hi + 1)
+                .unwrap_or_else(|| slice.row_space.base().bound());
+            let total_rows_usize = usize::try_from(total_rows).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "slice '{slice_id}': {total_rows} rows does not fit usize"
+                ))
+            })?;
+            let mut entity_of_row: Vec<Option<u64>> = vec![None; total_rows_usize];
             let mut claimed = 0u64;
-            for entity in 0..slice.row_space.base().bound() {
-                if let Some(row) = slice
-                    .row_space
-                    .base()
-                    .row_of(tessera_types::EntityId::new(entity))
-                {
+            for entity in 0..entity_bound {
+                if let Some(row) = slice.row_space.row_of(tessera_types::EntityId::new(entity)) {
                     entity_of_row[row.raw() as usize] = Some(entity);
                     claimed += 1;
                 }
             }
-            if claimed != row_count as u64 {
+            if claimed != total_rows {
                 return Err(BuildError::Invalid(format!(
-                    "slice '{slice_id}': permutation claims {claimed} rows but the segments hold \
-                     {row_count} — not a bijection"
+                    "slice '{slice_id}': the row space claims {claimed} rows but the segments \
+                     hold {total_rows} — not a bijection"
                 )));
             }
 
-            // A build writes exactly one segment per (partition, slice) (contracts §2.1), so
-            // its rows are `columns.arrow` row 0..row_count directly. A streamed segment would
-            // need its own row-range offset, which does not exist.
+            // The identity column, per segment **at that segment's own row offset**. A segment's
+            // `columns.arrow` rows are local `0..row_count`; in the slice's row space they begin
+            // at the extent's `row_base` (the base segment's at 0). The offset is looked up from
+            // the row space rather than accumulated in iteration order, so this cannot silently
+            // depend on the segment list's ordering.
             for segment in &slice.segments {
+                let row_base = slice
+                    .row_space
+                    .extents()
+                    .iter()
+                    .find(|extent| extent.seg_id == segment.seg_id)
+                    .map(|extent| extent.row_base as usize)
+                    .unwrap_or(0);
                 let ids = segment.columns.tessera_id();
-                for (row, id) in ids.iter().enumerate() {
-                    // Bijectivity was just confirmed above, so every row has an entity.
-                    let entity = entity_of_row[row].expect("row claimed by validate_rows above");
+                for (local, id) in ids.iter().enumerate() {
+                    let entity = entity_of_row
+                        .get(row_base + local)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| {
+                            BuildError::Invalid(format!(
+                                "slice '{slice_id}' segment '{}' row {local}: no entity claims \
+                                 this row",
+                                segment.seg_id
+                            ))
+                        })?;
                     let expected = identity_key
                         .forward(shard_id, tessera_types::EntityId::new(entity))
                         .map_err(BuildError::Identity)?
                         .raw();
                     if *id != expected {
                         return Err(BuildError::Invalid(format!(
-                            "slice '{slice_id}' row {row}: tessera_id {id:#x} does not match \
-                             identity.key's derivation {expected:#x} for entity {entity}"
+                            "slice '{slice_id}' segment '{}' row {local}: tessera_id {id:#x} \
+                             does not match identity.key's derivation {expected:#x} for entity \
+                             {entity}",
+                            segment.seg_id
                         )));
                     }
                 }
@@ -962,14 +1004,15 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
         serde_json::from_slice(&bytes)
             .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
     };
-    Ok(VerifyReport {
+    let report = VerifyReport {
         prefix: current.prefix,
         partitions: bundle.partitions.len(),
         slices,
         segments,
         rows,
         entity_id_high_water: bundle.manifest.entity_id_high_water,
-    })
+    };
+    Ok((bundle, report))
 }
 
 fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
@@ -1215,7 +1258,7 @@ fn digest_file(path: &Path) -> Result<FileDigest> {
     })
 }
 
-fn hex_digest(digest: &[u8]) -> String {
+pub(crate) fn hex_digest(digest: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
