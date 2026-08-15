@@ -7,10 +7,11 @@ compares recorded batteries, total verification checks their rows, and the censu
 their tiling; three mechanisms sharing one definition cannot drift apart, and there is one thing
 to extend when a surface is added.
 
-⊘ Rows 2 onward are not built: no driver, no stages, no entitlements, no `/control/status`
-barriers. What exists here today is the battery definition, the canonicalisation, a recorder that
-issues a battery against a live server, and the tests that pin them — including the property the
-whole suite rests on, that recording one battery twice against unchanged state compares equal.
+Row 3 lives beside it: `suite.driver` (the stage driver, §12.3's triggering protocol and
+barriers) and `suite.entitlement` (the `Nothing | Entity | Rows` algebra and the recording diff),
+exercised end to end by `test_stage_invariance.py`'s fixture-size plan. ⊘ Rows 6–9 are not built:
+no total verification, no profiles, no crash modifier (§10.1 is blocked on an owner ruling), no
+endurance tier.
 
 The canary comparator (`conformance/tests/test_canary.py`) is refactored onto `suite.canonical`
 rather than keeping its own copy. §12.2 is explicit about why there must be exactly one
@@ -47,6 +48,14 @@ from .battery import (  # noqa: E402
     record_one,
 )
 from .canonical import Batches, Canonical, Json, Streamed, canonicalise_viewport  # noqa: E402
+from .entitlement import (  # noqa: E402
+    Delta,
+    Entity,
+    Nothing,
+    Rows,
+    Unexplained,
+    diff,
+)
 
 __all__ = [
     "Absent",
@@ -54,16 +63,22 @@ __all__ = [
     "Battery",
     "Canonical",
     "Categories",
+    "Delta",
+    "Entity",
     "Item",
     "Json",
     "Meta",
+    "Nothing",
     "Query",
     "Recorded",
     "Region",
+    "Rows",
     "Streamed",
+    "Unexplained",
     "Viewport",
     "build_battery",
     "canonicalise_viewport",
+    "diff",
     "record",
     "record_one",
 ]

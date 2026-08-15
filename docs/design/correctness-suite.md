@@ -686,10 +686,17 @@ rather than left to be rediscovered:
 
 - `flush_max_age_secs` is set long, so no tick fires on its own and the driver owns the clock.
 - `POST /control/flush` pulls a tick. **A pulled tick dispatches everything currently eligible**,
-  so isolating a stage means arranging that only it is eligible — the merge ladder's `tier_width`
-  and the coalesce's tier threshold are the knobs, set from the run's configuration.
+  so isolating a stage means arranging that only it is eligible. **The knobs are not configuration**
+  — `serve.tier_width` and `serve.segment_floor_bytes` are parsed by the server and reach the
+  engine nowhere, which hard-codes a tier width of 4 and a 16 MiB floor, and the coalesce's width
+  of 8 has no key at all. Isolation is therefore write-counting against those fixed constants, with
+  `max_merged_segment_bytes` — the one live knob — set below the base segment so it excludes itself
+  from every merge window. A tick stage's barrier asserts the flush counter did **not** move, so a
+  plan that mis-counted fails as a plan defect rather than as a false invariance result.
 - Rotation rides flush publication and the growth tick, so a `Rotate` stage is a write shaped to
-  cross the rotation threshold rather than a request.
+  cross the rotation threshold rather than a request. **It has no wire barrier** — no rotation
+  counter reaches `/control/status` — so the only observable is the WAL member index on disc. That
+  is enough for a harness that owns the WAL path and is not enough for any remote form.
 
 Adding trigger routes for merge and coalesce would be simpler for the driver and is not proposed
 here: they would be a control surface existing only for tests, on a plane where every route is
@@ -702,6 +709,12 @@ exist in `ExecutorStats` without reaching the JSON. With them each stage has a b
 for flush, merge and the fold; a counter for the coalesce, which deliberately moves no row and so
 bumps no version (spec §2); and the refresh counter for the wait a flush additionally needs, without
 which a count is short by exactly the round's batch — measured, not supposed.
+
+**A merge needs the refresh barrier too, and the version alone is a trap.** Its publication runs
+the same refresh pass, so a driver that waited only on the version would record an established
+session's *stale* projection afterwards — comparing it against itself, and reporting a merge that
+changed nothing because nothing had yet been asked to change. The stage would pass while testing
+nothing, which is worse than failing.
 
 `Entitlement` is checked by differencing the two recordings per surface and comparing the result
 against what the stage was allowed:
@@ -870,9 +883,12 @@ driver cannot tell that a stage finished, and a suite whose barrier is a sleep i
 Rows 1–7 need no owner ruling and nothing that does not exist. **Row 8 does need one** (§10.1), and
 it is the only row that cannot be started on a reading of this document alone.
 
-> **⊘ Rows 1, 2, 4 and 5 are built; 3 and 6–9 are outstanding.** The table is a sequence, not a
-> status record — the issues are that — and it is marked here only because "none of this is built"
-> became false.
+> **⊘ Rows 1–5 are built; 6–9 are outstanding.** The table is a sequence, not a status record —
+> the issues are that — and it is marked here only because "none of this is built" became false.
+> **Stage invariance runs**, over all eight stages at fixture size, with four negative controls
+> that each fire: a flush claiming `Nothing`, a merge claiming `Rows`, an undeclared deny, and a
+> tampered points surface where one served row is dropped while every count still claims it —
+> spec §8.1's blind-count argument, made executable.
 >
 > **The build confirmed §12.3's sequencing protocol rather than assuming it.** The test that proves
 > each barrier counter moves drives merges and coalesces exactly as that subsection specifies — a
