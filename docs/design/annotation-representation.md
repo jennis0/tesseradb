@@ -1,7 +1,7 @@
 # Annotations — the representation
 
 **Date:** 2026-08-15
-**Status:** Provisional — **draft, not reviewed**. Companion to [`annotations.md`](annotations.md), which owns the *model*; this owns what the model is made of. **To become normative:** an independent review of the post-campaign shape, and the rulings in §12. **The measurement campaign is run and has been through review** ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/), 2026-08-15). **Review round two found three harness bugs**, all reproduced: one reversed §2's cost conclusion (§2.0.0 — the column wins in one regime, and the owner has ruled that regime out of scope rather than building for it), one refuted the per-artifact sizing rule (size per *member*), and one manufactured §2.6's geographic figures. Round two's remaining findings are **not yet dispositioned** and several are escalations: a suppression does not survive regeneration (§5.0.2), and the threshold is bound to gate mode in a way a membership filter reads around. The fold now has an artifact pass (§5.0.3), and writing it surfaced a fail-open the earlier draft called free: **deleting a point silently restores supplied content generated from it**, at the fold that executes the delete. That defect is a symptom — **the write cycle was specified for artifacts and never for the point-side events artifacts depend on** — so it is being designed rather than patched, in [`annotation-write-cycle.md`](annotation-write-cycle.md), which supersedes parts of §5.
+**Status:** Provisional — **reviewed, findings not yet ruled on** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)). Companion to [`annotations.md`](annotations.md), which owns the *model*; this owns what the model is made of. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) — reviewed, dispositioned — supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. **To become normative:** the owner rulings in §12, headed by where artifact entity IDs come from (§4), where supplied content lives (§2.4), and search's containment gate (§8); and the unmeasured items §11.3 names.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
 **Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
@@ -159,8 +159,10 @@ fault, which is a better outcome than a rule forbidding it.
 **Disk holds the entity form, memory holds the row form.** Entity space is the canonical,
 slice-invariant record; row space is per slice, derived, and rebuilt on the generation key exactly as
 projected mask fragments already are. An ingest appends an extent rather than renumbering
-([`permutation.rs`](../../crates/tessera-store/src/permutation.rs)), so an append extends the
-resident form instead of invalidating it. **The rebuild happens inside the fold rather than behind it** (§5.0.3) — a
+([`permutation.rs`](../../crates/tessera-store/src/permutation.rs)), so an append invalidates
+nothing — and the resident membership form is bounded at base rows, a member whose row is still in a
+flush extent contributing nothing until the fold folds it, fail-closed
+([`annotation-write-cycle.md`](annotation-write-cycle.md) §4.1). **The rebuild happens inside the fold rather than behind it** (§5.0.3) — a
 fold renumbers row space globally, and `compaction.md` §6.2 rules stale-serve unsound for exactly this
 class of artefact. ⊘ **The fold's artifact pass is unmeasured.**
 
@@ -230,7 +232,8 @@ every fold against freshly renumbered row IDs, so it is repaired on a cadence th
 gets. That is the same asymmetry §2.1 rests on, arriving in a second place.
 
 **Ingest does not fragment *enumerated* artifact membership, because it does not touch it.** A
-declared member set is frozen at build (model §5), so a newly ingested point joins no cluster until
+declared member set is frozen at declaration — I8's shape, stated in
+[`annotation-write-cycle.md`](annotation-write-cycle.md) §3.1 — so a newly ingested point joins no cluster until
 the layer is regenerated. Between regenerations it is uncovered — visible as a point, in no cluster —
 which is the same shape as §7.6's labels going stale rather than unsafe, and which §7.7's extractive
 tier already exists to cover. **For that class, what ingest adds is noise, not fragmentation.**
@@ -279,10 +282,27 @@ artifacts/<layer>/
   edges.arrow                       # (layer, level, ordinal) → (layer, level, ordinal)
 ```
 
-**Supplied content itself is not here.** Label text, descriptions and authored names live in the
-record blob at the artifact's entity, which is entity-addressed and has no `M_auth` involvement — the
-one piece of the withdrawn reuse claim that survives review intact, and the reason artifacts carry
-entity IDs at all.
+⊘ **One membership file per artifact does not survive the bundle's digest model, so the
+`members/<ordinal>.roaring` line above is a shape, not a layout** (review 2026-08-15, verified
+against the code). Every bundle file is a manifest entry, digested at write and parsed at open; at
+10⁷ artifacts that is 10⁷ entries. The membership bytes are affordable — 794 MB *measured* (§2) —
+and the packaging is not. Membership needs a packed form behind a bounded number of manifest
+entries; the record blob's block directory is the existing precedent for many small objects behind
+one entry. Picking the packaging is the owner's, listed beneath the five rulings in the review
+record's §6.
+
+**Supplied content itself is not here — and where it lives is an owner ruling, not a settled fact**
+(the review record's §6, ruling 4). As drafted, label text, descriptions and authored names live in
+the record blob at the artifact's entity: entity-addressed, no `M_auth` involvement, the one piece
+of the withdrawn reuse claim that survived review, and the reason artifacts carry entity IDs at all.
+**⊘ But the record blob cannot carry §5.0.1's in-place content edit as it exists**: its layers are
+disjoint by construction and probed base-first — no shadowing, no update (verified against the
+code). An implementer writing an edit as a new layer gets the **pre-edit text served silently**,
+which breaks the model's emergency path — suppress, edit the leaking version out, unsuppress — on
+the one route that exists for withdrawing a leak. The choice: keep supplied content in the record
+blob, and the in-place edit and the emergency path's edit step do not exist; or move it into the
+level's own files, where an update is an ordinary write and the record blob carries points only.
+Cost of ruling late: the layer registry gets built over whichever answer the implementer assumed.
 
 **An artifact's unmasked own-count is deliberately not stored.** It is the obvious field to add and it
 is C8: a corpus-wide count over items a principal may not see, one careless line from being served
@@ -431,6 +451,14 @@ flowchart TB
 (`deleted > suppressed > buffered`, write-path §5.3), single-sourced, so an artifact reaches it by
 the same route a point does.*
 
+**The substitutive branch as drawn takes a side in a contradiction the model has not resolved**
+(model §5; the review record's §6, ruling 2). It carries no count-threshold test — the mode-bound
+reading — while the model's §3 declares the threshold a layer property the gate mode does not touch.
+Implemented as drawn, every substitutive artifact serves its existence and an exact masked count
+down to one, the failure the model's own boundary example names. The predicate's overall shape —
+overlay first, then the layer gate, then the mode — is settled; which branches the threshold sits on
+is the ruling.
+
 **Every artifact-population route evaluates this predicate and no other** — the viewport, drill-down,
 filters, search, edge traversal, metadata. Where a route cannot afford it, the route does not exist;
 that is what §7 turns on.
@@ -450,17 +478,43 @@ outlive the reachability of what it labels.
 **Artifacts still get entity IDs**, because the deny lane, `tessera_id` and the overlay all address
 by entity. What they do not get is membership in `M_auth`, or the assumption that a bitmap
 intersection answers a visibility question. The reserved range is a **list** of 2¹⁶-aligned blocks,
-not one block: each regeneration consumes ~10⁷ IDs and any fixed block exhausts. *(This section was
-written under I9's never-reuse rule. [Decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
-relaxes it — slots return to the allocator at a fold — so the exhaustion is no longer permanent, but
-the block list stands: a regeneration still needs a contiguous run it can take at once.)*
+not one block: each regeneration consumes ~10⁷ IDs and any fixed block exhausts.
+
+⊘ **Decision 0072 is settled and not built, and nothing in this document may assume it is in force**
+([decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md), marked per
+[decision 0013](../decisions/0013-mark-specified-vs-implemented.md); review 2026-08-15, verified
+against the code). The decision relaxes I9 — a slot returns to the allocator at the fold that
+reconciles every durable structure naming it — but the allocator as built is monotone with no free
+list and refuses at `u32::MAX`, and `tessera_id` carries no generation field. Until it is built,
+exhaustion is permanent: a 10⁷-artifact layer regenerated daily consumes the identifier space in
+about fourteen months, after which **every write refuses, points included**. That refusal is
+fail-closed and loud; what must not happen meanwhile is sizing or scheduling anything on the
+assumption that IDs come back. The block list stands in either state: a regeneration needs a
+contiguous run it can take at once.
+
+**Where those runs come from is the review's structural blocker, ruled before the storage layout
+rather than after** (the record's §2; §6, ruling 1). As written here, artifact runs are taken from
+the same monotone space as points. Three point-side structures are dense over entity *ranges*
+rather than counts — verified in the code: a flush or merge extent's row table is dense over
+`[entity_lo, entity_hi]`; a merge allocates one slot per entity across its whole window; and the
+fold's pre-flight estimate charges four bytes per entity up to the highest one, then **refuses the
+fold** when the total exceeds the host. A ten-million-wide artifact run allocated mid-stream
+therefore punches a hole that every straddling merge pays for in resident memory and every fold
+pays for in its budget — and the budget never comes back down, so nightly regeneration walks it
+upward until the fold refuses. The fold is the only thing that executes deletions and reclaims
+dropped layers, so the symptom is a slow stall of the whole retirement path, nowhere near its
+cause. The options: the same monotone space, accepting the holes and their cost; a separate
+identifier region for artifacts; or a cap on merge-window width. The ruling blocks the addressing
+scheme (§2.3), this file layout (§2.4) and the fold's artifact pass (§5.0.3), which is why it is
+first in the review's dependency order.
 
 ## 5. Write, update, delete
 
 **Regeneration is a layer lifecycle event, not 10⁷ deletions.** Pushing a replaced clustering
 through the deny lane would deliver 20× the `overlay_soft_limit` (500,000, write-path §7) as a single
 event, into a lane sized for trickle denies, retiring at a fold with no artifact pass. Instead, the
-slice lifecycle applies unchanged ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3):
+slice lifecycle applies unchanged ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3 — ⊘
+itself provisional and unbuilt, so this cites a shape, not machinery):
 create is a WAL'd registry entry, drop is a WAL'd tombstone, the artifacts become garbage collected
 at the next fold, and **the name stays tombstoned against reuse** — a recreated `clusters/2026-08`
 with different membership would silently repoint every bookmark that named it.
@@ -472,14 +526,16 @@ with different membership would silently repoint every bookmark that named it.
 | Suppress one artifact | deny lane, by entity | Rule S — on unsuppress |
 | Delete one artifact | deny lane, by entity | Rule F — at the fold that executes it |
 | Analyst creates a selection | control verb (§5.1) | as above |
-| A **point** is deleted | nothing for derived content; **supplied content degrades** (§5.0.3) | its bit goes at the fold; predicate membership needs nothing |
+| A **point** is deleted | nothing for derived content; **supplied content is withheld at the deny's ack**, emergent from containment ([`annotation-write-cycle.md`](annotation-write-cycle.md) §3.2) | its membership bit goes at the fold; the fold reports, and executes the layer's strict/permissive declaration on the generating set |
 | A **point** is ingested | nothing for enumerated membership; **predicate membership gains it immediately** (§2.0) | — |
 
-That last row is only half free. A deleted point drops out of every mask, so every masked count falls
-immediately and correctly with no artifact-side work, and the **stale** structure — its assignment
-slot, its membership bit — is cleaned at the fold's attribute pass, which already blanks deleted
-entities per column ([`filter-index.md`](filter-index.md) §6.2). Supplied content gated on a
-generating set does not survive the same way: §5.0.3 has the re-base and the rule that closes it.
+The delete row is only half free. A deleted point drops out of every mask, so every masked count
+falls immediately and correctly with no artifact-side work, and the **stale** structure — its
+assignment slot, its membership bit — is cleaned at the fold's attribute pass, which already blanks
+deleted entities per column ([`filter-index.md`](filter-index.md) §6.2). Supplied content gated on a
+generating set is the write cycle's subject: withheld at the ack, emergent from containment, the
+fold's role confined to executing the declaration and reporting
+([`annotation-write-cycle.md`](annotation-write-cycle.md) §2–§4).
 
 ### 5.0 The unit of write is one artifact
 
@@ -518,6 +574,11 @@ being edited rather than refusing the operation:
 | **Membership** | in place, identity preserved, **version bumped** | not authorisation. The bump is what keeps it honest — see below |
 | **Gate — widening** | in place, version bumped | a viewer gaining access is not a fail-open |
 | **Gate — narrowing** | **suppress, then re-grant** | this is 0047's case exactly: an in-place narrowing is a revocation that bypasses the deny lanes. Suppression is immediate under Rule S and is checked before anything else on every route (§4) |
+
+⊘ **The content row names an operation no structure currently performs** (review 2026-08-15). While
+supplied content lives in the record blob, whose layers are disjoint and never updated in place
+(§2.4), "in place" has no route — and an edit written as a new blob layer serves the pre-edit text
+silently. The row exists under one answer to ruling 4; §2.4 states the options and their costs.
 
 **The version bump is the whole mechanism, and it costs one thing already measured.** A session's
 resolved visibility set (§8) is cached, so an edit after resolution would otherwise leave that session
@@ -603,22 +664,22 @@ entity to the artifacts holding it — which is of order 4 GB at 10⁹ and is *n
 artifacts within a level may overlap (§2.0), so it is a multimap. It also holds every builder in a
 level open at once, ~1 GB where a level covers the corpus.
 
-*Per artifact.* Translate one artifact's bitmap through `old_row → new_row`, write it, close it. That
-table needs no scatter: the fold already streams old rows with their entity, and `perm[entity]` is
-complete once pass 1 ends, so it is written **sequentially** in old-row order as a mapped file. It is
-read back with locality, because a cluster's members are Morton-contiguous in old row space — a
-translation walks a neighbourhood of pages, not the file. Resident cost is the largest artifact's
-member list, of order megabytes, plus output buffers.
+*Per artifact.* Translate one artifact's bitmap through an `old_row → new_row` table, write it,
+close it. ⊘ **Corrected in review (2026-08-15): the table is built by scatter, not sequential
+append.** As first written this construction claimed the table *"needs no scatter"* because the fold
+*"streams old rows with their entity"* — the fold emits no such stream. Pass 1 emits
+`(entity, new_row)` in **new-row** order, as the previous paragraph says, so building the table is a
+second 4 GB scatter beside `permutation.bin`'s, or a sort. What stands: the read-back locality — a
+cluster's members are Morton-contiguous in old row space, so a translation walks a neighbourhood of
+pages — and a resident cost of the largest artifact's member list plus output buffers.
 
-**The second is the one to cost, and it is far cheaper than the figure first written here.** Its 4 GB
-is *reclaimable page cache against a mapped file*, not an anonymous resident allocation, and
-`plan_fold`'s estimate is built from the anonymous terms — so the fold's ~9–10 GB un-reclaimable peak
-(`compaction.md` §3) may not move at all. What it does add is a second 4 GB mapping beside
-`permutation.bin`'s on a box whose serving load already holds most of RAM, so `plan_fold` must still
-learn about artifacts: a pass it does not budget for is one it cannot refuse. But the open question is
-whether the peak moves, not the assumption that it grows by half. Bitmap construction is the probe's
-13–25 s per 10⁷-artifact level either way. ⊘ **Unmeasured, and the two constructions are what the
-measurement compares**; §11.3 carries it.
+**Neither construction is the obvious winner, and the comparison is the measurement §11.3 carries —
+priced against the stream the fold actually emits.** The per-artifact table is a mapped file rather
+than an anonymous resident allocation, so the fold's ~9–10 GB un-reclaimable peak (`compaction.md`
+§3) may not move — but the table is scatter-built, and it adds a second 4 GB mapping beside
+`permutation.bin`'s on a box whose serving load already holds most of RAM. Either way `plan_fold`
+must learn about artifacts: a pass it does not budget for is one it cannot refuse. Bitmap
+construction is the probe's 13–25 s per 10⁷-artifact level in both constructions. ⊘ **Unmeasured.**
 
 **Rule F needs an artifact arm too, and currently has nothing to execute.** The fold's passes drop
 rows and postings; a deleted artifact has neither. Retirement must additionally drop its membership
@@ -626,55 +687,38 @@ file, its `artifacts.arrow` slot and every edge naming it — a new category the
 does not cover. A **dropped level or layer** reclaims the same way, which is what §5's lifecycle table
 already assumes without saying who does it.
 
-**A deleted point is free for derived content and is not free for supplied content.** Counts,
-centroids and hulls are recomputed per request from `membership ∩ M_auth` and from nothing else
-([`annotations.md`](annotations.md) §4.2), so a deleted point leaves them correct with no
-artifact-side work at all: it is outside every mask from the moment the delete is accepted, and out of
-the bitmap once the fold drops its row. Nothing stores an unmasked count that could go stale — storing
-one would be C8.
+**And the arm needs a membership clause the moment decision 0072 is built** (review 2026-08-15; the
+hazard exists only under slot reuse, which is ⊘ unbuilt — §4). A deleted *point*'s bit stays in
+every enumerated membership's entity-space disk form, harmless while I9 keeps the ID burned. Under
+[decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md), the fold
+that frees a slot must first drop it from every enumerated membership naming it — the decision's own
+reconciliation rule names artifact membership as a durable structure, and the write cycle defines
+the reconciliation for generating sets only. Without the clause, a later ingest allocated the slot
+**silently joins an analyst's stored selection**, invisible to its owner: the undeclared-member
+hazard the member-wise translation rule exists to keep out
+([`annotation-write-cycle.md`](annotation-write-cycle.md) §3.1), arriving through the allocator.
 
-**Supplied content is the half that does not hold, and the failure is a re-base at the fold.** A
-label, summary or authored hull carries a generating set and is served on containment,
-`and_cardinality(G, M_auth) == |G|` (§4). While the delete sits in the deny lane, the member is
-outside every mask, containment fails for every viewer, and the label is correctly withheld. **Then
-the fold executes the delete, `G` is remapped without that member, `|G|` shrinks to match, and the
-label is served again** — to everyone, on a generating set that no longer names what the text was
-derived from. A toponymy label written from five hundred documents can quote one that has since been
-deleted. Deletion, the stronger act, ends up weaker than suppression, and it flips at a scheduled
-nightly window.
+**What a point delete does to supplied content is the write cycle's, and this document no longer
+carries its own account** ([`annotation-write-cycle.md`](annotation-write-cycle.md) §2–§4, ruled
+2026-08-15, superseding three paragraphs that stood here). Derived content is free: counts,
+centroids and hulls are recomputed per request from `membership ∩ M_auth` and from nothing else, so
+a deleted point leaves them correct from the moment the delete is accepted, and nothing stores an
+unmasked count that could go stale — storing one would be C8. For supplied content, `G` is an
+immutable **entity**-space set with no row form at all, so the fold has nothing to remap: withdrawal
+is emergent from containment at the deny's ack, a deleted member never returns, and the fold's role
+is to execute the layer's strict/permissive declaration and produce the caller's report — one
+`and_cardinality(G, D₀)` per `G`-bearing artifact, no inverted index. The earlier draft here stored
+`G` in row space and had the fold re-base it, so the withheld label returned at the fold, served on
+a set that no longer named what the text was derived from — the fail-open the write cycle was
+commissioned to close. ⊘ **A live entity → artifact lookup remains absent**: between folds, *which
+artifacts were degraded* is answerable only from the last fold's report.
 
-**Freezing `|G|` at declaration does not close it, and the reason generalises.** The proposal was to
-store the declared cardinality beside the generating set, so that losing a member makes containment
-unsatisfiable for every viewer until the caller regenerates. **A cardinality is not an identity**
-*(owner ruling, 2026-08-15)*: row space is Morton order, so a point ingested into the same
-neighbourhood is assigned a row *inside* the cluster's row range at the next fold, and the count is
-restored by a member that was never declared. The general form of the defect is that **`G` is carried
-in a space whose identifiers are not stable across the event it must survive** — row IDs renumber at
-every fold, where entity IDs never do (I9). Any check that proves "this is still the declared set" by
-counting is unsound for the same reason.
-
-**The repair is that `G` was in the wrong space, and it is designed in
-[`annotation-write-cycle.md`](annotation-write-cycle.md)** — which supersedes this paragraph and the
-lifecycle table's point-event rows (that document's §10 lists the disposition). A generating set is an
-immutable set of **entity** IDs with no row form at all, which is what §7.6 always specified; giving it
-a row form here is what let the fold shrink it. Entity IDs never renumber and are never reused (I9),
-so the fold has nothing to rewrite, a deleted member never returns, and containment fails permanently
-without a stored flag or a frozen count. **Until that document is ruled on, the behaviour is as
-described above and it is fail-open** — the withheld label returns at the fold, and the register
-records that shrink as **not adopted** (C7). Suppression is unaffected either way: Rule S never
-touches postings, so the member stays in `G` and containment keeps failing.
-
-**Which artifacts were degraded is a by-product, not an index.** The instrument this appears to call
-for is an inverted entity → artifact index, and the fold does not need one: its artifact pass already
-visits every `(artifact, member)` pair, so intersecting the delete set as it goes yields exactly the
-artifacts that lost a member, at no extra traversal, as a report for the caller to act on. ⊘ **A live
-entity → artifact lookup is genuinely absent**, and is what to build if that answer is ever wanted
-between folds rather than at one.
-
-**The coupling worth stating either way:** enumerated membership is frozen at build, so its bits live
-only in base row space, which renumbers only at the fold, and merge and flush cadence never touch it.
-**Predicate membership does not share that**, because it is re-derived per request against current row
-space.
+**The coupling worth stating either way:** enumerated membership's resident bits live only in base
+row space, which renumbers only at the fold — a stated rule now, not an assumption: the row form
+covers members holding base rows, and a member whose row is still in a flush extent contributes
+nothing until the fold folds it ([`annotation-write-cycle.md`](annotation-write-cycle.md) §4.1).
+**Predicate membership does not share that**, because it is re-derived per request against current
+row space.
 
 ### 5.0.4 Edges constrain the order of writes
 
@@ -694,9 +738,17 @@ not generated from, which is worse than an outage and is exactly the class **I8*
 
 A selection assembled mid-session cannot ride `/control/ingest`, whose row carries a
 `{slice → (x, y)}` coordinate map and an entity's terms. An artifact has no coordinates, and carries
-a membership reference, a layer binding and a gate. It needs its own control verb, taking
-`(layer, membership, gate, supplied content)` and returning an identifier. **⊘ Unspecified here**;
-it is a contracts item, and it is the write path model §11 parks as an open question.
+a membership reference, a layer binding and a gate. It needs its own control verb, which the write
+cycle now defines — `(layer, membership, gate, content, stable key?)`, a WAL record, eligibility at
+ack ([`annotation-write-cycle.md`](annotation-write-cycle.md) §5) — with the contract shape still
+contracts work.
+
+⊘ **Between its WAL record and the next build, a runtime artifact has nowhere durable to live**
+(review 2026-08-15, verified against the code). The WAL rotates, and rotation requires its records
+drained into durable structure. For a point the drain is the flush, which acquires geometry and a
+row; an artifact never acquires a row, so no existing drain covers it, and parking it in the ingest
+buffer pins WAL rotation permanently. Where the record drains to — the registry plane, a level's own
+files, a new structure — is unanswered, and the create verb cannot be implemented until it is.
 
 ### 5.2 Identity across regeneration, which does not survive by default
 
@@ -809,6 +861,13 @@ layer is **nested**, the frontier selects: the disclosure threshold against `M_a
 depth and the display threshold against `M_sel` decides how far within it. If it is **stacked**, there
 is no frontier to run and the choice of level is the client's.
 
+⊘ **The two-threshold frontier in that paragraph is one of two answers the corpus gives, and the
+model gives the other** (review 2026-08-15). The model replaced the descent with a per-artifact test
+against `M_auth` (model §6) and never mentions `M_sel` — the filtered mask, `M_auth ∧ filters` —
+again. Under a filter, nothing now says which number sits beside an artifact — the masked count, or
+the filtered one — or what prunes a cluster the filter has emptied. Owed a statement alongside the
+threshold ruling; until then neither this paragraph nor the model's silence is the specification.
+
 ***Client-chosen.*** **Which layers render is the client's decision, and which level within one.**
 Every competent map tool lets a user toggle annotation layers, and nothing here should obstruct
 that — a layer is what appears in that toggle list (model §2.2). The rule this looks like it
@@ -859,17 +918,37 @@ review is concerned with, handed over as a feature.
 | **Derived** — clusterings | admitted **only** for a Q1-visible artifact, and per-tile counts inherit `min_visible_members` | the threshold is the disclosure control; a route around it is a route around C1's mitigation |
 | **Conjunctive** | as derived | the threshold still governs |
 
+*The substitutive row's "no threshold governs these" is the mode-bound reading of the contradiction
+the model records (model §5; the review record's §6, ruling 2). Under the independence reading a
+substitutive layer may carry a threshold, and its filter row then inherits it exactly as the derived
+row does.*
+
 Naming a non-visible artifact as a filter must be refused **work-indistinguishably** from naming one
 that never existed — the same problem as §8, and they should be solved together rather than
 separately.
 
 ## 8. Search, and inspection
 
-**Search over the artifact population is the point of putting label text somewhere searchable**, and
-it works: a token index over artifact entities, the population named by the request rather than by
-the filter, so a boolean tree still evaluates inside one candidate set.
+**Search over the artifact population as first specified here is a fail-open, and the route is
+withdrawn until it gates on containment** (review 2026-08-15; the record's §6, ruling 5). The draft
+specified a token index over artifact text with no containment test on the route at all. A viewer
+correctly refused a label's text can match a word in it, and repeating the probe is a word-presence
+oracle over content derived from documents they cannot read. The corpus already requires the
+adjacent surface — the filterable label vocabulary — to be containment-filtered under C11; this
+route reached the same data without citing it. What survives of the draft: the population is named
+by the request rather than by the filter, so a boolean tree still evaluates inside one candidate
+set.
 
-One caveat to register rather than discover. C25 accepts that a `match`'s service time tracks a
+**The gating mechanism is open, and one shape is under consideration rather than specified**
+(owner, 2026-08-15). Transform a generating set into the conjunction of the distinct
+term-signatures it spans, so that containment becomes a function of the satisfied term set alone —
+resolvable once per session instead of per candidate — with the overlay composed separately,
+because terms cannot see suppressions. Whether that conjunction is sound, and what it costs, is
+ruling 5's subject, together with the question under it: what the artifact population's
+authoritative candidate set *is*, given that it is never `M_auth`. Until ruled, there is no
+artifact search route.
+
+One caveat to register rather than discover, whichever mechanism lands. C25 accepts that a `match`'s service time tracks a
 token's corpus-wide carrier count, bounded by the argument that the loud case is a term carried by a
 large fraction of the corpus, whose existence is not a secret. **The artifact population is two
 orders smaller**, so a given carrier count is a proportionally larger fraction of it and the signal
@@ -907,13 +986,21 @@ annotation gives points.
 
 **So no leak-register row is needed, and the draft's dismissal of this route as *"hopeless for 10⁷
 artifacts"* was wrong** — by the distance between 883 ms and never having measured it. Route (1) is
-withdrawn and route (3) remains recorded as not working.
+withdrawn and route (3) remains recorded as not working. The reviewed write cycle qualifies route
+(2): the resolved set is candidacy, never the authority — the live masked count decides, and
+`verdict` on the artifact's entity is checked live first
+([`annotation-write-cycle.md`](annotation-write-cycle.md) §4.4). For drill-down specifically that
+reopens a residue — a held identifier can see a stale *pass* until the set refreshes — carried with
+its options in that document's §11.
 
 ## 9. Metadata
 
 `/v1/meta` carries the layer registry, **gate-filtered per principal** — the slice registry's
-mechanism, resolved once at authorise, so a gate-failed name and a never-registered name are
-indistinguishable in outcome and in work.
+mechanism, resolved per session and keyed on the layer version, a gate edit bumping the key and a
+live suppression check on the layer's own entity running ahead of the cached resolution
+([`annotation-write-cycle.md`](annotation-write-cycle.md) §6, which supersedes the
+resolve-once-at-authorise rule this section previously stated). A gate-failed name and a
+never-registered name stay indistinguishable in outcome and in work.
 
 Per layer: identity, structure (flat or hierarchical, level count), the zoom-to-level map, the
 declared derived vocabulary, which slices it appears in, and what kinds of supplied content its
@@ -968,13 +1055,18 @@ guard: a rule that must be derived and recorded per layer cannot be arrived at b
 absence can. A level arriving with no declared gate is refused at parse rather than inheriting the
 underlay's permissiveness because it happens to be shaped like one.
 
-**The resolution falls out of the model's own matrix rather than needing a new rule.** A Morton cell is
-**corpus-independent**: the grid is a function of the quantisation bounds that `/v1/meta` publishes,
-and a cell exists whether or not any point falls in it. So a density level is a `public` substitutive
-layer whose artifacts disclose nothing by existing and whose counts are masked — precisely what the
-underlay does today, reached through the general rules instead of a special case. A cluster's existence
-*is* corpus-derived, so it is threshold-gated. Same shape, different cell of the matrix, different
-rule, and the rule is never a property of being a level.
+**The matrix decides existence, and it does not decide the count rule — which an earlier revision
+claimed it did** (review 2026-08-15). Existence it handles: a Morton cell is **corpus-independent**
+— the grid is a function of the quantisation bounds `/v1/meta` publishes, and a cell exists whether
+or not any point falls in it — so a density level is a `public` substitutive layer whose artifacts
+disclose nothing by existing, where a cluster's existence is corpus-derived and threshold-gated. But
+density cells and administrative boundaries occupy the **same** cell of the matrix with opposite
+count rules: the underlay serves exact masked counts at any depth with no threshold (C18), while the
+model's boundary example (model §8.2) applies the threshold to boundary counts with rollup. So the
+count rule is a per-layer declaration, not a derivation — and the two rules interact: a public
+polygon decomposes into Morton cells, so a suppressed boundary count is recoverable by summing the
+underlay beneath it. The threshold's owner and the underlay are ruled together (the record's §6,
+ruling 2), and C1's differencing review inherits the pair.
 
 **Scope, stated because this is where a design of this kind runs away.** The unification is recorded;
 rebuilding the density underlay or the category layer on it is **not proposed**. Those are built,
@@ -1062,10 +1154,11 @@ reviewers; neither is a gap now, and both carry ⊘ marks where they rest on unm
 
 - **The fold's artifact pass is written (§5.0.3) and unmeasured**, and the measurement is a comparison
   rather than a figure: ride pass 1 with the inverted multimap resident, against per-artifact
-  translation through a sequentially written mapped `old_row → new_row`. What decides it is whether the
-  second's page-cache pressure leaves `plan_fold`'s anonymous peak where it is, and how much locality a
-  Morton-contiguous cluster actually gets on the translation read. It is the largest unpriced item
-  left.
+  translation through a scatter-built mapped `old_row → new_row`. The sequential-write construction
+  first priced here assumed an old-row-ordered stream the fold does not emit (§5.0.3), so the
+  comparison must be re-posed before it is run. What decides it is whether the second's page-cache
+  pressure leaves `plan_fold`'s anonymous peak where it is, and how much locality a Morton-contiguous
+  cluster actually gets on the translation read. It is the largest unpriced item left.
 - **Residency is unmeasured and unpriced in the slice budget.** 794 MB is *serialised* bytes; 10⁷
   separately allocated bitmaps carry per-object overhead the campaign never measured, and the figure
   multiplies by slices, by levels, and by two during a replace.
@@ -1083,7 +1176,27 @@ reviewers; neither is a gap now, and both carry ⊘ marks where they rest on unm
 
 ## 12. Rulings needed
 
-The campaign removed two of the four. What remains:
+**The review's five, in its dependency order** (the record's §6; none is this document's to decide):
+
+1. **Where artifact entity IDs come from** (§4) — the same monotone space accepting the holes, a
+   separate identifier region, or a cap on merge-window width. Blocks the addressing scheme, the
+   storage layout and the fold's artifact pass, so it is ruled first.
+2. **Is the count threshold independent of the gate mode?** The model owns the contradiction
+   (model §5); this document takes the mode-bound side in §4's predicate and §7's filter table, and
+   both sites are marked.
+3. **Does a label's existence follow its content's containment** — the fourth gate mode, which is
+   what the normative label rule (§7.6) already does? The model owns it (model §3); the C3 item
+   below is its face in this document.
+4. **Where does supplied content live** (§2.4) — the record blob, or the level's own files. Decides
+   whether §5.0.1's in-place edit and the model's emergency path exist at all.
+5. **Search gates on containment** (§8) — the route is withdrawn until ruled; the term-signature
+   shape is recorded there as under consideration, not specified. Includes what the artifact
+   population's authoritative candidate set is, given it is never `M_auth`.
+
+Beneath those, cheaper (the review's own list): the fold's Rule F membership clause (§5.0.3, live
+once decision 0072 is built), the filter axis (§6.3), and a packaging for membership (§2.4).
+
+**This document's own residue:**
 
 - ✔ **The signature-sort tiebreak** (§2.2) — **ruled, taken** *(owner, 2026-08-15,
   [decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md))*. Allocation becomes
@@ -1097,20 +1210,21 @@ The campaign removed two of the four. What remains:
 - **The suppression-across-regeneration refusal** (§5.0.2), which makes the stable key mandatory for
   any layer that has taken a suppression. Recommended and written; needs the ruling because it changes
   what a deny guarantees. *Cost if wrong:* a caller must clear suppressions before regenerating.
-- ⊘ **What a point deletion does to the content generated from it** (§5.0.3). Today the fold re-bases
-  the containment test onto the survivors and the withheld label comes back — fail-open on exactly the
-  material the delete was meant to remove. Freezing `|G|` was proposed and **declined**: a cardinality
-  is not an identity. The replacement is being designed as the write cycle rather than as a patch
-  ([`annotation-write-cycle.md`](annotation-write-cycle.md)), and the ruling waits on it.
+- ✔ **What a point deletion does to the content generated from it** — **ruled**, via the write
+  cycle ([`annotation-write-cycle.md`](annotation-write-cycle.md) §9, owner 2026-08-15): `G` is
+  entity-space truth with no row form, withdrawal is emergent from containment at the deny's ack,
+  and strict/permissive is the caller's declaration with strict the default. The freeze-`|G|` rule
+  this section once requested a ruling on is withdrawn as unsound there. §5.0.3 is corrected toward
+  it.
 - **Membership as a filter** (§7). Admitted under the threshold for derived layers, or declined?
-  Unchanged by the campaign — it is a disclosure question, not a cost one. *Recommendation: admit
-  with the threshold inherited.*
-- **C3** (§9), **closed for labels by model §2.3.** The service gates each label and chooses between
-  none of them, so an unsatisfied label is simply not served and there is no shell — C3 holds as
-  written, with no register change and no mechanism behind it. What remains is the
-  general case: an artifact whose supplied content is withheld but whose derived count and geometry
-  still say something true (§8.6). Reopen C3 for that, or make withheld and undeclared content
-  indistinguishable at the cost of §8.6's degrade-to-derived behaviour.
+  Unchanged by the campaign — it is a disclosure question, not a cost one — and its substitutive row
+  inherits ruling 2. *Recommendation: admit with the threshold inherited.*
+- **C3** (§9) — one face of ruling 3, not independent of it. Model §2.3 reads labels as vanishing
+  when no version satisfies, under which C3 holds as written; the model's §3 keep-the-artifact rule
+  leaves withheld content distinguishable from undeclared content, reopening C3 for the general case
+  (§8.6's degrade-to-derived behaviour). The label-existence ruling decides which reading stands;
+  if keep-the-artifact survives, either C3 gains a row or withheld and undeclared content are made
+  indistinguishable at the cost of §8.6.
 
 **Resolved by measurement, and recorded so they are not re-opened:**
 
@@ -1166,3 +1280,22 @@ artefact of storing membership in the wrong space.
 The retained superseded reasoning is in §2.7. It is kept at length because every wrong turn in this
 document had one cause — reasoning about entity space while designing a row-space hot path — and that
 error was invisible from inside the argument that made it.
+
+## Appendix R
+
+**r2 — 2026-08-15.** Stage 0 adversarial review, three lenses
+([record](../evidence/memos/2026-08-15-artifact-design-review.md)), run after the campaign and the
+write cycle. What it attacked and what changed: the search route is withdrawn as a fail-open until
+it gates on containment (§8, ruling 5); the entity-ID source is recorded as the structural blocker
+it is (§4, ruling 1); decision 0072 is marked specified-not-implemented where this document had
+cited it as in force (§4), and Rule F's arm gains the membership clause reuse will need (§5.0.3);
+the substitutive-threshold sites are marked as one side of the model's contradiction (§4, §7); the
+levels matrix no longer claims to derive the count rule (§10). Claims the code cannot support are
+marked at their sites: membership packaging and supplied content's home (§2.4, ruling 4), the
+in-place edit (§5.0.1), the runtime artifact's durable home (§5.1), and the fold pass's assumed
+old-row stream (§5.0.3). §5's point-event rows and §5.0.3's re-base account are replaced by the
+reviewed write cycle's.
+
+**r1 — 2026-08-15.** Drafted to replace the model's withdrawn §7/§7.1. The measurement campaign ran
+the same day; its review found three harness bugs, corrected in place and kept as negative results
+(§11.3).
