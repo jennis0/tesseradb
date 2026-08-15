@@ -1556,9 +1556,16 @@ fn read_attributes_by_entity(
     // narrow columns, not the corpus-scale join the geometry pass does". That holds while
     // `source_ids` fits in cache and inverts well before it stops: at 2.5×10⁸ the array is 2 GB and
     // the probes are uniformly scattered across it, so nearly every one of the ~28 comparisons is a
-    // cache miss. Measured on this machine it is **~20 minutes of one core** at that scale, with
-    // the disk idle — most of a 21m32s build, spent resolving a join the pass two stages down
-    // already does the cheap way.
+    // cache miss.
+    //
+    // **Worth 1m49s of a ~19m build at 2.5×10⁸, not the "~20 minutes of one core" an earlier
+    // revision of this comment claimed.** That figure came from sampling the pass at 97% of one
+    // core for sixty seconds and taking the whole elapsed stretch to be it; the stretch included a
+    // suspended laptop, and the build's *total* CPU was 19m45s, which the pass alone plainly cannot
+    // exceed. Measured properly, by the cgroup's own accounting across two builds of the same
+    // corpus: 19min 45.7s of CPU before, 17min 56.8s after. Real, and worth keeping — the sweep is
+    // also the shape that stays sequential as the corpus grows, where the probe's cost per row does
+    // not — but a tenth of what was asserted.
     //
     // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
     // pass makes for the same reason. The cost is a staging buffer: `chunk` at 12 B/row plus one
