@@ -32,8 +32,9 @@ half's ability to fail is asserted against real recordings: a deliberately corru
 — one item's declared value, another item's position — must be rejected by the row half, naming
 the rows; and a census computed for the wrong principal must be rejected by the census half. A
 third control corrupts nothing and pins the wire defect the first run of this mechanism found:
-the points tail's column names are the full declaration's first *k* rather than the render
-declaration's, held as a strict xfail so the fix is noticed the day it lands.
+the points tail's column names must be the render declaration's, never the full declaration's
+first *k* — this corpus's `seen_at` sits between two render columns, so a positional slip
+misnames every column after it.
 """
 
 from __future__ import annotations
@@ -332,15 +333,6 @@ def test_negative_control_a_census_for_the_wrong_principal_is_rejected(run):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the points tail is labelled with the full declaration's first k names rather than "
-    "the render declaration's: the engine hands the serialiser the whole compiled schema "
-    "(ViewportHead.declared_scalars) while the gather narrows to render columns, so this "
-    "corpus's `bay` codes arrive under the name `seen_at`. Found by total verification's "
-    "first run; the row half reads the tail positionally, which is correct before and "
-    "after the fix. When this xpasses, delete the marker.",
-)
 def test_the_points_tail_is_named_by_its_render_declaration(run):
     query = next(
         q

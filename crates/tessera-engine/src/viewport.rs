@@ -149,8 +149,10 @@ pub struct PointColumns {
     /// scaling against the extent `/v1/meta` publishes recovers the coordinates; shifting right
     /// by `32 - 2·zoom` gives the containing tile without recomputing anything (contracts §3.2).
     pub codes: Vec<u64>,
-    /// One buffer per declared scalar, **in `MANIFEST.declared_scalars` order and always of that
-    /// length** — see [`ViewportOut::scalar_names`], which is the parallel name list.
+    /// One buffer per **render** scalar, **in declaration order and always the render list's
+    /// length** — see [`ViewportOut::scalar_names`], which is the parallel name list. Never the
+    /// full declaration: a `filter`-only or blob-resident column occupies no slot in a segment's
+    /// tail (contracts §2.6), so a buffer under its name could only be invented values.
     pub scalars: Vec<ColumnBuf>,
 }
 
@@ -523,8 +525,9 @@ pub struct ViewportOut {
     pub points: PointColumns,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
     pub sub_cells: Vec<SubCellCount>,
-    /// The declared-scalar names, in manifest order, from the SAME generation this response's
-    /// points were gathered from. Carried here rather than left for the caller to
+    /// The render columns' names, in declaration order, from the SAME generation this response's
+    /// points were gathered from — the parallel name list to `points.scalars`, and exactly its
+    /// length. Carried here rather than left for the caller to
     /// re-fetch via `Engine::meta()` — that second call would `load_full()` the generation
     /// pointer a second time, against lifecycle §1.1's "exactly once, at request start". The
     /// names come from the same manifest either way, so response bytes are unaffected; this only
@@ -570,10 +573,16 @@ pub struct ViewportHead {
     pub stamp: GenerationStamp,
     /// See [`ViewportOut::stale`].
     pub stale: bool,
-    /// The declared-scalar schema, in manifest order, from the SAME generation the response is
-    /// served from — names for the wire's column headers, types so a collecting sink can seed
+    /// The **render**-column schema, in declaration order, from the SAME generation the response
+    /// is served from — names for the wire's column headers, types so a collecting sink can seed
     /// empty columns for a response that emits no points chunk at all.
-    pub declared_scalars: Vec<DeclaredScalar>,
+    ///
+    /// The render narrowing, never the full declaration, because both consumers pair this list
+    /// positionally with [`PointColumns::scalars`], which the emit pass gathers against
+    /// `Manifest::render_scalars` — a wider list here serves one column's values under another
+    /// column's name. The full compiled schema is `/v1/meta`'s to publish ([`EngineMeta`]), where
+    /// it describes the ingest plane rather than a row.
+    pub render_scalars: Vec<DeclaredScalar>,
 }
 
 /// The sink told the producer to stop: the consumer is gone (a closed channel, an expired
@@ -1256,13 +1265,13 @@ impl Engine {
             .head
             .expect("viewport_stream delivers a head before returning Ok");
         // An empty response emits no points chunk at all (the sink contract), but the batch
-        // shape still carries one buffer per declared column — seeded from the declaration, as
-        // the fold always did.
+        // shape still carries one buffer per render column — seeded from the head's schema,
+        // which is the same render narrowing every gathered chunk has.
         let points = sink.points.unwrap_or_else(|| PointColumns {
             tessera_ids: Vec::new(),
             codes: Vec::new(),
             scalars: head
-                .declared_scalars
+                .render_scalars
                 .iter()
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
@@ -1275,7 +1284,7 @@ impl Engine {
             points,
             sub_cells: sink.sub_cells,
             scalar_names: head
-                .declared_scalars
+                .render_scalars
                 .iter()
                 .map(|d| d.name.clone())
                 .collect(),
@@ -1405,6 +1414,20 @@ impl Engine {
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
+        // **Render columns only, narrowed once — for the head and the gather alike.**
+        // `declared_scalars` is the compiled schema and includes `filter`-only and blob-resident
+        // columns, which are entity-space and absent from `columns.arrow` by design; taking the
+        // full list would publish a column of nulls under a name a client can see, and — because
+        // the head's names are zipped positionally with the gathered buffers — caption a render
+        // column's values with a non-render column's name wherever the two lists diverge. One
+        // construction site is what keeps the names and the buffers the same list.
+        let render_scalars: Vec<_> = generation
+            .bundle
+            .manifest
+            .render_scalars()
+            .cloned()
+            .collect();
+
         // The head, delivered before the sweep: everything the response headers derive from is
         // known here, and a server that waits for the first flush before committing a status
         // needs it in hand by then. A refusal is the consumer gone — cancellation, not a fault.
@@ -1412,7 +1435,7 @@ impl Engine {
             coordinates,
             stamp: answered_from.clone(),
             stale,
-            declared_scalars: generation.bundle.manifest.declared_scalars.clone(),
+            render_scalars: render_scalars.clone(),
         })
         .map_err(|SinkClosed| EngineError::Cancelled)?;
         // Reset the clock so the head's construction and delivery are unattributed rather than
@@ -1502,17 +1525,9 @@ impl Engine {
         probe.lap(|t| &mut t.tiles_for_bbox_ns);
         probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
 
-        // **Render columns only.** `declared_scalars` is the compiled schema and includes
-        // `filter`-only columns, which are entity-space and absent from `columns.arrow` by design;
-        // taking the full list here would publish a column of nulls under a name a client can see
-        // and would make the two read paths disagree with the writer about the tail's shape.
-        let declared_scalars: Vec<_> = generation
-            .bundle
-            .manifest
-            .render_scalars()
-            .cloned()
-            .collect();
-        let declared_scalars = &declared_scalars[..];
+        // The emit pass gathers against the same render list the head carried — see its
+        // construction above for why the two must be one list.
+        let render_scalars = &render_scalars[..];
 
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
@@ -1735,7 +1750,7 @@ impl Engine {
         // the constant's doc). At or above it, the existing `pool.install` fan-out runs, on the
         // ONE shared pool this engine built at `Engine::open` — no second, per-request pool, no
         // nested throttling (D-D). Every input to `tile_sweep` is borrowed or `Copy`:
-        // `mask`/`segment`/`declared_scalars`/`params` are the generation- and request-derived
+        // `mask`/`segment`/`render_scalars`/`params` are the generation- and request-derived
         // values already resolved above (lifecycle §1.1 — nothing is re-loaded per tile), and
         // `cancel` is the D-C token, checked inside `tile_sweep` at the very top (moved there
         // at the very top of that function rather than here).
@@ -1844,7 +1859,7 @@ impl Engine {
         let seed = || PointColumns {
             tessera_ids: Vec::new(),
             codes: Vec::new(),
-            scalars: declared_scalars
+            scalars: render_scalars
                 .iter()
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
@@ -1857,7 +1872,7 @@ impl Engine {
             check_cancelled(&cancel)?;
             let mut stats = TileProbe::new();
             let parts = SelectionParts::new(&ts.parts);
-            let tile_points = gather_tile_columns(&parts, &ts.rows, declared_scalars)?;
+            let tile_points = gather_tile_columns(&parts, &ts.rows, render_scalars)?;
             stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
             buf_bytes += tile_points.wire_bytes_estimate();
             if let Err((want, got)) = buf.append(tile_points) {
@@ -3405,7 +3420,7 @@ fn segments_with_row_bases<'a>(
 /// otherwise unchanged.
 ///
 /// `None` is a declared column this segment does not hold, kept **positionally** so the entry
-/// order still matches `declared_scalars` — collapsing the absent ones here would silently shift
+/// order still matches the list resolved against — collapsing the absent ones here would silently shift
 /// every later column left, which is the failure `gather_scalars` refuses at the write end.
 type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
 
@@ -3473,8 +3488,8 @@ fn gather_tile_columns(
     let malformed = |d: &DeclaredScalar| {
         EngineError::Malformed(format!(
             "a segment of this slice has no scalar column '{}' at the declared type {}, which \
-             MANIFEST.declared_scalars requires; serving it would put values under another \
-             column's name",
+             the manifest's render declaration requires; serving it would put values under \
+             another column's name",
             d.name,
             d.arrow_type.arrow_type_name()
         ))

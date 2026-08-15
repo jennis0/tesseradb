@@ -696,12 +696,12 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     assert_eq!(
         out.scalar_names,
         vec!["band", "ingested_at", "score"],
-        "the names are the declaration's, in its order"
+        "the names are the render declaration's, in its order"
     );
     assert_eq!(
         out.points.scalars.len(),
         3,
-        "one buffer per declared column, whatever any tile happened to hold"
+        "one buffer per render column, whatever any tile happened to hold"
     );
     for (i, column) in out.points.scalars.iter().enumerate() {
         assert_eq!(
@@ -746,6 +746,334 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
         (2u8, 1_900_000_000_000_000i64, 99.5f32),
         "the flushed row's tail is what was ingested"
     );
+}
+
+// =============================================================================================
+// A render set that is not a prefix of the declaration
+// =============================================================================================
+
+/// The non-prefix fixture's schema: an **entity-space** `i64` declared first, then the rendered
+/// `u8` category and `f32`. The render columns sit at declared positions 1 and 2, so no render
+/// column shares a position with its place in the full declaration — the one shape that exposes
+/// a consumer pairing render buffers with full-declaration names, which every-column-rendered
+/// fixtures cannot. The widths differ for the file-header reason: a positional slip is a type
+/// mismatch, never a plausible value.
+const NON_PREFIX_SCHEMA_TOML: &str = r#"
+[[attribute]]
+name  = "audit"
+type  = "i64"
+index = true
+
+[[attribute]]
+name       = "band"
+type       = "category"
+width      = "u8"
+render     = true
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  low = 1
+  mid = 2
+  high = 3
+
+[[attribute]]
+name   = "score"
+type   = "f32"
+render = true
+"#;
+
+fn audit_of(source: u64) -> i64 {
+    9_000_000 + source as i64 * 7
+}
+
+fn write_points_non_prefix(path: &Path, n: u64) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("audit", DataType::Int64, false),
+        Field::new("band", DataType::Utf8, false),
+        Field::new("score", DataType::Float32, false),
+    ]));
+    let ids: Vec<u64> = (0..n).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids.clone())),
+            Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 37) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 53) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(arrow::array::Int64Array::from(
+                ids.iter().map(|e| audit_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| band_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(arrow::array::Float32Array::from(
+                ids.iter().map(|e| score_of(*e)).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
+    let points = tmp.join("points.parquet");
+    let pairs = tmp.join("pairs.parquet");
+    write_points_non_prefix(&points, n);
+    write_pairs_n(&pairs, n);
+    let schema_path = tmp.join("schema.toml");
+    std::fs::write(&schema_path, NON_PREFIX_SCHEMA_TOML).unwrap();
+    let args = BuildArgs {
+        points,
+        pairs,
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
+            .expect("the non-prefix fixture schema parses"),
+    };
+    build(&args).expect("a build whose render set is not a declaration prefix succeeds");
+}
+
+/// One ingest row for the non-prefix fixture — scalars positional over the **full** declaration
+/// (the ingest plane's shape); the flush narrows to the render columns before it writes.
+fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
+    UnallocatedRow {
+        external_id: Some(b"non-prefix-flushed".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![
+            WalScalar::I64(audit),
+            WalScalar::U8(band_code),
+            WalScalar::F32(score),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    }
+}
+
+/// Every `(tessera_id, band, score)` in every live segment — the render tail read by name, the
+/// same truth-by-identity join `tail_by_identity` performs for the all-rendered fixture.
+fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
+    let bundle = open_bundle(root).expect("the bundle opens");
+    let current: tessera_store::manifest::CurrentPointer =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
+            .expect("CURRENT parses");
+    let prefix = &current.prefix;
+    let mut out = BTreeMap::new();
+    for (phash, partition) in &bundle.partitions {
+        for segment in &partition.manifest.segments {
+            let dir = root
+                .join(prefix)
+                .join("partitions")
+                .join(phash)
+                .join("slices")
+                .join(&segment.slice)
+                .join("segments")
+                .join(&segment.seg_id);
+            let columns = ColumnsRef::load(&dir.join("columns.arrow"))
+                .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
+            let ids = columns.tessera_id();
+            let band = match columns.scalar("band") {
+                Some(ScalarSlice::U8(v)) => v,
+                other => panic!(
+                    "segment {} must carry 'band' as u8, found {other:?}",
+                    segment.seg_id
+                ),
+            };
+            let score = match columns.scalar("score") {
+                Some(ScalarSlice::F32(v)) => v,
+                other => panic!(
+                    "segment {} must carry 'score' as f32, found {other:?}",
+                    segment.seg_id
+                ),
+            };
+            for row in 0..ids.len() {
+                out.insert(ids[row], (band[row], score[row]));
+            }
+        }
+    }
+    out
+}
+
+/// **Every served points column arrives under its own name when the render set is not a prefix
+/// of the declaration.** The head's schema and the gathered buffers are both the render
+/// narrowing; a head carrying the full declaration instead served `band`'s codes under `audit`'s
+/// name and `score`'s values under `band`'s — silently, since a client reads by name, and
+/// invisibly to every fixture whose first columns render. Both segments participate: the
+/// build's and a flushed one, so the flush's own positional narrowing is under the same check.
+#[test]
+fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_non_prefix_fixture(&root, tmp.path(), 512);
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+
+    let flushed_entity = engine
+        .accept_ingest(
+            vec![non_prefix_row(&engine, 4242, 2, 9.25)],
+            "batch-non-prefix".to_string(),
+            [0u8; 32],
+        )
+        .expect("the ingest is accepted")[0];
+    flush(&engine);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], u32::MAX as usize),
+        )
+        .expect("a viewport over both segments");
+
+    assert_eq!(
+        out.scalar_names,
+        vec!["band", "score"],
+        "the render columns' names in declaration order — `audit` is entity-space and absent"
+    );
+    assert_eq!(
+        out.points.scalars.len(),
+        out.scalar_names.len(),
+        "one buffer per name: the two lists zip positionally on the wire"
+    );
+    assert_eq!(out.points.len(), 513, "every row of both segments is served");
+    let flushed_id = engine.tessera_id_of(flushed_entity).unwrap();
+    assert!(
+        out.points.iter().any(|(id, _)| id == flushed_id),
+        "the flushed item is served, not merely counted"
+    );
+
+    // Read by name, exactly as a client does; truth joined by identity from the segments.
+    let truth = non_prefix_tail_by_identity(&root);
+    let position =
+        |name: &str| out.scalar_names.iter().position(|n| n.as_str() == name).unwrap();
+    let band = match &out.points.scalars[position("band")] {
+        ColumnBuf::U8(v) => v,
+        other => panic!("the column named 'band' must be u8, found {other:?}"),
+    };
+    let score = match &out.points.scalars[position("score")] {
+        ColumnBuf::F32(v) => v,
+        other => panic!("the column named 'score' must be f32, found {other:?}"),
+    };
+    for (row, (id, _)) in out.points.iter().enumerate() {
+        let (expected_band, expected_score) = truth[&id.raw()];
+        assert_eq!(band[row], expected_band, "row {row}'s band, under its own name");
+        assert_eq!(score[row], expected_score, "row {row}'s score, under its own name");
+    }
+
+    // A counts-only request seeds its empty columns from the same render schema the gather
+    // fills, so the two shapes cannot disagree about the column set.
+    let counts_only = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 0),
+        )
+        .expect("a counts-only viewport");
+    assert!(counts_only.points.is_empty());
+    assert_eq!(counts_only.scalar_names, vec!["band", "score"]);
+    assert_eq!(counts_only.points.scalars.len(), 2);
+    assert!(
+        matches!(counts_only.points.scalars[0], ColumnBuf::U8(_)),
+        "the seeded empty column carries the render column's type, not the declaration's first"
+    );
+    assert!(matches!(counts_only.points.scalars[1], ColumnBuf::F32(_)));
+}
+
+/// **Drill-down under the same non-prefix declaration: every home's value under its own name.**
+/// The record is assembled per declared column — the render tail selected positionally through
+/// `Manifest::render_indices`, the entity-space column by name — and served as name/value pairs,
+/// so this pins that no home's value shifts under a neighbouring column's name when the render
+/// list and the declaration diverge. Checked for built rows and a flushed one.
+#[test]
+fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_non_prefix_fixture(&root, tmp.path(), 64);
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+
+    let flushed_entity = engine
+        .accept_ingest(
+            vec![non_prefix_row(&engine, 4242, 2, 9.25)],
+            "batch-non-prefix-drill".to_string(),
+            [0u8; 32],
+        )
+        .expect("the ingest is accepted")[0];
+    flush(&engine);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let expect_item = |id, audit: i64, band_key: &str, score: f32, label: &str| {
+        let served = engine
+            .item(&session, id, None)
+            .expect("drill-down succeeds")
+            .unwrap_or_else(|| panic!("{label} is visible to full coverage"));
+        let names: Vec<&str> = served.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["audit", "band", "score"],
+            "{label}: every declared column has a value in some home, in declared order"
+        );
+        let value = |name: &str| {
+            &served
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .value
+        };
+        assert_eq!(
+            value("audit"),
+            &tessera_engine::ScalarOut::I64(audit),
+            "{label}: the entity-space value under its own name"
+        );
+        assert_eq!(
+            value("band"),
+            &tessera_engine::ScalarOut::Utf8(band_key.to_string()),
+            "{label}: the category resolves to its own key"
+        );
+        assert_eq!(
+            value("score"),
+            &tessera_engine::ScalarOut::F32(score),
+            "{label}: the row value under its own name"
+        );
+    };
+
+    let entity_of_source = source_to_new_map(&root, "v00000");
+    for source in [0u64, 1, 5, 63] {
+        let id = engine
+            .tessera_id_of(tessera_types::EntityId::new(entity_of_source[&source]))
+            .expect("identity is computable");
+        expect_item(
+            id,
+            audit_of(source),
+            band_of(source),
+            score_of(source),
+            &format!("built source {source}"),
+        );
+    }
+    let flushed_id = engine.tessera_id_of(flushed_entity).unwrap();
+    expect_item(flushed_id, 4242, "mid", 9.25, "the flushed item");
 }
 
 // =============================================================================================

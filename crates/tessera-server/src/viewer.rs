@@ -579,9 +579,12 @@ impl ViewportSink for WireSink {
         let head = self.head.as_ref().expect("head precedes points");
         let serialise_start = Instant::now();
         // The wire's buffers are the engine's buffers borrowed — no transpose, no reshaping;
-        // names zip positionally with the chunk's columns, both in manifest order.
+        // names zip positionally with the chunk's columns. Both lists are the **render**
+        // narrowing of the declaration, in declaration order: the compiled schema is wider
+        // (filter-only and blob-resident columns occupy no points buffer), and the head carries
+        // the narrowed list precisely so this zip cannot pair a buffer with a wider list's name.
         let scalar_refs: Vec<(&str, ScalarColumn)> = head
-            .declared_scalars
+            .render_scalars
             .iter()
             .zip(&chunk.scalars)
             .map(|(d, col)| (d.name.as_str(), column_ref(col)))

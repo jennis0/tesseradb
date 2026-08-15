@@ -2695,7 +2695,7 @@ fn viewport_stream_chunks_concatenate_to_the_batch_response() {
     assert_eq!(head.stamp, batch.stamp);
     assert_eq!(head.stale, batch.stale);
     assert_eq!(
-        head.declared_scalars
+        head.render_scalars
             .iter()
             .map(|d| d.name.clone())
             .collect::<Vec<_>>(),
