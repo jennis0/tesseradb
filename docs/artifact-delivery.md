@@ -35,7 +35,7 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
 | **0** Rulings and promotion | not started | the three designs are normative and the register carries their rows | — |
-| **1** The spine — allocation and the layer registry | not started | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | — |
+| **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it; gate green. The registry is not started |
 | **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-threshold artifacts are indistinguishable from absent ones | — |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
@@ -128,6 +128,17 @@ dropped permanently — with no artifacts in it at all.
 *and in work* — from a name that was never registered; suppression takes effect at the ack for an
 already-open session; a dropped name is refused on recreation; all of it survives WAL replay and
 restart. **Data:** none new.
+
+**Where the tiebreak got to.** Landed in both build paths as a **16-byte sort record**, with the
+batch plan's residency model widened to match — a model left at 12 would plan a batch the loop
+cannot hold. The codes reach the sort through a mapped `morton-of-ordinal.u32`, filled by its own
+pass over the points file, because an ordinal exists only once the source ids are sorted and the
+first pass sees the file's order rather than the corpus's. Two things that cost, both ⊘ unmeasured
+and both this stage's: **one extra sequential pass** over the points file, and **4 B/item of
+anonymous memory** in the batch, against the alternative of reading the code out of the mapped
+array inside the comparator. **No existing test moved** — the suite pinned signature *grouping* and
+never the order inside a group — so the new one asserts the direction on both the pre-sort and the
+tie-refinement path.
 
 ### Stage 2 — One flat level, served with masked counts
 

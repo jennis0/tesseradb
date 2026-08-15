@@ -151,19 +151,34 @@ use crate::{
     EXTERNAL_ID_ROWS_PER_EXTENT, PHASH, PREFIX, SEG_ID,
 };
 
-/// One item's position in the signature sort. 12 bytes, four-byte aligned: at 10⁹ items the
-/// difference between this and a naturally-aligned `(u64, u32)` is four gigabytes.
+/// One item's position in the signature sort. 16 bytes, four-byte aligned — every field is a
+/// component of the sort key, and holding the key in the record is what keeps the comparator a
+/// pure function of it.
+///
+/// **The `morton` field is [decision 0073](../../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md)**:
+/// ties within a signature group order by the item's Morton **code**, so a spatially coherent set
+/// lands in a contiguous run of entity ids (*measured* 4.08× on artifact membership's disk form,
+/// with term postings byte-identical). It is the same `split32` cell code the tiler ranks rows by,
+/// so the two orders agree on what "nearby" means.
+///
+/// **The record grew from 12 bytes to hold it, and [`plan_build`]'s residency model was widened to
+/// match** — a batch is sized against the memory budget, so an unwidened model would plan a batch
+/// it cannot hold. ⊘ The alternative — keeping 12 bytes and reading the code out of the mapped
+/// `morton-of-ordinal.u32` inside the comparator — trades that anonymous 4 B/item for an
+/// indirection per comparison, and is **unmeasured**: it is the layout question the decision
+/// leaves to this stage.
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct SortRec {
     key_hi: u32,
     key_lo: u32,
+    morton: u32,
     ordinal: u32,
 }
 
 impl SortRec {
-    fn order(&self) -> (u32, u32, u32) {
-        (self.key_hi, self.key_lo, self.ordinal)
+    fn order(&self) -> (u32, u32, u32, u32) {
+        (self.key_hi, self.key_lo, self.morton, self.ordinal)
     }
 }
 
@@ -524,14 +539,16 @@ fn plan_build(
         worst
     };
     // The batch loop's residency model, stated so a refusal can print it: the batch's packed
-    // bucket (8 bytes/pair) + recs (12/item) + starts (4/item) + long bitset (1/8 per item),
+    // bucket (8 bytes/pair) + recs (16/item — 12 before decision 0073 added the Morton tiebreak
+    // to the sort key, and a model left at 12 would plan a batch the loop cannot hold) +
+    // starts (4/item) + long bitset (1/8 per item),
     // beside the loop-wide entity map (4/item over all n), per-term counters (4/term), the
     // join-chunk buffer (which scales down with the corpus, so a tiny test budget stays
     // feasible for a tiny corpus) and a fixed slack for band buffers, decoders and allocator.
     const SLACK: u64 = 64 << 20;
     let chunk_bytes = 16 * (JOIN_CHUNK_ROWS as u64).min(pair_rows.max(1) as u64);
     let loop_fixed = 4 * n + 4 * row_counts.len() as u64 + chunk_bytes + SLACK;
-    let per_batch = |b: u64| 8 * worst_pairs(b) + 12 * b + 4 * (b + 1) + b / 8;
+    let per_batch = |b: u64| 8 * worst_pairs(b) + 16 * b + 4 * (b + 1) + b / 8;
     let feasible = |b: u64| per_batch(b).saturating_add(loop_fixed) <= budget;
 
     // The largest feasible stride on the grid (or the whole corpus). If even one grid cell is
@@ -779,6 +796,57 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "the pairs file yielded {pair_rows} rows, then {pushed}"
         )));
     }
+    // ---- 3b. the Morton code per ordinal (decision 0073) ------------------------------
+    // The signature sort breaks ties by the item's Morton **code**, so the codes must be in hand
+    // before the batch loop. They are keyed by *ordinal*, which exists only once `source_ids` is
+    // sorted — which is why this is its own pass rather than a column collected in step 1: that
+    // pass sees the file's order, and the corpus's order is not known until it finishes.
+    //
+    // **Mapped rather than heap-allocated**, on step 8's own argument: 4 B/item is 4 GB at 10⁹ of
+    // memory the kernel cannot reclaim, for an array written once at random indices and then read
+    // as one contiguous slice per batch. It is deliberately outside [`plan_build`]'s residency
+    // model, which counts the anonymous allocations a batch must hold.
+    //
+    // It runs here, immediately before `source_ids` is dropped, because the join needs it. The
+    // cost is one more sequential pass over the points file; ⊘ what that is worth at 10⁹ is
+    // unmeasured, and it is the second half of the layout question [`SortRec`] names.
+    let mut morton_map = spill::MappedU32::zeroed(tmp.path(), "morton-of-ordinal.u32", n as usize)?;
+    let morton_of_ordinal = morton_map.as_mut_slice();
+    {
+        let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
+        let mut failure: Option<BuildError> = None;
+        let resolve = |chunk: &mut Vec<(u64, u32)>, codes: &mut [u32]| {
+            join_chunk(chunk, &source_ids, |ordinal, source_id, code| {
+                let Some(ordinal) = ordinal else {
+                    // The first pass over this same file resolved every id, so an unknown one
+                    // means the file moved under the build (step 8 fails closed identically).
+                    return Err(input_changed(&format!(
+                        "the points file names entity {source_id}, which its first pass did not"
+                    )));
+                };
+                codes[ordinal as usize] = code;
+                Ok(())
+            })
+        };
+        input::scan_points(&args.points, &args.extent, args.limit, |point| {
+            // From the quantised form directly, exactly as the tiler does — `split32`'s cell half
+            // is the code `morton_of` would give for the same point, so entity order and row order
+            // agree about what is nearby.
+            chunk.push((point.source_id, split32(point.qx, point.qy).0.raw()));
+            if chunk.len() == JOIN_CHUNK_ROWS {
+                if let Err(e) = resolve(&mut chunk, morton_of_ordinal) {
+                    failure = Some(e);
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        })?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        resolve(&mut chunk, morton_of_ordinal)?;
+    }
+
     drop(source_ids);
     drop(term_keys);
     drop(term_ids);
@@ -854,6 +922,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             recs.push(SortRec {
                 key_hi: (key >> 32) as u32,
                 key_lo: key as u32,
+                morton: morton_of_ordinal[ordinal as usize],
                 ordinal: ordinal as u32,
             });
         }
@@ -2729,11 +2798,15 @@ fn build_dictionary(
 ///   refined group therefore holds only **short** members whose signature is *exactly* the
 ///   group's two-term prefix (all identical) and **long** members extending that prefix.
 /// * **A prefix orders before every extension of it**, and identical signatures tie — so the
-///   refined order is: all shorts first, in the ordinal order the pre-sort already established;
-///   then the longs, ordered by their signature *tails* (terms from index 2 on) with ordinal
-///   breaking exact-tail ties. That is precisely the reference build's
-///   `(signature, source_id)` order, with the tiebreak the current stable sort left implicit
-///   made explicit.
+///   refined order is: all shorts first, in the `(morton, ordinal)` order the pre-sort already
+///   established; then the longs, ordered by their signature *tails* (terms from index 2 on) with
+///   `(morton, ordinal)` breaking exact-tail ties. That is precisely the reference build's
+///   `(signature, morton, source_id)` order (decision 0073), with the tiebreak the current stable
+///   sort left implicit made explicit.
+///
+///   **The shorts get the Morton tiebreak for free and the longs must be given it**, because the
+///   pre-sort key stops at two terms: within a tie group the shorts are already fully ordered by
+///   the key the parallel sort ran on, and the longs are re-sorted here from their tails up.
 ///
 /// Mechanically, each long member's tail is gathered **once** into a scratch arena — its
 /// location in `packed` comes from the batch's per-ordinal starts array in O(1), not from a
@@ -2847,9 +2920,12 @@ fn refine_group(
     let arena = &s.arena;
     // (tail, ordinal) is a total order on unique keys — ordinals are unique — so this
     // unstable sort has exactly one output, identical to the stable full-signature sort's.
+    // (tail, morton, ordinal): the same order the pre-sort gives the shorts, continued past the
+    // two-term prefix the pre-sort key stops at (decision 0073).
     s.longs.sort_unstable_by(|a, b| {
         arena[a.0..a.0 + a.1]
             .cmp(&arena[b.0..b.0 + b.1])
+            .then_with(|| a.2.morton.cmp(&b.2.morton))
             .then_with(|| a.2.ordinal.cmp(&b.2.ordinal))
     });
     group[..s.shorts.len()].copy_from_slice(&s.shorts);

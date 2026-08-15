@@ -940,3 +940,149 @@ fn bare_morton_widens_with_a_zero_residual() {
         );
     }
 }
+
+/// **Decision 0073**: within one signature group, entity ids ascend by the item's Morton **code**,
+/// and the source id only breaks a shared cell.
+///
+/// The fixture makes the two orders disagree on purpose — the Morton code *descends* as the source
+/// id ascends — so the superseded `(signature, source_id)` rule assigns entity ids in source order
+/// and this rule assigns them in the exact reverse. A test asserting only "grouped by signature"
+/// passes under both, which is why the existing smoke assertions did not move when this landed.
+///
+/// **Two signature shapes, because the sort has two paths.** A one-term signature never leaves the
+/// pre-sort, whose key now carries the code; four identical terms tie on the two-term pre-sort key
+/// and are re-sorted by `refine_group`, which compares signature tails and must apply the same
+/// tiebreak itself. The second path is the one an implementation forgets, and its omission is
+/// invisible in a corpus of short signatures.
+///
+/// Both build paths are asserted: the assignment is permanent (I9), and `build_equivalence.rs`
+/// holds the two to byte-identical bundles.
+#[test]
+fn entity_ids_break_signature_ties_on_the_morton_code() {
+    const SHORT: u64 = 8; // items 0..8 carry one term
+    const N: u64 = 16; // items 8..16 carry the same four
+
+    // Distinct cells, strictly descending in the source id.
+    let code_of = |e: u64| (N - 1 - e) * 4096;
+
+    let write_fixture = |points: &Path, pairs: &Path| {
+        let pschema = Arc::new(Schema::new(vec![
+            Field::new("entity_id", DataType::UInt64, false),
+            Field::new("morton", DataType::UInt64, false),
+        ]));
+        let ids: Vec<u64> = (0..N).collect();
+        let codes: Vec<u64> = ids.iter().map(|&e| code_of(e)).collect();
+        let batch = RecordBatch::try_new(
+            pschema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(ids)),
+                Arc::new(UInt64Array::from(codes)),
+            ],
+        )
+        .unwrap();
+        let mut w = ArrowWriter::try_new(File::create(points).unwrap(), pschema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let tschema = Arc::new(Schema::new(vec![
+            Field::new("entity_id", DataType::UInt64, false),
+            Field::new("term_id", DataType::UInt32, false),
+        ]));
+        let mut es: Vec<u64> = Vec::new();
+        let mut ts: Vec<u32> = Vec::new();
+        for e in 0..N {
+            for t in if e < SHORT {
+                vec![1u32]
+            } else {
+                vec![2, 3, 4, 5]
+            } {
+                es.push(e);
+                ts.push(t);
+            }
+        }
+        let batch = RecordBatch::try_new(
+            tschema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(es)),
+                Arc::new(UInt32Array::from(ts)),
+            ],
+        )
+        .unwrap();
+        let mut w = ArrowWriter::try_new(File::create(pairs).unwrap(), tschema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    };
+
+    // Term "1" interns first (items are walked in ascending source-id order), so the one-term
+    // signature sorts before the four-term one and takes the low entity ids. Within each group,
+    // the entity id ascends with the code, which is the source id reversed.
+    let mut expected: BTreeMap<u64, u64> = BTreeMap::new();
+    for e in 0..SHORT {
+        expected.insert(e, SHORT - 1 - e);
+    }
+    for e in SHORT..N {
+        expected.insert(e, SHORT + (N - 1 - e));
+    }
+
+    for (label, linear) in [("pipeline", false), ("linear", true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let points = tmp.path().join("points.parquet");
+        let pairs = tmp.path().join("pairs.parquet");
+        let out = tmp.path().join("bundle");
+        write_fixture(&points, &pairs);
+
+        let args = BuildArgs {
+            points,
+            pairs,
+            out: out.clone(),
+            extent: tessera_build::input::IDENTITY_EXTENT,
+            slice_id: "s0".to_string(),
+            limit: None,
+            identity_key: test_key(),
+            identity_key_hex: TEST_KEY_HEX.to_string(),
+            idset: 1,
+            shard_id: 0,
+            mint_external_ids: true,
+            emit_oracle_pairs: false,
+            batch_items: None,
+            memory_budget: None,
+            band_rows: None,
+            schema: Default::default(),
+        };
+        let report = if linear {
+            tessera_build::build_in_memory(&args)
+        } else {
+            build(&args)
+        }
+        .unwrap_or_else(|e| panic!("{label} build failed: {e}"));
+
+        let bundle = open_bundle(&out).expect("the bundle must open");
+        let part = &bundle.partitions["default"];
+        let ext_path = out
+            .join(&report.prefix)
+            .join(&part.manifest.external_id_runs[0]);
+        let mut source_to_new: BTreeMap<u64, u64> = BTreeMap::new();
+        for batch in read_arrow_ipc(&ext_path) {
+            let ext = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("external_id is binary");
+            let ent = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .expect("entity_id is u32");
+            for i in 0..batch.num_rows() {
+                let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
+                source_to_new.insert(source, ent.value(i) as u64);
+            }
+        }
+
+        assert_eq!(
+            source_to_new, expected,
+            "{label}: entity ids must ascend with the Morton code inside each signature group \
+             (decision 0073) — this fixture's source-id order is its exact reverse"
+        );
+    }
+}

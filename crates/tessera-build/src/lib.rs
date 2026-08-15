@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 use tessera_authz::{write_postings, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
-use tessera_spatial::Bounds;
+use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
     IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
@@ -255,6 +255,9 @@ struct StagedItem {
     /// not coordinates. Same width as the `f32` pair it replaces.
     qx: u32,
     qy: u32,
+    /// The `split32` cell code of `(qx, qy)`, held rather than recomputed because it is a sort
+    /// key: entity-id ties within a signature group break on it (decision 0073).
+    morton: u32,
     signature: Vec<u32>,
 }
 
@@ -347,6 +350,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             source_id: point.source_id,
             qx: point.qx,
             qy: point.qy,
+            morton: split32(point.qx, point.qy).0.raw(),
             signature: signature_sort_key(&terms),
         });
     }
@@ -374,10 +378,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         .batch_items
         .unwrap_or(u64::MAX)
         .min(staged.len().max(1) as u64) as usize;
+    // `(signature, morton, source_id)` — decision 0073. The Morton code is the minor key, so a
+    // spatially coherent set lands in a contiguous run of entity ids; the source id survives
+    // beneath it to keep the order total, since two items may share a cell.
     for chunk in staged.chunks_mut(batch) {
         chunk.sort_by(|a, b| {
             a.signature
                 .cmp(&b.signature)
+                .then(a.morton.cmp(&b.morton))
                 .then(a.source_id.cmp(&b.source_id))
         });
     }
