@@ -12,8 +12,9 @@ contracts work ([`contracts.md`](../../design/contracts.md)).
 visibility rule independent, and made an artifact whole-or-nothing. Each is defensible in prose. The
 test is whether the artifact types a deployment actually wants are still *expressible* — first as a
 declaration a caller could write without reading the design, then as a payload that has to hold real
-data rather than describe it. **Six things the prose had wrong fell out of writing them** (§10),
-including one this memo's own earlier draft put into a design document before the owner caught it.
+data rather than describe it. **Seven things the prose had wrong fell out of writing them** (§10),
+including two this memo's own earlier drafts put into the corpus — one into a design document and one
+into a decision — before the owner caught them.
 
 ---
 
@@ -67,34 +68,49 @@ slices     = ["embedding-2026-08"]
 membership = "enumerated"
 access       = { artifacts_carry_own = false }   # a cluster exists because the data does
 visible_when = { min_fraction = 0.05 }
-hierarchy    = { kind = "stacked" }
+hierarchy    = { kind = "nested", prune_children = false }
 content      = { derived = ["centroid", "hull"] }
 levels = [
-  { level = 0, title = "min_cluster_size 6000" },
-  { level = 1, title = "min_cluster_size 600" },
-  { level = 2, title = "min_cluster_size 60" },
+  { level = 0, title = "Coarse" },
+  { level = 1, title = "Mid" },
+  { level = 2, title = "Fine" },
 ]
 ```
 
 ```json
 {
   "layer": "clusters/hdbscan-2026-08",
-  "level": 1,
-  "stable_key": "c-immunology",
-  "membership": { "external_ids": ["2401.00123", "2401.00456", "…184 000 of them"] }
+  "level": 2,
+  "stable_key": "c-vaccine-trials",
+  "membership": { "external_ids": ["2401.00123", "2401.00456", "…31 000 of them"] },
+  "edges": [
+    { "layer": "clusters/hdbscan-2026-08", "level": 1, "stable_key": "c-immunology" }
+  ]
 }
 ```
 
-**The simplest artifact there is: an identity and a set.** No content, no access label, no variations.
-Its count, centroid and hull are recomputed per viewer from that membership and are never carried
-here — an unmasked hull in a payload would be the build-time geometry the design deleted, arriving
-through the write path instead of the file layout.
+**Almost the simplest artifact there is: an identity, a set, and one edge.** No content, no access
+label, no variations. Its count, centroid and hull are recomputed per viewer from that membership and
+are never carried here — an unmasked hull in a payload would be the build-time geometry the design
+deleted, arriving through the write path instead of the file layout.
+
+**`nested`, and the edge is the point.** HDBSCAN's condensed tree splits branches, so a child's
+members are a **subset** of its parent's and the lineage is explicit — throwing it away would discard
+something the algorithm computed. What is *not* true is that children **exhaust** a parent: points
+fall out as noise at each split, 20–25% of them on this corpus, so a parent holds members no child
+holds. Those two are different claims and merging them is the mistake an earlier draft of this memo
+made, and put into [decision 0080](../../decisions/0080-the-frontier-is-a-per-artifact-test.md)
+before the owner caught it.
+
+**The stacked case is a different layer, not this one.** Three *independent* runs at three
+`min_cluster_size` settings — which is what the measurement campaign produced — genuinely have no
+lineage, and there a point that was noise in the coarse run can join a cluster in the fine one. That
+is a real configuration and it declares `kind = "stacked"`, no edges, and levels that mean three
+analyses rather than three depths.
 
 **No zoom ranges, deliberately.** An embedding projection has no units, so no level corresponds to a
-zoom; level choice is the client's. **`stacked`** is what the measurement campaign actually produced —
-three independent runs whose nesting nobody verified — and declaring it honestly is what stops rollup
-and the frontier being claimed for a structure that has neither. **`min_fraction`** because a fixed
-bar of fifty protects a cluster of a hundred and does nothing for one of ten thousand.
+zoom; level choice is the client's. **`min_fraction`** because a fixed bar of fifty protects a
+cluster of a hundred and does nothing for one of ten thousand.
 
 ## 3. Its labels — `topics/ctfidf-2026-08`
 
@@ -377,6 +393,18 @@ real. **Rebuilding the underlay on it is not proposed.**
 ---
 
 ## 10. What the exercise found
+
+**A second wrong finding, caught by the owner, after it had reached a *decision*.** An earlier draft
+declared the HDBSCAN layer `stacked`, on the reasoning that its hierarchy does not cover — and that
+merged two different claims. HDBSCAN's condensed tree splits branches, so a child's members are a
+**subset** of its parent's and the lineage is explicit; what is true is that children do not
+**exhaust** a parent, because points fall out as noise at each split. Only the second is a property
+of a condensed tree, and only the first would break a downward walk. The stacked case is three
+*independent* runs, which is what the campaign produced and what the design generalised from.
+[Decision 0080](../../decisions/0080-the-frontier-is-a-per-artifact-test.md) carried the merged claim
+as its stated reason and is corrected in place; **its conclusion survives on the two grounds that do
+not depend on monotonicity**, and whether the walk should return as a display policy for nested layers
+is reopened there.
 
 **A wrong finding, caught by the owner, after it had reached a design document.** An earlier draft
 claimed density cells needed a fourth membership source — *computed* — because a cell's members are a

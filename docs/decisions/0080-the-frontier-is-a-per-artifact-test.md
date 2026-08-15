@@ -17,12 +17,23 @@ This contradicts a normative document, which is why it was the owner's to rule. 
 
 ## Why the walk cannot stay
 
-**It needs counts that shrink downward, and real clusterings do not supply them.** The walk is only
-well defined when a child's members are a subset of its parent's. HDBSCAN children hold points their
-parent does not and do not exhaust it — measured on the real corpus, where 20–25% of points are in
-no cluster at all — so a failing parent can sit above a passing child. The walk then describes no cut
-through the tree, and the symptom is a rendering oddity rather than an error, which is the worst
-place for it to appear.
+**Correction, 2026-08-16** *(owner)*: this section first claimed *"HDBSCAN children hold points their
+parent does not"*, and that is **false of a condensed tree**. HDBSCAN splits branches, so a child's
+members are always a subset of its parent's and there is explicit parent/child lineage. What is true
+is that children do not **exhaust** a parent — points fall out as noise at each split, 20–25% of them
+on the real corpus — which is a different claim, and one that leaves counts monotone downward. The
+two were merged, and the wrong half was the stated reason for this ruling.
+
+**Where the walk genuinely fails is the stacked case**, which is what produces a child holding points
+its parent does not: three *independent* runs at three `min_cluster_size` settings, where a point that
+was noise in the coarse run joins a cluster in the fine one. That is what the measurement campaign
+produced, and it is a real configuration — but it is not what a clustering with a hierarchy is.
+
+**So the walk is well defined for a nested layer and ill defined for a stacked one**, and the
+surviving reasons for testing per artifact are the two that do not depend on monotonicity: the
+disclosure control becomes the per-cell case the census literature is about, and the whole-level leak
+below cannot arise. ⊘ **Whether the walk should return for nested layers, as a display policy over
+per-artifact outcomes, is reopened by this correction and is not settled here.**
 
 **The repair that looks obvious is rejected and recorded so it is not proposed again.** Defining a
 node's *reach* as its own members unioned with its descendants' restores monotonicity by
