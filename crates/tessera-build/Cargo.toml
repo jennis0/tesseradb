@@ -7,6 +7,8 @@ edition = "2021"
 rustc-hash = "1"
 rayon = "1"
 libc = "0.2"
+# Entity-indexed build scratch lives in a mapped file rather than the heap — see `spill::MappedU32`.
+memmap2 = { workspace = true }
 tessera-types = { path = "../tessera-types" }
 tessera-plugin = { path = "../tessera-plugin" }
 tessera-spatial = { path = "../tessera-spatial" }

@@ -515,14 +515,20 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // paying a transpose is better than two emit paths that could disagree about a record's
     // contents (which `write_manifests` exists to prevent for the same reason).
     let filter_paths = {
-        let by_entity: Vec<Vec<ScalarValue>> = (0..args.schema.attributes.len())
-            .map(|column| {
-                tiler_items
-                    .iter()
-                    .map(|item| item.scalars[column].clone())
-                    .collect()
+        let by_entity: Vec<pipeline::EntityColumn> = args
+            .schema
+            .attributes
+            .iter()
+            .enumerate()
+            .map(|(column, attribute)| {
+                pipeline::EntityColumn::from_values(
+                    attribute.ty,
+                    tiler_items.iter().map(|i| i.scalars[column].clone()),
+                    &attribute.name,
+                )
+                .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         // The record blob beside the postings, from the same entity-major values — the two
         // builds must stay byte-identical, so this path writes every artefact the streaming
         // pipeline writes.
@@ -562,7 +568,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // what says that zero means nothing (decision 0064).
     let mut presence_paths: Vec<PathBuf> = Vec::new();
     for (column, (name, _)) in scalar_schema.iter().enumerate() {
-        let rows = pipeline::render_presence_of(tiler_items.iter().map(|i| &i.scalars[column]));
+        let rows = pipeline::render_presence_of(
+            tiler_items
+                .iter()
+                .map(|i| !matches!(i.scalars[column], ScalarValue::Null)),
+        );
         let Some(rows) = rows else { continue };
         if let Some(path) =
             tessera_store::flush::write_render_presence(&segment_dir, name, rows, n as u32)

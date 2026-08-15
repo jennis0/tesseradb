@@ -1,15 +1,17 @@
-"""The demo bundles' build inputs: the same corpus at two scales, with prose to search.
+"""The demo bundles' build inputs: the same corpus at four scales, with prose to search.
 
 `run_demo.sh` serves what this writes. The demo exists to show the filter surface, so every column
 here is one a control can be drawn for — a category with a value set, a date with a range, and
 prose with a word search — and nothing here is present only because the corpus had it.
 
-## The two scales, and why they carry different columns
+## The four scales, and why they carry different columns
 
 | | items | prose |
 |---|---|---|
 | `2m4` | 2,422,486 — the real corpus | `title` **and** `abstract` |
 | `25m` | 25,200,000 — the corpus 10.4x over | `title` only |
+| `250m` | 250,000,000 — 103x over | none |
+| `1b` | 1,000,000,000 — the design's target | none |
 
 Abstracts stop at the small scale for a measured reason rather than a cautious one. An abstract is
 954 characters against a title's 73, so the record blob holding 25,200,000 of them is ~26 GB, and
@@ -18,24 +20,40 @@ Titles at that scale are ~2.3 GB and ~0.6 GB. The viewer draws its filter contro
 `/v1/meta`'s `filter_operands`, so the abstract box is simply absent on the large bundle — the
 honest rendering of a column that is not there, and not a case the client special-cases.
 
+**Titles stop at 25,200,000, and that limit is the build's memory rather than the disk.** A 10⁹
+bundle carrying titles would be ~107 GB, which is only a disk question; what stops it is that both
+consumers of a text column — the record blob and the token index — read it from an entity-major
+array that is held whole. At a measured mean of 73 characters that is ~24 GB of strings for
+250,000,000 titles, before anything else the build holds, and the build is OOM-killed in the
+attribute pass. The fixed-width columns are no longer the problem: typing that intermediate
+(`EntityColumn`) took them from 32 B per value to the declared width, which is what lets these two
+scales build at all. Text did not benefit, because its cost is the strings and not the tag around
+them.
+
+The points file still carries `title` at every scale, so this declaration is the only thing between
+these bundles and prose search: streaming the text column to the blob and the index, rather than
+materialising it, makes the column declarable here with no other change.
+
 ## The values are the corpus's
 
 `probes/dataset.md` §4.3: the scaled corpus is the real 2,422,486 papers repeated as affine
 transforms of their geometry, so `entity_id % 2,422,486` is the base paper an entity is a replica
 of, and every value written here is that paper's own. This is `make_fixture.py`'s rule and this
-file inherits its caveat verbatim: the marginal distribution at 25,200,000 is the corpus's own, ten
-times over, but the *vocabulary* does not grow — replica 4 introduces no category and no title word
-the base corpus lacks. A claim about term-count growth at scale may not be read off this.
+file inherits its caveat verbatim: the marginal distribution at any scale is the corpus's own,
+repeated, but the *vocabulary* does not grow — no replica introduces a category or a title word the
+base corpus lacks. A claim about term-count growth at scale may not be read off this, and the claim
+gets harder to resist the further the scales run: 10⁹ items still carry the 2,422,486 corpus's
+distinct titles, 413 times each.
 
-## Codes are pinned, and shared across both scales
+## Codes are pinned, and shared across every scale
 
 `archive` and `primary_category` codes come from sorted key order from 1 (0 being the reserved
-absent sentinel), written once and used by both builds. Two bundles that disagreed about which code
+absent sentinel), written once and used by every build. Two bundles that disagreed about which code
 `hep-th` is would recolour the map on a dataset switch, which reads as data changing rather than as
 a fixture changing.
 
 Usage:
-    reference/.venv/bin/python probes/build_demo_datasets.py --data data [--scale 2m4|25m]
+    reference/.venv/bin/python probes/build_demo_datasets.py --data data [--scale 2m4|25m|250m|1b]
 """
 
 import argparse
@@ -49,7 +67,8 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 BASE = 2_422_486
-SCALES = {"2m4": 2_422_486, "25m": 25_200_000}
+SCALES = {"2m4": 2_422_486, "25m": 25_200_000,
+          "250m": 250_000_000, "1b": 1_000_000_000}
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data", default="data", help="the data/ directory (gitignored)")
@@ -179,9 +198,12 @@ name   = "author_count"
 type   = "u8"
 render = true
 
+'''
+
 # Prose. `render` on a text column is refused at the declaration — the hot column is a fixed-width
 # slot per row and prose is not — so a text column's value lives in the record blob and reaches a
 # client at drill-down. `index` is what builds the token index that answers `match` and `phrase`.
+SCHEMA_TITLE = '''
 [[attribute]]
 name   = "title"
 type   = "text"
@@ -212,6 +234,15 @@ POINTS_SCHEMA = [
 def write_points(scale: str, total: int) -> None:
     """One points file, streamed from the scaled geometry in entity batches."""
     with_abstract = scale == "2m4"
+    # **Prose stops at 25,200,000, and the reason is the build rather than the disk.** The record
+    # blob and the token index both read the text column from an entity-major array held whole, so
+    # a text column costs its own bytes in RAM — ~24 GB for 250,000,000 titles at a measured mean
+    # of 73 characters — on top of everything else the build holds. The fixed-width columns became
+    # cheap when the entity-major intermediate was typed (`EntityColumn`); text did not, because
+    # its cost is the strings themselves and not the tag around them. The points file still carries
+    # `title` at every scale, so declaring it here is all that stands between these bundles and
+    # prose search once the text column is streamed rather than materialised.
+    with_title = scale in ("2m4", "25m")
     fields = list(POINTS_SCHEMA) + ([("abstract", pa.string())] if with_abstract else [])
     schema = pa.schema(fields)
     out = OUT / f"points-{scale}.parquet"
@@ -256,12 +287,14 @@ def write_points(scale: str, total: int) -> None:
     log(f"{scale}: wrote {kept:,} rows, {out.stat().st_size / 1e9:.2f} GB")
 
     (OUT / f"schema-{scale}.toml").write_text(
-        SCHEMA_HEAD.format(scale=scale, rows=total) + (SCHEMA_ABSTRACT if with_abstract else "")
+        SCHEMA_HEAD.format(scale=scale, rows=total)
+        + (SCHEMA_TITLE if with_title else "")
+        + (SCHEMA_ABSTRACT if with_abstract else "")
     )
     (OUT / f"{scale}.json").write_text(json.dumps({
         "scale": scale,
         "items": total,
-        "prose": ["title", "abstract"] if with_abstract else ["title"],
+        "prose": (["title", "abstract"] if with_abstract else ["title"] if with_title else []),
         "archive_codes": len(archive_codes),
         "primary_codes": len(primary_codes),
         "submitted_at_min": int(stamps.min()),

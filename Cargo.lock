@@ -2409,6 +2409,7 @@ dependencies = [
  "chrono",
  "croaring",
  "libc",
+ "memmap2",
  "parquet",
  "proptest",
  "rayon",
