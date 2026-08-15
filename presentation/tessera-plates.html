@@ -1,0 +1,1736 @@
+<title>Tessera Plates</title>
+
+<style>
+  :root {
+    --paper:   #f2f5f6;
+    --surface: #ffffff;
+    --ink:     #101820;
+    --muted:   #5b6a75;
+    --line:    #d6dde2;
+    --accent:  #0e6f8a;
+    --accent-soft: #dcedf3;
+    --warn:    #7d6111;
+    --warn-soft: #f4ecd7;
+    --plate:   #fbfcfc;
+    --plate-line: #dbe2e6;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:   #0d1216;
+      --surface: #141b21;
+      --ink:     #e4eaee;
+      --muted:   #93a2ad;
+      --line:    #24303a;
+      --accent:  #56b9d4;
+      --accent-soft: #10303b;
+      --warn:    #d3ad4c;
+      --warn-soft: #2b2413;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:   #0d1216;
+    --surface: #141b21;
+    --ink:     #e4eaee;
+    --muted:   #93a2ad;
+    --line:    #24303a;
+    --accent:  #56b9d4;
+    --accent-soft: #10303b;
+    --warn:    #d3ad4c;
+    --warn-soft: #2b2413;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1020px; margin: 0 auto; padding: 0 24px 96px; }
+
+  header.masthead { padding: 64px 0 36px; border-bottom: 1px solid var(--line); }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    font-weight: 640;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .standfirst { font-size: 17.5px; line-height: 1.55; max-width: 68ch; margin: 0 0 8px; color: var(--muted); }
+
+  nav.contents { padding: 28px 0 8px; border-bottom: 1px solid var(--line); }
+  nav.contents ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 2px 32px; }
+  nav.contents li { display: flex; gap: 12px; align-items: baseline; padding: 4px 0; }
+  nav.contents .num { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 20px; font-variant-numeric: tabular-nums; }
+  nav.contents a { color: var(--ink); text-decoration: none; border-bottom: 1px solid transparent; }
+  nav.contents a:hover, nav.contents a:focus-visible { border-bottom-color: var(--accent); color: var(--accent); }
+
+  section.plate { padding-top: 56px; }
+  section.plate + section.plate { border-top: 1px solid var(--line); }
+
+  .act { margin-top: 72px; padding-top: 18px; border-top: 3px solid var(--ink); }
+  .act .act-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 0 0 4px; }
+  .act p { margin: 0; color: var(--muted); font-size: 15px; max-width: 76ch; }
+  .act + section.plate { border-top: none; padding-top: 30px; }
+  section.plate .eyebrow { margin-bottom: 8px; }
+
+  h2 { font-size: 24px; line-height: 1.2; letter-spacing: -0.012em; font-weight: 620; margin: 0 0 8px; text-wrap: balance; }
+  .lead { color: var(--muted); margin: 0 0 4px; max-width: 74ch; font-size: 15.5px; }
+
+  figure { margin: 20px 0 0; }
+  .board {
+    background: var(--plate);
+    border: 1px solid var(--plate-line);
+    border-radius: 3px;
+    padding: 16px 18px;
+    overflow-x: auto;
+  }
+  svg.plate-svg { display: block; width: 100%; height: auto; min-width: 640px; }
+  figcaption { font-size: 13.5px; line-height: 1.5; color: var(--muted); margin-top: 10px; max-width: 80ch; }
+
+  .note {
+    margin-top: 18px;
+    padding: 11px 15px;
+    border-left: 2px solid var(--warn);
+    background: var(--warn-soft);
+    font-size: 14px;
+    line-height: 1.55;
+    border-radius: 0 3px 3px 0;
+    max-width: 80ch;
+  }
+  .note .tag { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; display: block; margin-bottom: 3px; color: var(--muted); }
+
+  table.perf { width: 100%; border-collapse: collapse; margin-top: 22px; font-size: 14.5px; }
+  table.perf th, table.perf td { text-align: left; padding: 8px 14px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.perf th { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  table.perf td.num { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  table.perf td.src { color: var(--muted); font-size: 13.5px; }
+  .scroll { overflow-x: auto; }
+
+  footer.end { margin-top: 64px; padding-top: 26px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Tessera · seventeen plates and a figure board</p>
+  <h1>Reading a masked corpus as a map</h1>
+  <p class="standfirst">Tessera is an index for browsing a large document corpus as a pannable, zoomable map, under the requirement that a viewer&#8217;s permissions determine every count, density, cluster and label they are shown — not merely which items they can retrieve. Each plate below is self-contained and drawn to be lifted into a slide; measured figures are embedded where they belong, and machinery that is designed but not yet built is marked on the plate itself.</p>
+</header>
+
+<nav class="contents" aria-label="Contents">
+  <ol>
+    <li><span class="num">00</span><a href="#p0">The route</a></li>
+    <li><span class="num">01</span><a href="#pintro">What Tessera is</a></li>
+    <li><span class="num">02</span><a href="#psec">The security model</a></li>
+    <li><span class="num">03</span><a href="#p1">Where the mask sits</a></li>
+    <li><span class="num">04</span><a href="#p3">Permissions to pixels</a></li>
+    <li><span class="num">05</span><a href="#p4">Why a tile is a range</a></li>
+    <li><span class="num">06</span><a href="#p6">Sessions, and their cost</a></li>
+    <li><span class="num">07</span><a href="#p5">One viewport request</a></li>
+    <li><span class="num">08</span><a href="#ptoml">Declaring fields</a></li>
+    <li><span class="num">09</span><a href="#p7">Static sampling</a></li>
+    <li><span class="num">10</span><a href="#p8">Filtering and sampling</a></li>
+    <li><span class="num">11</span><a href="#p9">Evaluating a filter</a></li>
+    <li><span class="num">12</span><a href="#p2">The shape of the system</a></li>
+    <li><span class="num">13</span><a href="#p10">Writing new data</a></li>
+    <li><span class="num">14</span><a href="#p2b">Inside the engine</a></li>
+    <li><span class="num">15</span><a href="#pslice">Slices</a></li>
+    <li><span class="num">16</span><a href="#p11">Clusters roll up</a></li>
+    <li><span class="num">17</span><a href="#p12">Serving labels</a></li>
+    <li><span class="num">18</span><a href="#p13">The figure board</a></li>
+  </ol>
+</nav>
+
+<section class="plate" id="p0">
+  <p class="eyebrow">00 · the walkthrough at a glance</p>
+  <h2>The route</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 176" role="img" aria-label="Five stops: the model, permissions to pixels, drawing the map, change, and the parts under discussion — with the plates belonging to each." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar0" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">The route: five stops, eighteen plates</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="44" width="150" height="92" rx="2"/>
+          <rect x="186" y="44" width="150" height="92" rx="2"/>
+          <rect x="352" y="44" width="150" height="92" rx="2"/>
+          <rect x="518" y="44" width="150" height="92" rx="2"/>
+        </g>
+        <rect x="684" y="44" width="150" height="92" rx="2" fill="#ffffff" stroke="#7d6111" stroke-dasharray="4 3"/>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="95"  y="66">the model</text>
+          <text x="261" y="66">permissions→pixels</text>
+          <text x="427" y="66">drawing the map</text>
+          <text x="593" y="66">change</text>
+          <text x="759" y="66">under discussion</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="95"  y="84">what it is;</text>
+          <text x="95"  y="97">who sees what</text>
+          <text x="261" y="84">one viewer's terms</text>
+          <text x="261" y="97">become a map</text>
+          <text x="427" y="84">fields, sampling</text>
+          <text x="427" y="97">and filtering</text>
+          <text x="593" y="84">writes, then the</text>
+          <text x="593" y="97">machine in one view</text>
+          <text x="759" y="84">slices, clusters and</text>
+          <text x="759" y="97">labels — unbuilt</text>
+        </g>
+        <g font-size="10.5" fill="#0e6f8a" text-anchor="middle">
+          <text x="95"  y="122">plates 01–03</text>
+          <text x="261" y="122">04–07</text>
+          <text x="427" y="122">08–11</text>
+          <text x="593" y="122">12–14</text>
+          <text x="759" y="122">15–17</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar0)">
+          <line x1="172" y1="90" x2="182" y2="90"/>
+          <line x1="338" y1="90" x2="348" y2="90"/>
+          <line x1="504" y1="90" x2="514" y2="90"/>
+          <line x1="670" y1="90" x2="680" y2="90"/>
+        </g>
+        <text x="20" y="164" font-size="11.5" fill="#5b6a75">the figure board (18) underwrites every number quoted along the way — one machine, synthetic fixtures, re-runnable campaigns</text>
+      
+</svg>
+    </div>
+  </figure>
+</section>
+
+<div class="act">
+  <p class="act-label">Act I · The model</p>
+  <p>What Tessera is, the terms visibility is decided in, and the ordering everything rests on — three plates that set the vocabulary everything else relies on.</p>
+</div>
+
+<section class="plate" id="pintro">
+  <p class="eyebrow">01 · Act I — what Tessera is</p>
+  <h2>One corpus, a different map for every viewer</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 474" role="img" aria-label="A corpus of documents, each with a map position and permission terms, served as two different screens of the same region: one viewer sees many marks and a count of 8,140, the other sees few marks and 312 - every quantity computed from what that viewer may see." font-family="ui-sans-serif, system-ui, sans-serif">
+        <defs>
+          <marker id="arI" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One corpus; a different map for every viewer</text>
+
+        <text x="20" y="58" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE CORPUS — POSITIONS + PERMISSIONS</text>
+        <rect x="20" y="68" width="300" height="210" fill="#ffffff" stroke="#b7c2c9"/>
+        <g fill="#9aa8b1">
+          <circle cx="60" cy="100" r="3.5"/><circle cx="110" cy="88" r="3.5"/><circle cx="170" cy="110" r="3.5"/>
+          <circle cx="230" cy="92" r="3.5"/><circle cx="285" cy="120" r="3.5"/><circle cx="80" cy="150" r="3.5"/>
+          <circle cx="150" cy="165" r="3.5"/><circle cx="210" cy="150" r="3.5"/><circle cx="265" cy="175" r="3.5"/>
+          <circle cx="55" cy="210" r="3.5"/><circle cx="180" cy="215" r="3.5"/><circle cx="240" cy="230" r="3.5"/>
+          <circle cx="95" cy="250" r="3.5"/><circle cx="160" cy="255" r="3.5"/><circle cx="290" cy="240" r="3.5"/>
+        </g>
+        <circle cx="120" cy="180" r="5" fill="#0e6f8a"/>
+        <line x1="120" y1="186" x2="120" y2="292" stroke="#9aa8b1" stroke-dasharray="3 3"/>
+        <rect x="20" y="296" width="300" height="108" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="36" y="318" font-size="12" fill="#101820">document #4127</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="36" y="336">position — from the deployment&#8217;s own 2-D layout</text>
+          <text x="36" y="350">(an embedding projection, geography, &#8230;)</text>
+          <text x="36" y="366">permission terms: project-x · region-eu</text>
+          <text x="36" y="382">fields: archive = cs · submitted = 2025-03</text>
+          <text x="36" y="398">the document itself stays in the caller&#8217;s systems</text>
+        </g>
+
+        <line x1="324" y1="150" x2="394" y2="150" stroke="#101820" stroke-width="1.2" marker-end="url(#arI)"/>
+        <text x="358" y="138" font-size="10.5" fill="#5b6a75" text-anchor="middle">served through</text>
+        <text x="358" y="166" font-size="10.5" fill="#5b6a75" text-anchor="middle">permissions</text>
+
+        <text x="400" y="58" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE SAME REGION, AT THE SAME MOMENT, FOR TWO VIEWERS</text>
+        <rect x="400" y="68" width="200" height="170" fill="#ffffff" stroke="#b7c2c9"/>
+        <g fill="#0e6f8a">
+          <circle cx="430" cy="100" r="3.5"/><circle cx="470" cy="90" r="3.5"/><circle cx="510" cy="120" r="3.5"/>
+          <circle cx="550" cy="100" r="3.5"/><circle cx="440" cy="150" r="3.5"/><circle cx="490" cy="160" r="3.5"/>
+          <circle cx="530" cy="140" r="3.5"/><circle cx="570" cy="170" r="3.5"/><circle cx="420" cy="190" r="3.5"/>
+          <circle cx="460" cy="200" r="3.5"/><circle cx="520" cy="195" r="3.5"/><circle cx="560" cy="210" r="3.5"/>
+        </g>
+        <rect x="412" y="208" width="118" height="22" rx="11" fill="#fbfcfc" stroke="#0e6f8a"/>
+        <text x="471" y="223" font-size="10.5" fill="#101820" text-anchor="middle">8,140 visible here</text>
+        <rect x="630" y="68" width="200" height="170" fill="#ffffff" stroke="#b7c2c9"/>
+        <g fill="#0e6f8a">
+          <circle cx="700" cy="90" r="3.5"/><circle cx="740" cy="120" r="3.5"/>
+          <circle cx="720" cy="160" r="3.5"/><circle cx="790" cy="210" r="3.5"/>
+        </g>
+        <rect x="642" y="208" width="106" height="22" rx="11" fill="#fbfcfc" stroke="#0e6f8a"/>
+        <text x="695" y="223" font-size="10.5" fill="#101820" text-anchor="middle">312 visible here</text>
+        <g font-size="11.5" fill="#101820" text-anchor="middle">
+          <text x="500" y="258">viewer A — broad grants</text>
+          <text x="730" y="258">viewer B — narrow grants</text>
+        </g>
+
+        <g font-size="11.5">
+          <text x="400" y="292" fill="#101820">every quantity on either screen — marks, counts, density,</text>
+          <text x="400" y="308" fill="#101820">structure — is computed from that viewer&#8217;s visible set alone</text>
+          <text x="400" y="334" fill="#5b6a75">a document outside a viewer&#8217;s permissions contributes nothing</text>
+          <text x="400" y="350" fill="#5b6a75">to anything they are shown — not to a count, a shade,</text>
+          <text x="400" y="366" fill="#5b6a75">a cluster or a label</text>
+          <text x="400" y="392" fill="#101820">an index beside your document store, not a database: it</text>
+          <text x="400" y="408" fill="#101820">answers how many, where, and which examples — pannable</text>
+          <text x="400" y="424" fill="#101820">and zoomable at up to 10⁹ documents, updating continuously</text>
+        </g>
+        <text x="20" y="460" font-size="11" fill="#5b6a75">the corpus and its permissions come from the caller: Tessera holds positions, permission terms and declared fields — never the documents themselves</text>
+      </svg>
+    </div>
+    <figcaption>A tessera is a single tile of a mosaic — and, in Rome, a token presented to be recognised and admitted. Both readings apply: the unit of storage is a tile, the unit of access is a token, and every viewer assembles a different mosaic from the same tiles.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="psec">
+  <p class="eyebrow">02 · Act I — the vocabulary: terms on documents, terms on sessions</p>
+  <h2>The security model</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 418" role="img" aria-label="Documents are labelled with terms at ingest; a session's credentials resolve to satisfied terms; a document is visible to a session exactly when the two term sets intersect." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Documents carry terms; a session satisfies terms; visible means the two sets intersect</text>
+
+        <text x="40" y="56" font-size="11.5" fill="#5b6a75" letter-spacing="1">AT INGEST — EACH DOCUMENT IS LABELLED WITH TERMS</text>
+        <text x="570" y="56" font-size="11.5" fill="#5b6a75" letter-spacing="1">AT SESSION — CREDENTIALS RESOLVE TO TERMS</text>
+
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="40" y="68"  width="250" height="98" rx="2"/>
+          <rect x="40" y="192" width="250" height="98" rx="2"/>
+          <rect x="570" y="68"  width="250" height="98" rx="2"/>
+          <rect x="570" y="192" width="250" height="98" rx="2"/>
+        </g>
+        <g font-size="12.5" fill="#101820">
+          <text x="56" y="90">document #4127</text>
+          <text x="56" y="214">document #88410</text>
+          <text x="586" y="90">viewer A — analyst</text>
+          <text x="586" y="214">viewer B — finance</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="56" y="106">labelled once, at ingest</text>
+          <text x="56" y="230">labelled once, at ingest</text>
+          <text x="586" y="106">terms their credential satisfies</text>
+          <text x="586" y="230">terms their credential satisfies</text>
+        </g>
+        <g fill="#dcedf3" stroke="#0e6f8a">
+          <rect x="56"  y="122" width="88" height="22" rx="11"/>
+          <rect x="152" y="122" width="88" height="22" rx="11"/>
+          <rect x="56"  y="246" width="96" height="22" rx="11"/>
+          <rect x="586" y="122" width="88" height="22" rx="11"/>
+          <rect x="682" y="122" width="80" height="22" rx="11"/>
+          <rect x="586" y="246" width="96" height="22" rx="11"/>
+        </g>
+        <g font-size="10.5" fill="#101820" text-anchor="middle">
+          <text x="100" y="137">project-x</text>
+          <text x="196" y="137">region-eu</text>
+          <text x="104" y="261">finance-q3</text>
+          <text x="630" y="137">project-x</text>
+          <text x="722" y="137">briefing</text>
+          <text x="634" y="261">finance-q3</text>
+        </g>
+
+        <line x1="566" y1="100" x2="294" y2="100" stroke="#0e6f8a" stroke-width="2"/>
+        <text x="430" y="92" font-size="11" fill="#0e6f8a" text-anchor="middle">project-x on both sides → visible</text>
+        <line x1="566" y1="258" x2="294" y2="258" stroke="#0e6f8a" stroke-width="2"/>
+        <text x="430" y="250" font-size="11" fill="#0e6f8a" text-anchor="middle">finance-q3 on both sides → visible</text>
+        <g stroke="#9aa8b1" stroke-width="1.2" stroke-dasharray="4 4">
+          <line x1="566" y1="132" x2="294" y2="226"/>
+          <line x1="566" y1="226" x2="294" y2="132"/>
+        </g>
+        <rect x="336" y="158" width="190" height="48" fill="#fbfcfc"/>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="431" y="172">no shared term → invisible,</text>
+          <text x="431" y="186">absent from every count,</text>
+          <text x="431" y="200">sample and label</text>
+        </g>
+
+        <text x="430" y="322" font-size="12.5" fill="#0e6f8a" text-anchor="middle">the whole rule: a document is visible to a session ⇔ their term sets intersect</text>
+
+        <g font-size="11">
+          <text x="40" y="350" fill="#101820">terms are opaque bytes to the engine — the deployment's plugin defines them: classifications, compartments, tenancies, teams, ownership…</text>
+          <text x="40" y="368" fill="#5b6a75">a term is a route in, not a requirement: a document carrying several terms is visible through any one of them</text>
+          <text x="40" y="386" fill="#101820">authorisation comes only from the presented token — the engine never looks up credentials; staleness is bounded by token lifetime, which the caller sets</text>
+          <text x="40" y="404" fill="#7d6111">the one thing the engine cannot check: the ingest-side and session-side term derivations must agree on what a term means — every mask and label rests on it</text>
+        </g>
+      
+</svg>
+    </div>
+    <figcaption>Everything downstream — masks, filters, cluster frontiers, label gates, partitions — is built out of term sets and nothing else. The engine&#8217;s whole vocabulary of "who" and "what" is this plate.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p1">
+  <p class="eyebrow">03 · Act I — the requirement: where the mask sits</p>
+  <h2>Where the mask sits</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 312" role="img" aria-label="Two pipelines with identical stages in different order: aggregating before gating derives numbers from unreadable documents; masking before aggregating derives them only from the visible set." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Where the mask sits relative to aggregation</text>
+
+        <text x="20" y="58" font-size="11.5" fill="#5b6a75" letter-spacing="1">A &#160;&#160;AGGREGATE, THEN GATE &#8212; ENFORCEMENT AT RETRIEVAL (THE SURVEYED DEFAULT)</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="72" width="170" height="48" rx="2"/>
+          <rect x="230" y="72" width="200" height="48" rx="2"/>
+          <rect x="470" y="72" width="180" height="48" rx="2"/>
+          <rect x="690" y="72" width="140" height="48" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="105" y="92">full corpus</text>
+          <text x="330" y="92">count · cluster · label</text>
+          <text x="560" y="92">permission gate</text>
+          <text x="760" y="98">viewer</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="105" y="109">every item</text>
+          <text x="330" y="109">computed over everything</text>
+          <text x="560" y="109">trim · threshold · withhold</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar1)">
+          <line x1="192" y1="96" x2="226" y2="96"/>
+          <line x1="432" y1="96" x2="466" y2="96"/>
+          <line x1="652" y1="96" x2="686" y2="96"/>
+        </g>
+        <text x="230" y="150" font-size="12.5" fill="#7d6111">the quantities shown were derived from documents the viewer cannot read — the gate withholds them, but did not shape them</text>
+
+        <text x="20" y="196" font-size="11.5" fill="#5b6a75" letter-spacing="1">B &#160;&#160;MASK, THEN AGGREGATE &#8212; TESSERA'S ORDERING</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="210" width="170" height="48" rx="2"/>
+          <rect x="470" y="210" width="180" height="48" rx="2"/>
+          <rect x="690" y="210" width="140" height="48" rx="2"/>
+        </g>
+        <rect x="230" y="210" width="200" height="48" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="105" y="230">full corpus</text>
+          <text x="330" y="230">the viewer's visible set</text>
+          <text x="560" y="230">count · cluster · label</text>
+          <text x="760" y="236">viewer</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="105" y="247">every item</text>
+          <text x="330" y="247">one bitmap per session</text>
+          <text x="560" y="247">computed inside the set</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar1)">
+          <line x1="192" y1="234" x2="226" y2="234"/>
+          <line x1="432" y1="234" x2="466" y2="234"/>
+          <line x1="652" y1="234" x2="686" y2="234"/>
+        </g>
+        <text x="230" y="290" font-size="12.5" fill="#0e6f8a">every displayed quantity is computable from the visible set alone — a gated global aggregate is treated as a disclosure, not a filtered view</text>
+      
+</svg>
+    </div>
+    <figcaption>The rest of these plates exist to make ordering B affordable at 10⁹ items.</figcaption>
+  </figure>
+</section>
+
+
+
+
+
+<div class="act">
+  <p class="act-label">Act II · From permissions to pixels</p>
+  <p>Follow one viewer: their term set becomes a bitmap, the bitmap becomes tile counts and marks — and the expensive step happens exactly once per session.</p>
+</div>
+
+<section class="plate" id="p3">
+  <p class="eyebrow">04 · Act II — the spine: one viewer&#8217;s terms become a map</p>
+  <h2>Permissions to pixels</h2>
+  <p class="lead">The one structural idea: permissions and geometry live in two different orderings of the same items, each spent on what it is good at, meeting at exactly one projection.</p>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 532" role="img" aria-label="Granted terms' postings union into an entity-space mask whose runs are contiguous; the mask is projected once per session into map-ordered row space, where tiles are counted as contiguous ranges." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">From a viewer's permissions to per-tile counts</text>
+
+        <!-- postings -->
+        <text x="170" y="58" font-size="11.5" fill="#5b6a75" letter-spacing="1">PERMISSION INDEX &#8212; ITEMS IN PERMISSION ORDER ("ENTITY SPACE")</text>
+        <text x="160" y="88" font-size="12" fill="#101820" text-anchor="end">term "project-x"</text>
+        <rect x="170" y="72" width="640" height="24" fill="#ffffff" stroke="#b7c2c9"/>
+        <rect x="210" y="73" width="160" height="22" fill="#0e6f8a" opacity="0.55"/>
+        <text x="160" y="122" font-size="12" fill="#101820" text-anchor="end">term "region-eu"</text>
+        <rect x="170" y="106" width="640" height="24" fill="#ffffff" stroke="#b7c2c9"/>
+        <rect x="490" y="107" width="160" height="22" fill="#0e6f8a" opacity="0.55"/>
+        <text x="818" y="88" font-size="11" fill="#5b6a75"> </text>
+
+        <line x1="430" y1="134" x2="430" y2="158" stroke="#101820" stroke-width="1.2" marker-end="url(#ar3)"/>
+        <text x="444" y="150" font-size="11.5" fill="#5b6a75">union of the granted terms — once per session</text>
+
+        <!-- mask strip -->
+        <text x="160" y="178" font-size="12" fill="#101820" text-anchor="end">the viewer's mask</text>
+        <rect x="170" y="162" width="640" height="28" fill="#ffffff" stroke="#b7c2c9"/>
+        <rect x="210" y="163" width="160" height="26" fill="#0e6f8a"/>
+        <rect x="490" y="163" width="160" height="26" fill="#0e6f8a"/>
+        <g stroke="#b7c2c9" stroke-width="0.7">
+          <line x1="250" y1="162" x2="250" y2="190"/><line x1="290" y1="162" x2="290" y2="190"/><line x1="330" y1="162" x2="330" y2="190"/>
+          <line x1="530" y1="162" x2="530" y2="190"/><line x1="570" y1="162" x2="570" y2="190"/><line x1="610" y1="162" x2="610" y2="190"/>
+        </g>
+        <text x="170" y="214" font-size="11.5" fill="#101820">item IDs are permanent, and assigned <tspan fill="#0e6f8a">grouped by permission</tspan> — so a term's items are contiguous and a mask is a few compressed runs</text>
+        <text x="170" y="231" font-size="11.5" fill="#5b6a75">measured: 8.9–36.7× smaller postings, up to 130× faster to union, than ungrouped assignment</text>
+
+        <!-- crossing -->
+        <g stroke="#9aa8b1" stroke-width="1">
+          <line x1="230" y1="194" x2="230" y2="330"/>
+          <line x1="270" y1="194" x2="270" y2="330"/>
+          <line x1="310" y1="194" x2="190" y2="330"/>
+          <line x1="350" y1="194" x2="510" y2="330"/>
+          <line x1="510" y1="194" x2="310" y2="330"/>
+          <line x1="550" y1="194" x2="790" y2="330"/>
+          <line x1="590" y1="194" x2="590" y2="330"/>
+          <line x1="630" y1="194" x2="370" y2="330"/>
+        </g>
+        <text x="672" y="262" font-size="12" fill="#101820">projected into row order</text>
+        <text x="672" y="279" font-size="11" fill="#5b6a75">once per session, then cached —</text>
+        <text x="672" y="294" font-size="11" fill="#5b6a75">~10.7 s at 10⁹ for the broadest</text>
+        <text x="672" y="309" font-size="11" fill="#5b6a75">viewer, so never per request</text>
+
+        <!-- row strip -->
+        <rect x="170" y="334" width="640" height="28" fill="#ffffff" stroke="#b7c2c9"/>
+        <g fill="#0e6f8a">
+          <rect x="171" y="335" width="39" height="26"/>
+          <rect x="210" y="335" width="80" height="26"/>
+          <rect x="330" y="335" width="40" height="26"/>
+          <rect x="490" y="335" width="40" height="26"/>
+          <rect x="570" y="335" width="40" height="26"/>
+          <rect x="770" y="335" width="39" height="26"/>
+        </g>
+        <g stroke="#b7c2c9" stroke-width="0.7">
+          <line x1="210" y1="334" x2="210" y2="362"/><line x1="250" y1="334" x2="250" y2="362"/><line x1="290" y1="334" x2="290" y2="362"/>
+          <line x1="370" y1="334" x2="370" y2="362"/><line x1="530" y1="334" x2="530" y2="362"/><line x1="610" y1="334" x2="610" y2="362"/>
+        </g>
+        <text x="160" y="352" font-size="12" fill="#101820" text-anchor="end">the same items,</text>
+        <text x="160" y="367" font-size="11" fill="#5b6a75" text-anchor="end">in map order</text>
+
+        <!-- tile brackets -->
+        <g fill="none" stroke="#101820" stroke-width="1.2">
+          <path d="M170,370 L170,380 L330,380 L330,370"/>
+          <path d="M334,370 L334,380 L490,380 L490,370"/>
+          <path d="M494,370 L494,380 L650,380 L650,370"/>
+          <path d="M654,370 L654,380 L810,380 L810,370"/>
+        </g>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="250" y="400">tile 0 — 4</text>
+          <text x="412" y="400">tile 1 — 1</text>
+          <text x="572" y="400">tile 2 — 2</text>
+          <text x="732" y="400">tile 3 — 1</text>
+        </g>
+        <text x="170" y="426" font-size="11.5" fill="#101820">row order = map position (Morton — next plate), so every tile is one <tspan fill="#0e6f8a">contiguous range</tspan>: a visible count is an exact bit-count over a range,</text>
+        <text x="170" y="443" font-size="11.5" fill="#101820">touching no document data — cost proportional to <tspan fill="#0e6f8a">compressed blocks touched, never items matched</tspan></text>
+
+        <text x="170" y="480" font-size="11.5" fill="#5b6a75">why two orderings: new items re-rank map order continuously, but permission sets must never be renumbered — the projection absorbs the churn;</text>
+        <text x="170" y="497" font-size="11.5" fill="#5b6a75">and an ordering spent on permission grouping cannot also be spatial. The two meet only at this projection.</text>
+        <text x="170" y="521" font-size="11.5" fill="#5b6a75">internal item IDs never reach a client — the wire carries an opaque keyed permutation of them, so gaps and adjacency reveal nothing</text>
+      
+</svg>
+    </div>
+  </figure>
+</section>
+
+<section class="plate" id="p4">
+  <p class="eyebrow">05 · Act II — the ordering underneath plate 04</p>
+  <h2>Why a tile is a range</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 330" role="img" aria-label="A four-by-four grid traversed by a Z-shaped curve, next to the same sixteen cells as a flat array where one quadrant occupies a contiguous run intersected with a viewer's mask." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Morton order: interleave the coordinate bits, sort, and every map tile becomes a contiguous range</text>
+        <text x="40" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE GRID, TRAVERSED IN Z-ORDER</text>
+        <rect x="144" y="64" width="104" height="104" fill="#dcedf3"/>
+        <g stroke="#b7c2c9" fill="none">
+          <rect x="40" y="64" width="208" height="208"/>
+          <line x1="92"  y1="64" x2="92"  y2="272"/>
+          <line x1="144" y1="64" x2="144" y2="272"/>
+          <line x1="196" y1="64" x2="196" y2="272"/>
+          <line x1="40" y1="116" x2="248" y2="116"/>
+          <line x1="40" y1="168" x2="248" y2="168"/>
+          <line x1="40" y1="220" x2="248" y2="220"/>
+        </g>
+        <polyline points="66,90 118,90 66,142 118,142 170,90 222,90 170,142 222,142 66,194 118,194 66,246 118,246 170,194 222,194 170,246 222,246"
+          fill="none" stroke="#0e6f8a" stroke-width="1.6" opacity="0.75"/>
+        <g font-size="11" fill="#101820" text-anchor="middle">
+          <text x="66" y="84">0</text><text x="118" y="84">1</text><text x="170" y="84">4</text><text x="222" y="84">5</text>
+          <text x="66" y="136">2</text><text x="118" y="136">3</text><text x="170" y="136">6</text><text x="222" y="136">7</text>
+          <text x="66" y="188">8</text><text x="118" y="188">9</text><text x="170" y="188">12</text><text x="222" y="188">13</text>
+          <text x="66" y="240">10</text><text x="118" y="240">11</text><text x="170" y="240">14</text><text x="222" y="240">15</text>
+        </g>
+        <text x="40" y="298" font-size="11.5" fill="#101820">every quadtree tile at every zoom = one bit-prefix</text>
+        <text x="40" y="315" font-size="11.5" fill="#5b6a75">(highlighted: the tile whose codes start 01)</text>
+
+        <line x1="262" y1="164" x2="316" y2="164" stroke="#101820" stroke-width="1.2" marker-end="url(#ar4)"/>
+
+        <path d="M450,126 L450,118 L570,118 L570,126" fill="none" stroke="#0e6f8a" stroke-width="1.4"/>
+        <text x="510" y="106" font-size="12" fill="#0e6f8a" text-anchor="middle">the tile is rows [4, 8) — contiguous</text>
+        <text x="330" y="86" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE SAME CELLS AS STORED ROWS</text>
+        <g stroke="#b7c2c9">
+          <rect x="330" y="134" width="120" height="34" fill="#ffffff"/>
+          <rect x="450" y="134" width="120" height="34" fill="#dcedf3" stroke="#0e6f8a"/>
+          <rect x="570" y="134" width="240" height="34" fill="#ffffff"/>
+        </g>
+        <g stroke="#b7c2c9" stroke-width="0.8">
+          <line x1="360" y1="134" x2="360" y2="168"/><line x1="390" y1="134" x2="390" y2="168"/><line x1="420" y1="134" x2="420" y2="168"/>
+          <line x1="480" y1="134" x2="480" y2="168"/><line x1="510" y1="134" x2="510" y2="168"/><line x1="540" y1="134" x2="540" y2="168"/>
+          <line x1="600" y1="134" x2="600" y2="168"/><line x1="630" y1="134" x2="630" y2="168"/><line x1="660" y1="134" x2="660" y2="168"/>
+          <line x1="690" y1="134" x2="690" y2="168"/><line x1="720" y1="134" x2="720" y2="168"/><line x1="750" y1="134" x2="750" y2="168"/>
+          <line x1="780" y1="134" x2="780" y2="168"/>
+        </g>
+        <g font-size="10.5" fill="#101820" text-anchor="middle">
+          <text x="345" y="156">0</text><text x="375" y="156">1</text><text x="405" y="156">2</text><text x="435" y="156">3</text>
+          <text x="465" y="156">4</text><text x="495" y="156">5</text><text x="525" y="156">6</text><text x="555" y="156">7</text>
+          <text x="585" y="156">8</text><text x="615" y="156">9</text><text x="645" y="156">10</text><text x="675" y="156">11</text>
+          <text x="705" y="156">12</text><text x="735" y="156">13</text><text x="765" y="156">14</text><text x="795" y="156">15</text>
+        </g>
+        <text x="330" y="210" font-size="11.5" fill="#5b6a75" letter-spacing="1">A VIEWER'S MASK OVER THE SAME ROWS</text>
+        <rect x="330" y="222" width="480" height="26" fill="#ffffff" stroke="#b7c2c9"/>
+        <g fill="#0e6f8a">
+          <rect x="331" y="223" width="28" height="24"/>
+          <rect x="391" y="223" width="28" height="24"/>
+          <rect x="451" y="223" width="58" height="24"/>
+          <rect x="541" y="223" width="28" height="24"/>
+          <rect x="631" y="223" width="88" height="24"/>
+          <rect x="781" y="223" width="28" height="24"/>
+        </g>
+        <g stroke="#b7c2c9" stroke-width="0.8">
+          <line x1="360" y1="222" x2="360" y2="248"/><line x1="390" y1="222" x2="390" y2="248"/><line x1="420" y1="222" x2="420" y2="248"/>
+          <line x1="450" y1="222" x2="450" y2="248"/><line x1="480" y1="222" x2="480" y2="248"/><line x1="510" y1="222" x2="510" y2="248"/>
+          <line x1="540" y1="222" x2="540" y2="248"/><line x1="570" y1="222" x2="570" y2="248"/><line x1="600" y1="222" x2="600" y2="248"/>
+          <line x1="630" y1="222" x2="630" y2="248"/><line x1="660" y1="222" x2="660" y2="248"/><line x1="690" y1="222" x2="690" y2="248"/>
+          <line x1="720" y1="222" x2="720" y2="248"/><line x1="750" y1="222" x2="750" y2="248"/><line x1="780" y1="222" x2="780" y2="248"/>
+        </g>
+        <text x="330" y="282" font-size="11.5" fill="#101820">visible count in the tile = set bits in [4, 8) — <tspan fill="#0e6f8a">exact, no document data read</tspan></text>
+        <text x="330" y="299" font-size="11.5" fill="#5b6a75">a tile's [lo, hi) comes from two binary searches over the sorted code column; no tile table is stored</text>
+        <text x="330" y="316" font-size="11.5" fill="#5b6a75">the grid is 2¹⁶ × 2¹⁶ — ~0.23 items per cell at 10⁹, so collisions do not bind</text>
+      
+</svg>
+    </div>
+    <figcaption>Morton is chosen over Hilbert deliberately: worse locality, but only Morton has the prefix property, and that one property underpins tile counting, the density underlay, level-of-detail sampling and sharding.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p6">
+  <p class="eyebrow">06 · Act II — when the expensive work happens, and what it costs</p>
+  <h2>Sessions, and their cost</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 486" role="img" aria-label="Session pipeline from credential through plugin terms to a cached mask, composed per request with deletions and arrivals; below, measured first-viewport cost rising with how much the viewer may see." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar6" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">A session builds the mask once; every request composes cheap diffs on it</text>
+        <rect x="20" y="42" width="820" height="126" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="36" y="62" font-size="11.5" fill="#5b6a75" letter-spacing="1">ONCE PER SESSION</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="36"  y="78" width="150" height="56" rx="2"/>
+          <rect x="222" y="78" width="170" height="56" rx="2"/>
+          <rect x="428" y="78" width="180" height="56" rx="2"/>
+        </g>
+        <rect x="644" y="78" width="176" height="56" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="111" y="100">auth data</text>
+          <text x="307" y="100">caller's plugin</text>
+          <text x="518" y="100">union postings</text>
+          <text x="732" y="100">session mask</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="111" y="116">claims, or a signed</text>
+          <text x="111" y="128">verified assertion</text>
+          <text x="307" y="116">auth data &#8594; the set of</text>
+          <text x="307" y="128">permission terms it satisfies</text>
+          <text x="518" y="116">one bitmap per term —</text>
+          <text x="518" y="128">262 ms for 10⁴ terms at 10⁹</text>
+          <text x="732" y="116">projected to row order once,</text>
+          <text x="732" y="128">cached for the session</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar6)">
+          <line x1="188" y1="106" x2="218" y2="106"/>
+          <line x1="394" y1="106" x2="424" y2="106"/>
+          <line x1="610" y1="106" x2="640" y2="106"/>
+        </g>
+        <rect x="20" y="194" width="820" height="110" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="36" y="214" font-size="11.5" fill="#5b6a75" letter-spacing="1">EVERY REQUEST</text>
+        <rect x="36" y="228" width="240" height="52" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <rect x="420" y="228" width="200" height="52" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="156" y="248">deletions · suppressions ·</text>
+          <text x="156" y="264">items newer than the mask</text>
+          <text x="520" y="254">the effective visible set</text>
+        </g>
+        <line x1="278" y1="254" x2="416" y2="254" stroke="#101820" stroke-width="1.2" marker-end="url(#ar6)"/>
+        <text x="347" y="246" font-size="10.5" fill="#5b6a75" text-anchor="middle">composed as diffs</text>
+        <line x1="732" y1="134" x2="732" y2="254" stroke="#101820" stroke-width="1.2"/>
+        <line x1="732" y1="254" x2="624" y2="254" stroke="#101820" stroke-width="1.2" marker-end="url(#ar6)"/>
+        <text x="36" y="296" font-size="11.5" fill="#101820">a suppression or deletion is in force from the moment it is acknowledged, whatever mask the session built earlier</text>
+
+        <text x="20" y="342" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHERE THE COST LANDS — FIRST VIEWPORT OF A SESSION, BY HOW MUCH THE VIEWER MAY SEE (10⁹ ITEMS)</text>
+        <g font-size="11.5" fill="#101820" text-anchor="end">
+          <text x="150" y="368">0.0001% visible</text>
+          <text x="150" y="390">1.5% visible</text>
+          <text x="150" y="412">8% visible</text>
+          <text x="150" y="434">39% visible</text>
+          <text x="150" y="456">77% visible</text>
+        </g>
+        <g fill="#0e6f8a">
+          <rect x="160" y="356" width="30"  height="15"/>
+          <rect x="160" y="378" width="220" height="15"/>
+          <rect x="160" y="400" width="390" height="15"/>
+          <rect x="160" y="422" width="530" height="15"/>
+          <rect x="160" y="444" width="590" height="15"/>
+        </g>
+        <g font-size="11.5" fill="#101820">
+          <text x="198" y="368">11 ms</text>
+          <text x="388" y="390">180 ms</text>
+          <text x="558" y="412">1.1 s</text>
+          <text x="698" y="434">5.2 s</text>
+          <text x="758" y="456">9.9 s</text>
+        </g>
+        <text x="20" y="482" font-size="11.5" fill="#5b6a75">(log scale) — the authorise call itself is 1–2 ms at every size; warm requests for the same viewers run 7–285 ms; sessions do not yet share this work</text>
+      
+</svg>
+    </div>
+    <figcaption>The engine never interprets credentials itself: the caller&#8217;s plugin defines what a permission term means, and authorisation comes only from the presented token — the service never looks credentials up or refreshes them, so staleness is bounded by token lifetime, which the caller sets.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p5">
+  <p class="eyebrow">07 · Act II — what one pan or zoom costs, end to end</p>
+  <h2>One viewport request</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 356" role="img" aria-label="Five request stages left to right, a bar showing selection dominating measured time, and the measured cost model: nanoseconds per visible row, uncorrelated with points returned." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar5" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One viewport request, and where its time goes — measured at 10⁹ items</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="46" width="150" height="56" rx="2"/>
+          <rect x="188" y="46" width="150" height="56" rx="2"/>
+          <rect x="356" y="46" width="150" height="56" rx="2"/>
+          <rect x="524" y="46" width="150" height="56" rx="2"/>
+          <rect x="692" y="46" width="150" height="56" rx="2"/>
+        </g>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="95" y="68">compose mask</text>
+          <text x="263" y="68">tiles &#8594; ranges</text>
+          <text x="431" y="68">count per tile</text>
+          <text x="599" y="68">select per tile</text>
+          <text x="767" y="68">gather + emit</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="95" y="84">session projection</text>
+          <text x="95" y="96">+ overlay diffs</text>
+          <text x="263" y="84">binary search,</text>
+          <text x="263" y="96">~300 tiles</text>
+          <text x="431" y="84">range bit-counts,</text>
+          <text x="431" y="96">no file read</text>
+          <text x="599" y="84">walk visible rows,</text>
+          <text x="599" y="96">keep lowest priority</text>
+          <text x="767" y="84">columns &#8594; Arrow,</text>
+          <text x="767" y="96">opaque IDs out</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar5)">
+          <line x1="172" y1="74" x2="184" y2="74"/>
+          <line x1="340" y1="74" x2="352" y2="74"/>
+          <line x1="508" y1="74" x2="520" y2="74"/>
+          <line x1="676" y1="74" x2="688" y2="74"/>
+        </g>
+
+        <text x="20" y="152" font-size="11.5" fill="#5b6a75" letter-spacing="1">MEASURED SHARE OF THE REQUEST</text>
+        <g stroke="#b7c2c9">
+          <rect x="20"  y="164" width="16"  height="34" fill="#f1f4f5"/>
+          <rect x="36"  y="164" width="41"  height="34" fill="#e9e4f0"/>
+          <rect x="77"  y="164" width="706" height="34" fill="#dcedf3" stroke="#0e6f8a"/>
+          <rect x="783" y="164" width="49"  height="34" fill="#f4ecd7"/>
+        </g>
+        <text x="430" y="186" font-size="12.5" fill="#101820" text-anchor="middle">selection — 83–89%</text>
+        <g font-size="11" fill="#5b6a75">
+          <text x="20" y="216">compose ≈0%</text>
+          <text x="130" y="216">counting 3–6%</text>
+          <text x="700" y="216">gather 5–6%</text>
+        </g>
+        <line x1="28" y1="204" x2="28" y2="198" stroke="#9aa8b1"/>
+        <line x1="57" y1="204" x2="57" y2="198" stroke="#9aa8b1"/>
+        <line x1="807" y1="204" x2="807" y2="198" stroke="#9aa8b1"/>
+
+        <text x="20" y="258" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE MEASURED COST MODEL</text>
+        <text x="20" y="282" font-size="13" fill="#101820">request time ≈ 4.0–4.5 ns × <tspan fill="#0e6f8a">visible rows in the viewport</tspan> (correlation 0.83–0.999)</text>
+        <text x="20" y="304" font-size="13" fill="#101820">latency: <tspan fill="#0e6f8a">p50 123 ms · p99 158–191 ms</tspan> per viewport — hundreds of milliseconds at 10⁹, not single-digit</text>
+        <text x="20" y="326" font-size="12" fill="#5b6a75">uncorrelated with points returned (−0.08): raising the mark budget 20× moves p50 by ~20% — returning more is nearly free, seeing more is not</text>
+        <text x="20" y="345" font-size="12" fill="#5b6a75">the quantity to design against: a viewer granted 42% of the corpus averages ~25M visible rows per viewport, max ~145M</text>
+      
+</svg>
+    </div>
+    <figcaption>Counting behaves as the design hoped; selection does not, and an early claim that cost scales with screen area is refuted by measurement and recorded as such.</figcaption>
+  </figure>
+</section>
+
+<div class="act">
+  <p class="act-label">Act III · Fields, marks and filters</p>
+  <p>What a per-item field is and where its bytes live; then what is actually drawn, and how filtering narrows it — with sampling always running inside the mask, and inside the match.</p>
+</div>
+
+<section class="plate" id="ptoml">
+  <p class="eyebrow">08 · Act III — the data model: one declaration decides where a field lives</p>
+  <h2>Declaring fields: render, index, inspect</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 584" role="img" aria-label="A schema.toml attribute block on the left; four example declarations routed by their flags to three storage homes — the hot column read per rendered mark, the entity-space search structure read per query, and the record blob read per click." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="arT" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One TOML block per field decides where its bytes live — and therefore when they are ever read</text>
+
+        <text x="20" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE DECLARATION — schema.toml</text>
+        <rect x="20" y="62" width="430" height="164" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <g font-size="11" font-family="ui-monospace, Menlo, Consolas, monospace">
+          <text x="36" y="84"  fill="#101820">[[attribute]]</text>
+          <text x="36" y="101" fill="#101820">name       = "archive"</text>
+          <text x="36" y="118" fill="#101820">type       = "category"   <tspan fill="#5b6a75"># or a number width,</tspan></text>
+          <text x="36" y="135" fill="#101820">width      = "u8"         <tspan fill="#5b6a75">#   timestamp, keyword, text</tspan></text>
+          <text x="36" y="152" fill="#0e6f8a">render     = true         <tspan fill="#5b6a75"># drawn on the map</tspan></text>
+          <text x="36" y="169" fill="#0e6f8a">index      = true         <tspan fill="#5b6a75"># searchable / filterable</tspan></text>
+          <text x="36" y="186" fill="#101820">vocabulary = "declared"   <tspan fill="#5b6a75"># or discovered at ingest</tspan></text>
+          <text x="36" y="203" fill="#101820">listing    = "public"     <tspan fill="#5b6a75"># who may learn the value list</tspan></text>
+        </g>
+
+        <text x="480" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHAT THE BUILD DOES WITH IT</text>
+        <g font-size="11.5">
+          <text x="480" y="78"  fill="#101820">tessera build compiles the schema into the bundle's</text>
+          <text x="480" y="94"  fill="#101820">MANIFEST; the engine serves only what it declares, and</text>
+          <text x="480" y="110" fill="#101820">/v1/meta advertises the filter operands derived from it</text>
+          <text x="480" y="140" fill="#5b6a75">name and type are required; every flag defaults to false —</text>
+          <text x="480" y="156" fill="#5b6a75">the cheapest placement, made costlier only by an explicit word</text>
+          <text x="480" y="186" fill="#5b6a75">categories must also declare width, vocabulary and listing:</text>
+          <text x="480" y="202" fill="#5b6a75">disclosure and migration controls never default</text>
+        </g>
+
+        <text x="20" y="254" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHERE THE BYTES LIVE — ONE HOME PER FIELD, CHOSEN BY THE FLAGS</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20" y="266" width="254" height="40" rx="2"/>
+          <rect x="20" y="314" width="254" height="40" rx="2"/>
+          <rect x="20" y="362" width="254" height="40" rx="2"/>
+          <rect x="20" y="410" width="254" height="40" rx="2"/>
+        </g>
+        <g font-size="11.5" fill="#101820">
+          <text x="34" y="283">recency — f32</text>
+          <text x="34" y="331">archive — category (u8)</text>
+          <text x="34" y="379">submitter — keyword</text>
+          <text x="34" y="427">doi — keyword</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="34" y="298">render = true</text>
+          <text x="34" y="346">render + index</text>
+          <text x="34" y="394">index = true</text>
+          <text x="34" y="442">no flags</text>
+        </g>
+
+        <rect x="470" y="262" width="370" height="68" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="486" y="284" font-size="12" fill="#101820">RENDER — the hot column</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="486" y="301">row space, fixed width, mmap'd — read per rendered</text>
+          <text x="486" y="315">mark (~10⁵ a viewport); never compressed</text>
+        </g>
+        <rect x="470" y="350" width="370" height="68" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="486" y="372" font-size="12" fill="#101820">INDEX — the search structure</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="486" y="389">entity space, scanned under the viewer's mask — read</text>
+          <text x="486" y="403">once per query; categories add per-value bitmaps</text>
+        </g>
+        <rect x="470" y="438" width="370" height="68" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="486" y="460" font-size="12" fill="#101820">INSPECT — the record blob</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="486" y="477">compressed blocks (3.0× measured) — one block read</text>
+          <text x="486" y="491">per click (~0.25 ms); never on the render or query path</text>
+        </g>
+
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#arT)">
+          <line x1="278" y1="286" x2="466" y2="288"/>
+          <line x1="278" y1="328" x2="466" y2="304"/>
+          <line x1="278" y1="340" x2="466" y2="372"/>
+          <line x1="278" y1="382" x2="466" y2="386"/>
+          <line x1="278" y1="430" x2="466" y2="468"/>
+        </g>
+
+        <g font-size="11">
+          <text x="20" y="530" fill="#101820">the routing rule: place by how often a value is read, not by what it is — per mark, per query and per click are four orders of magnitude apart</text>
+          <text x="20" y="548" fill="#5b6a75">store once: a field's bytes live in exactly one home; a rendered column is already filterable over the request's own rows, at no extra storage</text>
+          <text x="20" y="566" fill="#5b6a75">refused at parse, each naming itself: render on keyword or text (not fixed width), render on a multi-valued field, a category missing its controls</text>
+        </g>
+      
+</svg>
+    </div>
+    <figcaption>An unindexed field still answers on click — the record always exists. Text fields are the one exception to store-once: indexing text adds a token dictionary and postings (~24 B/entity measured on titles) beside the blob.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p7">
+  <p class="eyebrow">09 · Act III — the mask says what may be shown; this decides what is drawn</p>
+  <h2>Static sampling, worked</h2>
+  <p class="lead">Sixteen rows, four tiles, two zoom levels — priority shown as a fixed 2-digit ID per item.</p>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 548" role="img" aria-label="A sixteen-row table in Morton order with fixed two-digit priorities and two masked rows; zoomed out, the whole table is one tile serving IDs below 20; zoomed in, four tiles serve IDs below 80 - the zoomed-out marks reappear in their own tiles, one tile falls back to the floor, and masked rows never enter any selection." font-family="ui-sans-serif, system-ui, sans-serif">
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Static sampling, worked: sixteen rows, four tiles, two zoom levels</text>
+        <text x="20" y="46" font-size="11.5" fill="#5b6a75">every item keeps one fixed draw priority for life — a 2-digit ID here, the leading 16 bits of its keyed public ID in reality; there is no randomness at query time</text>
+
+        <text x="96" y="82" font-size="11" fill="#5b6a75">one slice&#8217;s rows, in Morton order — so each tile below is a contiguous run (plates 04–05); two rows are outside this viewer&#8217;s mask</text>
+        <g stroke="#b7c2c9">
+          <rect x="96"  y="92" width="44" height="36" fill="#ffffff"/><rect x="140" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="184" y="92" width="44" height="36" fill="#ffffff"/><rect x="228" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="272" y="92" width="44" height="36" fill="#ffffff"/><rect x="316" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="360" y="92" width="44" height="36" fill="#eef1f3"/><rect x="404" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="448" y="92" width="44" height="36" fill="#ffffff"/><rect x="492" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="536" y="92" width="44" height="36" fill="#eef1f3"/><rect x="580" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="624" y="92" width="44" height="36" fill="#ffffff"/><rect x="668" y="92" width="44" height="36" fill="#ffffff"/>
+          <rect x="712" y="92" width="44" height="36" fill="#ffffff"/><rect x="756" y="92" width="44" height="36" fill="#ffffff"/>
+        </g>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="118" y="115">47</text><text x="162" y="115">12</text><text x="206" y="115">83</text><text x="250" y="115">59</text>
+          <text x="294" y="115">31</text><text x="338" y="115">76</text><text x="426" y="115">64</text>
+          <text x="470" y="115">92</text><text x="514" y="115">87</text><text x="602" y="115">95</text>
+          <text x="646" y="115">19</text><text x="690" y="115">88</text><text x="734" y="115">36</text><text x="778" y="115">60</text>
+        </g>
+        <g font-size="12.5" fill="#9aa8b1" text-anchor="middle">
+          <text x="382" y="115">08</text><text x="558" y="115">55</text>
+        </g>
+        <g stroke="#9aa8b1" stroke-width="1.2">
+          <line x1="368" y1="122" x2="396" y2="98"/>
+          <line x1="544" y1="122" x2="572" y2="98"/>
+        </g>
+        <g font-size="9" fill="#9aa8b1" text-anchor="middle">
+          <text x="118" y="140">0</text><text x="162" y="140">1</text><text x="206" y="140">2</text><text x="250" y="140">3</text>
+          <text x="294" y="140">4</text><text x="338" y="140">5</text><text x="382" y="140">6</text><text x="426" y="140">7</text>
+          <text x="470" y="140">8</text><text x="514" y="140">9</text><text x="558" y="140">10</text><text x="602" y="140">11</text>
+          <text x="646" y="140">12</text><text x="690" y="140">13</text><text x="734" y="140">14</text><text x="778" y="140">15</text>
+        </g>
+        <g fill="none" stroke="#101820" stroke-width="1.2">
+          <path d="M96,148 L96,156 L270,156 L270,148"/>
+          <path d="M274,148 L274,156 L446,156 L446,148"/>
+          <path d="M450,148 L450,156 L622,156 L622,148"/>
+          <path d="M626,148 L626,156 L798,156 L798,148"/>
+        </g>
+        <g font-size="11" fill="#101820" text-anchor="middle">
+          <text x="183" y="174">tile A · rows 0–3</text>
+          <text x="360" y="174">tile B · rows 4–7</text>
+          <text x="536" y="174">tile C · rows 8–11</text>
+          <text x="712" y="174">tile D · rows 12–15</text>
+        </g>
+
+        <text x="20" y="210" font-size="11.5" fill="#5b6a75" letter-spacing="1">ZOOMED OUT — THE WHOLE VIEWPORT IS ONE TILE (ROWS 0–15) · THRESHOLD AT THIS DEPTH: SERVE VISIBLE IDs BELOW 20</text>
+        <g>
+          <rect x="96"  y="222" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+          <rect x="93"  y="219" width="52" height="30" rx="15" fill="none" stroke="#0e6f8a"/>
+          <rect x="156" y="222" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+          <rect x="153" y="219" width="52" height="30" rx="15" fill="none" stroke="#0e6f8a"/>
+        </g>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="119" y="238">12</text>
+          <text x="179" y="238">19</text>
+        </g>
+        <text x="226" y="234" font-size="11" fill="#101820">two marks — how many visible rows sit below the cut is proportional to the visible total,</text>
+        <text x="226" y="248" font-size="11" fill="#101820">so mark count carries density</text>
+        <text x="96" y="272" font-size="11" fill="#5b6a75">08 would have been drawn, but it is not visible to this viewer — selection walks only their own rows; a different mask gives a different, equally stable sample</text>
+
+        <text x="20" y="306" font-size="11.5" fill="#5b6a75" letter-spacing="1">ZOOMED IN ONE LEVEL — FOUR TILES · THE THRESHOLD QUADRUPLES: SERVE VISIBLE IDs BELOW 80</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="96"  y="318" width="174" height="88" rx="2"/>
+          <rect x="272" y="318" width="174" height="88" rx="2"/>
+          <rect x="448" y="318" width="174" height="88" rx="2"/>
+          <rect x="624" y="318" width="174" height="88" rx="2"/>
+        </g>
+        <rect x="106" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="103" y="327" width="52" height="30" rx="15" fill="none" stroke="#0e6f8a"/>
+        <rect x="162" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="218" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="129" y="346">12</text><text x="185" y="346">47</text><text x="241" y="346">59</text>
+        </g>
+        <text x="106" y="378" font-size="10" fill="#5b6a75">83 is above the cut</text>
+        <rect x="282" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="338" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="394" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="305" y="346">31</text><text x="361" y="346">64</text><text x="417" y="346">76</text>
+        </g>
+        <text x="282" y="378" font-size="10" fill="#5b6a75">08 is not visible</text>
+        <rect x="458" y="330" width="46" height="24" rx="12" fill="#f4ecd7" stroke="#7d6111"/>
+        <rect x="514" y="330" width="46" height="24" rx="12" fill="#f4ecd7" stroke="#7d6111"/>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="481" y="346">87</text><text x="537" y="346">92</text>
+        </g>
+        <text x="568" y="346" font-size="10" fill="#7d6111">← floor</text>
+        <text x="458" y="378" font-size="10" fill="#5b6a75">nothing below 80 → serve the</text>
+        <text x="458" y="392" font-size="10" fill="#5b6a75">2 lowest visible — never blank</text>
+        <rect x="634" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="631" y="327" width="52" height="30" rx="15" fill="none" stroke="#0e6f8a"/>
+        <rect x="690" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="746" y="330" width="46" height="24" rx="12" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="657" y="346">19</text><text x="713" y="346">36</text><text x="769" y="346">60</text>
+        </g>
+        <text x="634" y="378" font-size="10" fill="#5b6a75">88 is above the cut</text>
+
+        <text x="20" y="436" font-size="11.5" fill="#0e6f8a">the zoomed-out marks — 12 and 19, ringed — are served again in their own tiles: served at the shallow depth means ID &lt; 20, the deeper threshold is 80,</text>
+        <text x="20" y="452" font-size="11.5" fill="#0e6f8a">and the item is still in whichever sub-tile contains it. zoom refines the picture — it never reshuffles it</text>
+        <g font-size="11">
+          <text x="20" y="482" fill="#101820">the real quantities: priority is the top 16 bits of the keyed public ID — uniform, uncorrelated with permissions; the threshold is anchored per session so a</text>
+          <text x="20" y="498" fill="#101820">tile draws ~16 marks, and it quadruples per depth exactly as here. a floor (2) and a cap (500) bound every tile: never blank, never unbounded</text>
+          <text x="20" y="524" fill="#5b6a75">panning changes nothing — the threshold depends on the viewer&#8217;s visible total, never the viewport; the same viewer over the same data draws the same</text>
+          <text x="20" y="540" fill="#5b6a75">marks on every revisit. under a filter, the identical rule re-runs over the matching rows alone (next plate)</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Beyond the cap, a shaded density underlay of exact masked sub-cell counts on a log colour ramp carries the decades that marks cannot.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p8">
+  <p class="eyebrow">10 · Act III — what typing a filter changes, and what it must not</p>
+  <h2>Filtering and sampling</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 508" role="img" aria-label="Nested sets — everything, what the viewer may see, what the filter matched — feed a stable context layer and a match layer; below, sampling the matches is contrasted with filtering a global sample, which empties the screen." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar8" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">A filter narrows what is highlighted — never what frames it, and never what you are allowed to see</text>
+
+        <rect x="20" y="52" width="300" height="214" rx="4" fill="#ffffff" stroke="#b7c2c9"/>
+        <text x="36" y="74" font-size="11.5" fill="#5b6a75" letter-spacing="1">EVERYTHING</text>
+        <rect x="48" y="90" width="244" height="152" rx="4" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="64" y="112" font-size="12" fill="#101820">what you may see</text>
+        <rect x="76" y="128" width="150" height="88" rx="4" fill="#ffffff" stroke="#0e6f8a" stroke-dasharray="4 3"/>
+        <text x="92" y="150" font-size="12" fill="#101820">what your</text>
+        <text x="92" y="166" font-size="12" fill="#101820">filter matched</text>
+
+        <g stroke="#101820" stroke-width="1.3" marker-end="url(#ar8)">
+          <line x1="294" y1="110" x2="352" y2="96"/>
+          <line x1="228" y1="176" x2="352" y2="226"/>
+        </g>
+
+        <rect x="360" y="52" width="470" height="110" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="376" y="76" font-size="12.5" fill="#101820">context layer — sampled from <tspan fill="#0e6f8a">everything you may see</tspan></text>
+        <text x="376" y="96" font-size="11" fill="#5b6a75">holds still while you type: marks, cluster structure and labels keep</text>
+        <text x="376" y="110" font-size="11" fill="#5b6a75">the frame of reference — filtering highlights, it never dissolves the map</text>
+        <text x="376" y="130" font-size="11" fill="#5b6a75">labels and cluster depth are governed by this set, so no filter can</text>
+        <text x="376" y="144" font-size="11" fill="#5b6a75">reveal — or hide — structure the viewer's permissions alone would not (plates 16–17)</text>
+        <rect x="712" y="66" width="104" height="82" fill="#fbfcfc" stroke="#b7c2c9"/>
+        <g fill="#9aa8b1">
+          <circle cx="728" cy="82" r="3.5"/><circle cx="760" cy="90" r="3.5"/><circle cx="794" cy="78" r="3.5"/>
+          <circle cx="740" cy="112" r="3.5"/><circle cx="778" cy="120" r="3.5"/><circle cx="726" cy="134" r="3.5"/>
+          <circle cx="798" cy="138" r="3.5"/><circle cx="762" cy="140" r="3.5"/>
+        </g>
+
+        <rect x="360" y="182" width="470" height="120" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="376" y="206" font-size="12.5" fill="#101820">match layer — drawn from <tspan fill="#0e6f8a">what the filter matched</tspan></text>
+        <text x="376" y="226" font-size="11" fill="#5b6a75">narrow filter &#8594; sent in full, unsampled · broad filter &#8594; sampled,</text>
+        <text x="376" y="240" font-size="11" fill="#5b6a75">by the same static rule, applied after the filter</text>
+        <text x="376" y="260" font-size="11" fill="#5b6a75">per tile, two exact range counts: matched and visible —</text>
+        <text x="376" y="274" font-size="11" fill="#101820">"312 of the 8,140 you can see here match"</text>
+        <rect x="712" y="196" width="104" height="92" fill="#fbfcfc" stroke="#b7c2c9"/>
+        <g fill="#c4ccd2">
+          <circle cx="728" cy="212" r="3.5"/><circle cx="760" cy="220" r="3.5"/><circle cx="794" cy="208" r="3.5"/>
+          <circle cx="740" cy="242" r="3.5"/><circle cx="778" cy="250" r="3.5"/><circle cx="726" cy="264" r="3.5"/>
+          <circle cx="798" cy="268" r="3.5"/><circle cx="762" cy="270" r="3.5"/>
+        </g>
+        <g fill="none" stroke="#0e6f8a" stroke-width="2">
+          <circle cx="760" cy="220" r="6"/><circle cx="740" cy="242" r="6"/><circle cx="798" cy="268" r="6"/>
+        </g>
+
+        <text x="20" y="344" font-size="11.5" fill="#5b6a75" letter-spacing="1">SAMPLED AFTER FILTERING — NOT FILTERED OUT OF A GLOBAL SAMPLE</text>
+        <rect x="20" y="360" width="160" height="104" fill="#ffffff" stroke="#0e6f8a"/>
+        <g fill="#0e6f8a">
+          <circle cx="52" cy="384" r="4"/><circle cx="98" cy="396" r="4"/><circle cx="140" cy="380" r="4"/>
+          <circle cx="66" cy="430" r="4"/><circle cx="122" cy="440" r="4"/>
+        </g>
+        <text x="100" y="484" font-size="11.5" fill="#101820" text-anchor="middle">sample of your matches ✓</text>
+        <rect x="220" y="360" width="160" height="104" fill="#ffffff" stroke="#b7c2c9"/>
+        <circle cx="330" cy="436" r="4" fill="#9aa8b1"/>
+        <text x="300" y="484" font-size="11.5" fill="#7d6111" text-anchor="middle">matches ∩ a global sample ✗</text>
+        <g font-size="12" fill="#101820">
+          <text x="420" y="384">a global sample selects around rare matches: thousands of</text>
+          <text x="420" y="401">matching items, none of them sampled &#8594; an empty screen</text>
+          <text x="420" y="430">so the sample is defined over the filtered set itself, and the</text>
+          <text x="420" y="447">threshold pass re-runs on every filter change — the depth-</text>
+          <text x="420" y="464">preserving guarantees of the previous plate apply unchanged,</text>
+          <text x="420" y="481">within any one filter state</text>
+        </g>
+      
+</svg>
+    </div>
+  </figure>
+</section>
+
+<section class="plate" id="p9">
+  <p class="eyebrow">11 · Act III — how a filter expression actually runs</p>
+  <h2>Evaluating a filter</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 384" role="img" aria-label="A boolean filter tree with the viewer's visible set entering every leaf, and the measured rule for crossing the result onto the map." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar9" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+          <marker id="ar9c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0e6f8a"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">A filter is a boolean tree, evaluated inside what the viewer may see</text>
+        <text x="20" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE EXPRESSION</text>
+        <rect x="150" y="62" width="120" height="40" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="210" y="86" font-size="12.5" fill="#101820" text-anchor="middle">all_of</text>
+        <rect x="60" y="142" width="130" height="40" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="125" y="166" font-size="12.5" fill="#101820" text-anchor="middle">any_of</text>
+        <rect x="240" y="142" width="150" height="40" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="315" y="161" font-size="12" fill="#101820" text-anchor="middle">year ≥ 2020</text>
+        <text x="315" y="175" font-size="10" fill="#5b6a75" text-anchor="middle">numeric scan</text>
+        <rect x="20" y="222" width="120" height="40" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="80" y="241" font-size="12" fill="#101820" text-anchor="middle">type = memo</text>
+        <text x="80" y="255" font-size="10" fill="#5b6a75" text-anchor="middle">category</text>
+        <rect x="160" y="222" width="120" height="40" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="220" y="241" font-size="12" fill="#101820" text-anchor="middle">match "fraud"</text>
+        <text x="220" y="255" font-size="10" fill="#5b6a75" text-anchor="middle">analysed text</text>
+        <g stroke="#9aa8b1" stroke-width="1.1">
+          <line x1="185" y1="102" x2="140" y2="138"/>
+          <line x1="235" y1="102" x2="300" y2="138"/>
+          <line x1="105" y1="182" x2="85" y2="218"/>
+          <line x1="145" y1="182" x2="205" y2="218"/>
+        </g>
+        <rect x="20" y="302" width="370" height="44" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="205" y="322" font-size="12" fill="#101820" text-anchor="middle">the viewer's visible set, pushed into every leaf</text>
+        <text x="205" y="338" font-size="10.5" fill="#5b6a75" text-anchor="middle">so no intermediate result ever holds an item they cannot see</text>
+        <g stroke="#0e6f8a" stroke-width="1.3" marker-end="url(#ar9c)">
+          <line x1="80"  y1="298" x2="80"  y2="266"/>
+          <line x1="220" y1="298" x2="220" y2="266"/>
+          <line x1="330" y1="298" x2="318" y2="186"/>
+        </g>
+        <text x="20" y="374" font-size="11" fill="#5b6a75">new capability = a new leaf type, never a new query language — the disclosure surface stays enumerable</text>
+
+        <text x="450" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">CROSSING THE RESULT ONTO THE MAP — MEASURED RULE</text>
+        <rect x="450" y="62" width="380" height="56" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="466" y="86" font-size="12" fill="#101820">is the result ≤ 3 × the viewport's rows?</text>
+        <text x="466" y="104" font-size="10.5" fill="#5b6a75">the only decision the crossing needs</text>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar9)">
+          <line x1="560" y1="118" x2="560" y2="152"/>
+          <line x1="740" y1="118" x2="740" y2="152"/>
+        </g>
+        <text x="548" y="140" font-size="10.5" fill="#5b6a75" text-anchor="end">yes — narrow</text>
+        <text x="752" y="140" font-size="10.5" fill="#5b6a75">no — broad</text>
+        <rect x="450" y="156" width="200" height="72" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="466" y="178" font-size="12" fill="#101820">project the result</text>
+        <text x="466" y="196" font-size="10.5" fill="#5b6a75">cost scales with the result —</text>
+        <text x="466" y="210" font-size="10.5" fill="#5b6a75">cheap because it is narrow:</text>
+        <text x="466" y="224" font-size="10.5" fill="#5b6a75">3.8 ms at 10⁵ matches</text>
+        <rect x="666" y="156" width="164" height="72" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="682" y="178" font-size="12" fill="#101820">test the viewport's</text>
+        <text x="682" y="194" font-size="12" fill="#101820">own rows instead</text>
+        <text x="682" y="212" font-size="10.5" fill="#5b6a75">bounded by the screen,</text>
+        <text x="682" y="226" font-size="10.5" fill="#5b6a75">not the corpus: tens of ms</text>
+        <text x="450" y="264" font-size="11.5" fill="#101820">projecting a broad result would cost more than the scan that found it:</text>
+        <text x="450" y="282" font-size="11.5" fill="#7d6111">10⁸ matches &#8594; 2,779 ms to project, against a 730 ms scan</text>
+        <text x="450" y="312" font-size="11" fill="#5b6a75">ranked queries are expressed as thresholds and ranked after intersection —</text>
+        <text x="450" y="328" font-size="11" fill="#5b6a75">a corpus-wide top-k intersected afterwards would let results vary with items</text>
+        <text x="450" y="344" font-size="11" fill="#5b6a75">the viewer cannot see; and no pre-intersection match count is ever exposed</text>
+        <text x="450" y="372" font-size="11" fill="#5b6a75">filter budget at 10⁹: 0.5–1 s · category scans 74–280 ms · worst cases closed 17–74× by block-building</text>
+      
+</svg>
+    </div>
+  </figure>
+</section>
+
+<div class="act">
+  <p class="act-label">Act IV · Change, and the machine whole</p>
+  <p>Who calls the machine and with what credentials; how data arrives, becomes visible and is removed; then every store in one picture, each box grounded by a plate that came before it.</p>
+</div>
+
+<section class="plate" id="p2">
+  <p class="eyebrow">12 · Act IV — the machine from outside: who calls what</p>
+  <h2>The shape of the system</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 428" role="img" aria-label="Three client tiers reach three planes inside one process; the engine memory-maps an immutable bundle, the write executor owns a write-ahead log." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One binary, three surfaces, two durable stores</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="60"  y="46" width="200" height="46" rx="2"/>
+          <rect x="330" y="46" width="200" height="46" rx="2"/>
+          <rect x="600" y="46" width="200" height="46" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="160" y="65">browser / SDK</text>
+          <text x="430" y="65">app tier</text>
+          <text x="700" y="65">operator / data tier</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="160" y="82">viewport · drill-down · meta</text>
+          <text x="430" y="82">authorise · revoke</text>
+          <text x="700" y="82">ingest · delete · suppress</text>
+        </g>
+        <rect x="40" y="126" width="780" height="196" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="56" y="146" font-size="11.5" fill="#5b6a75" letter-spacing="1">TESSERA &#8212; ONE BINARY, ONE PROCESS</text>
+        <rect x="60" y="160" width="200" height="50" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="330" y="160" width="200" height="50" rx="2"/>
+          <rect x="600" y="160" width="200" height="50" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="160" y="180">viewer plane</text>
+          <text x="430" y="180">session plane</text>
+          <text x="700" y="180">admin plane</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="160" y="197">token only — untrusted</text>
+          <text x="430" y="197">own listener, own credential</text>
+          <text x="700" y="197">unix socket, operator credential</text>
+        </g>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="60"  y="246" width="460" height="52" rx="2"/>
+          <rect x="580" y="246" width="220" height="52" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="290" y="267">engine</text>
+          <text x="690" y="267">write executor</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="290" y="284">masks · counts · selection · caches</text>
+          <text x="690" y="284">owns the WAL, single writer</text>
+        </g>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="140" y="360" width="300" height="52" rx="2"/>
+          <rect x="560" y="360" width="240" height="52" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="290" y="381">bundle/</text>
+          <text x="680" y="381">wal/</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="290" y="398">immutable versioned artifacts</text>
+          <text x="680" y="398">durability for ingest and denies</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar2)">
+          <line x1="160" y1="94" x2="160" y2="156"/>
+          <line x1="430" y1="94" x2="430" y2="156"/>
+          <line x1="700" y1="94" x2="700" y2="156"/>
+          <line x1="160" y1="212" x2="160" y2="242"/>
+          <line x1="430" y1="212" x2="430" y2="242"/>
+          <line x1="700" y1="212" x2="700" y2="242"/>
+          <line x1="290" y1="300" x2="290" y2="356"/>
+          <line x1="680" y1="300" x2="680" y2="356"/>
+          <line x1="576" y1="272" x2="526" y2="272"/>
+        </g>
+        <g font-size="11" fill="#5b6a75">
+          <text x="300" y="335">mmap, read-only</text>
+          <text x="690" y="335">append + fsync</text>
+          <text x="536" y="262" text-anchor="middle">publishes new</text>
+          <text x="551" y="290" text-anchor="middle">generation</text>
+        </g>
+      
+</svg>
+    </div>
+    <figcaption>Responses are Arrow IPC over plain HTTP, so any language consumes them directly. The same binary in batch mode produces bundles offline; Python appears only as a test-time oracle, never in a request path.</figcaption>
+  </figure>
+  <div class="note">
+    <span class="tag">Designed, not built</span>
+    Compartmented partitions — separation of designated data at rest and in memory, not merely by mask — are specified but not implemented. A deployment today is one partition: every item co-resident, separated by bitmap arithmetic.
+  </div>
+</section>
+
+<section class="plate" id="p10">
+  <p class="eyebrow">13 · Act IV — how data arrives and leaves while all of this is served</p>
+  <h2>Writing new data</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 452" role="img" aria-label="Ingest and change lanes feeding one write executor, above a timeline separating acknowledgement, visibility at flush, and physical removal at the fold." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="ar10" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+          <marker id="ar10d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#7d6111"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Two write lanes that never share a queue, and the three moments of an item's life</text>
+        <rect x="40" y="44" width="340" height="70" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="56" y="66" font-size="12.5" fill="#101820">ingest — add items</text>
+        <text x="56" y="84" font-size="10.5" fill="#5b6a75">bounded: may be refused under load (429)</text>
+        <text x="56" y="98" font-size="10.5" fill="#5b6a75">a commit window batches arrivals; IDs allocated at its close</text>
+        <rect x="480" y="44" width="340" height="70" rx="2" fill="#ffffff" stroke="#7d6111"/>
+        <text x="496" y="66" font-size="12.5" fill="#101820">change — delete · suppress · unsuppress</text>
+        <text x="496" y="84" font-size="10.5" fill="#5b6a75">unbounded: never refused for load —</text>
+        <text x="496" y="98" font-size="10.5" fill="#5b6a75">refusing a security operation fails open</text>
+        <rect x="250" y="168" width="360" height="60" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="430" y="192" font-size="12.5" fill="#101820" text-anchor="middle">write executor — the single writer</text>
+        <text x="430" y="210" font-size="10.5" fill="#5b6a75" text-anchor="middle">append &#8594; fsync &#8594; apply &#8594; swap &#8594; acknowledge</text>
+        <line x1="210" y1="114" x2="330" y2="164" stroke="#101820" stroke-width="1.2" marker-end="url(#ar10)"/>
+        <line x1="650" y1="114" x2="530" y2="164" stroke="#7d6111" stroke-width="1.2" marker-end="url(#ar10d)"/>
+        <text x="640" y="146" font-size="10.5" fill="#7d6111">drained first, always</text>
+
+        <text x="40" y="282" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE LIFE OF AN INGESTED ITEM — THREE SEPARATE MOMENTS</text>
+        <line x1="60" y1="318" x2="828" y2="318" stroke="#101820" stroke-width="1.2" marker-end="url(#ar10)"/>
+        <g stroke="#101820" stroke-width="1.4">
+          <line x1="130" y1="310" x2="130" y2="326"/>
+          <line x1="410" y1="310" x2="410" y2="326"/>
+          <line x1="690" y1="310" x2="690" y2="326"/>
+        </g>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="130" y="348">acknowledged</text>
+          <text x="410" y="348">flushed</text>
+          <text x="690" y="348">folded</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="130" y="366">durable, counted by authorisation —</text>
+          <text x="130" y="380">a receipt, not a visibility promise</text>
+          <text x="410" y="366">the item gains a map position &#8594; visible;</text>
+          <text x="410" y="380">the gap is bounded by a configured flush age</text>
+          <text x="690" y="366">a deleted item's row and permission</text>
+          <text x="690" y="380">entries are physically removed (nightly)</text>
+        </g>
+        <text x="60" y="416" font-size="11.5" fill="#7d6111">a deny is different: its acknowledgement is held until the entry is durable and applied — it is in force from the moment the caller hears "ok",</text>
+        <text x="60" y="432" font-size="11.5" fill="#5b6a75">and until the fold physically executes a deletion, an overlay entry keeps the item invisible (fail-closed either way)</text>
+        <text x="60" y="450" font-size="11" fill="#5b6a75">bulk ingest, measured: 250–465k rows/s submitted, 150–270k rows/s including the flush that makes them visible; 97k rows/s for one caller in small batches</text>
+      
+</svg>
+    </div>
+    <figcaption>Batching arrivals into a commit window costs seconds the latency budget already grants, and buys the permission-grouped ID assignment of plate 04 — the sort scope is whatever one window allocates together, permanently.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p2b">
+  <p class="eyebrow">14 · Act IV — the machine, revisited: every store above, in one picture</p>
+  <h2>Inside the engine</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 676" role="img" aria-label="The engine's major objects: per-session mask fragment and row projection, the shared ingest buffer, deny overlay and delta postings in memory; the bundle's file groups, the write-ahead log and the fragment cache on disk, with the arrows connecting them." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="arE" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Inside the engine: the major objects, in memory and on disk</text>
+
+        <!-- memory zone -->
+        <rect x="20" y="44" width="820" height="286" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="36" y="64" font-size="11.5" fill="#5b6a75" letter-spacing="1">IN MEMORY</text>
+
+        <rect x="40" y="84" width="260" height="64" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="52" y="104" font-size="12" fill="#101820">mask fragment — per session</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="52" y="119">the viewer's visible set — one bitmap;</text>
+          <text x="52" y="131">composed per request with the overlay;</text>
+          <text x="52" y="143">survives restart via the fragment cache</text>
+        </g>
+
+        <rect x="330" y="84" width="240" height="64" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="342" y="104" font-size="12" fill="#101820">row projection — per session</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="342" y="119">the visible set in map order;</text>
+          <text x="342" y="131">rebuilt only when the geometry</text>
+          <text x="342" y="143">version moves</text>
+        </g>
+
+        <rect x="600" y="84" width="240" height="52" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="612" y="102" font-size="12" fill="#101820">ingest buffer</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="612" y="117">accepted items awaiting flush —</text>
+          <text x="612" y="130">durable, not yet on the map</text>
+        </g>
+
+        <rect x="600" y="144" width="240" height="52" rx="2" fill="#ffffff" stroke="#7d6111"/>
+        <text x="612" y="162" font-size="12" fill="#101820">deny overlay: deleted · suppressed</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="612" y="177">two separate stores; in force from</text>
+          <text x="612" y="190">the moment of acknowledgement</text>
+        </g>
+
+        <rect x="600" y="224" width="240" height="64" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="612" y="245" font-size="12" fill="#101820">write executor — the single writer</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="612" y="261">drains denies first, then ingest;</text>
+          <text x="612" y="276">append → fsync → apply → swap → ack</text>
+        </g>
+
+        <rect x="40" y="196" width="170" height="58" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="52" y="215" font-size="12" fill="#101820">delta postings</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="52" y="231">permission entries for items</text>
+          <text x="52" y="244">added since the last build</text>
+        </g>
+
+        <g font-size="10.8" fill="#5b6a75">
+          <text x="330" y="210">buffer, overlay, delta postings and version</text>
+          <text x="330" y="225">counters hang off one generation pointer,</text>
+          <text x="330" y="240">swapped atomically — every request works</text>
+          <text x="330" y="255">from a single consistent snapshot</text>
+        </g>
+
+        <!-- memory arrows -->
+        <line x1="115" y1="196" x2="115" y2="152" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="124" y="178" font-size="10.5" fill="#5b6a75">plus the deltas</text>
+        <path d="M596,170 L316,170 L316,130 L306,130" fill="none" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+
+        <!-- disk zone -->
+        <rect x="20" y="354" width="820" height="290" rx="3" fill="none" stroke="#9aa8b1"/>
+        <text x="36" y="374" font-size="11.5" fill="#5b6a75" letter-spacing="1">ON DISK</text>
+
+        <rect x="32" y="388" width="574" height="240" rx="2" fill="none" stroke="#b7c2c9"/>
+        <text x="48" y="406" font-size="11" fill="#5b6a75">bundle/ — immutable &amp; versioned; the engine mmaps it read-only</text>
+
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="48"  y="418" width="160" height="80" rx="2"/>
+          <rect x="222" y="418" width="160" height="80" rx="2"/>
+          <rect x="396" y="418" width="160" height="80" rx="2"/>
+          <rect x="48"  y="510" width="160" height="80" rx="2"/>
+          <rect x="222" y="510" width="160" height="80" rx="2"/>
+          <rect x="396" y="510" width="160" height="80" rx="2"/>
+        </g>
+        <g font-size="11.5" fill="#101820">
+          <text x="60" y="438">the crossing</text>
+          <text x="234" y="438">term postings</text>
+          <text x="408" y="438">geometry — per slice</text>
+          <text x="60" y="530">attributes</text>
+          <text x="234" y="530">records</text>
+          <text x="408" y="530">MANIFEST + side-manifest</text>
+        </g>
+        <g font-size="10" fill="#5b6a75">
+          <text x="60" y="454">permutation: permission→row</text>
+          <text x="60" y="468">row-entity: row→permission</text>
+          <text x="60" y="482">(4 B per row each)</text>
+          <text x="234" y="454">one compressed bitmap</text>
+          <text x="234" y="468">per permission term —</text>
+          <text x="234" y="482">long runs, cheap unions</text>
+          <text x="408" y="454">morton.u32: sorted codes</text>
+          <text x="408" y="468">columns.arrow: identity +</text>
+          <text x="408" y="482">position per row</text>
+          <text x="60" y="546">one value column per</text>
+          <text x="60" y="560">filterable field, + postings</text>
+          <text x="60" y="574">for category values</text>
+          <text x="234" y="546">per-item blob — read on</text>
+          <text x="234" y="560">click, never on the</text>
+          <text x="234" y="574">render path</text>
+          <text x="408" y="546">schema, identity key,</text>
+          <text x="408" y="560">versions; published</text>
+          <text x="408" y="574">deny state</text>
+        </g>
+        <g font-size="10.8" fill="#5b6a75">
+          <text x="48" y="606">a periodic compaction fold rewrites all of this under a new version —</text>
+          <text x="48" y="620">deleted items are then physically gone, and their overlay entries retire</text>
+        </g>
+
+        <rect x="636" y="440" width="196" height="108" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="648" y="462" font-size="12" fill="#101820">wal/ — write-ahead log</text>
+        <g font-size="10" fill="#5b6a75">
+          <text x="648" y="479">every ingest and deny, fsync'd</text>
+          <text x="648" y="493">before it is acknowledged;</text>
+          <text x="648" y="507">replayed on restart</text>
+        </g>
+        <rect x="636" y="560" width="196" height="64" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="648" y="580" font-size="12" fill="#101820">mask-fragment cache</text>
+        <g font-size="10" fill="#5b6a75">
+          <text x="648" y="596">sessions' visible sets by digest,</text>
+          <text x="648" y="610">verified on every reopen</text>
+        </g>
+
+        <!-- cross-zone arrows -->
+        <line x1="230" y1="418" x2="230" y2="152" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="238" y="344" font-size="10.5" fill="#5b6a75">unioned at authorise — once per session</text>
+        <line x1="720" y1="288" x2="720" y2="436" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="730" y="336" font-size="10.5" fill="#5b6a75">append + fsync,</text>
+        <text x="730" y="350" font-size="10.5" fill="#5b6a75">then apply + ack</text>
+        <path d="M596,110 L582,110 L582,436 L560,436" fill="none" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="574" y="344" font-size="10.5" fill="#5b6a75" text-anchor="end">flush: writes a new segment</text>
+
+        <text x="20" y="666" font-size="11" fill="#101820">one viewport request reads: (fragment ∘ overlay) → the visible set · projection + morton ranges → per-tile counts and marks · columns.arrow → the returned rows</text>
+      
+</svg>
+    </div>
+    <figcaption>Everything a request touches is either an mmap&#8217;d immutable file or an object hanging off the current generation snapshot — there is no lock on the read path, and the only mutable pointer is the generation swap.</figcaption>
+  </figure>
+</section>
+
+<div class="act">
+  <p class="act-label">Act V · Under discussion</p>
+  <p>Slices, clusters and cluster labels are designed and not yet built — these three plates are the basis for that discussion.</p>
+</div>
+
+<section class="plate" id="pslice">
+  <p class="eyebrow">15 · Act V — the same items under more than one projection</p>
+  <h2>Slices: one identity, many coordinate systems</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 484" role="img" aria-label="A shared entity space fans into three slices — two temporal snapshots and an alternative embedding projection — each with its own coordinates for the same identified items; one item is absent from the earliest slice." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <defs>
+          <marker id="arS" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Slices: the same identified items, placed by more than one coordinate system</text>
+        <text x="840" y="26" font-size="11" fill="#7d6111" text-anchor="end">design under review — not yet built</text>
+
+        <rect x="40" y="52" width="780" height="70" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="56" y="76" font-size="12" fill="#101820">ENTITY SPACE — SHARED ACROSS EVERY SLICE</text>
+        <text x="56" y="94" font-size="11" fill="#5b6a75">one identity per item · permissions (term postings) · labels and generating sets · metadata · the viewer's mask</text>
+        <text x="56" y="110" font-size="11" fill="#5b6a75">all of it exists once, and is valid for every slice — nothing below owns any of it</text>
+
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#arS)">
+          <line x1="160" y1="126" x2="160" y2="162"/>
+          <line x1="430" y1="126" x2="430" y2="162"/>
+          <line x1="700" y1="126" x2="700" y2="162"/>
+        </g>
+        <text x="430" y="148" font-size="10.5" fill="#5b6a75" text-anchor="middle">the mask projects into whichever slice the request names</text>
+
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="160" y="184">slice "2024-Q4"</text>
+          <text x="430" y="184">slice "2025-Q1"</text>
+          <text x="700" y="184">slice "embedding-B"</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="160" y="199">temporal snapshot</text>
+          <text x="430" y="199">temporal snapshot</text>
+          <text x="700" y="199">another projection of the same items</text>
+        </g>
+        <g fill="#ffffff" stroke="#b7c2c9">
+          <rect x="60"  y="208" width="200" height="150"/>
+          <rect x="330" y="208" width="200" height="150"/>
+          <rect x="600" y="208" width="200" height="150"/>
+        </g>
+        <!-- slice A: items 1,2,3,5 (4 not yet ingested) -->
+        <g fill="#9aa8b1">
+          <circle cx="100" cy="244" r="5"/><circle cx="185" cy="236" r="5"/><circle cx="88" cy="330" r="5"/>
+        </g>
+        <circle cx="150" cy="296" r="6" fill="#0e6f8a"/>
+        <circle cx="150" cy="296" r="10" fill="none" stroke="#0e6f8a"/>
+        <g font-size="9.5" fill="#5b6a75">
+          <text x="108" y="240">1</text><text x="193" y="232">2</text><text x="96" y="326">5</text>
+        </g>
+        <text x="164" y="292" font-size="9.5" fill="#0e6f8a">3</text>
+        <!-- slice B: items 1..5, drifted -->
+        <g fill="#9aa8b1">
+          <circle cx="372" cy="252" r="5"/><circle cx="452" cy="228" r="5"/><circle cx="502" cy="318" r="5"/><circle cx="362" cy="336" r="5"/>
+        </g>
+        <circle cx="432" cy="304" r="6" fill="#0e6f8a"/>
+        <circle cx="432" cy="304" r="10" fill="none" stroke="#0e6f8a"/>
+        <g font-size="9.5" fill="#5b6a75">
+          <text x="380" y="248">1</text><text x="460" y="224">2</text><text x="510" y="314">4</text><text x="370" y="332">5</text>
+        </g>
+        <text x="446" y="300" font-size="9.5" fill="#0e6f8a">3</text>
+        <!-- slice C: items 1..5, different arrangement -->
+        <g fill="#9aa8b1">
+          <circle cx="642" cy="332" r="5"/><circle cx="702" cy="230" r="5"/><circle cx="652" cy="248" r="5"/><circle cx="732" cy="338" r="5"/>
+        </g>
+        <circle cx="762" cy="276" r="6" fill="#0e6f8a"/>
+        <circle cx="762" cy="276" r="10" fill="none" stroke="#0e6f8a"/>
+        <g font-size="9.5" fill="#5b6a75">
+          <text x="650" y="328">1</text><text x="710" y="226">2</text><text x="660" y="244">4</text><text x="740" y="334">5</text>
+        </g>
+        <text x="776" y="272" font-size="9.5" fill="#0e6f8a">3</text>
+
+        <text x="430" y="380" font-size="11.5" fill="#101820" text-anchor="middle">each slice owns only what is downstream of the permutation: its coordinates, its Morton ranking, its tile ranges</text>
+        <text x="430" y="397" font-size="11.5" fill="#0e6f8a" text-anchor="middle">item 3 is the same entity everywhere — same ID, same permissions, same record; only its position differs</text>
+        <text x="430" y="414" font-size="11.5" fill="#5b6a75" text-anchor="middle">item 4 has no row in "2024-Q4": slice membership is simply "has a position here" — no membership structure is stored</text>
+
+        <g font-size="11">
+          <text x="20" y="444" fill="#101820">one token authorises across every slice — the mask is built once in entity space, and current credentials govern historical slices too</text>
+          <text x="20" y="462" fill="#5b6a75">deliberately not time-as-a-third-Morton-axis: slices are discrete and viewed one at a time, so each keeps its own clean ranking</text>
+          <text x="20" y="480" fill="#5b6a75">the price per slice: its own permutation array (~4 GB flat at 10⁹, pageable when sparse) and one projection per session that touches it</text>
+        </g>
+      
+</svg>
+    </div>
+    <figcaption>In relational vocabulary: one logical table (entity space, owning identity and metadata) and N clustered covering indexes (the slices), each a physical ordering carrying only the scalars its rendering needs — so there is nothing to keep consistent between slices.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p11">
+  <p class="eyebrow">16 · Act V — structure on the map: clusters</p>
+  <h2>Clusters roll up</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 448" role="img" aria-label="A supplied cluster tree annotated with one viewer's visible counts; the descent frontier passes above a node whose visible count falls below the threshold, so its members surface in the parent." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Insufficient visibility becomes rollup, never a hole</text>
+        <text x="20" y="46" font-size="11.5" fill="#5b6a75">one supplied hierarchy; per viewer, descend while the count of visible members stays above a threshold — the frontier of that descent is their clustering</text>
+        <text x="840" y="26" font-size="11" fill="#7d6111" text-anchor="end">designed — not yet implemented</text>
+        <g stroke="#9aa8b1" stroke-width="1.1">
+          <line x1="430" y1="106" x2="210" y2="146"/>
+          <line x1="430" y1="106" x2="650" y2="146"/>
+          <line x1="210" y1="214" x2="100" y2="254"/>
+          <line x1="210" y1="214" x2="320" y2="254"/>
+          <line x1="650" y1="214" x2="540" y2="254"/>
+          <line x1="650" y1="214" x2="760" y2="254"/>
+        </g>
+        <rect x="360" y="58" width="140" height="48" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="430" y="78" font-size="12" fill="#101820" text-anchor="middle">root</text>
+        <text x="430" y="95" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 1,930</text>
+        <rect x="140" y="146" width="140" height="68" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="210" y="166" font-size="12" fill="#101820" text-anchor="middle">node A</text>
+        <text x="210" y="183" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 1,720</text>
+        <text x="210" y="200" font-size="10.5" fill="#5b6a75" text-anchor="middle">≥ 25 &#8594; descend</text>
+        <rect x="580" y="146" width="140" height="68" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="650" y="166" font-size="12" fill="#101820" text-anchor="middle">node B</text>
+        <text x="650" y="183" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 210</text>
+        <text x="650" y="200" font-size="10.5" fill="#0e6f8a" text-anchor="middle">served — B2 rolls up here</text>
+        <rect x="30" y="254" width="140" height="60" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="100" y="274" font-size="12" fill="#101820" text-anchor="middle">A1</text>
+        <text x="100" y="291" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 1,050</text>
+        <text x="100" y="306" font-size="10.5" fill="#0e6f8a" text-anchor="middle">served</text>
+        <rect x="250" y="254" width="140" height="60" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="320" y="274" font-size="12" fill="#101820" text-anchor="middle">A2</text>
+        <text x="320" y="291" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 670</text>
+        <text x="320" y="306" font-size="10.5" fill="#0e6f8a" text-anchor="middle">served</text>
+        <rect x="470" y="254" width="140" height="60" rx="2" fill="#ffffff" stroke="#c8d2d8" stroke-dasharray="4 3"/>
+        <text x="540" y="274" font-size="12" fill="#5b6a75" text-anchor="middle">B1</text>
+        <text x="540" y="291" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 198</text>
+        <text x="540" y="306" font-size="10.5" fill="#5b6a75" text-anchor="middle">not split — B2 blocks</text>
+        <rect x="690" y="254" width="140" height="60" rx="2" fill="#ffffff" stroke="#7d6111" stroke-dasharray="4 3"/>
+        <text x="760" y="274" font-size="12" fill="#7d6111" text-anchor="middle">B2</text>
+        <text x="760" y="291" font-size="10.5" fill="#5b6a75" text-anchor="middle">visible 12 &lt; 25</text>
+        <text x="760" y="306" font-size="10.5" fill="#7d6111" text-anchor="middle">below threshold</text>
+        <polyline points="20,242 440,242 460,178 840,178" fill="none" stroke="#0e6f8a" stroke-width="1.8" stroke-dasharray="7 5"/>
+        <text x="24" y="232" font-size="11" fill="#0e6f8a">this viewer's frontier</text>
+        <text x="30" y="346" font-size="11.5" fill="#101820">counts are one bitmap intersection per node, so another viewer walks the same tree to a different frontier;</text>
+        <text x="30" y="363" font-size="11.5" fill="#5b6a75">node geometry — centroid, hull, extent — is recomputed from the viewer's visible members only, since a shared build-time hull would point at invisible items</text>
+        <g font-size="11.5">
+          <text x="30" y="398" fill="#101820">the thresholds under discussion — <tspan font-weight="600">absolute floor (min_points, e.g. 25)</tspan>: counted against everything the viewer may see; a disclosure</text>
+          <text x="30" y="415" fill="#101820">control on how finely structure is exposed, and a filter may never lower it · <tspan font-weight="600">relative floor (min-%) and a display threshold on the</tspan></text>
+          <text x="30" y="432" fill="#101820"><tspan font-weight="600">filtered set</tspan>: how deep to refine where matches concentrate — display-side choices, inside the bound the absolute floor sets</text>
+        </g>
+      
+</svg>
+    </div>
+    <figcaption>The absolute floor is small-cell suppression from the census-disclosure literature; its known attack — differencing two overlapping releases — is blocked on the filter route by construction, and open for review on the pan/zoom route.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p12">
+  <p class="eyebrow">17 · Act V — labels on that structure</p>
+  <h2>Serving labels</h2>
+  <figure>
+    <div class="board">
+      <svg class="plate-svg" viewBox="0 0 860 376" role="img" aria-label="One cluster node's candidate labels with generating sets of decreasing size, each tested for containment in the viewer's visible set; the first label passing is served." font-family="ui-sans-serif, system-ui, sans-serif">
+
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">A label is served only if the viewer can see everything it was generated from</text>
+        <text x="840" y="26" font-size="11" fill="#7d6111" text-anchor="end">designed — not yet implemented</text>
+        <text x="20" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">ONE NODE'S CANDIDATE LABELS, GENERATED PER SET, TESTED TOP-DOWN FOR ONE VIEWER</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20" y="64"  width="500" height="56" rx="2"/>
+          <rect x="20" y="130" width="500" height="56" rx="2"/>
+        </g>
+        <rect x="20" y="196" width="500" height="56" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <rect x="20" y="262" width="500" height="56" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <g font-size="12.5" fill="#101820">
+          <text x="36" y="86">full-node label</text>
+          <text x="36" y="152">cumulative-union label</text>
+          <text x="36" y="218">single-term label</text>
+          <text x="36" y="284">extractive term list</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="36" y="104">generated from all 1,240 members</text>
+          <text x="36" y="170">from the members under the two largest permission terms — 980 items</text>
+          <text x="36" y="236">from one term's members — everyone holding the term sees all of them</text>
+          <text x="36" y="302">key terms computed at view time from exactly the viewer's own visible members</text>
+        </g>
+        <g font-size="12.5" text-anchor="end">
+          <text x="500" y="86" fill="#7d6111">✕ withheld</text>
+          <text x="500" y="152" fill="#7d6111">✕ withheld</text>
+          <text x="500" y="218" fill="#0e6f8a">✓ served</text>
+          <text x="500" y="284" fill="#5b6a75">always passes</text>
+        </g>
+        <g font-size="10.5" text-anchor="end" fill="#5b6a75">
+          <text x="500" y="104">31 source items the viewer cannot see</text>
+          <text x="500" y="170">4 source items the viewer cannot see</text>
+          <text x="500" y="236">every source item visible</text>
+          <text x="500" y="302">its inputs are visible by definition</text>
+        </g>
+        <text x="560" y="64" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE TEST</text>
+        <circle cx="700" cy="178" r="78" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="700" y="136" font-size="11.5" fill="#101820" text-anchor="middle">what the viewer may see</text>
+        <circle cx="686" cy="198" r="34" fill="#ffffff" stroke="#101820"/>
+        <text x="686" y="202" font-size="11" fill="#101820" text-anchor="middle">✓</text>
+        <circle cx="784" cy="120" r="30" fill="#ffffff" stroke="#7d6111"/>
+        <text x="790" y="124" font-size="11" fill="#7d6111" text-anchor="middle">✕</text>
+        <text x="700" y="288" font-size="11.5" fill="#101820" text-anchor="middle">served iff the generating set fits inside —</text>
+        <text x="700" y="305" font-size="11.5" fill="#5b6a75" text-anchor="middle">one bitmap containment test per candidate,</text>
+        <text x="700" y="321" font-size="11.5" fill="#5b6a75" text-anchor="middle">per request, never cached above the check</text>
+        <text x="20" y="348" font-size="11.5" fill="#101820">withheld labels are invisible, not marked withheld: the decision depends only on data the viewer can already see, so the refusal itself reveals nothing;</text>
+        <text x="20" y="365" font-size="11.5" fill="#5b6a75">a single label from the whole node would be servable to almost nobody — which is why the caller generates several, keyed by set selection, and the richest passing one wins</text>
+      
+</svg>
+    </div>
+    <figcaption>Since a label&#8217;s text can paraphrase its sources, reading it with even one source unauthorised would be reading a document the viewer cannot open. Generating sets are immutable once supplied; a deletion can dark-ship a label for everyone, which the ladder absorbs by falling to the next tier.</figcaption>
+  </figure>
+</section>
+
+<section class="plate" id="p13">
+  <p class="eyebrow">18 · the measured record behind every number above</p>
+  <h2>The figure board</h2>
+  <p class="lead">Measured on one development machine (WSL2, 12 cores, 47 GB, NVMe) against synthetic fixtures at 10⁷–10⁹ items — not a certification environment. Shapes and ratios transfer; absolute milliseconds may not. Every figure&#8217;s raw campaign is preserved and re-runnable.</p>
+  <div class="scroll">
+  <table class="perf">
+    <thead><tr><th>Quantity</th><th>Figure</th><th>Conditions</th></tr></thead>
+    <tbody>
+      <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Read path, 10⁹ items</td></tr>
+      <tr><td>Viewport p50</td><td class="num">123 ms</td><td class="src">k = 500 operating point, warm, single segment, ~300 tiles, after adaptive decode (−25%)</td></tr>
+      <tr><td>Viewport p99</td><td class="num">158–191 ms</td><td class="src">pre-optimisation bracket at k = 50 and k = 1000</td></tr>
+      <tr><td>Cost model</td><td class="num">4.0–4.5 ns / visible row</td><td class="src">correlates 0.83–0.999 with the visible-row sum; −0.08 with points returned</td></tr>
+      <tr><td>Selection&#8217;s share of a request</td><td class="num">83–89%</td><td class="src">gather 5–6%, counting 3–6%, mask composition ≈ 0%</td></tr>
+      <tr><td>Whole-viewport counting</td><td class="num">0.1–0.3 ms</td><td class="src">~300 exact masked tile counts — the part that is pure bitmap arithmetic</td></tr>
+      <tr><td>Response payload</td><td class="num">~79 KB</td><td class="src">mean, ~4,400 points — independent of corpus size</td></tr>
+
+      <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Sessions, 10⁹ items</td></tr>
+      <tr><td>authorise endpoint</td><td class="num">1–2 ms</td><td class="src">at every principal size; the real cost lands on the first viewport</td></tr>
+      <tr><td>Mask union, 10⁴-term grant</td><td class="num">262 ms</td><td class="src">worst case measured: 2,885 ms for a 25%-coverage principal over fully scattered postings</td></tr>
+      <tr><td>First viewport of a session</td><td class="num">11 ms → 9.9 s</td><td class="src">viewer seeing 0.0001% → 77% of the corpus; warm requests 7–285 ms; sessions do not yet share this work</td></tr>
+      <tr><td>Session projection</td><td class="num">~10.7 s</td><td class="src">full walk + sort for the broadest viewer — why it runs once per session, never per request</td></tr>
+      <tr><td>Permission-grouped IDs</td><td class="num">8.9–36.7×</td><td class="src">smaller posting storage vs. ungrouped; up to 130× on union cost — policy-dependent (one measured configuration gains 1.0×)</td></tr>
+
+      <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Filtering, 10⁹ items</td></tr>
+      <tr><td>Ruled budget</td><td class="num">0.5–1 s</td><td class="src">per filter evaluation</td></tr>
+      <tr><td>Selective category scan</td><td class="num">74–280 ms</td><td class="src">flat value column scanned under the viewer&#8217;s set as candidate</td></tr>
+      <tr><td>Unselective predicates</td><td class="num">3.4–6.0 s → 130–200 ms</td><td class="src">closed (17–74×) by assembling result blocks directly rather than item-by-item</td></tr>
+      <tr><td>Result → row crossing</td><td class="num">≤ 3× rule</td><td class="src">project a narrow result (3.8 ms at 10⁵); test the viewport&#8217;s rows for a broad one (projecting 10⁸ would cost 2,779 ms — more than its 730 ms scan)</td></tr>
+
+      <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Write path</td></tr>
+      <tr><td>Bulk ingest, one caller</td><td class="num">250–465k rows/s</td><td class="src">submission; 150–270k rows/s including the flush that makes rows visible</td></tr>
+      <tr><td>Small batches</td><td class="num">97k rows/s</td><td class="src">one caller, 1,000-row batches; eight concurrent callers ~286k (3×)</td></tr>
+      <tr><td>Spread across deployment shapes</td><td class="num">4.8×</td><td class="src">set by commit-window depth, term density and caller concurrency — there is no single ingest rate</td></tr>
+
+      <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Resident structures, 10⁹ items (unsharded)</td></tr>
+      <tr><td>Hot columns + Morton codes</td><td class="num">14 + 4 GB</td><td class="src">12 B/row gather columns; 4 B/row sorted code column, searched every request</td></tr>
+      <tr><td>Term index</td><td class="num">~20 GB</td><td class="src">at ~10 postings/item; ~2 GB at ~1</td></tr>
+      <tr><td>Permutation</td><td class="num">4 GB</td><td class="src">permission order → row order, u32, one per temporal slice</td></tr>
+      <tr><td>One viewer&#8217;s dense mask</td><td class="num">125 MB</td><td class="src">ceiling; compression takes realistic masks far below it</td></tr>
+      <tr><td>Filter column</td><td class="num">1 GB / byte of width</td><td class="src">per declared column — sixteen declared columns cost sixteen times what they declare</td></tr>
+
+      <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Negative results — kept deliberately</td></tr>
+      <tr><td>Masks under Morton order</td><td class="num">run ratio 1.03–1.15</td><td class="src">vs. 1.00 random — masks are essentially scattered spatially; no precomputed spatial shortcut for selection exists</td></tr>
+      <tr><td>&#8220;Cost scales with screen area&#8221;</td><td class="num">refuted</td><td class="src">cost tracks visible rows in the viewport; the claim survives only for counting, not selection</td></tr>
+      <tr><td>Permission-signature collapse</td><td class="num">gradual, not cliff-wise</td><td class="src">top 500 signature groups cover 82% under category-like policy and ~0% under author-like — layout wins are deployment-dependent</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer class="end">
+  <p>All measurement is against synthetic fixtures at 10⁷–10⁹ items on a single development machine. The raw campaigns live in <code>probes/</code>; re-run one before relying on a quoted figure.</p>
+</footer>
+
+</div>

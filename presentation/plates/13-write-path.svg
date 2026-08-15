@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 452" width="860" height="452" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>Ingest and change lanes feeding one write executor, above a timeline separating acknowledgement, visibility at flush, and physical removal at the fold.</title>
+<rect x="0" y="0" width="860" height="452" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="ar10" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+          <marker id="ar10d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#7d6111"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Two write lanes that never share a queue, and the three moments of an item's life</text>
+        <rect x="40" y="44" width="340" height="70" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="56" y="66" font-size="12.5" fill="#101820">ingest — add items</text>
+        <text x="56" y="84" font-size="10.5" fill="#5b6a75">bounded: may be refused under load (429)</text>
+        <text x="56" y="98" font-size="10.5" fill="#5b6a75">a commit window batches arrivals; IDs allocated at its close</text>
+        <rect x="480" y="44" width="340" height="70" rx="2" fill="#ffffff" stroke="#7d6111"/>
+        <text x="496" y="66" font-size="12.5" fill="#101820">change — delete · suppress · unsuppress</text>
+        <text x="496" y="84" font-size="10.5" fill="#5b6a75">unbounded: never refused for load —</text>
+        <text x="496" y="98" font-size="10.5" fill="#5b6a75">refusing a security operation fails open</text>
+        <rect x="250" y="168" width="360" height="60" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="430" y="192" font-size="12.5" fill="#101820" text-anchor="middle">write executor — the single writer</text>
+        <text x="430" y="210" font-size="10.5" fill="#5b6a75" text-anchor="middle">append &#8594; fsync &#8594; apply &#8594; swap &#8594; acknowledge</text>
+        <line x1="210" y1="114" x2="330" y2="164" stroke="#101820" stroke-width="1.2" marker-end="url(#ar10)"/>
+        <line x1="650" y1="114" x2="530" y2="164" stroke="#7d6111" stroke-width="1.2" marker-end="url(#ar10d)"/>
+        <text x="640" y="146" font-size="10.5" fill="#7d6111">drained first, always</text>
+
+        <text x="40" y="282" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE LIFE OF AN INGESTED ITEM — THREE SEPARATE MOMENTS</text>
+        <line x1="60" y1="318" x2="828" y2="318" stroke="#101820" stroke-width="1.2" marker-end="url(#ar10)"/>
+        <g stroke="#101820" stroke-width="1.4">
+          <line x1="130" y1="310" x2="130" y2="326"/>
+          <line x1="410" y1="310" x2="410" y2="326"/>
+          <line x1="690" y1="310" x2="690" y2="326"/>
+        </g>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="130" y="348">acknowledged</text>
+          <text x="410" y="348">flushed</text>
+          <text x="690" y="348">folded</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="130" y="366">durable, counted by authorisation —</text>
+          <text x="130" y="380">a receipt, not a visibility promise</text>
+          <text x="410" y="366">the item gains a map position &#8594; visible;</text>
+          <text x="410" y="380">the gap is bounded by a configured flush age</text>
+          <text x="690" y="366">a deleted item's row and permission</text>
+          <text x="690" y="380">entries are physically removed (nightly)</text>
+        </g>
+        <text x="60" y="416" font-size="11.5" fill="#7d6111">a deny is different: its acknowledgement is held until the entry is durable and applied — it is in force from the moment the caller hears "ok",</text>
+        <text x="60" y="432" font-size="11.5" fill="#5b6a75">and until the fold physically executes a deletion, an overlay entry keeps the item invisible (fail-closed either way)</text>
+        <text x="60" y="450" font-size="11" fill="#5b6a75">bulk ingest, measured: 250–465k rows/s submitted, 150–270k rows/s including the flush that makes them visible; 97k rows/s for one caller in small batches</text>
+      
+
+</svg>

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 428" width="860" height="428" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>Three client tiers reach three planes inside one process; the engine memory-maps an immutable bundle, the write executor owns a write-ahead log.</title>
+<rect x="0" y="0" width="860" height="428" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="ar2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One binary, three surfaces, two durable stores</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="60"  y="46" width="200" height="46" rx="2"/>
+          <rect x="330" y="46" width="200" height="46" rx="2"/>
+          <rect x="600" y="46" width="200" height="46" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="160" y="65">browser / SDK</text>
+          <text x="430" y="65">app tier</text>
+          <text x="700" y="65">operator / data tier</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="160" y="82">viewport · drill-down · meta</text>
+          <text x="430" y="82">authorise · revoke</text>
+          <text x="700" y="82">ingest · delete · suppress</text>
+        </g>
+        <rect x="40" y="126" width="780" height="196" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="56" y="146" font-size="11.5" fill="#5b6a75" letter-spacing="1">TESSERA &#8212; ONE BINARY, ONE PROCESS</text>
+        <rect x="60" y="160" width="200" height="50" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="330" y="160" width="200" height="50" rx="2"/>
+          <rect x="600" y="160" width="200" height="50" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="160" y="180">viewer plane</text>
+          <text x="430" y="180">session plane</text>
+          <text x="700" y="180">admin plane</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="160" y="197">token only — untrusted</text>
+          <text x="430" y="197">own listener, own credential</text>
+          <text x="700" y="197">unix socket, operator credential</text>
+        </g>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="60"  y="246" width="460" height="52" rx="2"/>
+          <rect x="580" y="246" width="220" height="52" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="290" y="267">engine</text>
+          <text x="690" y="267">write executor</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="290" y="284">masks · counts · selection · caches</text>
+          <text x="690" y="284">owns the WAL, single writer</text>
+        </g>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="140" y="360" width="300" height="52" rx="2"/>
+          <rect x="560" y="360" width="240" height="52" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="290" y="381">bundle/</text>
+          <text x="680" y="381">wal/</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="290" y="398">immutable versioned artifacts</text>
+          <text x="680" y="398">durability for ingest and denies</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar2)">
+          <line x1="160" y1="94" x2="160" y2="156"/>
+          <line x1="430" y1="94" x2="430" y2="156"/>
+          <line x1="700" y1="94" x2="700" y2="156"/>
+          <line x1="160" y1="212" x2="160" y2="242"/>
+          <line x1="430" y1="212" x2="430" y2="242"/>
+          <line x1="700" y1="212" x2="700" y2="242"/>
+          <line x1="290" y1="300" x2="290" y2="356"/>
+          <line x1="680" y1="300" x2="680" y2="356"/>
+          <line x1="576" y1="272" x2="526" y2="272"/>
+        </g>
+        <g font-size="11" fill="#5b6a75">
+          <text x="300" y="335">mmap, read-only</text>
+          <text x="690" y="335">append + fsync</text>
+          <text x="536" y="262" text-anchor="middle">publishes new</text>
+          <text x="551" y="290" text-anchor="middle">generation</text>
+        </g>
+      
+
+</svg>

@@ -28,11 +28,68 @@
 // Wired into the pipeline by a separate task; until then the lib target sees every item as
 // unused. Remove this allow when `pipeline.rs` takes the module up.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{BuildError, Result};
+
+/// An entity-indexed `u32` scratch array, backed by a file under `.build-tmp/` instead of the heap.
+///
+/// **This exists so that a pass bounded by the corpus stops being bounded by RAM.** The build's
+/// entity-major scratch — a coordinate axis per entity, and the like — is written once at a random
+/// index during one scan and read once at a random index during a later one, and is never sorted.
+/// As a `Vec` that is 4 B per entity of *anonymous* memory, which the kernel may not reclaim: 1 GB
+/// at 2.5×10⁸ and 4 GB at 10⁹, per array, that a machine must simply have. Mapped, the same bytes
+/// are page cache — the kernel keeps what fits and evicts the rest under pressure, so a smaller
+/// machine gets slower rather than OOM-killed, and a larger one is no worse off because the pages
+/// stay resident anyway.
+///
+/// **It carries no receipt, unlike the bucket and band files above, and the reason is the
+/// lifetime rather than an inconsistency.** Those are written, closed, and read back — a torn or
+/// doubly-appended file is a real risk and feeds the permanent entity-ID assignment (I9). This is
+/// a mapping held open across its only writer and its only reader in one process: there is no
+/// close-and-reopen for a receipt to guard, and its contents are re-derivable from the points file
+/// in any case. What it does share is the directory and its lifecycle, so a killed build leaves it
+/// to the next `TmpDir::create` exactly like the rest.
+#[derive(Debug)]
+pub(crate) struct MappedU32 {
+    map: memmap2::MmapMut,
+    len: usize,
+}
+
+impl MappedU32 {
+    /// A zeroed array of `len` values at `<dir>/<name>`.
+    pub(crate) fn zeroed(dir: &Path, name: &str, len: usize) -> Result<Self> {
+        let path = dir.join(name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| BuildError::io(&path, e))?;
+        // A fresh file reads as zeros, which is the initial value every caller wants; `set_len`
+        // makes those zeros addressable without writing them.
+        let bytes = (len as u64)
+            .checked_mul(4)
+            .expect("entity count times 4 exceeds u64");
+        file.set_len(bytes).map_err(|e| BuildError::io(&path, e))?;
+        // SAFETY: the file is this build's own, created empty under a directory it owns, and the
+        // mapping is not shared with another process. Its length is fixed for the mapping's life.
+        let map = unsafe { memmap2::MmapMut::map_mut(&file) }.map_err(|e| BuildError::io(&path, e))?;
+        Ok(MappedU32 { map, len })
+    }
+
+    /// The array. Taken once by the caller and held as an ordinary slice for the rest of the pass —
+    /// there is no shared-borrow accessor beside it because every caller both fills and reads it,
+    /// and one binding for both is what keeps the mapping's exclusivity obvious.
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u32] {
+        // SAFETY: `mmap` returns a page-aligned pointer, so `u32` alignment holds; the mapping is
+        // `len * 4` bytes by construction; and `&mut self` gives exclusive access to it.
+        unsafe { std::slice::from_raw_parts_mut(self.map.as_mut_ptr().cast::<u32>(), self.len) }
+    }
+}
 
 /// Buffer size for spill I/O, both directions. Four mebibytes: large enough that the syscall
 /// cost is noise against the encode/decode work, small enough to be irrelevant against the

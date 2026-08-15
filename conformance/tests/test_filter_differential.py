@@ -41,9 +41,13 @@ What it deliberately does **not** cover, so the next reader is not left inferrin
   session-scoped and shared, and a suppression would mutate them under every other module; the
   overlay-journal differential owns the machinery, and extending it with a filtered request is
   the natural home. Uncovered here, stated rather than implied.
-- **θ-live filtered selection** — §5.2's rule that a filtered selection stays anchored on
-  `M_auth`. This module runs θ saturated so that a composition bug and a θ bug cannot masquerade
-  as each other (the same argument `conftest.catalogue_server` makes for the mask tests).
+- **θ-live filtered selection** — covered, in one deliberate place
+  (`test_a_live_theta_never_thins_a_filtered_selection`, against `catalogue_density_server`):
+  §8.5's match-layer rule is that a filtered request serves every match up to the cap, with θ's
+  threshold clause never applied to it — the θ-thinned filtered map was a real defect
+  (2026-08-14), invisible to every θ-saturated test in this module. The sweep and everything
+  else here still runs θ saturated so that a composition bug and a θ bug cannot masquerade as
+  each other (the same argument `conftest.catalogue_server` makes for the mask tests).
 - **Post-build ingest** — a flush now appends a value-column extent and a filter answers over the
   entities it published (`filter-index.md` §2.1). The fixture here is build-only, so that path is
   exercised in `crates/tessera-engine/tests/filtering.rs` against a real flush rather than over
@@ -250,6 +254,48 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
         f"the engine's filtered served set has {len(filt_served)} entities against the oracle's "
         f"{len(m_sel)} — the two implementations disagree about which items match"
     )
+
+
+def test_a_live_theta_never_thins_a_filtered_selection(
+    catalogue_bundle, catalogue_density_server, catalogue_filter_columns
+):
+    """§8.5's match-layer count rule, at the configuration the density rule actually ships in.
+
+    A filtered request serves every match up to the cap; θ's threshold clause applies to the
+    context of an unfiltered map, never to a match set. The defect this pins: the filtered
+    selection used to run under the *unfiltered* θ odds, so a filter that narrowed a tile a
+    hundredfold drew the `k_min` floor instead of its matches — the map thinned in proportion to
+    the filter's selectivity, silently, and every θ-saturated test in this module passed over it.
+
+    The control comes first: on this server θ genuinely thins the *unfiltered* map, or the
+    assertions after it prove nothing. Caps are huge here (`harness.write_config`'s defaults), so
+    served == matched per tile is the whole rule; the capped interaction lives in the engine's own
+    tests against a small `k`."""
+    server = catalogue_density_server
+    case = next(c for c in cat.catalogue() if c.name == "full_100pct")
+    token = server.authorise(list(case.grants))["token"]
+
+    plain = server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    plain_tiles = _tiles_by_id(decode_viewport(plain)[0])
+    assert any(s < v for v, _m, s in plain_tiles.values()), (
+        "θ is not live on this server — no unfiltered tile was thinned, so this test has lost "
+        "its control and the fixture needs looking at"
+    )
+
+    filtered = server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=SWEEP_EXPR)
+    filt_tiles = _tiles_by_id(decode_viewport(filtered)[0])
+    for tile, (visible, matched, served) in filt_tiles.items():
+        assert matched <= visible, f"tile {tile}: matched {matched} > visible {visible} — I12"
+        assert served == matched, (
+            f"tile {tile}: served {served} != matched {matched} under a live θ — the filtered "
+            "selection is being pushed through the unfiltered threshold odds again"
+        )
+
+    # And the membership, not just the counts: the served set is the oracle's brute-force M_sel,
+    # exactly — the same equality the saturated sweep asserts, now with θ live enough to have
+    # thinned it if the rule regressed.
+    m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, set(case.entities))
+    assert _served_entities(filtered) == m_sel
 
 
 def test_the_empty_combinators_are_their_operators_identities(

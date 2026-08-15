@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 676" width="860" height="676" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>The engine's major objects: per-session mask fragment and row projection, the shared ingest buffer, deny overlay and delta postings in memory; the bundle's file groups, the write-ahead log and the fragment cache on disk, with the arrows connecting them.</title>
+<rect x="0" y="0" width="860" height="676" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="arE" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Inside the engine: the major objects, in memory and on disk</text>
+
+        <!-- memory zone -->
+        <rect x="20" y="44" width="820" height="286" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="36" y="64" font-size="11.5" fill="#5b6a75" letter-spacing="1">IN MEMORY</text>
+
+        <rect x="40" y="84" width="260" height="64" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="52" y="104" font-size="12" fill="#101820">mask fragment — per session</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="52" y="119">the viewer's visible set — one bitmap;</text>
+          <text x="52" y="131">composed per request with the overlay;</text>
+          <text x="52" y="143">survives restart via the fragment cache</text>
+        </g>
+
+        <rect x="330" y="84" width="240" height="64" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="342" y="104" font-size="12" fill="#101820">row projection — per session</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="342" y="119">the visible set in map order;</text>
+          <text x="342" y="131">rebuilt only when the geometry</text>
+          <text x="342" y="143">version moves</text>
+        </g>
+
+        <rect x="600" y="84" width="240" height="52" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="612" y="102" font-size="12" fill="#101820">ingest buffer</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="612" y="117">accepted items awaiting flush —</text>
+          <text x="612" y="130">durable, not yet on the map</text>
+        </g>
+
+        <rect x="600" y="144" width="240" height="52" rx="2" fill="#ffffff" stroke="#7d6111"/>
+        <text x="612" y="162" font-size="12" fill="#101820">deny overlay: deleted · suppressed</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="612" y="177">two separate stores; in force from</text>
+          <text x="612" y="190">the moment of acknowledgement</text>
+        </g>
+
+        <rect x="600" y="224" width="240" height="64" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="612" y="245" font-size="12" fill="#101820">write executor — the single writer</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="612" y="261">drains denies first, then ingest;</text>
+          <text x="612" y="276">append → fsync → apply → swap → ack</text>
+        </g>
+
+        <rect x="40" y="196" width="170" height="58" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="52" y="215" font-size="12" fill="#101820">delta postings</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="52" y="231">permission entries for items</text>
+          <text x="52" y="244">added since the last build</text>
+        </g>
+
+        <g font-size="10.8" fill="#5b6a75">
+          <text x="330" y="210">buffer, overlay, delta postings and version</text>
+          <text x="330" y="225">counters hang off one generation pointer,</text>
+          <text x="330" y="240">swapped atomically — every request works</text>
+          <text x="330" y="255">from a single consistent snapshot</text>
+        </g>
+
+        <!-- memory arrows -->
+        <line x1="115" y1="196" x2="115" y2="152" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="124" y="178" font-size="10.5" fill="#5b6a75">plus the deltas</text>
+        <path d="M596,170 L316,170 L316,130 L306,130" fill="none" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+
+        <!-- disk zone -->
+        <rect x="20" y="354" width="820" height="290" rx="3" fill="none" stroke="#9aa8b1"/>
+        <text x="36" y="374" font-size="11.5" fill="#5b6a75" letter-spacing="1">ON DISK</text>
+
+        <rect x="32" y="388" width="574" height="240" rx="2" fill="none" stroke="#b7c2c9"/>
+        <text x="48" y="406" font-size="11" fill="#5b6a75">bundle/ — immutable &amp; versioned; the engine mmaps it read-only</text>
+
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="48"  y="418" width="160" height="80" rx="2"/>
+          <rect x="222" y="418" width="160" height="80" rx="2"/>
+          <rect x="396" y="418" width="160" height="80" rx="2"/>
+          <rect x="48"  y="510" width="160" height="80" rx="2"/>
+          <rect x="222" y="510" width="160" height="80" rx="2"/>
+          <rect x="396" y="510" width="160" height="80" rx="2"/>
+        </g>
+        <g font-size="11.5" fill="#101820">
+          <text x="60" y="438">the crossing</text>
+          <text x="234" y="438">term postings</text>
+          <text x="408" y="438">geometry — per slice</text>
+          <text x="60" y="530">attributes</text>
+          <text x="234" y="530">records</text>
+          <text x="408" y="530">MANIFEST + side-manifest</text>
+        </g>
+        <g font-size="10" fill="#5b6a75">
+          <text x="60" y="454">permutation: permission→row</text>
+          <text x="60" y="468">row-entity: row→permission</text>
+          <text x="60" y="482">(4 B per row each)</text>
+          <text x="234" y="454">one compressed bitmap</text>
+          <text x="234" y="468">per permission term —</text>
+          <text x="234" y="482">long runs, cheap unions</text>
+          <text x="408" y="454">morton.u32: sorted codes</text>
+          <text x="408" y="468">columns.arrow: identity +</text>
+          <text x="408" y="482">position per row</text>
+          <text x="60" y="546">one value column per</text>
+          <text x="60" y="560">filterable field, + postings</text>
+          <text x="60" y="574">for category values</text>
+          <text x="234" y="546">per-item blob — read on</text>
+          <text x="234" y="560">click, never on the</text>
+          <text x="234" y="574">render path</text>
+          <text x="408" y="546">schema, identity key,</text>
+          <text x="408" y="560">versions; published</text>
+          <text x="408" y="574">deny state</text>
+        </g>
+        <g font-size="10.8" fill="#5b6a75">
+          <text x="48" y="606">a periodic compaction fold rewrites all of this under a new version —</text>
+          <text x="48" y="620">deleted items are then physically gone, and their overlay entries retire</text>
+        </g>
+
+        <rect x="636" y="440" width="196" height="108" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="648" y="462" font-size="12" fill="#101820">wal/ — write-ahead log</text>
+        <g font-size="10" fill="#5b6a75">
+          <text x="648" y="479">every ingest and deny, fsync'd</text>
+          <text x="648" y="493">before it is acknowledged;</text>
+          <text x="648" y="507">replayed on restart</text>
+        </g>
+        <rect x="636" y="560" width="196" height="64" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="648" y="580" font-size="12" fill="#101820">mask-fragment cache</text>
+        <g font-size="10" fill="#5b6a75">
+          <text x="648" y="596">sessions' visible sets by digest,</text>
+          <text x="648" y="610">verified on every reopen</text>
+        </g>
+
+        <!-- cross-zone arrows -->
+        <line x1="230" y1="418" x2="230" y2="152" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="238" y="344" font-size="10.5" fill="#5b6a75">unioned at authorise — once per session</text>
+        <line x1="720" y1="288" x2="720" y2="436" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="730" y="336" font-size="10.5" fill="#5b6a75">append + fsync,</text>
+        <text x="730" y="350" font-size="10.5" fill="#5b6a75">then apply + ack</text>
+        <path d="M596,110 L582,110 L582,436 L560,436" fill="none" stroke="#101820" stroke-width="1.2" marker-end="url(#arE)"/>
+        <text x="574" y="344" font-size="10.5" fill="#5b6a75" text-anchor="end">flush: writes a new segment</text>
+
+        <text x="20" y="666" font-size="11" fill="#101820">one viewport request reads: (fragment ∘ overlay) → the visible set · projection + morton ranges → per-tile counts and marks · columns.arrow → the returned rows</text>
+      
+
+</svg>

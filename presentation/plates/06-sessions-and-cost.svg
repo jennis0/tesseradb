@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 486" width="860" height="486" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>Session pipeline from credential through plugin terms to a cached mask, composed per request with deletions and arrivals; below, measured first-viewport cost rising with how much the viewer may see.</title>
+<rect x="0" y="0" width="860" height="486" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="ar6" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">A session builds the mask once; every request composes cheap diffs on it</text>
+        <rect x="20" y="42" width="820" height="126" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="36" y="62" font-size="11.5" fill="#5b6a75" letter-spacing="1">ONCE PER SESSION</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="36"  y="78" width="150" height="56" rx="2"/>
+          <rect x="222" y="78" width="170" height="56" rx="2"/>
+          <rect x="428" y="78" width="180" height="56" rx="2"/>
+        </g>
+        <rect x="644" y="78" width="176" height="56" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="111" y="100">auth data</text>
+          <text x="307" y="100">caller's plugin</text>
+          <text x="518" y="100">union postings</text>
+          <text x="732" y="100">session mask</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
+          <text x="111" y="116">claims, or a signed</text>
+          <text x="111" y="128">verified assertion</text>
+          <text x="307" y="116">auth data &#8594; the set of</text>
+          <text x="307" y="128">permission terms it satisfies</text>
+          <text x="518" y="116">one bitmap per term —</text>
+          <text x="518" y="128">262 ms for 10⁴ terms at 10⁹</text>
+          <text x="732" y="116">projected to row order once,</text>
+          <text x="732" y="128">cached for the session</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar6)">
+          <line x1="188" y1="106" x2="218" y2="106"/>
+          <line x1="394" y1="106" x2="424" y2="106"/>
+          <line x1="610" y1="106" x2="640" y2="106"/>
+        </g>
+        <rect x="20" y="194" width="820" height="110" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
+        <text x="36" y="214" font-size="11.5" fill="#5b6a75" letter-spacing="1">EVERY REQUEST</text>
+        <rect x="36" y="228" width="240" height="52" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <rect x="420" y="228" width="200" height="52" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="12.5" fill="#101820" text-anchor="middle">
+          <text x="156" y="248">deletions · suppressions ·</text>
+          <text x="156" y="264">items newer than the mask</text>
+          <text x="520" y="254">the effective visible set</text>
+        </g>
+        <line x1="278" y1="254" x2="416" y2="254" stroke="#101820" stroke-width="1.2" marker-end="url(#ar6)"/>
+        <text x="347" y="246" font-size="10.5" fill="#5b6a75" text-anchor="middle">composed as diffs</text>
+        <line x1="732" y1="134" x2="732" y2="254" stroke="#101820" stroke-width="1.2"/>
+        <line x1="732" y1="254" x2="624" y2="254" stroke="#101820" stroke-width="1.2" marker-end="url(#ar6)"/>
+        <text x="36" y="296" font-size="11.5" fill="#101820">a suppression or deletion is in force from the moment it is acknowledged, whatever mask the session built earlier</text>
+
+        <text x="20" y="342" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHERE THE COST LANDS — FIRST VIEWPORT OF A SESSION, BY HOW MUCH THE VIEWER MAY SEE (10⁹ ITEMS)</text>
+        <g font-size="11.5" fill="#101820" text-anchor="end">
+          <text x="150" y="368">0.0001% visible</text>
+          <text x="150" y="390">1.5% visible</text>
+          <text x="150" y="412">8% visible</text>
+          <text x="150" y="434">39% visible</text>
+          <text x="150" y="456">77% visible</text>
+        </g>
+        <g fill="#0e6f8a">
+          <rect x="160" y="356" width="30"  height="15"/>
+          <rect x="160" y="378" width="220" height="15"/>
+          <rect x="160" y="400" width="390" height="15"/>
+          <rect x="160" y="422" width="530" height="15"/>
+          <rect x="160" y="444" width="590" height="15"/>
+        </g>
+        <g font-size="11.5" fill="#101820">
+          <text x="198" y="368">11 ms</text>
+          <text x="388" y="390">180 ms</text>
+          <text x="558" y="412">1.1 s</text>
+          <text x="698" y="434">5.2 s</text>
+          <text x="758" y="456">9.9 s</text>
+        </g>
+        <text x="20" y="482" font-size="11.5" fill="#5b6a75">(log scale) — the authorise call itself is 1–2 ms at every size; warm requests for the same viewers run 7–285 ms; sessions do not yet share this work</text>
+      
+
+</svg>

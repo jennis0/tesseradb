@@ -1744,6 +1744,28 @@ impl Engine {
             }
         };
 
+        // §8.5's match-layer count rule: a filtered request serves every match, up to the cap —
+        // the θ threshold clause does not thin a filtered selection. Saturating the threshold is
+        // how the definition says "in full": `C_θ = |vis(T)|` by construction, so
+        // `served = min(matched, cap)` per tile, with the cap-many smallest `tessera_id`s when a
+        // tile is over — the same prefix rule as ever, so nesting across zooms is untouched.
+        //
+        // This is NOT a re-anchor. θ's anchor stays `visible_total()`, unfiltered, and §5.2 of
+        // `filter-surface.md` forbids anchoring on `M_sel` (a threshold that moved as the viewer
+        // typed). The rule here is the other half of the same section: the anchor never narrows,
+        // and the match layer never samples. Before this, a filtered tile was pushed through the
+        // unfiltered θ odds — a tile narrowed from 4,000 visible to 40 matched drew ~1% of 40,
+        // i.e. the k_min floor — so the map thinned in proportion to the filter's selectivity
+        // instead of showing the matches.
+        let params = if req.filter.is_some() {
+            SelectParams {
+                threshold: Threshold::Saturated,
+                ..params
+            }
+        } else {
+            params
+        };
+
         // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
         // own entry/scheduling cost exceeds the per-tile work it would parallelise (measured; see
@@ -3267,7 +3289,9 @@ fn tile_sweep<'a>(
     let part_list = parts;
     let parts = SelectionParts::new(&part_list);
     // Anchored on `matched`, not `visible`: selection's cap and tier decisions are about the set
-    // it draws from. θ's *threshold* anchor is separate and stays unfiltered — `visible_total()`.
+    // it draws from. θ's *threshold* anchor is separate and stays unfiltered — `visible_total()`
+    // — and on a filtered request the threshold arrives saturated (§8.5's match-layer rule; see
+    // the params override in `Engine::viewport`), so `served = min(matched, cap)` there.
     let selected = Selection::of(mask, &parts, params, matched);
     stats.lap(|t| &mut t.select_ns);
     // Counted by `Selection::of` itself, inside the loops that do the reading — not from
