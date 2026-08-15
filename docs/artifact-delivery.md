@@ -34,7 +34,7 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
-| **0** Rulings and promotion | not started | the three designs are normative and the register carries their rows | — |
+| **0** Rulings and promotion | **review done, findings open** | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md): four fail-opens, one structural blocker, five rulings owed. **Stage 1's registry half is blocked on them** |
 | **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it, and the geometry read moved so it costs no extra pass; verified on the real 2.4M corpus. The registry is not started |
 | **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-threshold artifacts are indistinguishable from absent ones | — |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
@@ -82,7 +82,8 @@ material is written; what is missing is the disposition.
 
 | What | State | Blocks | Note |
 |---|---|---|---|
-| **Independent review** of the model and the representation, post-round-two, on the disclosure and implementability lenses | open | everything | the write cycle has had its three; the other two have had none in their current shape |
+| **Independent review** of the model and the representation | ✔ **run 2026-08-15** — three lenses, [the record](evidence/memos/2026-08-15-artifact-design-review.md) | — | the model's core survived all three; its *derived* rules did not |
+| **Disposition the review** — four fail-opens, one structural blocker, five rulings | **open, and now the gate** | everything | the rulings are listed in the record's §6, in dependency order |
 | Disposition round two's open findings on the representation | open | Stages 2–4 | several are escalations, not repairs |
 | **The signature-sort tiebreak** (rep §12) | ✔ **ruled 2026-08-15** — [decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) | Stage 1 | taken: allocation becomes `(signature, morton_code, source_id)`. Free in the format and *measured* so; what it costs in the build's batch plan is named there and sized in Stage 1 |
 | The descent change (model §6) — per-artifact test replacing §7.5's tree walk | open | Stage 5 | contradicts a normative document |
