@@ -1,6 +1,6 @@
 //! Build-stage observation.
 //!
-//! `tessera build` is eleven numbered stages (see `pipeline.rs`), and "blank-database ingest as a
+//! `tessera build` is twelve numbered stages (see `pipeline.rs`), and "blank-database ingest as a
 //! function of point count" is really a question about *which* of them bends with scale: the
 //! sorts are n log n, the digest pass is linear in bytes, and several passes are driven by the
 //! size of the source files rather than by `--limit` at all.
@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-/// The eleven pipeline stages, in execution order.
+/// The twelve pipeline stages, in execution order.
 ///
 /// Names match the `// ---- n. ...` comments in `pipeline.rs`. Adding a stage means adding a
 /// variant; renaming one means changing both, which is the point — a stage that exists in the
@@ -25,11 +25,10 @@ pub enum BuildStage {
     Dictionary,
     /// 3. One pass over the pairs file, packing `ordinal << 32 | term_id`, then sort and dedup.
     PairsPack,
-    /// 3b. One pass over the points file, scattering each item's Morton code by ordinal so the
-    ///    signature sort can break ties on it (decision 0073). Its own stage because it is a whole
-    ///    extra pass over the points file, and a cost that size should be visible to the bench
-    ///    rather than hidden inside its neighbours.
-    MortonCodes,
+    /// 3b. **The one pass over the points file's geometry**, scattered by ordinal — early, because
+    ///    the signature sort breaks ties on the Morton code (decision 0073) and entity ids do not
+    ///    exist yet. What used to be read again at [`BuildStage::GeometryPermute`] is read here.
+    GeometryRead,
     /// 4. The signature sort — permanent under I9, and the reason entity IDs cannot be
     ///    reassigned later.
     SignatureSort,
@@ -39,8 +38,9 @@ pub enum BuildStage {
     PostingsWrite,
     /// 7. The external-id sidecar and its locator.
     ExternalIds,
-    /// 8. One pass over the points file, geometry in entity order.
-    GeometryScan,
+    /// 8. Geometry permuted from ordinal into entity order, plus the declared attribute tail. No
+    ///    points-file I/O: [`BuildStage::GeometryRead`] did the reading.
+    GeometryPermute,
     /// 8b. Entity-space filter postings, one file per `index = true` column. Its own
     ///    stage rather than a rider on `PostingsWrite`, which runs before the attribute values
     ///    have been read; zero-length for a schema that declares no filterable column.
@@ -59,12 +59,12 @@ impl BuildStage {
             BuildStage::SourceIds => "source_ids",
             BuildStage::Dictionary => "dictionary",
             BuildStage::PairsPack => "pairs_pack",
-            BuildStage::MortonCodes => "morton_codes",
+            BuildStage::GeometryRead => "geometry_read",
             BuildStage::SignatureSort => "signature_sort",
             BuildStage::Assignment => "assignment",
             BuildStage::PostingsWrite => "postings_write",
             BuildStage::ExternalIds => "external_ids",
-            BuildStage::GeometryScan => "geometry_scan",
+            BuildStage::GeometryPermute => "geometry_permute",
             BuildStage::FilterPostings => "filter_postings",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
@@ -76,12 +76,12 @@ impl BuildStage {
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
-        BuildStage::MortonCodes,
+        BuildStage::GeometryRead,
         BuildStage::SignatureSort,
         BuildStage::Assignment,
         BuildStage::PostingsWrite,
         BuildStage::ExternalIds,
-        BuildStage::GeometryScan,
+        BuildStage::GeometryPermute,
         BuildStage::TilerSort,
         BuildStage::SegmentWrite,
         BuildStage::Manifests,

@@ -796,45 +796,64 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "the pairs file yielded {pair_rows} rows, then {pushed}"
         )));
     }
-    // ---- 3b. the Morton code per ordinal (decision 0073) ------------------------------
-    // The signature sort breaks ties by the item's Morton **code**, so the codes must be in hand
-    // before the batch loop. They are keyed by *ordinal*, which exists only once `source_ids` is
-    // sorted — which is why this is its own pass rather than a column collected in step 1: that
-    // pass sees the file's order, and the corpus's order is not known until it finishes.
+    // ---- 3b. geometry, by ordinal -----------------------------------------------------
+    // **The points file's geometry is read exactly once, and it is read here** — before entity ids
+    // exist, so it lands in *ordinal* space and is permuted into entity space at step 8 rather
+    // than re-read there.
     //
-    // **Mapped rather than heap-allocated**, on step 8's own argument: 4 B/item is 4 GB at 10⁹ of
-    // memory the kernel cannot reclaim, for an array written once at random indices and then read
-    // as one contiguous slice per batch. It is deliberately outside [`plan_build`]'s residency
-    // model, which counts the anonymous allocations a batch must hold.
+    // The pass exists because decision 0073 breaks signature ties on the Morton code, so the sort
+    // needs geometry it previously did not. Reading it here rather than adding a fourth pass is
+    // what makes that ruling free: an ordinal is only defined once `source_ids` is sorted, and the
+    // *entity* an item ends up with is not known until the batch loop below has run — so between
+    // those two facts, ordinal space is the only space this can land in, and step 8's scan becomes
+    // a scatter over memory it already has.
     //
-    // It runs here, immediately before `source_ids` is dropped, because the join needs it. The
-    // cost is one more sequential pass over the points file; ⊘ what that is worth at 10⁹ is
-    // unmeasured, and it is the second half of the layout question [`SortRec`] names.
-    let mut morton_map = spill::MappedU32::zeroed(tmp.path(), "morton-of-ordinal.u32", n as usize)?;
-    let morton_of_ordinal = morton_map.as_mut_slice();
+    // **Mapped rather than heap-allocated**, on step 8's own argument: 4 B per item per axis is
+    // 8 GB at 10⁹ of memory the kernel cannot reclaim. See [`spill::MappedU32`] — the bytes become
+    // page cache, so a machine short of RAM pages instead of failing. They are deliberately outside
+    // [`plan_build`]'s residency model, which counts the anonymous allocations a batch must hold.
+    //
+    // The two integrity checks are the ones step 8 used to make, moved with the read: a shrunk file
+    // resolves every id it still presents and would otherwise leave the missing items at (0, 0)
+    // with no error, and a count alone accepts a repeat that compensates a removal ({1,2,3} become
+    // {2,2,2}), so the multiset of ids must be the first pass's.
+    let mut x_ord_map = spill::MappedU32::zeroed(tmp.path(), "x-of-ordinal.u32", n as usize)?;
+    let mut y_ord_map = spill::MappedU32::zeroed(tmp.path(), "y-of-ordinal.u32", n as usize)?;
+    let x_of_ordinal = x_ord_map.as_mut_slice();
+    let y_of_ordinal = y_ord_map.as_mut_slice();
     {
-        let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
+        let mut points_seen = 0u64;
+        let mut geom_anchor = 0u64;
+        let mut chunk: Vec<(u64, (u32, u32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
         let mut failure: Option<BuildError> = None;
-        let resolve = |chunk: &mut Vec<(u64, u32)>, codes: &mut [u32]| {
-            join_chunk(chunk, &source_ids, |ordinal, source_id, code| {
+        let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
+                       xs: &mut [u32],
+                       ys: &mut [u32],
+                       points_seen: &mut u64,
+                       geom_anchor: &mut u64| {
+            join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
                 let Some(ordinal) = ordinal else {
-                    // The first pass over this same file resolved every id, so an unknown one
-                    // means the file moved under the build (step 8 fails closed identically).
                     return Err(input_changed(&format!(
                         "the points file names entity {source_id}, which its first pass did not"
                     )));
                 };
-                codes[ordinal as usize] = code;
+                xs[ordinal as usize] = x;
+                ys[ordinal as usize] = y;
+                *points_seen += 1;
+                *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
                 Ok(())
             })
         };
         input::scan_points(&args.points, &args.extent, args.limit, |point| {
-            // From the quantised form directly, exactly as the tiler does — `split32`'s cell half
-            // is the code `morton_of` would give for the same point, so entity order and row order
-            // agree about what is nearby.
-            chunk.push((point.source_id, split32(point.qx, point.qy).0.raw()));
+            chunk.push((point.source_id, (point.qx, point.qy)));
             if chunk.len() == JOIN_CHUNK_ROWS {
-                if let Err(e) = resolve(&mut chunk, morton_of_ordinal) {
+                if let Err(e) = resolve(
+                    &mut chunk,
+                    x_of_ordinal,
+                    y_of_ordinal,
+                    &mut points_seen,
+                    &mut geom_anchor,
+                ) {
                     failure = Some(e);
                     return ControlFlow::Break(());
                 }
@@ -844,9 +863,27 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         if let Some(error) = failure {
             return Err(error);
         }
-        resolve(&mut chunk, morton_of_ordinal)?;
+        resolve(
+            &mut chunk,
+            x_of_ordinal,
+            y_of_ordinal,
+            &mut points_seen,
+            &mut geom_anchor,
+        )?;
+        if points_seen != n {
+            return Err(input_changed(&format!(
+                "the points file yielded {points_seen} geometry rows, but its first pass \
+                 selected {n}"
+            )));
+        }
+        if geom_anchor != ids_anchor {
+            return Err(input_changed(
+                "the points file's geometry pass carries different ids than its first pass did \
+                 (row count unchanged)",
+            ));
+        }
     }
-    timer.end(BuildStage::MortonCodes, n);
+    timer.end(BuildStage::GeometryRead, n);
 
     drop(source_ids);
     drop(term_keys);
@@ -923,7 +960,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             recs.push(SortRec {
                 key_hi: (key >> 32) as u32,
                 key_lo: key as u32,
-                morton: morton_of_ordinal[ordinal as usize],
+                // From the quantised form directly, exactly as the tiler does — `split32`'s cell
+                // half is the code `morton_of` would give for the same point, so entity order and
+                // row order agree about what is nearby. Computed rather than stored: a third
+                // mapped array would cost 4 B/item to save one interleave per item.
+                morton: split32(x_of_ordinal[ordinal as usize], y_of_ordinal[ordinal as usize])
+                    .0
+                    .raw(),
                 ordinal: ordinal as u32,
             });
         }
@@ -1166,88 +1209,32 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         if args.mint_external_ids { n } else { 0 },
     );
 
-    // ---- 8. geometry, in entity order ------------------------------------------------
-    // Chunk-order insensitivity ([`join_chunk`]): source ids are duplicate-checked, so every
-    // `(x_of_entity, y_of_entity)` slot is written exactly once — there is no order to observe.
-    // (A file that repeats or substitutes ids since the first pass fails the id-anchor check
-    // below — a row count alone would accept a repeat that compensates a removal, and this was
-    // previously last-write-wins silent.)
-    // 32-bit fixed point per axis, not coordinates: the cell code and its residual both
-    // fall out by shift and mask, so no stage re-quantises (see `input::PointRow`).
-    // Mapped rather than heap-allocated: 4 B per entity per axis is 8 GB at 10⁹ of memory the
-    // kernel cannot reclaim, for two arrays that are written once and read once at random indices
-    // and never sorted. See [`spill::MappedU32`] — the bytes become page cache, so a machine short
-    // of RAM pages instead of failing.
+    // ---- 8. geometry, permuted into entity order -------------------------------------
+    // **No I/O: step 3b read the file, and this only moves what it read.** `entity_of_ordinal` is
+    // a bijection over `0..n` — entity ids are positions in the batch's signature order, and the
+    // batches partition ordinal space — so every slot is written exactly once and none is left at
+    // (0, 0). That is the property the old scan needed its id-anchor check to establish about the
+    // *file*; here it is a property of an array this function built, so the checks stayed behind
+    // in 3b with the read they belong to.
+    //
+    // 32-bit fixed point per axis, not coordinates: the cell code and its residual both fall out
+    // by shift and mask, so no stage re-quantises (see `input::PointRow`).
+    //
+    // The scatter is the same random write pattern the old scan performed, minus the parquet
+    // decode in front of it — so this stage is strictly cheaper than the one it replaces. Its cost
+    // is a second pair of mapped arrays for as long as the permute runs; the ordinal pair is
+    // released immediately afterwards, and both are page cache rather than anonymous memory.
     let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
     let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
     let x_of_entity = x_map.as_mut_slice();
     let y_of_entity = y_map.as_mut_slice();
-    let mut points_seen = 0u64;
-    let mut geom_anchor = 0u64;
-    let mut failure: Option<BuildError> = None;
-    let mut chunk: Vec<(u64, (u32, u32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
-    let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
-                   x_of_entity: &mut [u32],
-                   y_of_entity: &mut [u32],
-                   points_seen: &mut u64,
-                   geom_anchor: &mut u64| {
-        join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
-            let Some(ordinal) = ordinal else {
-                return Err(input_changed(&format!(
-                    "the points file names entity {source_id}, which its first pass did not"
-                )));
-            };
-            let entity = entity_of_ordinal[ordinal as usize] as usize;
-            x_of_entity[entity] = x;
-            y_of_entity[entity] = y;
-            *points_seen += 1;
-            *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
-            Ok(())
-        })
-    };
-    input::scan_points(&args.points, &args.extent, args.limit, |point| {
-        chunk.push((point.source_id, (point.qx, point.qy)));
-        if chunk.len() == JOIN_CHUNK_ROWS {
-            if let Err(e) = resolve(
-                &mut chunk,
-                x_of_entity,
-                y_of_entity,
-                &mut points_seen,
-                &mut geom_anchor,
-            ) {
-                failure = Some(e);
-                return ControlFlow::Break(());
-            }
-        }
-        ControlFlow::Continue(())
-    })?;
-    if let Some(error) = failure {
-        return Err(error);
+    for ordinal in 0..n as usize {
+        let entity = entity_of_ordinal[ordinal] as usize;
+        x_of_entity[entity] = x_of_ordinal[ordinal];
+        y_of_entity[entity] = y_of_ordinal[ordinal];
     }
-    resolve(
-        &mut chunk,
-        x_of_entity,
-        y_of_entity,
-        &mut points_seen,
-        &mut geom_anchor,
-    )?;
-    drop(chunk);
-    // A shrunk points file resolves every id it still presents and would previously leave the
-    // missing entities at (0, 0) with no error at all — count, don't trust.
-    if points_seen != n {
-        return Err(input_changed(&format!(
-            "the points file yielded {points_seen} geometry rows, but its first pass \
-             selected {n}"
-        )));
-    }
-    // And a count alone accepts a repeat that compensates a removal ({1,2,3} become {2,2,2}):
-    // the multiset of ids must be the first pass's, so entity slots are written exactly once.
-    if geom_anchor != ids_anchor {
-        return Err(input_changed(
-            "the points file's geometry pass carries different ids than its first pass did \
-             (row count unchanged)",
-        ));
-    }
+    drop(x_ord_map);
+    drop(y_ord_map);
     // The declared attribute tail, read **here** and not at the segment write, because this is
     // where the two things that resolve it are still alive: `source_ids` maps a file's id to its
     // ordinal, and `entity_of_ordinal` maps that ordinal to the entity the build assigned it.
@@ -1267,7 +1254,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     drop(source_ids);
     drop(entity_of_ordinal);
 
-    timer.end(BuildStage::GeometryScan, n);
+    timer.end(BuildStage::GeometryPermute, n);
 
     // ---- 8b. attribute filter postings (filter-index §4) -------------------------------
     // Its own stage, after entity assignment and before the tiler sort: entity ids are final

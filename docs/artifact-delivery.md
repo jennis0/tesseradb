@@ -35,7 +35,7 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
 | **0** Rulings and promotion | not started | the three designs are normative and the register carries their rows | — |
-| **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it; gate green. The registry is not started |
+| **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it, and the geometry read moved so it costs no extra pass; verified on the real 2.4M corpus. The registry is not started |
 | **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-threshold artifacts are indistinguishable from absent ones | — |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
@@ -137,37 +137,39 @@ first pass sees the file's order rather than the corpus's. **No existing test mo
 pinned signature *grouping* and never the order inside a group — so the new one asserts the
 direction on both the pre-sort and the tie-refinement path.
 
-**What the real 2.4M corpus says** (*measured* 2026-08-15, two builds of the same corpus through the
-shipped writer, warm cache, `categories-subclass`):
+**What the real 2.4M corpus says** (*measured* 2026-08-15, builds of the same corpus through the
+shipped writer, warm cache, `categories-subclass`, **minimum of three runs**):
 
-| | before | after | |
-|---|---:|---:|---|
-| `postings.arrow`, `pairs.parquet`, `morton.u32` | | | **byte-identical** |
-| permutation, `row-entity`, `columns.arrow`, external ids | | | changed, as they must |
-| mean monotone run in `permutation.bin` | 2.00 | **49.19** | **24.6×** |
-| build wall time | 6.93 s | 10.30 s | **+49%** |
-| peak RSS | 202 MB | 214 MB | +5.5% |
+| | baseline | tiebreak | + the pass rework |
+|---|---:|---:|---:|
+| build wall time | 7.34 s | 8.84 s (+20%) | **8.20 s (+12%)** |
+| points-file passes | 3 | 4 | **3** |
+| `postings.arrow`, `pairs.parquet`, `morton.u32` | | **byte-identical** | **byte-identical** |
+| mean monotone run in `permutation.bin` | 2.00 | **49.19** | 49.19 |
 
-**Two of these correct the design.** M3's *"postings byte-identical"* now holds end to end rather
+**Read the timings as ±1 s.** Single runs of this build vary by that much on this machine, and an
+earlier revision of this section quoted **+49%** from one — that figure was noise and is withdrawn,
+along with the precise `+0.33 s record / +3.04 s pass` split derived the same way. Three-run minima
+are what the table carries.
+
+**Two results correct the design.** M3's *"postings byte-identical"* now holds end to end rather
 than in a re-derivation — and it is structural, not luck: a signature group occupies the same
 contiguous entity range however its interior is ordered, so a term's postings cannot move. M7's
 permutation claim was *"~1 → ~44"*; the measured pair is **2.00 → 49.19**, because the uncorrelated
 baseline for a random permutation is 2, not 1. The direction and the destination hold; **the ratio
 is 24.6×, not 44×**, and anything quoting the old baseline is quoting a mistake.
 
-**And one is a cost the decision under-stated.** [Decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md)
-called the build-side effect second-order, reasoning about the sort record. It is not: the build is
-**+49%** at 2.4M. Decomposed by running the wide record with the pass switched off, the split is
-**+0.33 s for the record and the extra key component, +3.04 s for the pass** — so the layout
-question the decision left open is settled and it is the wrong lever: at 12 bytes with an
-indirection it would recover about a tenth of what was lost.
+**The rework, and what it bought.** The build read the points file three times before the tiebreak —
+source ids, a re-read for external ids, and geometry in entity order — and the tiebreak made it
+four, because the sort needs geometry that entity-space stages had not yet read. Geometry now lands
+**once**, in ordinal space, early enough for the sort; the old geometry scan becomes a scatter
+through `entity_of_ordinal` with no I/O at all. Back to three passes, and the bundle it produces is
+**byte-identical** to the four-pass one — every file, with only `created_at` moving.
 
-⊘ **The lever is the pass, and there is a recovery worth its own change.** The build reads the
-points file **twice** already — once for source ids, once for geometry in entity order — and this
-made it three. If the new pass also captured `(qx, qy)` by ordinal, the geometry scan becomes a
-permutation of arrays already in hand, taking the build to **two** passes: net faster than before
-the tiebreak. Not done here, because it restructures a stage that feeds the tiler, the geometry
-anchor check and the sub-cell residual, and that is a change with its own argument to make.
+⊘ **What remains is +12%, and it is not the pass.** The residue is the wider sort record, the extra
+comparator field, the permute loop and two more mapped arrays held across the batch loop. Whether
+that is worth a second attempt — a 12-byte record reading codes back out of the mapped array — is
+unmeasured, and cheaper to answer at 25M than at 2.4M where it is inside the noise.
 
 ### Stage 2 — One flat level, served with masked counts
 
