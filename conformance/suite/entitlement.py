@@ -89,7 +89,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, NamedTuple
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
@@ -262,21 +264,134 @@ def _tables(concatenated: bytes) -> pa.Table | None:
     return pa.concat_tables(tables) if len(tables) > 1 else tables[0]
 
 
-def _point_rows(canon: Streamed, label: str, reasons: list[str]) -> list[_Row]:
+def _points_table(canon: Streamed, label: str, reasons: list[str]) -> pa.Table | None:
+    """The served points as Arrow, or `None` for an empty surface or one that cannot be
+    attributed. The schema check lives here so both routes below share it and a malformed
+    surface is reported exactly once per recording."""
     table = _tables(canon.points)
     if table is None:
-        return []
-    names = table.schema.names
+        return None
     for required in ("tessera_id", "code", FX_COLUMN):
-        if required not in names:
+        if required not in table.schema.names:
             reasons.append(f"{label}: points schema lacks `{required}` — cannot attribute rows")
-            return []
-    columns = [table.column(name).to_pylist() for name in names]
+            return None
+    return table
+
+
+def _rows_at(table: pa.Table, positions: np.ndarray) -> list[_Row]:
+    """Decode the named rows to Python.
+
+    **Everything expensive in this module is a `to_pylist` on a served surface**, and this is the
+    only one left on the hot path — which is why it takes positions rather than a table. A
+    recording holds every point a viewport served; a stage changes a few thousand of them. Cost
+    proportional to the change rather than to the recording is the whole point of the vectorised
+    route in [`_split_rows`]. Measured on the endurance corpus: 0.59 s per 200,000 points across
+    seven columns, and a deep-zoom recording carries an order of magnitude more than that.
+    """
+    if len(positions) == 0:
+        return []
+    taken = table.take(pa.array(positions, pa.int64()))
+    names = taken.schema.names
+    columns = [taken.column(name).to_pylist() for name in names]
     ti, ci, fi = names.index("tessera_id"), names.index("code"), names.index(FX_COLUMN)
-    rows = []
-    for values in zip(*columns):
-        rows.append(_Row(key=values, tessera_id=values[ti], code=values[ci], fx=values[fi]))
-    return rows
+    return [
+        _Row(key=values, tessera_id=values[ti], code=values[ci], fx=values[fi])
+        for values in zip(*columns)
+    ]
+
+
+def _point_rows(canon: Streamed, label: str, reasons: list[str]) -> list[_Row]:
+    """Every served point, decoded. The reference route: obviously the tuple semantics the diff
+    is specified in, and the fallback whenever [`_split_rows`] declines."""
+    table = _points_table(canon, label, reasons)
+    if table is None:
+        return []
+    return _rows_at(table, np.arange(table.num_rows))
+
+
+def _column_equal(before: pa.ChunkedArray, after: pa.ChunkedArray) -> np.ndarray:
+    """Elementwise equality with **Python's** null semantics, which is what the tuple route means
+    by equal: two nulls are equal, a null and a value are not. `pyarrow.compute.equal` yields
+    *null* when either side is null, and a null read as False would report every null-bearing row
+    as changed — a whole surface of spurious added/removed pairs."""
+    both_null = pc.and_(pc.is_null(before), pc.is_null(after))
+    equal = pc.fill_null(pc.equal(before, after), False)
+    return pc.or_(equal, both_null).to_numpy(zero_copy_only=False)
+
+
+def _split_rows(tb: pa.Table, ta: pa.Table) -> tuple[np.ndarray, np.ndarray, bool] | None:
+    """`(removed positions in tb, added positions in ta, residual order held)` — the tuple route's
+    answer, computed without decoding either recording.
+
+    A row is *removed* when its full column tuple is absent from the other side, which — given a
+    unique served identity — is exactly "no row there carries this `tessera_id`, or one does and
+    some column differs". Both halves are set operations over the identity column and a
+    columnwise comparison at the matched positions, so nothing is decoded but the rows that
+    actually moved.
+
+    **Returns `None` rather than an answer when `tessera_id` is not unique in either recording**,
+    because the identity join above is then not the tuple semantics: two rows sharing an identity
+    would match one position and hide the other. The contract makes the served identity unique
+    per recording, so this is a guard against a defect, not a supported shape — and declining
+    into the reference route means such a defect is still *caught*, just slowly, rather than
+    silently mis-attributed.
+    """
+    if ta.schema.names != tb.schema.names:
+        return None
+    identity = (tb.column("tessera_id"), ta.column("tessera_id"))
+    # An identity that is not a non-null integer cannot key the join: a null decodes to NaN and
+    # compares unequal to itself, and a non-integer decodes to an object array whose sortedness
+    # says nothing. Both are contract violations rather than shapes to support, so decline into
+    # the reference route, which still answers.
+    if not all(pa.types.is_integer(c.type) and c.null_count == 0 for c in identity):
+        return None
+    ids_b = identity[0].combine_chunks().to_numpy(zero_copy_only=False)
+    ids_a = identity[1].combine_chunks().to_numpy(zero_copy_only=False)
+    order_b, order_a = np.argsort(ids_b, kind="stable"), np.argsort(ids_a, kind="stable")
+    sorted_b, sorted_a = ids_b[order_b], ids_a[order_a]
+    for run in (sorted_b, sorted_a):
+        if run.size > 1 and (np.diff(run) == 0).any():
+            return None
+
+    hit_b, hit_a = np.isin(ids_b, ids_a), np.isin(ids_a, ids_b)
+    pos_b = np.flatnonzero(hit_b)
+    pos_a = order_a[np.searchsorted(sorted_a, ids_b[pos_b])]
+
+    same = np.ones(pos_b.size, dtype=bool)
+    if pos_b.size:
+        sub_b = tb.take(pa.array(pos_b, pa.int64()))
+        sub_a = ta.take(pa.array(pos_a, pa.int64()))
+        for name in tb.schema.names:
+            same &= _column_equal(sub_b.column(name), sub_a.column(name))
+
+    removed = np.sort(np.concatenate([np.flatnonzero(~hit_b), pos_b[~same]]))
+    added = np.sort(np.concatenate([np.flatnonzero(~hit_a), pos_a[~same]]))
+    # The surviving rows must appear in the same order on both sides; their contents are already
+    # known equal, so the identity sequence carries the whole comparison.
+    residual_ok = bool(np.array_equal(ids_b[pos_b[same]], ids_a[np.sort(pos_a[same])]))
+    return removed, added, residual_ok
+
+
+def _resolve_ids(analysed: dict, wanted: set[int]) -> list[_Row]:
+    """The served rows carrying the given identities, taken from wherever a viewport served them.
+
+    Only the battery's drill-down items need this. Every other identity the diff looks up belongs
+    to a row that *changed*, and those are decoded already — but a drill-down item is normally
+    the one thing that did not change, so its identity would otherwise be unresolvable now that
+    unchanged rows are never decoded.
+    """
+    if not wanted:
+        return []
+    out: list[_Row] = []
+    want = pa.array(sorted(wanted), pa.uint64())
+    for vd in analysed.values():
+        for table in vd.tables:
+            if table is None:
+                continue
+            column = table.column("tessera_id")
+            mask = pc.is_in(column, value_set=want.cast(column.type))
+            out.extend(_rows_at(table, np.flatnonzero(mask.to_numpy(zero_copy_only=False))))
+    return out
 
 
 def _tile_map(canon: Streamed) -> dict[int, tuple[int, int, int]]:
@@ -328,40 +443,63 @@ def _label(query: Viewport) -> str:
 
 @dataclass
 class _VpDiff:
-    rows_before: list[_Row]
-    rows_after: list[_Row]
     added: list[_Row]
     removed: list[_Row]
+    #: The two recordings, kept as Arrow for [`_resolve_ids`]. Unchanged rows are never decoded,
+    #: so a later lookup of an *unchanged* identity has to come back here for it.
+    tables: tuple[pa.Table | None, pa.Table | None]
+
+
+def _rows_by_tuple(
+    rows_before: list[_Row], rows_after: list[_Row]
+) -> tuple[list[_Row], list[_Row], bool]:
+    """The diff's semantics, stated directly over decoded rows: a row belongs to the change when
+    its full column tuple is absent from the other side. [`_split_rows`] computes this without
+    decoding; this is what it must agree with, and the route taken when it declines."""
+    before_keys = {r.key for r in rows_before}
+    after_keys = {r.key for r in rows_after}
+    removed = [r for r in rows_before if r.key not in after_keys]
+    added = [r for r in rows_after if r.key not in before_keys]
+    residual_before = [r.key for r in rows_before if r.key in after_keys]
+    residual_after = [r.key for r in rows_after if r.key in before_keys]
+    return removed, added, residual_before == residual_after
 
 
 def _analyse_viewport(
     query: Viewport, before: Streamed, after: Streamed, reasons: list[str]
 ) -> _VpDiff:
     label = _label(query)
-    rows_before = _point_rows(before, label, reasons)
-    rows_after = _point_rows(after, label, reasons)
+    tb = _points_table(before, label, reasons)
+    ta = _points_table(after, label, reasons)
 
-    before_keys = {r.key for r in rows_before}
-    after_keys = {r.key for r in rows_after}
-    removed = [r for r in rows_before if r.key not in after_keys]
-    added = [r for r in rows_after if r.key not in before_keys]
+    if before.points == after.points:
+        # Identical bytes are identical rows, and the surfaces here run to millions of points:
+        # not decoding them is worth the special case.
+        return _VpDiff([], [], (tb, ta))
+
+    split = None if tb is None or ta is None else _split_rows(tb, ta)
+    if split is not None:
+        removed_pos, added_pos, residual_ok = split
+        removed, added = _rows_at(tb, removed_pos), _rows_at(ta, added_pos)
+    else:
+        rows_before = [] if tb is None else _rows_at(tb, np.arange(tb.num_rows))
+        rows_after = [] if ta is None else _rows_at(ta, np.arange(ta.num_rows))
+        removed, added, residual_ok = _rows_by_tuple(rows_before, rows_after)
 
     # The residual must be identical *in order*: contracts §3.2 orders points ascending by
     # `tessera_id` within each tile, so an unexplained reordering is a defect, never noise.
-    residual_before = [r.key for r in rows_before if r.key in after_keys]
-    residual_after = [r.key for r in rows_after if r.key in before_keys]
-    if residual_before != residual_after:
+    if not residual_ok:
         reasons.append(
             f"{label}: beyond the {len(added)} added / {len(removed)} removed rows, the "
             f"surviving rows changed order or content — a permutation-preserving surface would "
             f"have hidden this"
         )
-    if before.points != after.points and not added and not removed and residual_before == residual_after:
+    if not added and not removed and residual_ok:
         reasons.append(
             f"{label}: points bytes differ with no row difference — encoding or chunking drift, "
             f"which §12.2 step 4's content-determinism assumption says must not happen"
         )
-    return _VpDiff(rows_before, rows_after, added, removed)
+    return _VpDiff(added, removed, (tb, ta))
 
 
 def _check_viewport_counts(
@@ -534,13 +672,23 @@ def diff(before: Recorded, after: Recorded) -> Delta | CappedDelta | Uncheckable
         nonempty[q] = set(tiles_b) | set(tiles_a)
 
     # Item identity is carried by every served row; both sides of every viewport contribute, so a
-    # row that exists only before (a vanished item) still names itself.
+    # row that exists only before (a vanished item) still names itself. Only two kinds of identity
+    # are ever looked up here — one that moved, and a drill-down item's — so the map is built from
+    # the rows that moved plus a targeted lookup for the battery's items, rather than from every
+    # served row. The distinction is not academic at endurance scale: the full form decodes
+    # millions of rows to answer a few hundred questions.
     code_of_fx: dict[int, int] = {}
     fx_of_tessera: dict[int, int] = {}
     for vd in analysed.values():
-        for row in (*vd.rows_before, *vd.rows_after):
+        for row in (*vd.removed, *vd.added):
             code_of_fx[row.fx] = row.code
             fx_of_tessera[row.tessera_id] = row.fx
+    for row in _resolve_ids(analysed, {q.tessera_id for q in before if isinstance(q, Item)}):
+        # A moved row's own code wins: an item that both moved and is drilled into is described
+        # by the recording that changed, which is what the full form's before-then-after order
+        # also yielded.
+        code_of_fx.setdefault(row.fx, row.code)
+        fx_of_tessera.setdefault(row.tessera_id, row.fx)
 
     # -- membership evidence (module doc): untruncated tiles of every viewport — an unfiltered
     # one's complete tile is the visible set, a filtered one's the matched set, and a matched

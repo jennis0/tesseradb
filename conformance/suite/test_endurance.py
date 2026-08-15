@@ -188,8 +188,19 @@ GRANT_TERMS = tuple(range(64, 72))
 GRANTS = tuple(str(t) for t in GRANT_TERMS)
 SLICE_ID = "s0"
 BBOX = (0.0, 0.0, 65536.0, 65536.0)
-#: Saturation (§10's precondition, inherited by the diff): above every visible total this run can
-#: reach, so a removed row admits nothing behind it and a write's delta is the corpus's delta.
+#: The per-tile cap (contracts §3.2's cap clause, not a per-request ceiling).
+#:
+#: **At the small tiers this sits above every visible total the run can reach**, so no tile
+#: truncates, a removed row admits nothing behind it, and a write's delta is the corpus's delta.
+#: Past roughly three million items at this grant's 1/16 it no longer can, and the zoom-0
+#: viewport — one tile over the whole extent — caps first while the deeper ones, whose visible
+#: set is spread over 64 and 1024 tiles, stay complete for far longer. A capped tile is not a
+#: skipped check: the diff falls to its capped arm, which holds membership over the tiles that
+#: stayed complete and net movement everywhere, and reports a recording whose every tile capped
+#: as uncheckable rather than passing it.
+#:
+#: Raising this to chase exactness at scale is the wrong lever twice over — it cannot outrun a
+#: corpus that grows, and the deep viewport's served set is what the harness must then compare.
 K = 200_000
 #: The suite config's merge cap (`driver._suite_config`): the ladder's saturation size.
 SATURATION_BYTES = 1_048_576

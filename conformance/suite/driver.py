@@ -628,8 +628,12 @@ class SuiteHarness:
         # was found only by the endurance tier, three runs in a row at the same operation count.
         # A file also outlives the process, so a crashed server's tail is still readable — which a
         # drained pipe would have to reimplement.
+        # Appended, never truncated: a plan restarts the server — a reload stage, a kill, a cold
+        # profile between every stage — and opening for write would throw away the history at
+        # exactly the points a long run needs it. One file across the run's whole life, so the
+        # tail after a failure still carries what the previous process said before it died.
         self.log_path = self.run_dir / "server.log"
-        self._log = self.log_path.open("wb")
+        self._log = self.log_path.open("ab")
         self.proc = subprocess.Popen(
             argv,
             cwd=REPO_ROOT,
