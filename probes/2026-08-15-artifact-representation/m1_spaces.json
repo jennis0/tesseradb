@@ -1,0 +1,59 @@
+{
+ "L0": {
+  "row": {
+   "tag": "row",
+   "clusters": 8,
+   "members": 1934209,
+   "bytes": 10794,
+   "bytes_runopt": 10794,
+   "bytes_per_member": 0.006
+  },
+  "entity": {
+   "tag": "entity",
+   "clusters": 8,
+   "members": 1934209,
+   "bytes": 1278785,
+   "bytes_runopt": 1278785,
+   "bytes_per_member": 0.661
+  },
+  "ratio": 118.47
+ },
+ "L1": {
+  "row": {
+   "tag": "row",
+   "clusters": 111,
+   "members": 1857630,
+   "bytes": 41943,
+   "bytes_runopt": 41943,
+   "bytes_per_member": 0.023
+  },
+  "entity": {
+   "tag": "entity",
+   "clusters": 111,
+   "members": 1857630,
+   "bytes": 3267145,
+   "bytes_runopt": 3267145,
+   "bytes_per_member": 1.759
+  },
+  "ratio": 77.89
+ },
+ "L2": {
+  "row": {
+   "tag": "row",
+   "clusters": 884,
+   "members": 1824800,
+   "bytes": 132463,
+   "bytes_runopt": 132463,
+   "bytes_per_member": 0.073
+  },
+  "entity": {
+   "tag": "entity",
+   "clusters": 884,
+   "members": 1824800,
+   "bytes": 3800807,
+   "bytes_runopt": 3800807,
+   "bytes_per_member": 2.083
+  },
+  "ratio": 28.69
+ }
+}

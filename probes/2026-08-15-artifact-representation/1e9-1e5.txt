@@ -1,0 +1,21 @@
+rows=1000000000 artifacts=100000 noise=0.22
+assigned in 12.134623199s; coverage 0.780
+
+--- size ---
+row-space bitmaps :    477491694 B  (477.492 MB)
+dense column (u32) :   4000000000 B  (4000.000 MB)
+column / bitmaps  : 8.38x
+bytes per artifact: 4774.9
+
+viewport   100% : visible= 250000378  artifacts in range=  100000
+  per-artifact bitmaps :    308.87 ms   (sum 194997903)
+  column scan          :   1360.51 ms   (sum 194997903)
+
+viewport    10% : visible=  25001497  artifacts in range=   10773
+  per-artifact bitmaps :     33.55 ms   (sum 19502825)
+  column scan          :    104.86 ms   (sum 19502825)
+
+viewport     1% : visible=   2500545  artifacts in range=    1070
+  per-artifact bitmaps :      4.11 ms   (sum 1951358)
+  column scan          :     13.24 ms   (sum 1951358)
+bitmap build 7.986326286s

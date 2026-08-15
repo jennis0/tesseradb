@@ -1,0 +1,32 @@
+{
+ "disc": {
+  "members": 40031,
+  "runs": 318,
+  "bytes": 1317,
+  "b_per_member": 0.0329
+ },
+ "square": {
+  "members": 40015,
+  "runs": 361,
+  "bytes": 1489,
+  "b_per_member": 0.0372
+ },
+ "corridor": {
+  "members": 80446,
+  "runs": 1188,
+  "bytes": 4918,
+  "b_per_member": 0.0611
+ },
+ "coastline": {
+  "members": 42505,
+  "runs": 456,
+  "bytes": 1893,
+  "b_per_member": 0.0445
+ },
+ "archipelago": {
+  "members": 99717,
+  "runs": 3668,
+  "bytes": 15055,
+  "b_per_member": 0.151
+ }
+}

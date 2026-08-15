@@ -1,0 +1,37 @@
+{
+ "per_layer": {
+  "L0": {
+   "clusters": 8,
+   "coverage": 0.798,
+   "width": 1,
+   "dense_col": 2422486,
+   "partial_col": 1938838,
+   "row_bitmaps": 10794,
+   "entity_bitmaps": 1278785
+  },
+  "L1": {
+   "clusters": 111,
+   "coverage": 0.767,
+   "width": 1,
+   "dense_col": 2422486,
+   "partial_col": 1875053,
+   "row_bitmaps": 41943,
+   "entity_bitmaps": 3267145
+  },
+  "L2": {
+   "clusters": 884,
+   "coverage": 0.753,
+   "width": 2,
+   "dense_col": 4844972,
+   "partial_col": 3724655,
+   "row_bitmaps": 132463,
+   "entity_bitmaps": 3800807
+  }
+ },
+ "totals": {
+  "dense_col": 9689944,
+  "partial_col": 7538546,
+  "row_bitmaps": 185200,
+  "entity_bitmaps": 8346737
+ }
+}

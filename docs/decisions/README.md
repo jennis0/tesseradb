@@ -84,3 +84,9 @@ prevent.
 | [0064](0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md) | 2026-08-10 | An absent number is a presence bitmap beside the column, not a sentinel and not a validity buffer |
 | [0065](0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md) | 2026-08-11 | Row→entity is stored as `row-entity.u32` after all: a filtered viewport asks it per row, and the keyed bijection's ~17.5 ns is the whole cost of the cheap route |
 | [0066](0066-none-of-requires-a-value-and-names-one-column.md) | 2026-08-11 | `none_of` means *carries a value, and none of these matches it* — the presence requirement is what keeps a negation positive and closes 0062's C11 oracle at the same time |
+| [0067](0067-term-timing-is-accepted-for-text-and-keyword-postings.md) | 2026-08-12 | The term-postings timing channel is accepted for text and keyword terms |
+| [0068](0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md) | 2026-08-12 | A row-space operand bounded by the request's domain is admitted, and a rendered column is filterable |
+| [0069](0069-filter-do-not-rank-sharpens-to-no-corpus-global-statistics.md) | 2026-08-12 | "Filter, do not rank" sharpens to "no corpus-global statistics" |
+| [0070](0070-analysers-are-named-and-declared-per-column.md) | 2026-08-13 | Analysers are named, declared per column, and there will be more than one |
+| [0071](0071-fault-injection-reaches-a-served-binary-by-its-own-build.md) | 2026-08-15 | Fault injection reaches a served binary by its own build, not by a runtime switch |
+| [0072](0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) | 2026-08-15 | Entity IDs are slots and are reused after a fold; identity moves to `tessera_id` |
