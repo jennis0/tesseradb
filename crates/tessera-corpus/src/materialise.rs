@@ -207,11 +207,11 @@ impl Corpus {
     /// ingests items beyond the built prefix from the same functions (spec §12.1's "the same
     /// corpus feeds every way in").
     ///
-    /// ⊘ One column outruns the server today: `/control/ingest`'s parse has no
-    /// `timestamp[us]` branch, so a batch carrying `seen_at` is refused even though the WAL and
-    /// the build both store the type. This emits the type the manifest declares for the column
-    /// (`DeclaredScalar::wire_type`); the gap is the server's to close, and papering over it here
-    /// — an `i64` column, say — would be refused too, as a declared-type mismatch.
+    /// Every column emits the type the manifest declares for it
+    /// (`DeclaredScalar::wire_type`), which is the only shape ingest accepts — a substitute (an
+    /// `i64` for a `timestamp_us`, say) is refused as a declared-type mismatch. `seen_at` was
+    /// un-ingestable when this was written, ingest having inferred types by downcast and knowing
+    /// no timestamp; the decode is driven by the declaration now and the set is exhaustive.
     pub fn ingest_batch(&self, range: Range<u64>) -> RecordBatch {
         let rows = usize::try_from(range.end.saturating_sub(range.start))
             .expect("an ingest batch fits in memory by construction");

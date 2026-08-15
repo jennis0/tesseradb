@@ -9,9 +9,10 @@ to extend when a surface is added.
 
 Row 3 lives beside it: `suite.driver` (the stage driver, §12.3's triggering protocol and
 barriers) and `suite.entitlement` (the `Nothing | Entity | Rows` algebra and the recording diff),
-exercised end to end by `test_stage_invariance.py`'s fixture-size plan. ⊘ Rows 6–9 are not built:
-no total verification, no profiles, no crash modifier (§10.1 is blocked on an owner ruling), no
-endurance tier.
+exercised end to end by `test_stage_invariance.py`'s fixture-size plan. Row 6 is
+`suite.verification` — the row half against the corpus's computed expectations and the per-tile
+census — and §10.1's kill modifier rides the driver, decision 0071 having ruled how a pause site
+reaches a served binary. ⊘ Rows 7 and 9 are not built: no profiles, no endurance tier.
 
 The canary comparator (`conformance/tests/test_canary.py`) is refactored onto `suite.canonical`
 rather than keeping its own copy. §12.2 is explicit about why there must be exactly one
