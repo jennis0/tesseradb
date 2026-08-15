@@ -1067,7 +1067,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         .finish(&postings_path)
         .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
-    tmp.close()?;
 
     timer.end(BuildStage::PostingsWrite, pair_count);
 
@@ -1105,15 +1104,21 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // previously last-write-wins silent.)
     // 32-bit fixed point per axis, not coordinates: the cell code and its residual both
     // fall out by shift and mask, so no stage re-quantises (see `input::PointRow`).
-    let mut x_of_entity: Vec<u32> = vec![0; n as usize];
-    let mut y_of_entity: Vec<u32> = vec![0; n as usize];
+    // Mapped rather than heap-allocated: 4 B per entity per axis is 8 GB at 10⁹ of memory the
+    // kernel cannot reclaim, for two arrays that are written once and read once at random indices
+    // and never sorted. See [`spill::MappedU32`] — the bytes become page cache, so a machine short
+    // of RAM pages instead of failing.
+    let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
+    let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
+    let x_of_entity = x_map.as_mut_slice();
+    let y_of_entity = y_map.as_mut_slice();
     let mut points_seen = 0u64;
     let mut geom_anchor = 0u64;
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, (u32, u32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
     let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
-                   x_of_entity: &mut Vec<u32>,
-                   y_of_entity: &mut Vec<u32>,
+                   x_of_entity: &mut [u32],
+                   y_of_entity: &mut [u32],
                    points_seen: &mut u64,
                    geom_anchor: &mut u64| {
         join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
@@ -1135,8 +1140,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(
                 &mut chunk,
-                &mut x_of_entity,
-                &mut y_of_entity,
+                x_of_entity,
+                y_of_entity,
                 &mut points_seen,
                 &mut geom_anchor,
             ) {
@@ -1151,8 +1156,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     }
     resolve(
         &mut chunk,
-        &mut x_of_entity,
-        &mut y_of_entity,
+        x_of_entity,
+        y_of_entity,
         &mut points_seen,
         &mut geom_anchor,
     )?;
@@ -1204,6 +1209,24 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // final (I9) and the attribute values are in hand. Its files join the manifest digest at
     // step 11 with everything else.
     let record_paths = write_record_blob(&partition_dir, &args.schema, &attributes_by_entity)?;
+    // **Everything past here wants only the render columns**, and the two passes that wanted the
+    // rest have just run. `permute_attribute_tail` skips a non-render column outright (its home is
+    // entity space, and giving it a slot in every row is the per-row cost §10.3's routing exists to
+    // avoid), so an index-only column is dead from this line — but it was living to the end of the
+    // segment write, straight through the tiler sort's 12 B/row and the record batch beside it.
+    //
+    // For a `text` column that is the whole of the corpus's prose: ~24 GB of strings at 2.5×10⁸
+    // titles, held for a stage that will not read one of them. Releasing here is what lets a schema
+    // carry text at all at these scales without the peak paying for it twice over.
+    let mut attributes_by_entity = attributes_by_entity;
+    for (column, attribute) in attributes_by_entity
+        .iter_mut()
+        .zip(args.schema.attributes.iter())
+    {
+        if !attribute.render {
+            *column = EntityColumn::filled(attribute.ty, 0);
+        }
+    }
     timer.end(BuildStage::FilterPostings, n);
 
     // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
@@ -1254,8 +1277,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted rows
     // the permutation was scattered from.
     let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
-    let rows_by_index: Vec<u32> = rows.iter().map(|r| r.entity).collect();
-    tessera_store::write_row_entity(&row_entity_path, &rows_by_index)
+    // Collected **once** and kept: this is the row→entity permutation, and the attribute tail
+    // below wants the same vector. It used to be gathered here and again there, so 4 B per row was
+    // held twice for the whole segment write — 1 GB at 2.5×10⁸ and 4 GB at 10⁹, for two passes over
+    // `rows` producing identical bytes. Neither copy was dropped before the record batch, which is
+    // the one place the build is asked to hold as little as possible beside it.
+    let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
+    tessera_store::write_row_entity(&row_entity_path, &entity_row)
         .map_err(|e| BuildError::io(&row_entity_path, e))?;
     fsync_file(&row_entity_path)?;
 
@@ -1276,9 +1304,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 split32(x_of_entity[entity], y_of_entity[entity]).1
             })
             .collect();
-        drop(x_of_entity);
-        drop(y_of_entity);
-        let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
+        drop(x_map);
+        drop(y_map);
         drop(rows);
         // `forward` is fallible (Important I-1): a checked conversion, never `as u32`. At build
         // the allocator cap makes the error unreachable, and collecting into a `Result` is what
@@ -1319,6 +1346,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     }
     fsync_file(&columns_path)?;
     fsync_file(&morton_path)?;
+    // The spill directory closes **here**, not after the postings write where it used to: the
+    // geometry pass now keeps its entity-major scratch in it too (`spill::MappedU32`), so the
+    // directory's lifetime is the whole of the build's transient on-disk state rather than the
+    // pairs half of it. Both mappings are dropped by this point, so the tree is unbusy.
+    tmp.close()?;
 
     timer.end(BuildStage::SegmentWrite, n);
 
@@ -1372,46 +1404,249 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 /// reports no error. The count is checked rather than trusted: this is a *third* pass over the
 /// points file, and a file that changed under the build is exactly what the geometry pass's own
 /// anchor check exists to catch.
+/// One attribute's values in entity order: a typed column, with presence beside it.
+///
+/// **This replaced a `Vec<ScalarValue>` per column, and the difference is the whole reason a build
+/// above 10⁸ items completes.** `ScalarValue` carries a `Utf8(String)` variant, so every slot costs
+/// 32 bytes whatever the column declared — a `u8` column pays for a pointer, a length, a capacity
+/// and a tag. One such vector per column is allocated *and written* for every entity before the
+/// attribute pass reads its first row, so the cost is paid in full even by a build that fails
+/// immediately after. At 2,422,486 items it is a rounding error beside the geometry pass's 28N; at
+/// 250,000,000 items across five columns it is 40 GB, and the build is OOM-killed having produced
+/// nothing but the postings of the pass before it. `filter-index` §4 priced this as "outside the
+/// memory plan regardless" — typed, the same five columns are the schema's declared 12 B/row, and
+/// the ceiling that paragraph describes is no longer where the plan runs out.
+///
+/// **Presence is a bit rather than a value, because a typed column has no spare one.**
+/// `ScalarValue::Null` gave the old intermediate an absent representation for free; a `Vec<u8>` has
+/// no `u8` to reserve. So absence is carried alongside, which is also the shape the output already
+/// wanted — the presence bitmaps written beside each render column are exactly this. It costs an
+/// eighth of a byte per entity: 31 MB at 250,000,000, against the gigabytes the typing saves.
+///
+/// A slot whose value is absent keeps its type's zero. That is what every consumer of an absent
+/// value already reads — the reserved code 0 for a category, the render placeholder elsewhere — so
+/// no consumer distinguishes "absent" by the payload, only by this bit.
+pub(crate) struct EntityColumn {
+    data: ScalarColumnData,
+    present: Vec<u64>,
+}
+
+impl EntityColumn {
+    pub(crate) fn filled(ty: ScalarType, n: usize) -> Self {
+        Self {
+            data: ScalarColumnData::filled(ty, n),
+            present: vec![0u64; n.div_ceil(64)],
+        }
+    }
+
+    /// Collect an entity-ordered sequence into a typed column, for a caller that already holds the
+    /// values in entity order rather than discovering them in file order.
+    /// `ExactSizeIterator` rather than `IntoIterator`, so the length is known without collecting:
+    /// buffering into a `Vec<ScalarValue>` first would rebuild, for one moment, exactly the
+    /// 32-B-per-value intermediate this type exists to avoid.
+    pub(crate) fn from_values<I>(ty: ScalarType, values: I, name: &str) -> std::io::Result<Self>
+    where
+        I: IntoIterator<Item = ScalarValue>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let values = values.into_iter();
+        let mut column = Self::filled(ty, values.len());
+        for (entity, value) in values.enumerate() {
+            column.set(entity, value, name)?;
+        }
+        Ok(column)
+    }
+
+    pub(crate) fn set(
+        &mut self,
+        entity: usize,
+        value: ScalarValue,
+        name: &str,
+    ) -> std::io::Result<()> {
+        // Absent: the zero stands, and the bit is *cleared* to say so rather than merely left
+        // alone. Clearing matters where slots are reused — the staging buffer in
+        // [`read_attributes_by_entity`] writes a fresh chunk over the last one, and a bit left set
+        // by a previous row would make this row's absence read as that row's value.
+        if matches!(value, ScalarValue::Null) {
+            self.present[entity / 64] &= !(1u64 << (entity % 64));
+            return Ok(());
+        }
+        self.present[entity / 64] |= 1u64 << (entity % 64);
+        self.data.set(entity, value, name)
+    }
+
+    pub(crate) fn is_present(&self, entity: usize) -> bool {
+        self.present[entity / 64] >> (entity % 64) & 1 == 1
+    }
+
+    pub(crate) fn value_at(&self, entity: usize) -> ScalarValue {
+        if self.is_present(entity) {
+            self.data.get(entity)
+        } else {
+            ScalarValue::Null
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// The column in entity order. Yields **owned** values, where the `Vec<ScalarValue>` this
+    /// replaced yielded references: a fixed-width value is a copy either way, and a `Utf8` one
+    /// clones a string the caller previously cloned itself at the point of use.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = ScalarValue> + '_ {
+        (0..self.len()).map(|entity| self.value_at(entity))
+    }
+
+    /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
+    /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s clone would
+    /// be a second copy of every string in the corpus.
+    pub(crate) fn str_at(&self, entity: usize) -> Option<&str> {
+        self.is_present(entity)
+            .then(|| self.data.str_at(entity))
+            .flatten()
+    }
+
+    /// Move one value across from a staging column, leaving the source slot absent. Used to land a
+    /// resolved chunk into entity order without going through [`Self::value_at`], whose `Utf8` arm
+    /// would clone every string in the chunk.
+    pub(crate) fn take_from(
+        &mut self,
+        entity: usize,
+        src: &mut EntityColumn,
+        pos: usize,
+        name: &str,
+    ) -> std::io::Result<()> {
+        if !src.is_present(pos) {
+            return Ok(());
+        }
+        src.present[pos / 64] &= !(1u64 << (pos % 64));
+        let value = src.data.take(pos);
+        self.set(entity, value, name)
+    }
+}
+
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
-) -> Result<Vec<Vec<ScalarValue>>> {
+) -> Result<Vec<EntityColumn>> {
     if args.schema.is_empty() {
         return Ok(Vec::new());
     }
     let attributes = &args.schema.attributes;
-    // One flat vector per column, indexed by entity. `ScalarValue` rather than a typed vector:
-    // this form is transient and the typed allocation is the one that survives into the record
-    // batch, so paying for the enum here and the tight `Vec` there is the right way round.
-    let mut by_entity: Vec<Vec<ScalarValue>> = attributes
+    // One typed column per attribute, indexed by entity — see [`EntityColumn`] for why this is not
+    // the `ScalarValue` vector it reads like, and what that costs at 10⁸ items and above.
+    let mut by_entity: Vec<EntityColumn> = attributes
         .iter()
-        .map(|_| vec![ScalarValue::U8(0); n as usize])
+        .map(|a| EntityColumn::filled(a.ty, n as usize))
         .collect();
     let mut seen = 0u64;
     let mut unknown: Option<u64> = None;
+    // A value whose tag is not its column's is a build defect, not an input one, and `set` is the
+    // only place that can see it. Captured rather than unwrapped: the scan's callback cannot fail,
+    // and a panic here would report the row rather than the column that is wrong.
+    let mut mistyped: Option<String> = None;
+    let mut failure: Option<BuildError> = None;
+
+    // **[`join_chunk`]'s merge sweep, not a probe per row.** This pass used a `binary_search` into
+    // `source_ids` for every row, on the reasoning that it is "per-row work over a handful of
+    // narrow columns, not the corpus-scale join the geometry pass does". That holds while
+    // `source_ids` fits in cache and inverts well before it stops: at 2.5×10⁸ the array is 2 GB and
+    // the probes are uniformly scattered across it, so nearly every one of the ~28 comparisons is a
+    // cache miss. Measured on this machine it is **~20 minutes of one core** at that scale, with
+    // the disk idle — most of a 21m32s build, spent resolving a join the pass two stages down
+    // already does the cheap way.
+    //
+    // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
+    // pass makes for the same reason. The cost is a staging buffer: `chunk` at 12 B/row plus one
+    // typed row per column, ~1.6 GB at `JOIN_CHUNK_ROWS` — transient, freed here, and bounded by
+    // the corpus only through the `min` below.
+    let staged_rows = JOIN_CHUNK_ROWS.min(n as usize).max(1);
+    let mut staged: Vec<EntityColumn> = attributes
+        .iter()
+        .map(|a| EntityColumn::filled(a.ty, staged_rows))
+        .collect();
+    let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
+
+    // Everything mutable is a parameter rather than a capture, so the scan's callback and this can
+    // both hold it — the shape the geometry pass's `resolve` uses, and for the same borrow reason.
+    let resolve = |chunk: &mut Vec<(u64, u32)>,
+                   staged: &mut [EntityColumn],
+                   by_entity: &mut [EntityColumn],
+                   seen: &mut u64,
+                   unknown: &mut Option<u64>| {
+        join_chunk(chunk, source_ids, |ordinal, source_id, pos| {
+            let Some(ordinal) = ordinal else {
+                unknown.get_or_insert(source_id);
+                return Ok(());
+            };
+            let entity = entity_of_ordinal[ordinal as usize] as usize;
+            *seen += 1;
+            for ((column, src), attribute) in by_entity
+                .iter_mut()
+                .zip(staged.iter_mut())
+                .zip(attributes.iter())
+            {
+                column
+                    .take_from(entity, src, pos as usize, &attribute.name)
+                    .map_err(|e| {
+                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                    })?;
+            }
+            Ok(())
+        })
+    };
+
     input::scan_attributes(
         &args.points,
         &args.schema,
         minters,
         args.limit,
         |source_id, values| {
-            // Binary search rather than `join_chunk`'s merge sweep: this pass is per-row work over a
-            // handful of narrow columns, not the corpus-scale join the geometry pass does, so the
-            // sweep's chunk machinery would cost more than the log n it saves.
-            let Ok(ordinal) = source_ids.binary_search(&source_id) else {
-                unknown.get_or_insert(source_id);
-                return;
-            };
-            let entity = entity_of_ordinal[ordinal] as usize;
-            seen += 1;
-            for (column, value) in by_entity.iter_mut().zip(values) {
-                column[entity] = value.clone();
+            let pos = chunk.len();
+            for ((column, value), attribute) in
+                staged.iter_mut().zip(values).zip(attributes.iter())
+            {
+                if let Err(e) = column.set(pos, value.clone(), &attribute.name) {
+                    mistyped.get_or_insert_with(|| e.to_string());
+                }
+            }
+            chunk.push((source_id, pos as u32));
+            if chunk.len() == staged_rows && failure.is_none() {
+                if let Err(e) = resolve(
+                    &mut chunk,
+                    &mut staged,
+                    &mut by_entity,
+                    &mut seen,
+                    &mut unknown,
+                ) {
+                    failure = Some(e);
+                }
             }
         },
     )?;
+    if !chunk.is_empty() && failure.is_none() {
+        if let Err(e) = resolve(
+            &mut chunk,
+            &mut staged,
+            &mut by_entity,
+            &mut seen,
+            &mut unknown,
+        ) {
+            failure = Some(e);
+        }
+    }
+    drop(staged);
+    drop(chunk);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if let Some(message) = mistyped {
+        return Err(BuildError::Invalid(message));
+    }
     if let Some(source_id) = unknown {
         return Err(input_changed(&format!(
             "the points file's attribute pass names entity {source_id}, which its first pass did \
@@ -1469,7 +1704,7 @@ fn read_attributes_by_entity(
 pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::schema::Schema,
-    by_entity: &[Vec<ScalarValue>],
+    by_entity: &[EntityColumn],
 ) -> Result<Vec<PathBuf>> {
     write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
 }
@@ -1481,7 +1716,7 @@ use tessera_filter_write::POSTINGS_BAND_ROWS;
 fn write_filter_postings_banded(
     partition_dir: &Path,
     schema: &crate::schema::Schema,
-    by_entity: &[Vec<ScalarValue>],
+    by_entity: &[EntityColumn],
     band_rows: usize,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
@@ -1566,7 +1801,7 @@ fn write_filter_postings_banded(
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
     schema: &crate::schema::Schema,
-    by_entity: &[Vec<ScalarValue>],
+    by_entity: &[EntityColumn],
 ) -> Result<Vec<PathBuf>> {
     // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
     // Records §4.2 exempts categories from the blob because their entity-space structures are the
@@ -1607,7 +1842,7 @@ pub(crate) fn write_record_blob(
     )
     .map_err(|e| BuildError::io(&blocks_path, e))?;
 
-    let n = by_entity.first().map_or(0, Vec::len);
+    let n = by_entity.first().map_or(0, EntityColumn::len);
     let mut fields: Vec<RecordField> = Vec::with_capacity(blob_columns.len());
     // A range loop on purpose: each entity gathers across *several* parallel columns, which is
     // not the single-slice shape `needless_range_loop`'s rewrite fits.
@@ -1616,7 +1851,8 @@ pub(crate) fn write_record_blob(
         fields.clear();
         for &column in &blob_columns {
             let attribute = &schema.attributes[column];
-            let Some(value) = record_value_of(&by_entity[column][entity], attribute)? else {
+            let Some(value) = record_value_of(&by_entity[column].value_at(entity), attribute)?
+            else {
                 continue;
             };
             let tag = u16::try_from(column).map_err(|_| {
@@ -1689,14 +1925,14 @@ fn record_value_of(
 /// rather than two producers that agree the byte-identity argument. What is here is the adaptation:
 /// the build's source is a `ScalarValue` per entity, where the fold's is a value column.
 struct StagedCategory<'a> {
-    values: &'a [ScalarValue],
+    values: &'a EntityColumn,
     column: &'a str,
 }
 
 impl tessera_filter_write::CategorySource for StagedCategory<'_> {
     fn for_each(&self, f: &mut dyn FnMut(u32, u32) -> std::io::Result<()>) -> std::io::Result<()> {
         for (entity, value) in self.values.iter().enumerate() {
-            let code = category_code(value, self.column).map_err(std::io::Error::other)?;
+            let code = category_code(&value, self.column).map_err(std::io::Error::other)?;
             // Code 0 is the reserved *absent* code, so an entity carrying it gets no posting. This
             // is the same zero the entity-major buffer is initialised to, which is safe only
             // because the reader's count check upstream proves every entity was visited — an
@@ -1713,7 +1949,7 @@ impl tessera_filter_write::CategorySource for StagedCategory<'_> {
 fn write_category_postings(
     path: &Path,
     column: &str,
-    values: &[ScalarValue],
+    values: &EntityColumn,
     band_rows: usize,
 ) -> Result<()> {
     tessera_filter_write::write_category_postings(
@@ -1761,7 +1997,7 @@ fn write_column_values(
     values_path: &Path,
     presence_path: &Path,
     attribute: &crate::schema::Attribute,
-    values: &[ScalarValue],
+    values: &EntityColumn,
 ) -> Result<WrittenColumn> {
     let mut present = croaring::Bitmap::new();
     let mut universal = true;
@@ -1821,7 +2057,7 @@ fn write_column_values(
     } else if attribute.vocabulary.is_some() {
         let mut held: Vec<u32> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
-            let code = category_code(value, &attribute.name)?;
+            let code = category_code(&value, &attribute.name)?;
             if code == tessera_store::vocabulary::ABSENT_CODE {
                 universal = false;
                 continue;
@@ -1884,33 +2120,35 @@ fn write_column_values(
 /// operator has to go and fix.
 fn keyword_values<'a>(
     attribute: &crate::schema::Attribute,
-    values: &'a [ScalarValue],
+    values: &'a EntityColumn,
     present: &mut croaring::Bitmap,
     universal: &mut bool,
 ) -> Result<Vec<&'a str>> {
     let mut out = Vec::new();
-    for (entity, value) in values.iter().enumerate() {
-        match value {
-            ScalarValue::Utf8(text) if text.is_empty() => {
-                return Err(BuildError::Invalid(format!(
-                    "attribute '{}' is declared `keyword` and entity {entity} carries the empty \
-                     string, which is not a value (records §7, contracts §2.4 — an unset field and \
-                     a client bug both produce it). Leave the cell null for absence",
-                    attribute.name
-                )))
-            }
-            ScalarValue::Utf8(text) => {
-                present.add(entity as u32);
-                out.push(text.as_str());
-            }
-            ScalarValue::Null => *universal = false,
-            other => {
-                return Err(BuildError::Invalid(format!(
-                    "attribute '{}' is declared `keyword` but carries {other:?}",
-                    attribute.name
-                )))
-            }
+    for entity in 0..values.len() {
+        if !values.is_present(entity) {
+            *universal = false;
+            continue;
         }
+        // Borrowed, not read through `value_at`: this collects one `&str` per entity across the
+        // whole column, so cloning here would be a second copy of every keyword in the corpus.
+        let Some(text) = values.str_at(entity) else {
+            return Err(BuildError::Invalid(format!(
+                "attribute '{}' is declared `keyword` but carries {:?}",
+                attribute.name,
+                values.value_at(entity)
+            )));
+        };
+        if text.is_empty() {
+            return Err(BuildError::Invalid(format!(
+                "attribute '{}' is declared `keyword` and entity {entity} carries the empty \
+                 string, which is not a value (records §7, contracts §2.4 — an unset field and a \
+                 client bug both produce it). Leave the cell null for absence",
+                attribute.name
+            )));
+        }
+        present.add(entity as u32);
+        out.push(text);
     }
     Ok(out)
 }
@@ -1984,14 +2222,14 @@ fn push_numeric_chunks(
     writer: &mut ValueColumnWriter,
     values_path: &Path,
     attribute: &crate::schema::Attribute,
-    values: &[ScalarValue],
+    values: &EntityColumn,
 ) -> Result<()> {
     macro_rules! stream {
         ($variant:ident, $ctor:expr, $map:expr) => {{
             let mut out = Vec::with_capacity(VALUE_CHUNK);
-            for v in values {
+            for v in values.iter() {
                 match v {
-                    ScalarValue::$variant(x) => out.push($map(*x)),
+                    ScalarValue::$variant(x) => out.push($map(x)),
                     // No slot at all — see this function's doc.
                     ScalarValue::Null => continue,
                     other => {
@@ -2075,7 +2313,7 @@ fn push_numeric_chunks(
 fn write_text_index(
     column_dir: &Path,
     attribute: &crate::schema::Attribute,
-    values: &[ScalarValue],
+    values: &EntityColumn,
 ) -> Result<Vec<PathBuf>> {
     // The identity was resolved at the schema parse; the name is its first component. Resolving it
     // again here rather than threading an `Analyser` down keeps the build's contract with the
@@ -2105,20 +2343,22 @@ fn write_text_index(
         })?;
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
-    for (entity, value) in values.iter().enumerate() {
-        let entity = entity as u32;
-        let prose = match value {
-            ScalarValue::Utf8(s) => s.as_str(),
-            // Absence is `Null`, and the empty string is a value a corpus may hold — the same
-            // out-of-band rule the string families share. Neither yields a term.
-            ScalarValue::Null => continue,
-            other => {
-                return Err(BuildError::Invalid(format!(
-                    "attribute '{}': a text column's value must be a string, got {other:?}",
-                    attribute.name
-                )))
-            }
+    for entity in 0..values.len() {
+        // Absence is `Null`, and the empty string is a value a corpus may hold — the same
+        // out-of-band rule the string families share. Neither yields a term.
+        if !values.is_present(entity) {
+            continue;
+        }
+        // Borrowed: this walks every string in the corpus, and a clone per entity would be a
+        // second copy of the column for the duration of the tokenise.
+        let Some(prose) = values.str_at(entity) else {
+            return Err(BuildError::Invalid(format!(
+                "attribute '{}': a text column's value must be a string, got {:?}",
+                attribute.name,
+                values.value_at(entity)
+            )));
         };
+        let entity = entity as u32;
         for token in analyser.tokens(prose) {
             let postings = terms.entry(token).or_default();
             // Entities arrive ascending, so the duplicate a repeated term produces is always the
@@ -2183,7 +2423,7 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
 /// geometry, identity and attributes cannot come from different items.
 fn permute_attribute_tail(
     schema: &crate::schema::Schema,
-    by_entity: Vec<Vec<ScalarValue>>,
+    by_entity: Vec<EntityColumn>,
     entity_row: &[u32],
 ) -> Result<AttributeTail> {
     let mut presence = Vec::new();
@@ -2199,14 +2439,18 @@ fn permute_attribute_tail(
         // Taken before the substitution below, which is what erases the distinction: the column
         // itself stays non-nullable (contracts R4) and an absent value is written as the type's
         // zero, and this is what says that zero means nothing.
-        if let Some(rows) = render_presence_of(entity_row.iter().map(|&e| &values[e as usize])) {
+        if let Some(rows) =
+            render_presence_of(entity_row.iter().map(|&e| values.is_present(e as usize)))
+        {
             presence.push((attribute.name.clone(), rows));
         }
         let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
         for &entity in entity_row {
             column
                 .push(
-                    values[entity as usize].or_render_placeholder(attribute.ty),
+                    values
+                        .value_at(entity as usize)
+                        .or_render_placeholder(attribute.ty),
                     &attribute.name,
                 )
                 .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))?;
@@ -2239,16 +2483,16 @@ struct AttributeTail {
 /// Shared by the streaming and linear builds because they hold their values in different shapes
 /// but must write the same bytes — the property `tests/build_equivalence.rs` exists to hold them
 /// to.
-pub(crate) fn render_presence_of<'a>(
-    values: impl IntoIterator<Item = &'a ScalarValue>,
-) -> Option<Bitmap> {
+/// Takes presence per row rather than the values themselves: the entity-major columns are typed
+/// now (see [`EntityColumn`]), so absence is a bit beside the value and never a variant of it.
+pub(crate) fn render_presence_of(present_per_row: impl IntoIterator<Item = bool>) -> Option<Bitmap> {
     let mut present = Bitmap::new();
     let mut any_absent = false;
-    for (row, value) in values.into_iter().enumerate() {
-        if matches!(value, ScalarValue::Null) {
-            any_absent = true;
-        } else {
+    for (row, is_present) in present_per_row.into_iter().enumerate() {
+        if is_present {
             present.add(row as u32);
+        } else {
+            any_absent = true;
         }
     }
     any_absent.then_some(present)
@@ -2668,8 +2912,14 @@ mod tests {
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
-            vec![ScalarValue::U16(7)],
-            vec![ScalarValue::Utf8("kept".to_string())],
+            EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                .expect("typed column"),
+            EntityColumn::from_values(
+                ScalarType::Utf8,
+                [ScalarValue::Utf8("kept".to_string())],
+                "note",
+            )
+            .expect("typed column"),
         ];
         let written =
             write_record_blob(dir.path(), &schema, &by_entity).expect("blob stage writes");
@@ -2696,8 +2946,11 @@ mod tests {
             attributes: vec![category.clone()],
             vocabularies: per_viewer(crate::schema::Listing::PerViewer),
         };
-        let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
-            .expect("blob stage accepts");
+        let only_category =
+            [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                .expect("typed column")];
+        let written =
+            write_record_blob(dir.path(), &schema, &only_category).expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
 
         // But the same category under a `public` listing owes no value column and no postings, so
@@ -2707,8 +2960,11 @@ mod tests {
             attributes: vec![category],
             vocabularies: per_viewer(crate::schema::Listing::Public),
         };
-        let written = write_record_blob(dir.path(), &schema, &[vec![ScalarValue::U16(7)]])
-            .expect("blob stage writes");
+        let only_category =
+            [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                .expect("typed column")];
+        let written =
+            write_record_blob(dir.path(), &schema, &only_category).expect("blob stage writes");
         assert!(
             !written.is_empty(),
             "a public category with neither flag has no entity-space home; without a blob row \
@@ -2740,7 +2996,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Codes scattered across a 32-bit space, as `vocabulary` mints them, with one code held
         // heavily enough to cross the Roaring threshold and code 0 (absent) carried too.
-        let values: Vec<ScalarValue> = (0..5_000u32)
+        let values = EntityColumn::from_values(
+            ScalarType::U32,
+            (0..5_000u32)
             .map(|e| {
                 ScalarValue::U32(match e % 7 {
                     0 => tessera_store::vocabulary::ABSENT_CODE,
@@ -2748,8 +3006,10 @@ mod tests {
                     2 => 17,
                     _ => 1_000 + (e % 53),
                 })
-            })
-            .collect();
+            }),
+            "colour",
+        )
+        .expect("typed column");
 
         let mut files: Vec<Vec<u8>> = Vec::new();
         for band_rows in [1usize, 2, 100, 1_000, usize::MAX] {
@@ -2767,7 +3027,7 @@ mod tests {
             tessera_authz::DeltaTier::open(&dir.path().join("postings-1.arrow")).expect("open");
         let mut codes: Vec<u32> = values
             .iter()
-            .map(|v| category_code(v, "colour").expect("code"))
+            .map(|v| category_code(&v, "colour").expect("code"))
             .collect::<Vec<_>>();
         codes.sort_unstable();
         codes.dedup();

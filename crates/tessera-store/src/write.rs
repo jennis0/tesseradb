@@ -919,6 +919,106 @@ impl ScalarColumnData {
         Ok(())
     }
 
+    /// A column pre-sized to `len` values of the type's zero, for a pass that fills by **index**
+    /// rather than by appending.
+    ///
+    /// The build's attribute pass reads the points file in file order and writes each value into
+    /// its entity's slot, so it cannot push. Holding that intermediate as `Vec<ScalarValue>` — as
+    /// it did — costs **32 bytes per value whatever the column declared**: `ScalarValue` carries a
+    /// `Utf8(String)` variant, so a `u8` slot still pays for a pointer, a length, a capacity and a
+    /// tag. At 2,422,486 items that is invisible against everything else the build holds; at
+    /// 250,000,000 across five columns it is 40 GB, allocated and written before the pass reads its
+    /// first row, and the build is OOM-killed having produced nothing. Typed, the same five columns
+    /// are the schema's declared 12 B/row.
+    ///
+    /// **The zero is not the absent value.** A typed column has no spare representation for "no
+    /// value at all", which `ScalarValue::Null` gave the old intermediate for free, so a caller
+    /// filling by index must carry presence alongside — see the build's `EntityColumn`.
+    pub fn filled(ty: ScalarType, len: usize) -> Self {
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match ty {
+                    $(ScalarType::$v => ScalarColumnData::$v(vec![Default::default(); len]),)*
+                    ScalarType::Bool => ScalarColumnData::Bool(vec![false; len]),
+                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                        ScalarColumnData::Utf8(vec![String::new(); len])
+                    }
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// Write one value at `index`, refusing a tag that is not this column's type — [`Self::push`]'s
+    /// rule and the same reasoning: a coerced value gives one row another row's identity, with
+    /// every value present and none its own.
+    pub fn set(&mut self, index: usize, value: ScalarValue, name: &str) -> io::Result<()> {
+        let expected = self.arrow_type();
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match (self, value) {
+                    $((ScalarColumnData::$v(col), ScalarValue::$v(x)) => col[index] = x,)*
+                    (ScalarColumnData::Bool(col), ScalarValue::Bool(x)) => col[index] = x,
+                    (ScalarColumnData::Utf8(col), ScalarValue::Utf8(x)) => col[index] = x,
+                    (_, got) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
+                        ))
+                    }
+                }
+            };
+        }
+        fixed_width_columns!(arms);
+        Ok(())
+    }
+
+    /// Borrow one string value, for the callers that only read it — the keyword dictionary and the
+    /// text index both collect `&str` across the whole column, and [`Self::get`]'s clone would turn
+    /// that into a second copy of every string in the corpus.
+    ///
+    /// `None` when this column is not string-typed, which is a caller error rather than an absence:
+    /// absence is the caller's presence bit, not a variant here.
+    pub fn str_at(&self, index: usize) -> Option<&str> {
+        match self {
+            ScalarColumnData::Utf8(col) => Some(col[index].as_str()),
+            _ => None,
+        }
+    }
+
+    /// Move one value out, leaving the type's zero behind. The `Utf8` arm takes the `String`
+    /// rather than cloning it, which is what makes landing a staged chunk into entity order cost
+    /// a pointer move per row instead of a copy of every string in the chunk.
+    pub fn take(&mut self, index: usize) -> ScalarValue {
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match self {
+                    $(ScalarColumnData::$v(col) => ScalarValue::$v(col[index]),)*
+                    ScalarColumnData::Bool(col) => ScalarValue::Bool(col[index]),
+                    ScalarColumnData::Utf8(col) => {
+                        ScalarValue::Utf8(std::mem::take(&mut col[index]))
+                    }
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// Read one value back out. `Utf8` clones — which is what a caller holding the old
+    /// `Vec<ScalarValue>` intermediate already did at every use, so no path gains an allocation.
+    pub fn get(&self, index: usize) -> ScalarValue {
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match self {
+                    $(ScalarColumnData::$v(col) => ScalarValue::$v(col[index]),)*
+                    ScalarColumnData::Bool(col) => ScalarValue::Bool(col[index]),
+                    ScalarColumnData::Utf8(col) => ScalarValue::Utf8(col[index].clone()),
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
     fn arrow_type(&self) -> DataType {
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
