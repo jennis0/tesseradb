@@ -83,7 +83,8 @@ material is written; what is missing is the disposition.
 | What | State | Blocks | Note |
 |---|---|---|---|
 | **Independent review** of the model and the representation | ✔ **run 2026-08-15** — three lenses, [the record](evidence/memos/2026-08-15-artifact-design-review.md) | — | the model's core survived all three; its *derived* rules did not |
-| **Disposition the review** — four fail-opens, one structural blocker, five rulings | **open, and now the gate** | everything | the rulings are listed in the record's §6, in dependency order |
+| **Disposition the review** — four fail-opens, one structural blocker, five rulings | **1 of 5 ruled**; repairs made | everything | ruling 1 is [decision 0074](decisions/0074-row-less-entities-are-allocated-downward.md) — row-less entities allocate downward. Four remain, in the record's §6 order |
+| Implement [0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) — slot reuse | **deferred, deliberately** *(owner, 2026-08-15)* | nothing here | not a dependency: artifacts need identity, the deny lane and the opaque identifier, none of which need reuse. Deferring **removes** the recycled-slot fail-open rather than carrying it; the membership-reconciliation clause ships with it whenever it lands |
 | Disposition round two's open findings on the representation | open | Stages 2–4 | several are escalations, not repairs |
 | **The signature-sort tiebreak** (rep §12) | ✔ **ruled 2026-08-15** — [decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) | Stage 1 | taken: allocation becomes `(signature, morton_code, source_id)`. Free in the format and *measured* so; what it costs in the build's batch plan is named there and sized in Stage 1 |
 | The descent change (model §6) — per-artifact test replacing §7.5's tree walk | open | Stage 5 | contradicts a normative document |

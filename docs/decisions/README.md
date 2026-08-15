@@ -91,3 +91,4 @@ prevent.
 | [0071](0071-fault-injection-reaches-a-served-binary-by-its-own-build.md) | 2026-08-15 | Fault injection reaches a served binary by its own build, not by a runtime switch |
 | [0072](0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) | 2026-08-15 | Entity IDs are slots and are reused after a fold; identity moves to `tessera_id` |
 | [0073](0073-entity-ties-are-ordered-by-morton-code.md) | 2026-08-15 | Within a signature group, entity IDs are ordered by Morton code |
+| [0074](0074-row-less-entities-are-allocated-downward.md) | 2026-08-15 | Artifacts keep entity IDs, allocated downward from the top of the space |

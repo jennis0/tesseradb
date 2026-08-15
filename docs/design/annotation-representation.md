@@ -503,10 +503,19 @@ therefore punches a hole that every straddling merge pays for in resident memory
 pays for in its budget — and the budget never comes back down, so nightly regeneration walks it
 upward until the fold refuses. The fold is the only thing that executes deletions and reclaims
 dropped layers, so the symptom is a slow stall of the whole retirement path, nowhere near its
-cause. The options: the same monotone space, accepting the holes and their cost; a separate
-identifier region for artifacts; or a cap on merge-window width. The ruling blocks the addressing
-scheme (§2.3), this file layout (§2.4) and the fold's artifact pass (§5.0.3), which is why it is
-first in the review's dependency order.
+cause.
+
+✔ **Ruled** *(owner, 2026-08-15, [decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md))*:
+artifacts keep entity IDs, and **row-less entities are allocated downward from `u32::MAX`** while
+points continue upward from 0. Every bound above is derived from a **segment extent**, and an
+artifact appears in no segment, so an artifact ID above every point enters none of those spans and
+costs nothing; what cost anything was a run sitting *between* two point segments that later merge,
+and two regions make that unrepresentable rather than merely unlikely. The pattern is already this
+repository's, in the ingest buffer's downward term-extension IDs. A downward allocator still returns
+a contiguous run, so §2.3's ordinal arithmetic is untouched; what the decision adds is a second
+durable mark, and the recovery obligation that goes with it — the restart seed derives from ingest
+rows and overlay entries alone today, so an artifact allocation raises nothing, and a rotation could
+otherwise re-issue its ID to a point.
 
 ## 5. Write, update, delete
 
