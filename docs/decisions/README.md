@@ -96,3 +96,6 @@ prevent.
 | [0076](0076-an-artifact-is-served-whole-or-not-at-all.md) | 2026-08-15 | An artifact is served whole or not at all |
 | [0077](0077-supplied-content-lives-in-the-record-blob.md) | 2026-08-15 | Artifact supplied content lives in the record blob |
 | [0078](0078-the-service-takes-no-opinion-on-which-variation.md) | 2026-08-15 | The service takes no opinion on which variation is served; the caller supplies the ordering |
+| [0079](0079-the-gate-is-one-flag-not-three-modes.md) | 2026-08-15 | The gate is one flag: does the artifact carry its own terms |
+| [0080](0080-the-frontier-is-a-per-artifact-test.md) | 2026-08-15 | The frontier is a per-artifact test, not a tree walk |
+| [0081](0081-a-replacement-mints-identities-an-edit-keeps-them.md) | 2026-08-15 | A replacement mints identities, an edit keeps them, and nothing carries across a replacement |
