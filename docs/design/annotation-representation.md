@@ -184,7 +184,8 @@ item's life, so a comparison key renumbers nothing and leaves **I9** intact.
 **What it is worth is bounded by §2.1.** 4.08× applies to the entity-space form, which row space
 already beats by 28–118×. This is a disk-form and projection-input optimisation, not a request-path
 one. It is free, and it is **permanent** — unretrofittable under I9, so it is decided before the
-first build that writes artifacts or not at all. Ruling in §12.
+first build that writes artifacts or not at all. **Ruled and taken**
+([decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md)).
 
 **There is only one entity ordering, so this is not an artifact-local decision.** Taking it for
 artifact membership takes it for everything in entity space at once, and what else moves separates by
@@ -1084,12 +1085,15 @@ reviewers; neither is a gap now, and both carry ⊘ marks where they rest on unm
 
 The campaign removed two of the four. What remains:
 
-- **The signature-sort tiebreak** (§2.2). Order ties within a signature group by Morton code rather
-  than arrival order? **Measured: 4.08× on the disk form, and postings byte-identical at 1.00×.** It
-  is free. It is also **permanent under I9** and cannot be retrofitted, so it is decided before the
-  first build that writes artifacts or not at all. §2.1 bounds what it is worth — the hot path is row
-  space, so this is disk and projection input. *Recommendation: take it.* Cost if wrong: a larger
-  disk form and a slower projection decode, never a correctness question.
+- ✔ **The signature-sort tiebreak** (§2.2) — **ruled, taken** *(owner, 2026-08-15,
+  [decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md))*. Allocation becomes
+  `(signature, morton_code, source_id)`, the last component for totality. **Measured: 4.08× on the
+  disk form, and postings byte-identical at 1.00×**, with §2.1 bounding what it is worth — the hot
+  path is row space, so this is disk and projection input. Two things the decision carries that this
+  section did not: the build's signature sort holds a 12-byte record under an enforced batch
+  residency model, so the code is a fourth field and the record layout is a real choice; and §2.2.1's
+  multi-slice question is **deferred rather than answered**, which is safe only while one slice
+  exists.
 - **The suppression-across-regeneration refusal** (§5.0.2), which makes the stable key mandatory for
   any layer that has taken a suppression. Recommended and written; needs the ruling because it changes
   what a deny guarantees. *Cost if wrong:* a caller must clear suppressions before regenerating.

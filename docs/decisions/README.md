@@ -90,3 +90,4 @@ prevent.
 | [0070](0070-analysers-are-named-and-declared-per-column.md) | 2026-08-13 | Analysers are named, declared per column, and there will be more than one |
 | [0071](0071-fault-injection-reaches-a-served-binary-by-its-own-build.md) | 2026-08-15 | Fault injection reaches a served binary by its own build, not by a runtime switch |
 | [0072](0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) | 2026-08-15 | Entity IDs are slots and are reused after a fold; identity moves to `tessera_id` |
+| [0073](0073-entity-ties-are-ordered-by-morton-code.md) | 2026-08-15 | Within a signature group, entity IDs are ordered by Morton code |
