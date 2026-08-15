@@ -1,4 +1,4 @@
-# What a layer declaration looks like, for eight artifact types
+# What a layer declaration looks like, and what an artifact carries
 
 **Date:** 2026-08-15 (r2 — the schema settled with the owner, and three of the first draft's
 examples were wrong) · **Status:** Working memo — evidence, not normative. **Illustrative, not a
@@ -168,16 +168,22 @@ title      = "Research programmes"
 slices     = ["embedding-2026-08"]
 membership = "attribute"                         # "the points carrying this programme tag"
 access     = { artifacts_carry_own = true }      # satisfied by any authenticated principal
-content    = { derived = [],
+content    = { derived = ["hull", "centroid"],
                supplied = [{ kind = "name",   corpus_derived = false },
                            { kind = "extent", corpus_derived = false }] }
 ```
 
-**This is what attribute-predicate membership is for**, and it replaces the subject-taxonomy example
-the first draft used. Reaching for an artifact where the value belongs to the corpus's own vocabulary
-and thousands of items carry it is the case the model says should be a **category**; a programme is
-the other side of that test — the set needs a name, an owner and its own access, and its members are
-whatever carries the tag.
+**The derived geometry is what makes this an artifact rather than a category**, and without it this
+example is a category with extra steps — which is what the first draft wrote. A category answers
+*which items carry this value*; it cannot be drawn. An artifact answers *where, how many and what
+shape*, over the viewer's own visible members. That is the model's own test — reach for an artifact
+when the set needs an identity, a gate of its own, or **content** — and a hull is content a
+vocabulary has nowhere to put.
+
+**So the test to apply before declaring one of these:** if nothing would render it, use a category
+with an authored gate, which the register already accepts (**C23**). Attribute-predicate membership
+earns its place exactly when a value's *extent on the map* is the thing wanted, and costs nothing to
+store when it is.
 
 **The count may be zero**, and that is the sharpest illustration of the rule: staff must know a
 programme exists over documents they cannot read, and answering the count from anything but their own
@@ -311,3 +317,172 @@ rollup needed no configuration at all, being the coarser artifact passing its ow
 **What none of these exercise**, so what this memo does not test: edges at scale (only the label layer
 declares any), the proportional rule on a predicate layer (the one combination still forbidden while
 its denominator is undefined), and any layer past three levels.
+
+---
+
+## 11. What one artifact carries
+
+The layer declares the shape; the artifact carries the data. Writing the payloads is the second half
+of the test, and it is where the model has to actually hold a thing rather than describe one. The
+shape below is a control-plane payload — a layer is created by a verb with a WAL'd registry entry,
+not by a file a build reads — so it is JSON, and the response is the artifact's `tessera_id`.
+
+**Members are named by `external_id` or by `tessera_id`, resolved to entities at admission exactly as
+a deny is** (write cycle §5). A caller never writes an entity ID: they do not have one and it is not
+theirs to know.
+
+### One cluster — the simplest thing there is
+
+```json
+{
+  "layer": "clusters/hdbscan-2026-08",
+  "level": 1,
+  "stable_key": "c-immunology",
+  "membership": { "external_ids": ["2401.00123", "2401.00456", "…184000 of them"] }
+}
+```
+
+No content, no access label, no variations. Its count, centroid and hull are recomputed per viewer
+from this membership and are never carried here — an unmasked hull in a payload would be the
+build-time geometry the design deleted, arriving by another door.
+
+### One label — the richest, and the one that exercises variations
+
+```json
+{
+  "layer": "topics/ctfidf-2026-08",
+  "level": 0,
+  "stable_key": "c-immunology/label",
+  "membership": { "external_ids": ["…the 240 sampled documents"] },
+  "edges": [
+    { "layer": "clusters/hdbscan-2026-08", "level": 1, "stable_key": "c-immunology" }
+  ],
+  "variations": [
+    { "rank": 0,
+      "access_label": "programme:VAC",
+      "content": { "label_text": "vaccine immunology and trial design" },
+      "generating_set": { "external_ids": ["…the 62 documents under VAC"] } },
+    { "rank": 1,
+      "content": { "label_text": "immunology" },
+      "generating_set": { "external_ids": ["…the 8 documents everyone here can see"] } }
+  ]
+}
+```
+
+**Three separate things are doing three separate jobs**, and conflating any two is where the
+fail-opens were: the artifact's `membership` decides the number beside it; each variation's
+`generating_set` decides whether *that description* may be shown; and a variation's `access_label` is
+a further condition on which one a viewer gets. A viewer satisfying neither variation receives no
+label at all.
+
+**The generating sets are not nested and need not be.** Rank 1's set is smaller and it is not a
+subset of rank 0's — the ranking is the caller's declared preference, not a containment hierarchy.
+
+### One boundary — spatial membership, corpus-independent content
+
+```json
+{
+  "layer": "boundaries/uk-2026",
+  "level": 0,
+  "stable_key": "E01000001",
+  "access_label": "public",
+  "membership": { "shape": { "type": "Polygon", "coordinates": [[[…]]] } },
+  "content": { "polygon": { "type": "Polygon", "coordinates": [[[…]]] }, "name": "City of London 001A" }
+}
+```
+
+**No generating set anywhere, and declaring one would be refused.** The polygon and the name are
+corpus-independent — true whether or not a single document exists — so containment is vacuous and
+they are served unconditionally. **The shape appears twice for two different reasons**: once as the
+membership predicate, which decides *which points are in it*, and once as content, which is *what is
+drawn*. They are the same geometry here and need not be; a boundary may be drawn simplified and
+counted exactly.
+
+### One programme — attribute membership, and the artifact that is drawn
+
+```json
+{
+  "layer": "programmes/portfolio",
+  "level": 0,
+  "stable_key": "prog-alpha",
+  "access_label": "staff",
+  "membership": { "attribute": { "column": "programme", "value": "alpha" } },
+  "content": { "name": "Programme Alpha", "extent": { "type": "Polygon", "coordinates": [[[…]]] } }
+}
+```
+
+**Its membership is a query, not a list**, so it costs nothing to store and never goes stale: a
+document tagged tomorrow is a member on the next request. The authored `extent` exists precisely
+because the derived hull is unavailable to a viewer who can see none of its documents — who still
+gets the name, the extent, and a count of **zero**.
+
+### One fitted circle — supplied geometry that gates, and a declared fallback
+
+```json
+{
+  "layer": "clusters/kmeans-2026-08",
+  "level": 0,
+  "stable_key": "k-0142",
+  "membership": { "external_ids": ["…4 100 of them"] },
+  "variations": [
+    { "rank": 0,
+      "content": { "circle": { "centre": [0.412, 0.887], "radius": 0.0193 } },
+      "generating_set": { "external_ids": ["…the same 4 100"] } },
+    { "rank": 1, "content": {} }
+  ]
+}
+```
+
+**Rank 1 is the whole point.** An empty variation every viewer satisfies vacuously is how a caller
+declares the degrade-to-derived behaviour the rulings withdrew as an automatic service: fail
+containment on the circle and you fall through to a variation with no supplied content, receiving
+existence, a masked count and a recomputed centroid. Omit rank 1 and the artifact vanishes instead.
+**The same file expresses both policies**, which is what it means for the behaviour to be declared.
+
+Note that the generating set here *is* the membership — the circle was fitted over all of it. That is
+the coincidence that makes this layer dangerous: it looks like the cluster payload above until you
+see that the geometry is carried rather than computed.
+
+### One analyst selection — created at runtime
+
+```json
+{
+  "layer": "selections/analyst",
+  "level": 0,
+  "access_label": "analyst:jrivera",
+  "membership": { "tessera_ids": ["8f2a…", "b013…", "…ten of them"] }
+}
+```
+
+**Named by `tessera_id` because that is what the analyst has** — they assembled this from things on
+their screen, and the opaque identifier is the only one that ever crossed to them. No stable key: it
+is not an edge target and nothing joins to it from outside.
+
+### And one layer with no payload at all
+
+`density/morton` publishes nothing. Its artifacts are the grid cells, implied by the quantisation
+bounds the metadata already carries, and its membership is the points inside each — resolved per
+request. **A layer whose artifacts are never ingested is a coherent thing**, and it is the check that
+the abstraction is not secretly a table.
+
+### What writing the payloads found
+
+**Stable keys are effectively mandatory for any layer that is an edge target.** An edge names its
+target, and at publish time the caller has no `tessera_id` for it — the ids are assigned by the
+service. So either the caller retains every id returned from the target's publish (10⁷ of them for a
+clustering, to attach labels afterwards) or the target layer carries stable keys and the edge names
+one. Decision 0081 made the key optional by withdrawing the suppression-carry refusal that had forced
+it; **edges force it back for a different reason**, and the design says only that a key is "offered".
+⊘ Worth stating at the site: a layer named in another layer's `depends_on` needs keys.
+
+**Membership and content can be the same thing, and the payload has to allow it without implying
+it.** A boundary's shape is both its membership predicate and its drawn content; a fitted circle's
+generating set is its whole membership. In both cases the payload repeats the value rather than
+offering a "same as membership" shorthand — because the shorthand would make the dangerous case
+(circle) look like the safe one (boundary), and the two differ precisely in whether the geometry was
+computed from members the viewer may not see.
+
+**Nothing in any payload carries an unmasked derived quantity**, and that is the property to test for
+rather than assume: no count, no hull, no bounding box. Every one of those is recomputed per viewer,
+and a payload field for any of them would be the build-time geometry the representation deleted,
+arriving through the write path instead of the file layout.
