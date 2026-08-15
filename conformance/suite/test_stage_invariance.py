@@ -271,8 +271,10 @@ def test_the_plan_walked_every_stage_it_promised(plan_results):
 
 def test_the_plan_covers_every_stage_class_the_design_names(plan_results):
     """§2's eight stages, transcribed: build, load, write, merge, deny, fold — and the two a
-    harness forgets, the entity-space coalesce and rotation. (§10.1's kill modifier is blocked on
-    an owner ruling and deliberately absent.)"""
+    harness forgets, the entity-space coalesce and rotation. (§10.1's kill modifier is absent
+    *here* by scope, not by blocker — decision 0071 ruled and it is driven over the same stages in
+    `test_crash_atomicity`. This plan asserts what a stage changes; that one asserts what a stage
+    killed part-way leaves behind.)"""
     classes = {type(r.stage) for r in plan_results.values()}
     assert {Build, Load, Write, Merge, Coalesce, Deny, Fold, Rotate} <= classes
     ops = {r.stage.op for r in plan_results.values() if isinstance(r.stage, Deny)}

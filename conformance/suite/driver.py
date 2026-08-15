@@ -56,10 +56,23 @@ requires (the pinned tick clock, the compaction window forced off so a CI run in
 00:00–04:00 UTC window cannot self-dispatch a fold mid-plan) or the merge cap. The spawn below
 reuses the harness's binary discipline (`ensure_cli_built` — default features, always), its port
 allocation, its `Server` handle and its health wait, and writes its own TOML.
+
+## The kill modifier
+
+A stage may carry a kill (§10.1): [`Killed`] wraps it, boots the faults build for exactly that
+stage, parks the write executor at a named publication seam, SIGKILLs the server, discards what a
+power cut would have taken, restarts the ordinary build, and hands the walk back to `run_plan`'s
+ordinary record. The comparison then gains one disjunct in [`check`] — ``after ≡ before`` or
+``after ≡ before + entitlement``, exactly — and nothing else changes. [`Killed`]'s own doc
+carries the argument; `test_crash_atomicity.py` carries the two limits a crash test must not
+overclaim past.
 """
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
 import time
 import os
 import subprocess
@@ -78,6 +91,7 @@ from oracle.harness import (
     Server,
     ensure_cli_built,
     free_port,
+    kill_server,
     stop_server,
 )
 
@@ -88,6 +102,39 @@ from .entitlement import Delta, Entity, Nothing, Rows, Unexplained, diff
 class StageInvarianceViolation(AssertionError):
     """A stage changed something it was not entitled to change — or failed to change what it
     claimed. The message carries the stage, the claim and the observed delta."""
+
+
+#: The faults build's own target directory (decision 0071). Never `target/release`, which the
+#: oracle harness owns and builds with default features by rule — `ensure_cli_built`'s doc
+#: records the incident that rule comes from, and this path is that doc's "its own path".
+FAULTS_TARGET_DIR = REPO_ROOT / "target" / "faults"
+FAULTS_CLI_BIN = FAULTS_TARGET_DIR / "release" / "tessera"
+
+
+def ensure_faults_cli_built() -> None:
+    """Build the faults binary — `fault-injection` declared by name, to its own target directory.
+
+    Same shape as `ensure_cli_built` and deliberately never short-circuited on existence: cargo
+    tracks the feature set, so a stale or wrong-featured binary at this path is rebuilt rather
+    than trusted. The separate ``--target-dir`` is what keeps the two binaries from ever
+    overwriting each other — a stage carrying a kill boots this one, every other stage boots
+    `CLI_BIN`.
+    """
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "tessera-cli",
+            "--features",
+            "fault-injection",
+            "--target-dir",
+            str(FAULTS_TARGET_DIR),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def _suite_config(
@@ -152,6 +199,145 @@ def _wal_member_index(wal_path: Path) -> int:
     return int(members[-1].stem.rsplit("-", 1)[1])
 
 
+def _post_flush(server: Server) -> None:
+    """`POST /control/flush`, waiting for nothing. `SuiteHarness.pull_tick` is the waiting form;
+    this is what a `provoke` uses, because a stage about to park the executor cannot promise
+    which counters still move before it does."""
+    resp = requests.post(
+        f"{server.control_base}/control/flush",
+        headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
+# -- the per-seam discard rules (§12.3's table) --------------------------------------------------
+#
+# A SIGKILL alone is not a power cut: the page cache survives process death, so bytes nothing
+# fsynced are still readable by the next process. Each function below takes exactly what §12.3
+# says a power cut would have taken at its seam — no more, or the test is a false failure; no
+# less, or it is a no-op that verifies replay logic while claiming durability.
+
+#: `next_prefix_name`'s shape, as the startup sweep filters it: `v` + five-or-more digits.
+_PREFIX_RE = re.compile(r"v\d{5,}")
+
+
+def _live_prefix(bundle_root: Path) -> str:
+    return json.loads((bundle_root / "CURRENT").read_text())["prefix"]
+
+
+def _bundle_files(bundle_root: Path) -> frozenset[str]:
+    """Every file under the bundle root, by root-relative path — the snapshot half of the
+    appeared-files discard. The WAL and the cache live outside the bundle root by this suite's
+    layout, so neither can be swept up: the WAL's durability boundary is its own (the sync
+    sidecar rule), and the cache is not part of the bundle contract."""
+    return frozenset(str(p.relative_to(bundle_root)) for p in bundle_root.rglob("*") if p.is_file())
+
+
+def _reference_strings(node) -> set[str]:
+    """Every dict key and string value in a parsed manifest, recursively. Manifest file
+    references are prefix-relative path strings — `files` map keys and the named path fields —
+    and collecting all strings rather than schema-chasing keeps this independent of which field
+    a future manifest shape names a file in. Over-collection is safe: it can only make the
+    discard *keep* a file, never take one."""
+    out: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            out.add(key)
+            out |= _reference_strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            out |= _reference_strings(value)
+    elif isinstance(node, str):
+        out.add(node)
+    return out
+
+
+def _committed_references(bundle_root: Path) -> tuple[str, set[str]]:
+    """The live prefix and every path a durable, reachable manifest names. Reachability roots at
+    `CURRENT`: the prefix it names, that prefix's `MANIFEST.json`, and every complete
+    `SEGMENTS-<n>.json` under it. A manifest inside an unflipped prefix is itself unreachable and
+    deliberately contributes nothing."""
+    prefix = _live_prefix(bundle_root)
+    prefix_dir = bundle_root / prefix
+    refs: set[str] = set()
+    for manifest in [
+        prefix_dir / "MANIFEST.json",
+        *sorted(prefix_dir.glob("partitions/*/SEGMENTS-*.json")),
+    ]:
+        refs |= _reference_strings(json.loads(manifest.read_text()))
+    return prefix, refs
+
+
+def _looks_like_commitment(rel_path: str) -> bool:
+    """Whether a path is itself commit-point metadata — `CURRENT`, a `MANIFEST.json`, a complete
+    side-manifest. None may ever *appear* during a stage parked before its commit; one appearing
+    means the kill did not land where the seam claimed, and the discard must refuse rather than
+    delete committed state."""
+    name = Path(rel_path).name
+    if name.endswith(".tmp"):
+        return False
+    return name in ("CURRENT", "MANIFEST.json") or (
+        name.startswith("SEGMENTS-") and name.endswith(".json")
+    )
+
+
+def _discard_appeared_files(bundle_root: Path, before: frozenset[str]) -> tuple[str, ...]:
+    """§12.3's discard rule for the manifest-publish and merge-publish seams: every file the
+    killed stage wrote that no durable manifest names — the side-manifest being written and the
+    segment files only it would have named, or a merge's output segment, its inputs untouched.
+
+    Implemented as *appeared since the snapshot, unreferenced by any committed manifest*, with
+    both halves load-bearing: the snapshot keeps the discard from touching pre-existing
+    unreferenced residue that a power cut would not have taken (it may be synced, and it is the
+    reclamation's business), and the reference check turns a kill that missed its seam into a
+    named refusal instead of a deleted publication.
+    """
+    appeared = sorted(_bundle_files(bundle_root) - before)
+    prefix, refs = _committed_references(bundle_root)
+    published = [
+        rel
+        for rel in appeared
+        if _looks_like_commitment(rel)
+        or (rel.startswith(f"{prefix}/") and rel[len(prefix) + 1 :] in refs)
+    ]
+    if published:
+        raise RuntimeError(
+            f"the parked executor was meant to have published nothing, but committed state "
+            f"appeared during the killed stage: {published[:4]} — the kill did not land on the "
+            f"seam it claimed, and discarding would corrupt a real publication"
+        )
+    for rel in appeared:
+        (bundle_root / rel).unlink()
+    # Directories the stage created are empty once their files are gone; prune deepest-first and
+    # leave any that still hold pre-existing files.
+    for rel_dir in sorted({str(Path(rel).parent) for rel in appeared}, key=len, reverse=True):
+        try:
+            (bundle_root / rel_dir).rmdir()
+        except OSError:
+            pass
+    return tuple(appeared)
+
+
+def _discard_unflipped_prefixes(bundle_root: Path) -> tuple[str, ...]:
+    """§12.3's discard rule for the `CURRENT`-flip seam: the whole unflipped prefix, which is
+    unreferenced by construction — the fold's commit point is a single rename, so everything it
+    wrote is discardable until that happens. No snapshot and no bookkeeping, which is why this
+    seam's test is the first built. `CURRENT.tmp` is included for completeness; parked before
+    `write_current` none exists, but a power cut inside the flip itself would leave one."""
+    live = _live_prefix(bundle_root)
+    took: list[str] = []
+    for child in sorted(bundle_root.iterdir()):
+        if child.is_dir() and child.name != live and _PREFIX_RE.fullmatch(child.name):
+            shutil.rmtree(child)
+            took.append(child.name)
+    tmp = bundle_root / "CURRENT.tmp"
+    if tmp.exists():
+        tmp.unlink()
+        took.append("CURRENT.tmp")
+    return tuple(took)
+
+
 @dataclass
 class SuiteHarness:
     """One suite run's server, session and battery — the mutable context a plan walks.
@@ -188,13 +374,20 @@ class SuiteHarness:
     def wal_path(self) -> Path:
         return self.run_dir / "wal.log"
 
-    def spawn(self) -> None:
+    def spawn(self, faults: bool = False) -> None:
         """Start `tessera serve` on this harness's bundle, cache and WAL, and wait for health.
 
         Same paths across two calls is exactly the restart-on-same-state case — which is what the
-        Load stage is.
+        Load stage is. ``faults=True`` boots the faults build from its own target directory
+        (decision 0071) — only a [`Killed`] stage does this, and only for its own life; every
+        other spawn is the default-features binary the oracle harness owns.
         """
-        ensure_cli_built()
+        if faults:
+            ensure_faults_cli_built()
+            binary = FAULTS_CLI_BIN
+        else:
+            ensure_cli_built()
+            binary = CLI_BIN
         viewer_port, session_port, control_port = free_port(), free_port(), free_port()
         config_path = self.run_dir / "tessera.toml"
         config_path.write_text(
@@ -211,7 +404,7 @@ class SuiteHarness:
         env["TESSERA_REFERENCE_SESSION_CRED"] = SESSION_CREDENTIAL
         env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
         self.proc = subprocess.Popen(
-            [str(CLI_BIN), "serve", "-c", str(config_path)],
+            [str(binary), "serve", "-c", str(config_path)],
             cwd=REPO_ROOT,
             env=env,
             stdout=subprocess.PIPE,
@@ -238,6 +431,14 @@ class SuiteHarness:
     def stop(self) -> None:
         if self.proc is not None:
             stop_server(self.proc)
+            self.proc = None
+            self.server = None
+
+    def kill(self) -> None:
+        """SIGKILL — no graceful shutdown, no unwind, no drop guards. The crash half of the kill
+        modifier; `oracle.harness.kill_server` is the same call the restart-replay test uses."""
+        if self.proc is not None:
+            kill_server(self.proc)
             self.proc = None
             self.server = None
 
@@ -307,6 +508,33 @@ class SuiteHarness:
             timeout=30.0,
         )
 
+    # -- the faults build's arming surface (decision 0071) --------------------------------------
+
+    def arm(self, site: str) -> None:
+        """`POST /control/faults/arm` — faults build only; against the ordinary binary the route
+        does not exist and this raises, which is the right failure for a plan that put a kill on
+        a stage without booting the build that can take one."""
+        resp = requests.post(
+            f"{self.server.control_base}/control/faults/arm",
+            headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
+            json={"site": site},
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+    def arrivals(self, site: str) -> int:
+        """How many times the executor has reached `site` since it was armed. Non-zero under a
+        stall arming means a thread is demonstrably parked — the kill precondition, observed
+        rather than slept for."""
+        resp = requests.get(
+            f"{self.server.control_base}/control/faults/arrivals",
+            headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
+            params={"site": site},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["arrivals"]
+
 
 # -- stages ------------------------------------------------------------------------------------
 
@@ -326,6 +554,13 @@ class Stage:
 
     def entitlement(self) -> Delta:
         return Nothing()
+
+    def provoke(self, h: SuiteHarness) -> None:
+        """The non-waiting half of `apply`, for a stage carrying a kill: issue the request that
+        makes the stage run, and wait for nothing. `apply`'s waits observe completion, and a
+        stage about to park at a seam never completes — the [`Killed`] wrapper's observable is
+        the parked arrival instead. Stages with no provocation defined cannot carry a kill."""
+        raise RuntimeError(f"stage `{self.label}` cannot carry a kill: no provocation defined")
 
 
 class Build(Stage):
@@ -391,7 +626,7 @@ class Write(Stage):
         self._fx_keys = tuple(fx_keys)
         self._snap: dict | None = None
 
-    def apply(self, h: SuiteHarness) -> None:
+    def _ingest(self, h: SuiteHarness) -> None:
         resp = h.server.ingest(self._body, self._batch_id)
         if resp.status_code != 200:
             raise RuntimeError(f"ingest refused ({resp.status_code}): {resp.text}")
@@ -400,12 +635,21 @@ class Write(Stage):
             raise RuntimeError(
                 f"ingest accepted {accepted} rows where the batch carried {len(self._fx_keys)}"
             )
+
+    def apply(self, h: SuiteHarness) -> None:
+        self._ingest(h)
         executor = h.executor()
         self._snap = {
             "flushes": executor["flush"]["flushes"],
             "refreshes": executor["flush"]["refreshes"],
         }
         h.pull_tick()
+
+    def provoke(self, h: SuiteHarness) -> None:
+        """Ingest — acked against the WAL, so the batch is durable whatever happens next — then
+        request the tick whose flush will run into the armed seam."""
+        self._ingest(h)
+        _post_flush(h.server)
 
     def barrier(self, h: SuiteHarness) -> None:
         _poll(
@@ -447,6 +691,10 @@ class _TickStage(Stage):
     def apply(self, h: SuiteHarness) -> None:
         self._snap = self._snapshot(h)
         h.pull_tick()
+
+    def provoke(self, h: SuiteHarness) -> None:
+        """Request the tick that dispatches this stage, and wait for nothing (base doc)."""
+        _post_flush(h.server)
 
     def _assert_no_flush(self, h: SuiteHarness) -> None:
         flushes = h.executor()["flush"]["flushes"]
@@ -539,10 +787,18 @@ class Fold(Stage):
     a global permutation rewrite, a prefix flip — and entitled to change nothing, because every
     deletion it executes left the served surface at acceptance (§10)."""
 
-    label = "fold"
-
-    def __init__(self):
+    def __init__(self, label: str = "fold"):
+        self.label = label
         self._snap: dict | None = None
+
+    @staticmethod
+    def _request(h: SuiteHarness) -> None:
+        resp = requests.post(
+            f"{h.server.control_base}/control/compact",
+            headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
 
     def apply(self, h: SuiteHarness) -> None:
         compaction = h.status()["compaction"]
@@ -551,12 +807,11 @@ class Fold(Stage):
             "fold_failures": compaction["fold_failures"],
             "refreshes": h.executor()["flush"]["refreshes"],
         }
-        resp = requests.post(
-            f"{h.server.control_base}/control/compact",
-            headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
-            timeout=10,
-        )
-        resp.raise_for_status()
+        self._request(h)
+
+    def provoke(self, h: SuiteHarness) -> None:
+        """Request the fold, and wait for nothing (base doc)."""
+        self._request(h)
 
     def barrier(self, h: SuiteHarness) -> None:
         def landed() -> bool:
@@ -608,6 +863,130 @@ class Rotate(Stage):
             )
 
 
+# -- the kill modifier (§10.1, §12.3) ----------------------------------------------------------
+
+
+#: The three publication seams a kill may land on, with the counters that must not have moved
+#: while the executor is parked there — "parked means blocked" made checkable. The switchboard's
+#: two ack-contract sites are deliberately absent: their crash story is the WAL's, held by the
+#: truncating restart-replay tests, and §12.3's discard table has no row for them.
+_SEAM_SITES = ("before_manifest_publish", "before_current_flip", "before_merge_publish")
+
+
+class Killed(Stage):
+    """A stage killed at a publication seam — §10.1's modifier, not a mechanism of its own.
+
+    The whole crash apparatus is borrowed: the stage's own `provoke` starts it, the switchboard's
+    arrival count proves a thread is parked at the seam, `run_plan`'s ordinary recordings supply
+    both sides of the comparison, and [`check`] grows exactly one disjunct — ``after ≡ before``
+    or ``after ≡ before + entitlement``, and never anything between. That is what makes a crash
+    affordable at every stage rather than at the one everybody worries about: the plan gains one
+    wrapper, and the entitlement algebra it already trusts does the work.
+
+    The sequence: boot the faults build (decision 0071 — the seam pause sites exist in no other
+    binary, and it lives at its own target path so `target/release/tessera` stays the harness's
+    default-features build), arm the site, provoke the stage, wait for the executor to
+    demonstrably arrive, assert nothing published, SIGKILL, optionally discard what was not
+    synced, then boot the ordinary build for the after-recording — the restarts book-ended inside
+    this stage are reopen-on-same-state, entitled to change nothing, so anything they perturbed
+    fails the same disjunction.
+
+    **`discard_unsynced` is what makes this a power-loss simulation rather than a replay test.**
+    The page cache survives process death: every byte the killed process wrote is readable by the
+    next one whether or not anything fsynced it, so a kill-and-restart alone cannot fail an
+    engine that acks before it syncs — measured, not argued (§10.1). The discard applies §12.3's
+    per-seam rule for what a power cut would have taken; each rule's own doc carries its
+    reasoning. Run with ``discard_unsynced=False`` the same walk still asserts the disjunction,
+    but it is then a statement about recovery logic only, and no plan may present it as more.
+    """
+
+    def __init__(self, stage: Stage, kill_at: str, discard_unsynced: bool = True):
+        if kill_at not in _SEAM_SITES:
+            raise ValueError(
+                f"not a publication seam: {kill_at!r} — a kill lands on one of {_SEAM_SITES}"
+            )
+        self.stage = stage
+        self.kill_at = kill_at
+        self.discard_unsynced = discard_unsynced
+        self.label = f"kill-{stage.label}"
+        #: Root-relative paths (or prefix names, at the flip) the discard took — the test's
+        #: evidence that the rule fired, and on what.
+        self.discarded: tuple[str, ...] = ()
+        self._snap: dict | None = None
+
+    def _published_counters(self, h: SuiteHarness) -> dict:
+        status = h.status()
+        executor = status["write_executor"]
+        return {
+            "flushes": executor["flush"]["flushes"],
+            "merges": executor["merges"],
+            "segments_version": status["partitions"][0]["segments_version"],
+            "folds": status["compaction"]["folds"],
+            "fold_failures": status["compaction"]["fold_failures"],
+        }
+
+    def _assert_nothing_published(self, h: SuiteHarness) -> None:
+        """Parked means *blocked*: the seam's own publication counter must not have moved, and
+        no flush may have ridden the same tick at the other two seams (the isolation the tick
+        stages already assert, kept under a kill)."""
+        now = self._published_counters(h)
+        watched = {
+            "before_manifest_publish": ("flushes",),
+            "before_merge_publish": ("merges", "segments_version", "flushes"),
+            "before_current_flip": ("folds", "fold_failures", "flushes"),
+        }[self.kill_at]
+        for key in watched:
+            if now[key] != self._snap[key]:
+                raise RuntimeError(
+                    f"{self.label}: `{key}` moved ({self._snap[key]} -> {now[key]}) while the "
+                    f"executor was parked at {self.kill_at} — parked was supposed to mean "
+                    f"nothing published"
+                )
+
+    def apply(self, h: SuiteHarness) -> None:
+        h.stop()
+        h.spawn(faults=True)
+        _poll(
+            lambda: all(p["readiness"] for p in h.status()["partitions"]),
+            f"{self.label}: the faults build never became ready",
+            timeout=30.0,
+        )
+        files_before = _bundle_files(h.bundle_root)
+        self._snap = self._published_counters(h)
+        h.arm(self.kill_at)
+        self.stage.provoke(h)
+        _poll(
+            lambda: h.arrivals(self.kill_at) >= 1,
+            f"{self.label}: the executor never reached {self.kill_at}",
+            timeout=300.0,
+        )
+        self._assert_nothing_published(h)
+        h.kill()
+        if self.discard_unsynced:
+            if self.kill_at == "before_current_flip":
+                self.discarded = _discard_unflipped_prefixes(h.bundle_root)
+            else:
+                self.discarded = _discard_appeared_files(h.bundle_root, files_before)
+            if not self.discarded:
+                raise RuntimeError(
+                    f"{self.label}: the discard found nothing to take — the seam's premise is "
+                    f"that the publication's files are on disc while the executor is parked, and "
+                    f"a discard with nothing to do is a crash test quietly reduced to a restart"
+                )
+        h.spawn()
+        h.authorise()
+
+    def barrier(self, h: SuiteHarness) -> None:
+        _poll(
+            lambda: all(p["readiness"] for p in h.status()["partitions"]),
+            f"{self.label}: the restarted bundle never became ready",
+            timeout=30.0,
+        )
+
+    def entitlement(self) -> Delta:
+        return self.stage.entitlement()
+
+
 # -- the walk ----------------------------------------------------------------------------------
 
 
@@ -642,12 +1021,24 @@ def run_plan(h: SuiteHarness, plan: Sequence[Stage]) -> list[StageResult]:
 def check(result: StageResult, claimed: Delta | None = None) -> None:
     """Assert the recorded delta equals the stage's entitlement (or an explicit `claimed`).
 
+    A [`Killed`] stage is checked against §10.1's disjunction instead — ``after ≡ before`` or
+    ``after ≡ before + entitlement``, exactly, with no third outcome — which is the whole of what
+    crash atomicity adds to the comparison.
+
     Raises [`StageInvarianceViolation`] with the claim and the observation side by side — and
     with the diff's own reasons when the change was not expressible as an entitlement at all.
     """
     if result.before is None:
         return  # the establishing stage: nothing to compare against (Build's doc)
     entitled = claimed if claimed is not None else result.stage.entitlement()
+    if isinstance(result.stage, Killed):
+        if result.delta == Nothing() or result.delta == entitled:
+            return
+        raise StageInvarianceViolation(
+            f"stage `{result.label}` was killed mid-flight and must land on an endpoint — "
+            f"`before` exactly, or `before + {entitled!r}` exactly — and the recordings show "
+            f"{result.delta!r}, which is neither"
+        )
     if result.delta == entitled:
         return
     raise StageInvarianceViolation(
@@ -660,7 +1051,9 @@ __all__ = [
     "Build",
     "Coalesce",
     "Deny",
+    "FAULTS_CLI_BIN",
     "Fold",
+    "Killed",
     "Load",
     "Merge",
     "Rotate",
@@ -670,5 +1063,6 @@ __all__ = [
     "SuiteHarness",
     "Write",
     "check",
+    "ensure_faults_cli_built",
     "run_plan",
 ]
