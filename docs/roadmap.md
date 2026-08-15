@@ -254,11 +254,14 @@ viewer cannot see is a statement about those items. Membership, extent and hull 
 per viewer from masked members only, and labels gate on exact containment against `M_auth` and
 never against the filtered mask.
 
-Both wait on [`design/derived-artifact-gating.md`](design/derived-artifact-gating.md) becoming
-normative. It exists because three artifacts were gated by three rules in two sections with
-nothing connecting them, and a fourth would go looking for precedent and find contradictory
-answers; promoting it is what makes these two decidable rather than improvised. It also governs
-[#43]'s frontier behaviour and phase 2's [#12].
+Both wait on the three artifact designs — [`design/annotations.md`](design/annotations.md),
+[`design/annotation-representation.md`](design/annotation-representation.md) and
+[`design/annotation-write-cycle.md`](design/annotation-write-cycle.md) — becoming normative. They
+exist because three artifacts were gated by three rules in two sections with nothing connecting
+them, and a fourth would go looking for precedent and find contradictory answers; promoting them is
+what makes these two decidable rather than improvised. (They supersede
+`derived-artifact-gating.md`, which is retired at promotion.) They also govern [#43]'s frontier
+behaviour and phase 2's [#12].
 
 One known revisit: [#12] requires cross-partition containment to merge correctly, so a router
 ignorant of an unreachable slice does not serve labels it should withhold. With [#12] in phase 2,

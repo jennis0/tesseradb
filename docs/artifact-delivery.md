@@ -19,8 +19,9 @@ overlap; the rest take it so that a stage's diff stays separable and the main tr
 **Reads with:** [`design/annotations.md`](design/annotations.md) (the model),
 [`design/annotation-representation.md`](design/annotation-representation.md) (the representation),
 [`design/annotation-write-cycle.md`](design/annotation-write-cycle.md) (the write cycle) — all three
-**drafts**, two of them unreviewed; [`design/derived-artifact-gating.md`](design/derived-artifact-gating.md),
-superseded in scope; [`design/correctness-suite.md`](design/correctness-suite.md) §12 (the fixture
+**reviewed and ruled** (decisions 0074–0081), provisional pending promotion;
+[`design/derived-artifact-gating.md`](design/derived-artifact-gating.md),
+superseded and retired at promotion; [`design/correctness-suite.md`](design/correctness-suite.md) §12 (the fixture
 machinery this extends); [`probes/dataset.md`](../probes/dataset.md) (the corpus);
 [`probes/2026-08-15-artifact-representation/`](../probes/2026-08-15-artifact-representation/) (the
 campaign every sizing figure below comes from). Ordering precedent:
@@ -34,9 +35,9 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
-| **0** Rulings and promotion | **review done, findings open** | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md): four fail-opens, one structural blocker, five rulings owed. **Stage 1's registry half is blocked on them** |
+| **0** Rulings and promotion | **ruled, bar search** — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md) and the eight rulings. Open: search's gate (ruling 5), the filter axis, membership packaging, the proportional denominator; two architecture amendments owed (§7.5, §7.7) |
 | **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it, and the geometry read moved so it costs no extra pass; verified on the real 2.4M corpus. The registry is not started |
-| **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-threshold artifacts are indistinguishable from absent ones | — |
+| **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | — |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
 | **5** Hierarchy, levels, selection | not started | the non-covering case behaves as the design says under both pruning settings, and the build named the lossy edge in advance | — |
@@ -44,7 +45,7 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
 | **8** Filters, search, scale | not started | an invisible artifact and a nonexistent one cost the same; 10⁹ points with ~10⁷ artifacts serves and folds inside budget | — |
 
-Stages 5 and 6 touch largely disjoint machinery — edges and descent against geometry and the
+Stages 5 and 6 touch largely disjoint machinery — edges and display pruning against geometry and the
 existing filter path — so they can run beside each other. Nothing else here can.
 
 ## 1. What decides the shape of this plan
@@ -58,11 +59,12 @@ before the first build that writes an artifact or not at all. It also renumbers 
 every fixture, so it wants to be taken *once*, in the same rebuild as the full-schema 2.4M corpus
 [#88] is already committed to.
 
-**Two of the three designs have not been reviewed.** The write cycle is reviewed and dispositioned;
-the model and the representation are drafts, the representation carries round-two findings that are
-*not yet dispositioned*, and two of the model's claims **contradict the normative architecture**
-(§7.5's descent, §7.7's label ladder). The roadmap already gates this work on it. Writing code
-against an unpromoted draft here means writing it twice.
+**All three designs are reviewed and ruled, and not yet normative.** The Stage 0 review's findings
+are dispositioned by decisions 0074–0081; what remains before promotion is search's containment
+gate (the one open ruling), the register rows, and the two amendments the rulings owe the normative
+architecture — §7.5's descent (decision 0080) and §7.7's ladder (decision 0078). The roadmap gates
+this work on the three designs becoming normative. Writing code against an unpromoted draft here
+means writing it twice.
 
 Everything else is ordinary sequencing: a layer must exist before an artifact, an artifact before
 its content, content before the events that can invalidate it.
@@ -77,15 +79,15 @@ inherit it.
 
 ## 2. Stage 0 — what must be settled, and what it blocks
 
-No code. One adversarial review and a ruling pass, sized at days rather than weeks because the
-material is written; what is missing is the disposition.
+No code. The adversarial review is run and the ruling pass is made (decisions 0074–0081); what
+remains is promotion — search's gate, the register rows, and the two architecture amendments.
 
 | What | State | Blocks | Note |
 |---|---|---|---|
 | **Independent review** of the model and the representation | ✔ **run 2026-08-15** — three lenses, [the record](evidence/memos/2026-08-15-artifact-design-review.md) | — | the model's core survived all three; its *derived* rules did not |
 | **Review ruling 1** — where artifact entity IDs come from | ✔ **ruled** — [decision 0074](decisions/0074-row-less-entities-are-allocated-downward.md) | Stages 1–4 | row-less entities allocate downward from the top; the repairs from the review's other findings are made |
-| **Review ruling 2** — the masked count as an existence criterion | ✔ **ruled** — [decision 0075](decisions/0075-the-masked-count-is-an-existence-criterion.md) | Stages 1–2 | it never suppressed a count: it decides whether the artifact is served. Declared per layer, absolute or proportional, no default, **independent of the gate mode** |
-| **Review ruling 3** — does a label's existence follow its content? | ✔ **ruled** — [decision 0076](decisions/0076-an-artifact-is-served-whole-or-not-at-all.md) | Stage 3 | wider than asked: **no levels of restriction within one artifact**, beyond versions. C3's question evaporates; §8.6's degrade-to-derived is withdrawn |
+| **Review ruling 2** — the masked count as an existence criterion | ✔ **ruled** — [decision 0075](decisions/0075-the-masked-count-is-an-existence-criterion.md) | Stages 1–2 | it never suppressed a count: it decides whether the artifact is served. Declared per layer, absolute or proportional, no default, **independent of the own-terms flag** |
+| **Review ruling 3** — does a label's existence follow its content? | ✔ **ruled** — [decision 0076](decisions/0076-an-artifact-is-served-whole-or-not-at-all.md) | Stage 3 | wider than asked: **no levels of restriction within one artifact**, beyond ranked variations. C3's question evaporates; the model's degrade-to-derived is deleted |
 | **Review ruling 4** — the artifact **edit** mechanism | **deferred to its own design pass** *(owner, 2026-08-15)* | Stage 7 only | not load-bearing: publishing and republishing artifacts needs no edit route. Two consequences, both stated rather than discovered — the emergency path becomes *suppress, then republish* (slower, not weaker), and runtime selections, whose whole lifecycle is editing, wait for it |
 | Where supplied content **lives** | ✔ **ruled** — [decision 0077](decisions/0077-supplied-content-lives-in-the-record-blob.md) | Stage 3 | the record blob, at the artifact's entity. Its addressing is rank in the blob's **own** has-row bitmap, independent of row space, so an artifact having no row does not bear on it |
 | **Review ruling 5** — how search gates on containment | open | Stage 8 | the term-signature conjunction is the candidate shape; the route stays withdrawn until ruled, which costs nothing before Stage 8 |
@@ -94,13 +96,13 @@ material is written; what is missing is the disposition.
 | The descent change — per-artifact test replacing §7.5's tree walk | ✔ **ruled** — [decision 0080](decisions/0080-the-frontier-is-a-per-artifact-test.md) | Stage 5 | dropped. Non-covering hierarchies make the walk ill-defined; the rollup promise weakens and the caller supplies a covering top level if they want it. ⊘ §7.5 amendment owed |
 | The label ladder reduced to guidance | ✔ **ruled** — [decision 0078](decisions/0078-the-service-takes-no-opinion-on-which-variation.md) | Stage 3 | the service resolves a caller-supplied ordering and chooses nothing. **A variation is a general artifact property**, not a label one |
 | The three gate modes | ✔ **ruled** — [decision 0079](decisions/0079-the-gate-is-one-flag-not-three-modes.md) | Stages 1–2 | they were a two-by-two in three names. One flag — does the artifact carry its own terms — beside the independent criterion, which also stops a schema word disabling a disclosure control |
-| The suppression-across-regeneration refusal | ✔ **withdrawn** — [decision 0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | — | the premise was wrong: regeneration need not mint identities. An **edit** keeps them and suppressions survive natively; a **replacement** ends them and nothing carries, correctly. A report replaces the refusal; the stable key is optional again |
+| The suppression-carry refusal | ✔ **withdrawn** — [decision 0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | — | the premise was wrong: a refresh need not mint identities. An **edit** keeps them and suppressions survive natively; a **replacement** ends them and nothing carries, correctly. A report replaces the refusal; the stable key is optional again |
 | Membership as a filter (rep §7) | open | Stage 8 | a disclosure question, not a cost one |
-| Appendix C edits: C1 gains layers as a differencing surface; a C23-shaped row for substitutive; a C12-shaped row for the corpus-independence declaration; C17 annotated; C7's disposition (already written, r42) | part done | Stages 2–4 | the register is exhaustive by construction or it is not a register |
-| `derived-artifact-gating.md` — folded into the three or retired | open | promotion | its taxonomy is superseded; leaving both standing is the "two answers" problem it was written to fix |
+| Appendix C edits: C1 gains layers as a differencing surface; a C23-shaped row for the own-terms flag; a C12-shaped row for the corpus-independence declaration; C17 annotated; C7's disposition (already written, r42) | part done | Stages 2–4 | the register is exhaustive by construction or it is not a register |
+| `derived-artifact-gating.md` — retired | **decided; deletion owed at promotion** | promotion | its taxonomy is superseded; what existed nowhere else — the point-scale edge argument, the edge gate's form, the induced-subgraph sampling problem — is carried in the model (§5, §11), and the roadmap's gate now names the three successors |
 
-**Two design items are owed and are not rulings.** The entity budget under repeated regeneration —
-a 10⁷-artifact layer mints 10⁷ IDs per regeneration against a `u32` space (write-cycle §9), with
+**Two design items are owed and are not rulings.** The entity budget under repeated replacement —
+a 10⁷-artifact layer mints 10⁷ IDs per wholesale replacement against a `u32` space (write-cycle §9; the burn is replacement's, not the model's — decision 0081), with
 [decision 0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) as the likely
 answer since a dropped layer's slots return at the fold; and the **per-request bound on predicate
 evaluation** (rep §2.0), without which a nationwide boundary level is seconds per query. The first
@@ -209,15 +211,16 @@ never the cluster's size.
 
 - Enumerated membership: entity-space Roaring on disk (`members/<ordinal>.roaring`), the derived
   **row-space** operator built at open, member-wise and never range-wise.
-- The visibility predicate in one place, overlay first: `verdict` → layer gate → gate mode.
-- The derived gate and `min_visible_members`, enforced on the **live** count; the session's resolved
+- The visibility predicate in one place, overlay first: `verdict` → layer gate → own terms ∧
+  existence criterion (decision 0079).
+- The existence criterion (decision 0075), enforced on the **live** count; the session's resolved
   visibility set as candidacy only, keyed on `(layer, version, generation)`.
 - Viewport carries the artifacts whose rows intersect the tile ranges, with masked counts.
   Drill-down by `tessera_id` resolves through the resolved set. Ordinals never cross the wire.
 - Contracts work: the viewport frame and `/v1/items` shapes for an artifact.
 
 **The check:** on the real 2.4M clustering, a broad principal and a one-term principal receive
-different counts for the same cluster, neither equal to its declared size; clusters below threshold
+different counts for the same cluster, neither equal to its declared size; clusters below the criterion
 are **absent**, not refused, and the response cannot distinguish them from clusters that never
 existed. The conformance oracle recomputes every count from the same membership and the same mask
 independently. **Data:** `clusters/hdbscan-2026-08` at 2.4M (§5.2), the seeded generator's artifact
@@ -232,7 +235,8 @@ arm at 10⁴ (§5.1).
 - Supplied content in the record blob; **`G` as an immutable sorted entity-space array**, mmapped on
   touch; containment `and_cardinality(G, M_auth) == |G|` against the **composed** mask, cached
   nowhere, and costing the same on the pass and fail paths.
-- Ranked versions: one artifact, one identity, first satisfied served.
+- Ranked variations: one artifact, one identity, the first satisfied served entire — or no artifact
+  at all (decisions 0076, 0078).
 - The attachment edge, and the term that is fail-open if omitted: an attached artifact is tested on
   its target's `verdict` **and** its target's gate, on every route, including the ones that never
   traverse the edge.
@@ -269,8 +273,9 @@ cannot carry this, because the check is "nothing is missing or extra" over all *
 **Capability:** several levels of structure, chosen by zoom or by the client, with rollup that is
 honest about what it cannot cover.
 
-- Parent/child edges; per-artifact threshold testing rather than a tree walk; pruning as a declared
-  policy per layer with a per-level override that may only **raise** the threshold.
+- Parent/child edges; per-artifact criterion testing rather than a tree walk (decision 0080);
+  display pruning as a declared policy per layer with a per-level override that may only **raise**
+  the criterion.
 - Build-time containment verification that **reports** violating edges rather than deciding
   anything.
 - Nested against stacked declared, never inferred; the zoom-to-level map as advisory metadata.
@@ -302,13 +307,17 @@ share.
 
 - The create/edit control verb (contracts work): `(layer, membership, gate, content, stable key?)`,
   members named by `external_id` or `tessera_id`, resolved at admission.
-- The edit table: content in place with `G`; membership in place with a version bump; gate widening
-  in place; **gate narrowing = suppress, re-grant, unsuppress**.
-- Stable keys, the suppression-carry refusal and the dangling-dependent refusal on regeneration.
+- The edit verb, from the edit design pass this stage waits on (decision 0077 defers it): content
+  in place with `G`; membership in place with a version bump; gate widening in place; **gate
+  narrowing = suppress, re-grant, unsuppress**. Identity, edges and suppressions survive every edit
+  (decision 0081).
+- Optional stable keys; the replacement report (a replacement that strands live suppressions is
+  reported, not refused); the dangling-dependent refusal, which binds replacement only.
 
 **The check:** a set of ten shared with a colleague who cannot see three of its members shows
-**seven**; a hundred edits later the day-one bookmark still resolves; a regeneration that would
-drop a live suppression or dangle an edge is refused with the offending keys named. **Data:**
+**seven**; a hundred edits later the day-one bookmark still resolves; a replacement that would
+dangle an edge is refused with the offending dependents named, and one that strands a suppression
+is reported. **Data:**
 `selections/analyst-*` and `programmes/portfolio` (§5.2).
 
 ### Stage 8 — Filters, search and scale
@@ -316,13 +325,13 @@ drop a live suppression or dangle an edge is refused with the offending keys nam
 **Capability:** artifacts are searchable and filterable within their disclosure rules, at the scale
 the design claims.
 
-- Membership as a filter — unrestricted for substitutive layers, threshold-inherited for derived
-  ones, and refused work-indistinguishably for a non-visible artifact.
+- Membership as a filter — unrestricted for layers declaring no criterion, criterion-inherited for
+  those declaring one, and refused work-indistinguishably for a non-visible artifact.
 - Search over artifact text via the token index on the artifact population, with C25 re-read against
   a population two orders smaller.
 - The 25M / 250M / 10⁹ artifact tiers, built once with the corpus tiers.
 
-**The check:** per-tile counts under a membership filter never resolve below `min_visible_members`;
+**The check:** per-tile counts under a membership filter never resolve below the layer's existence criterion;
 a filter naming an invisible artifact and one naming a nonexistent artifact do the same work. At
 10⁹ with ~10⁷ artifacts, a viewport serves inside its budget and the fold completes inside
 `plan_fold`'s memory ceiling. **Data:** the scale tiers (§5.3).
@@ -353,8 +362,8 @@ table, prefix-stable in *n*. Both directions must be closed-form — the members
 the artifacts holding an entity — or the census cannot answer "nothing is missing or extra".
 
 Shape: a keyed contiguous Morton interval per artifact plus a keyed scatter, so compact *and*
-pathological membership both occur by construction; gate modes cycled across artifacts so all three
-are exercised at every size; a generating set as a keyed ~10²-member subset; deliberate overlaps
+pathological membership both occur by construction; the own-terms flag and criterion cycled across
+artifacts so all four cells of the two-by-two are exercised at every size; a generating set as a keyed ~10²-member subset; deliberate overlaps
 within a level, one single-member artifact, one artifact with zero visible members for a chosen
 grant, one level with no artifacts at all.
 
@@ -370,13 +379,13 @@ something. Seven layers, each earning its place by being the case some stage can
 
 | Layer | Artifacts | Membership | Gate | Content | The case it carries |
 |---|---:|---|---|---|---|
-| `clusters/hdbscan-2026-08` | 8 / 111 / 884 / ~10⁴ over four levels | enumerated | derived, threshold | count, centroid, hull | the baseline; 20–25% noise means **non-covering in both directions**, which is the shape model §6 exists for |
-| `topics/ctfidf-2026-08` | ~3 per cluster, plus per-term variants | enumerated (the sample) | containment | label text from real titles | the containment result that surprises: broad and narrow viewers fail the *same* label |
-| `centroids/kmeans-2026-08` | 4,000 flat | enumerated | derived | **supplied** centre+radius fitted over full membership | model §8.6's trap — supplied geometry that looks derived, and the degrade-to-derived behaviour |
-| `taxonomy/arxiv-2026-08` | ~60 archives → ~176 subject classes | attribute predicate (the real `categories` column) | substitutive, `public` | authored names | a **covering** hierarchy, zero-count artifacts, and Stage 6's two-membership-sources equality check |
-| `regions/synthetic-geo` | ~2,000 | spatial predicate | substitutive | authored polygons | the perimeter cost, and §5.1's "draw all boundaries or gate them" trap |
-| `selections/analyst-*` | ~50 | enumerated, scattered | substitutive, per-analyst term | none | model §8.3 — the set of ten that shows seven |
-| `programmes/portfolio` | ~30 | enumerated | substitutive, any principal | authored name and extent | model §8.5 — a named programme with a **zero** count and no hull |
+| `clusters/hdbscan-2026-08` | 8 / 111 / 884 / ~10⁴ over four levels | enumerated | no own terms; criterion | count, centroid, hull | the baseline; 20–25% noise means **non-covering in both directions**, which is the shape model §6 exists for |
+| `topics/ctfidf-2026-08` | ~3 per cluster, plus per-term variants | enumerated (the sample) | no own terms; no criterion — containment decides | label text from real titles | the containment result that surprises: broad and narrow viewers fail the *same* label |
+| `centroids/kmeans-2026-08` | 4,000 flat | enumerated | no own terms; criterion | **supplied** centre+radius fitted over full membership | model §8.6's trap — supplied geometry that looks derived; a viewer failing its containment sees no artifact (decision 0076), and the everyone-visible remedy is a last-ranked variation |
+| `taxonomy/arxiv-2026-08` | ~60 archives → ~176 subject classes | attribute predicate (the real `categories` column) | own terms `public`; no criterion | authored names | a **covering** hierarchy, zero-count artifacts, and Stage 6's two-membership-sources equality check |
+| `regions/synthetic-geo` | ~2,000 | spatial predicate | own terms `public`; no criterion | authored polygons | the perimeter cost, and §5.1's "draw all boundaries or gate them" trap |
+| `selections/analyst-*` | ~50 | enumerated, scattered | own terms: per-analyst; no criterion | none | model §8.3 — the set of ten that shows seven |
+| `programmes/portfolio` | ~30 | enumerated | own terms: any principal; no criterion | authored name and extent | model §8.5 — a named programme with a **zero** count and no hull |
 
 **Three things this fixture must get right, each of which has already gone wrong once:**
 
@@ -449,7 +458,7 @@ allocated here rather than left as a list:
 | Owed | Stage | Why it could refute something |
 |---|---|---|
 | **Residency** — 10⁷ separately allocated bitmaps carry per-object overhead the campaign never measured; 794 MB is *serialised* bytes, and it multiplies by slice, by level, and by two during a replace | 2, re-measured at 8 | the slice budget has no line for it |
-| **The fold's artifact pass**, as a comparison: riding pass 1 with the inverted multimap resident against per-artifact translation through a sequentially written mapped table | 4 | the largest unpriced item left; decides whether `plan_fold`'s ~9–10 GB anonymous peak moves |
+| **The fold's artifact pass**, as a comparison: riding pass 1 with the inverted multimap resident against per-artifact translation through a scatter-built mapped table (rep §5.0.3's corrected posing) | 4 | the largest unpriced item left; decides whether `plan_fold`'s ~9–10 GB anonymous peak moves |
 | **The three arms** — flush-union, merge-rebase, fold-rebuild | 4 | the merge arm's bound is proportional to the merged span, not to the artifact population |
 | **Σ\|G\| and containment per request** | 3 | ~4 B/member *assumed*; refuted if a real deployment's Σ\|G\| approaches membership's order |
 | **Reach**, if it is materialised at all | 5 | the deleted assignment-column framing made it look free; it is a second membership structure |
@@ -473,7 +482,7 @@ a first-toucher stall of tens of seconds per level or blank annotation levels af
 fold, and neither is acceptable. This is the item to measure first inside Stage 4, not last.
 
 **The drill-down conflict.** The resolved visibility set restores the structural closure a
-per-identifier count would break, and the live-threshold rule says a cache may bake in counts but
+per-identifier count would break, and the live-count rule says a cache may bake in counts but
 never verdicts. Those two are in tension on exactly one route, and the design says so. It needs a
 small design pass during Stage 2, not a decision taken by whoever implements the endpoint.
 

@@ -1,8 +1,8 @@
 # Annotations — artifacts, edges and layers
 
 **Date:** 2026-08-15
-**Status:** Provisional — **reviewed, findings not yet ruled on** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)). The model's core survived; the rules hanging off it did not all survive as *derived*, and the contradictions are marked at their sites rather than resolved. **To become normative:** the owner rulings the review's §6 lists — for this document, whether the count threshold is independent of the gate mode (§5) and whether a label's existence follows its content's containment (§3) — plus the standing contradictions with the normative architecture design: the descent change (§6, against §7.5) and the ladder reduction (§2.3, against §7.7). Membership sizing, previously the open cost, is measured ([`annotation-representation.md`](annotation-representation.md) §2). [`annotation-write-cycle.md`](annotation-write-cycle.md) is reviewed and dispositioned; where this document disagrees with it, that one wins.
-**Supersedes in scope** [`derived-artifact-gating.md`](derived-artifact-gating.md), whose taxonomy this collapses — three gates become one containment test plus one threshold (§4). That document is not yet edited; where the two disagree, neither is normative and this one is newer.
+**Status:** Provisional — **reviewed and ruled** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md); the rulings are decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). **To become normative:** what genuinely remains — search's containment gate (the review's ruling 5, still open), the filter axis (§11), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4), the proportional criterion's denominator for predicate membership (§5), the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it), and the measurements [`annotation-representation.md`](annotation-representation.md) §11.3 names — plus the amendments owed to the normative architecture at promotion: §7.5's descent ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)) and §7.7's ladder ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)). [`annotation-write-cycle.md`](annotation-write-cycle.md) is reviewed and dispositioned; where this document disagrees with it, that one wins.
+**Supersedes** [`derived-artifact-gating.md`](derived-artifact-gating.md), whose taxonomy this collapses — three gates become one containment test plus one existence criterion (§4, §5) — and which is retired at promotion. What existed nowhere else is carried here: the point-scale cardinality argument for edges and the structural form of an edge gate (§5), and the induced-subgraph sampling problem, parked by name (§11).
 **Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), [0006](../decisions/0006-per-session-handles-retired.md), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are cited as **spec §n**.
 
@@ -46,11 +46,11 @@ flowchart TB
   A -->|"edge"| A2
   A -->|"membership"| P["Points"]
   A2 -->|"membership"| P
-  A --> V["<b>Versions</b> of its content — ranked,<br/>each gated; first satisfied is served"]
+  A --> V["<b>Variations</b> of its content — ranked,<br/>each gated; first satisfied is served"]
 ```
 
 *Configuration lives on the layer, resolution on the level, membership on the artifact; structure is
-edges. An artifact may carry ranked versions at different gatings (§2.3). Nothing is configured per
+edges. An artifact may carry ranked variations at different gatings (§2.3). Nothing is configured per
 artifact, and an artifact is addressed `(layer, level, ordinal)` — internally only: on the wire an
 artifact is its `tessera_id` and nothing else, the ordinal never leaving the server (ruled;
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §5).*
@@ -58,7 +58,7 @@ artifact is its `tessera_id` and nothing else, the ordinal never leaving the ser
 **An artifact** is an identity, a membership set over points, zero or more edges to other artifacts,
 and content. Content is either **supplied** — authored, corpus-independent or declared — or
 **derived**, recomputed per viewer from masked members. Its content may exist in several ranked
-**versions** at different gatings — the same artifact, one identity, the first version a viewer
+**variations** at different gatings — the same artifact, one identity, the first variation a viewer
 satisfies being the one served (§2.3).
 
 **A layer** is the unit of declaration, configuration and reachability: one clustering, one label
@@ -87,9 +87,9 @@ layers share nothing.
 |---|---|
 | identity and name — what a registry lists | its artifact set |
 | the **gate**: whether a viewer may know this analysis exists | its ordinal space and reserved entity run |
-| lifecycle: create, drop, regenerate, tombstoned name | its representation and membership source |
+| lifecycle: create, drop, replace, tombstoned name | its representation and membership source |
 | hierarchy kind — nested or stacked | its advisory zoom range |
-| the gate **mode** its artifacts use | its containment-verification result |
+| the **own-terms flag** and **existence criterion** its artifacts use (§5) | its containment-verification result |
 | which slices it appears in | |
 | relations to other layers | |
 
@@ -98,14 +98,14 @@ set, a review queue and a boundary collection with a single administrative level
 layers.
 
 **Stacked levels sit in one layer where the caller publishes them together**, even with no edges
-between them — three HDBSCAN runs released as one clustering are authorised and regenerated as one.
+between them — three HDBSCAN runs released as one clustering are authorised and refreshed as one.
 Independence of *structure* is not independence of *lifecycle*, and it is lifecycle a layer boundary
 tracks.
 
-**The threshold is a layer property**, and a per-level override may only **raise** it, never lower
-it. `min_visible_members` is a disclosure control, so a per-level knob that could relax it in one
-place is the fail-open direction; monotone-upward is the same shape as **I12**'s rule that a filter
-may move the frontier up and never down.
+**The existence criterion is a layer property**, and a per-level override may only **raise** it,
+never lower it. The criterion is a disclosure control, so a per-level knob that could relax it in
+one place is the fail-open direction; monotone-upward is the same shape as **I12**'s rule that a
+filter may move the frontier up and never down.
 
 **What a client toggles is usually a layer** — *show clusters, hide boundaries* — and it may
 additionally pick a level within one. Both are request selection (§6.1); neither reaches inside a
@@ -114,7 +114,7 @@ level, where artifact selection is the server's.
 **A label layer is a layer, not a level of the clustering it names.** It has its own gate, its own
 lifecycle and its own artifacts, and its edges name a target `(layer, level, ordinal)` — so it is
 republished when the naming step re-runs without the clustering moving. Its artifacts are gated individually,
-and may carry ranked **versions** resolved first-available (§2.3).
+and may carry ranked **variations** resolved first-available (§2.3).
 
 ### 2.2 The vocabulary is the map industry's
 
@@ -145,8 +145,8 @@ levels of one is equally defensible.
 
 | Model them as | They share | Which means |
 |---|---|---|
-| one layer, three levels | one gate, one lifecycle, one name | authorised together, regenerated together, dropped together; a client picks a level within the toggle |
-| three layers | nothing | independently gated, independently regenerated, three entries in the toggle list |
+| one layer, three levels | one gate, one lifecycle, one name | authorised together, refreshed together, dropped together; a client picks a level within the toggle |
+| three layers | nothing | independently gated, independently refreshed, three entries in the toggle list |
 
 Neither is more correct. **Restricting counties but not countries requires three layers**, because a
 gate is a layer property; publishing a mapping agency's release as one revisable unit argues for one.
@@ -157,34 +157,37 @@ generated from — its own gate, and an edge to the cluster it names. §2.3 reco
 visibility does not follow from its cluster's, a synthesis can be more sensitive than its sources,
 and a label that leaks must be suppressible *now*, which addresses an entity.
 
-**Several labels for one cluster are either versions or separate artifacts, and the caller decides
-which.** Versions are one label described at several clearances, resolved first-available; separate
+**Several labels for one cluster are either variations or separate artifacts, and the caller decides
+which.** Variations are one label described at several clearances, resolved first-available; separate
 labels are different statements, all served to whoever satisfies them. §2.3 implements only the
 first, because only the first is a question about access.
 
-### 2.3 Versions: one artifact, one identity, several gatings
+### 2.3 Variations: one artifact, one identity, several gatings
 
-**An artifact may carry several versions of its content. Each version has its own gate. They are
-ranked, and a viewer is served the first they satisfy.** That is the whole mechanism *(owner ruling,
-2026-08-15)*, and nothing else about choosing what to show belongs in the service.
+**An artifact may carry several variations of its content. Each variation has its own gate. They are
+ranked by the caller, and a viewer is served the first they satisfy — entire — or nothing at all**
+(decisions [0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md),
+[0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). That is the whole
+mechanism, and nothing else about choosing what to show belongs in the service: the ordering is
+supplied, never derived, because only the caller knows why one variation precedes another.
 
-**They are the same artifact.** One identity, one membership, one entity — a version sets *which
+**They are the same artifact.** One identity, one membership, one entity — a variation sets *which
 content this viewer sees*, not which object they are looking at. An earlier revision made each
 candidate its own artifact with its own entity; that was wrong, and the identity question the owner
 asked twice is what it was wrong about.
 
-**Which means versions need nothing new.** §4 already gates content by containment on its generating
-set. A version is a `(content, gate, rank)` triple on an artifact that already exists, and resolution
-is that same test run down a ranked list. No version entities, no version ordinals, no version
+**Which means variations need nothing new.** §4 already gates content by containment on its generating
+set. A variation is a `(content, gate, rank)` triple on an artifact that already exists, and resolution
+is that same test run down a ranked list. No variation entities, no variation ordinals, no variation
 identifiers, and nothing added to the deny lane.
 
 **Why this belongs in the service when the label ladder did not.** A ladder asks *which of these
-different things is best* — quality, preference, product judgement, the caller's throughout. Versions
+different things is best* — quality, preference, product judgement, the caller's throughout. Variations
 ask *how is this same thing described to someone with this clearance*, which is a permission-masked
 service's entire subject. The first is presentation and was three revisions of machinery this document
 should never have grown. The second is access control and is one rule.
 
-| | Versions of one artifact | Separate artifacts |
+| | Variations of one artifact | Separate artifacts |
 |---|---|---|
 | What they are | one thing, described at different clearances | different things |
 | Identity | **one** | one each |
@@ -192,20 +195,22 @@ should never have grown. The second is access control and is one rule.
 | Chosen by | the declared rank | nobody — the caller decides what to do with them |
 
 **The caller decides which they have**, and that is the *"driven by the user"* half. Toponymy's
-candidates modelled as versions of one label get first-available; modelled as separate labels they all
+candidates modelled as variations of one label get first-available; modelled as separate labels they all
 arrive and the caller's interface picks. Neither is more correct; the service implements only the
 first, because only the first is a question about access.
 
 **Emergency withdrawal uses what exists, which was the objection to a shared identity and does not
-survive.** If one version turns out to disclose, suppress the **artifact** — immediate under Rule S,
-fail-closed, and the intermediate state is the safe one — then edit the bad version out
-([`annotation-representation.md`](annotation-representation.md) §5.0.1 makes content edits
-first-class) and unsuppress. **⊘ The edit step is deferred to a design pass of its own** *(owner,
-2026-08-15)*, so the path as written does not exist yet and the withdrawal that does is **suppress,
+survive.** If one variation turns out to disclose, suppress the **artifact** — immediate under Rule S,
+fail-closed, and the intermediate state is the safe one — then edit the bad variation out and
+unsuppress. **⊘ The edit step is deferred to a design pass of its own** *(owner, 2026-08-15;
+[decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md))*, so the path as
+written does not exist yet and the withdrawal that does is **suppress,
 then republish the layer without the offending content**. That is slower and it is not weaker: the
 suppression acts at the ack, fail-closed, and the republish makes it permanent.
 
-**Editing is not the obstacle it was drafted as, and the reason is worth keeping.** Bundle files are
+**Editing is not the obstacle it was drafted as, and the reason is worth keeping.** Supplied content
+lives in the record blob at the artifact's own entity
+([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)). Bundle files are
 immutable and digest-verified, so nothing is mutated under a live reader — but every writer here
 already publishes rather than mutates, a record lives in a single 256 KiB block and never straddles
 two, and a publication is a write-then-rename. An edit is therefore a republish of the extent the
@@ -214,76 +219,68 @@ be done is writing the edit as an additional record layer: the stack takes the f
 and rests on layers being disjoint, so a second layer for the same entity serves the **pre-edit text,
 silently** — the trap this paragraph originally mistook for a prohibition.
 
-**Two properties were claimed to follow, and one of them is contradicted elsewhere in this
-document.** *A viewer who satisfies no version receives nothing for that artifact* — under which
-**C3** holds as written: no shell, no announcement — is one of two answers this document gives on
-label existence. The other is §3's Q2, under which the artifact keeps its identity and masked count
-when its content is withheld. They cannot both stand, and which one does is an owner ruling (§3
-states both sides). The second property is untouched by the ruling: derived content — a hull, a
-centroid, a count — is recomputed from `membership ∩ M_auth` whatever version resolved, because it
-was never a version of anything (§4).
+**A viewer who satisfies no variation receives nothing for that artifact**
+([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): no shell, no
+announcement, and **C3** holds as written. Derived content — a hull, a centroid, a count — is
+recomputed from `membership ∩ M_auth` whatever variation resolved, because it was never a variation
+of anything (§4).
 
-**Membership across versions is undefined, and the gap reintroduces the defect this document
-rejected `reach` for** (review 2026-08-15). A label's membership is *the sample it was generated
-from* (§2.2); versions carry different samples; one membership is declared. So the count served
-beside a resolved version describes a set that version was not generated from — a statement about an
-invented set standing next to content about a declared one, which is §6's argument against `reach`
-verbatim. Unresolved; carried in §11.
+**One membership, several samples.** An artifact declares one membership, and the number beside it
+is that membership's masked count, unmodified, whatever variation resolved
+([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)). A variation's
+sample lives in its generating set, where it governs that variation's containment — the count never
+describes the sample and never claimed to. A caller for whom the membership *is* the sample (§2.2's
+labels) declares one that stands for the artifact as a whole, knowing each variation still gates on
+its own set.
 
-⊘ **This still reduces §7.7 from a mechanism to guidance**, alongside §6's descent change, and wants
-the same ruling. Its five tiers remain what §7.8 uses them for — advice on which generating sets to
-produce. A caller wanting the ladder's behaviour expresses it as ranked versions; the service neither
-knows nor needs to know that is what they are doing.
+**This reduces §7.7 from a mechanism to guidance**
+([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md); ⊘ the
+amendment to §7.7 is owed at promotion). Its five tiers remain what §7.8 uses them for — advice on
+which generating sets to produce. A caller wanting the ladder's behaviour expresses it as ranked
+variations; the service neither knows nor needs to know that is what they are doing.
 
 **The check that would have saved three revisions:** *does this decide something about **access**, or
 about **presentation**?* Access is Tessera's. Presentation is the caller's. A design that finds itself
 ranking things by **quality** has crossed the line; ranking them by **clearance** has not.
 
-## 3. The three questions
+## 3. One existence test, and one number
 
-Every artifact the service might serve is resolved by three independent questions. There are no
-others.
+**An artifact is served to a principal entire, or it is absent — indistinguishable from one that
+never existed** ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
+There are no levels of restriction within a single artifact: no state in which a viewer may know a
+label exists but not read it, and no artifact present with some of its content missing. Variations
+(§2.3) are the shape that rule takes, not an exception to it — a viewer is served exactly one,
+entire, or nothing.
 
 ```mermaid
 flowchart TB
-  Q1{"May you know<br/>it exists?"} -->|no| X["absent — indistinguishable<br/>from never having existed"]
-  Q1 -->|yes| Q2{"May you see<br/>this content?"}
-  Q2 -->|"supplied: generating set ⊆ M_auth"| S["serve it"]
-  Q2 -->|"derived: recompute under the mask"| S
-  Q2 -->|no| N["omit this content,<br/>keep the artifact"]
-  S --> Q3["the number beside it is always<br/>|membership ∩ M_auth|"]
-  N --> Q3
+  E{"gate passes ∧ existence criterion passes ∧<br/>some variation's contents are all contained?"}
+  E -->|no| X["absent — indistinguishable<br/>from never having existed"]
+  E -->|yes| S["serve the first variation<br/>the viewer satisfies, entire"]
+  S --> N["the number beside it is always<br/>|membership ∩ M_auth|"]
 ```
 
-*Resolving one artifact for one viewer. The three questions are independent; conflating any two of
-them is where the fail-opens are.*
+*Resolving one artifact for one viewer: one conjunction, evaluated once. Containment failures fall
+through the variation ranking; a viewer who satisfies none sees no artifact.*
 
-**May you know it exists?** Its gate — §5.
+**Existence** is one conjunction: the layer gate, the artifact's own terms if it carries them (§5),
+the existence criterion if one is declared (§5), and containment of every corpus-derived content the
+resolved variation carries (§4). Derived content is contained by construction; corpus-independent
+content has an empty generating set and constrains nothing. This restores the corpus's own position:
+§7.6's normative rule is that a principal never learns of the existence of a label they cannot see,
+and it now holds for the general object — **C3** holds as written, because nothing is ever withheld
+from a served artifact, so there is no shell to be distinguishable from absence.
 
-**May you see this content?** Containment of that content's generating set against `M_auth` — §4.
+**The number beside a served artifact** is always the masked count of the artifact's **own declared
+membership**, unmodified. Never a build-time count, never a count over anything the caller did not
+declare, never anything derived from a set the viewer cannot see — and never a withheld or coarsened
+one, because a partial artifact is forbidden
+([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)). This is **I2**
+at the artifact.
 
-**What number goes beside it?** Always the masked count of the artifact's **own declared
-membership**. Never a build-time count, never a count over anything the caller did not declare, and
-never anything derived from a set the viewer cannot see. This is **I2** at the artifact.
-
-The invariant half of that answer stands: **what is served is always a masked count of declared
-membership, and never anything else.** Whether it is served *at all* — who owns the
-count-suppression threshold — is a question this document currently answers twice, and the two
-answers contradict. §5 carries the contradiction and the owner ruling it waits on.
-
-**Two questions here are owed owner rulings and must not be read as settled** (review 2026-08-15).
-First, Q1 and Q2 are stated as independent, and for labels this document breaks its own separation:
-§2.3 says a viewer who satisfies no version *receives nothing* — existence following content — while
-Q2's *omit this content, keep the artifact* says the opposite. Both readings are live. The
-keep-the-artifact reading also reverses **C3**, which records as **Closed** that a principal never learns of
-content they cannot see: a viewer told a layer declares a shape, and handed an artifact without one,
-learns its generating set reaches outside their mask. A fourth gate mode — the artifact exists iff
-some version's containment passes — is what the normative label rule (§7.6) already does, and it is
-not one of §5's three. Which answer survives is the ruling; §8.1's flagship label layer depends on
-it. Second, the gate modes must compose with an artifact's own suppression; the fix — the overlay
-consulted first, on every route — is specified in
-[`annotation-representation.md`](annotation-representation.md) §4 and carried by the reviewed
-[`annotation-write-cycle.md`](annotation-write-cycle.md) §5.
+The test composes with the artifact's own suppression by consulting the overlay first, on every
+route — specified in [`annotation-representation.md`](annotation-representation.md) §4 and carried
+by [`annotation-write-cycle.md`](annotation-write-cycle.md) §5.
 
 ## 4. Content: one containment test
 
@@ -310,8 +307,8 @@ make the test tractable (**I5**: everyone satisfying *T* sees every item under *
 §8's worked example shows both viewers failing the same label and both satisfying its per-term
 variant.
 
-**Derived content is always masked, whatever the gate says.** This is the rule that keeps §5's
-substitutive mode honest and it is stated separately because it is the fail-open: an artifact whose
+**Derived content is always masked, whatever the gate says.** This is the rule that keeps an
+own-terms gate honest (§5) and it is stated separately because it is the fail-open: an artifact whose
 own terms authorise it is authorised to *exist*, not to describe its members. Serving a build-time
 hull or a build-time count for such an artifact discloses the members the gate did not cover.
 
@@ -346,8 +343,8 @@ client's obligations rather than the server's.
 ### 4.2 Declaring derived content
 
 A layer declares which derived properties its artifacts expose, from a closed vocabulary the engine
-implements. **Count is intrinsic** — every artifact has a masked count, and the threshold requires it
-computed regardless. Everything else is opt-in, because a hull over masked members costs O(visible
+implements. **Count is intrinsic** — every artifact has a masked count, and the existence criterion
+requires it computed regardless. Everything else is opt-in, because a hull over masked members costs O(visible
 members) per artifact per request where a count is one bitmap operation, and a client drawing only
 centroids should not pay hull cost for every artifact on screen.
 
@@ -365,13 +362,14 @@ keeps the artifact surface a counting surface rather than a general aggregation 
 Illustratively, and **not** a contract — the wire and manifest shapes are contracts work:
 
 ```
-layer "clusters/2026-08"          layer "boundaries/uk-2026"
-  gate      derived, min = 50        gate      substitutive, public
-  structure hierarchical, 3 levels   structure hierarchical, LSOA→MSOA→LAD
-  descent   prune, level 1→2         descent   prune off
-  slices    [embedding-2026-08]      slices    [geographic]
-  derived   [centroid, hull]         derived   [centroid]
-  supplied  []                       supplied  [shape: corpus-independent]
+layer "clusters/2026-08"           layer "boundaries/uk-2026"
+  own_terms  none                     own_terms  public
+  criterion  absolute 50              criterion  none
+  structure  hierarchical, 3 levels   structure  hierarchical, LSOA→MSOA→LAD
+  pruning    on, level 1→2            pruning    off
+  slices     [embedding-2026-08]      slices     [geographic]
+  derived    [centroid, hull]         derived    [centroid]
+  supplied   []                       supplied   [shape: corpus-independent]
 ```
 
 **`public` is a distinguished value, and an empty term list is refused at parse.** All three reviewers
@@ -381,54 +379,75 @@ recounts that empty-required-set-admits-everyone was the slice-gate error caught
 empty-means-admit-all: the caught error, reintroduced in the illustration. The model had no way to
 say *public*, which is why the reach for `[]` was inevitable.
 
+**The criterion has no default, and its absence is declared rather than implied**
+([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)). A layer that
+wants no criterion says `none` in the field that means it; a declaration with the field missing is
+refused at parse. Under the old three-mode enumeration one schema word — *substitutive* — switched
+the criterion off as a side effect; making absence its own statement is what closes that path
+([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)).
+
 **Two fields carry a security consequence, not one** *(review finding)*. Whether a supplied item is
 corpus-independent — declaring a fitted centroid corpus-independent would serve it to every
-principal. And **the gate mode itself**: on the mode-bound reading of the threshold — one side of the
-contradiction §5 records, not a settled rule — declaring a layer substitutive switches off
-`min_visible_members` entirely, so a corpus-derived clustering mis-declared substitutive serves the
-existence, count and hull of every cell down to one member, which is everything C1's disclosure
-control exists to prevent, disabled by one schema word. Under §3's independence reading the
-mis-declaration un-gates existence while the threshold still governs the count — narrower, still a
-disclosure. Both fields are caller assertions the service cannot
-verify, of **C12**'s class, and belong in the register beside it; what the gate-mode row must say
-waits on §5's ruling. A gate-mode *change* on a populated
-layer un-suppresses every previously hidden artifact and is an owner-visible event rather than
-configuration — which is the line separating both of these from the derived vocabulary above, where
-every value is safe.
+principal. And **the own-terms flag**: whether an artifact's own terms are the right ones is a
+caller assertion the service cannot verify. Both are of **C12**'s class and belong in the register
+beside it. A gate *change* on a populated layer restates by direction: narrowing — adding or raising
+a criterion, setting the own-terms flag — is safe in place; widening — removing or lowering a
+criterion, clearing the flag — un-hides previously absent artifacts and goes through
+suppress–edit–unsuppress at the layer, an owner-visible event rather than configuration
+([`annotation-write-cycle.md`](annotation-write-cycle.md) §6). That direction rule is the line
+separating these two fields from the derived vocabulary above, where every value is safe.
 
-## 5. Existence: three gate modes
+## 5. Existence: one flag, one criterion
 
-| Mode | Rule | For |
-|---|---|---|
-| **Derived** | masked count of members ≥ `min_visible_members` | clusters — today's rule (§7.5) |
-| **Conjunctive** | derived **and** the artifact's own terms | a restricted analytic over ordinary points |
-| **Substitutive** | the artifact's own terms alone | boundaries, programmes, anything that exists independently of the corpus |
+A layer declares two independent controls for its artifacts, and both are conjuncts of §3's one
+test ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)):
 
-Both non-default modes are already ruled on elsewhere, for different objects, and this generalises
-them rather than inventing them. The conjunctive mode is `derived-artifact-gating.md` §5.2's
-*terms first, always* — the boundary's own mask decides whether the viewer learns of it, the
-threshold applies after, and the fail-open named there is the reverse: a healthy induced count
-surfacing something whose terms the viewer does not hold. The substitutive mode is **C23** — an
-authored gate that *replaces* membership-derivation for a category value, accepted as caller's
-control, and existing precisely so that a value nobody has populated yet can still be named.
+- **The own-terms flag** — *does an artifact carry its own access terms?* If it does, a viewer must
+  satisfy them before the artifact exists for them. The flag generalises **C23**'s authored gate —
+  accepted as caller's control, existing precisely so that a thing nobody has populated yet can
+  still be named — and its composition rule is *terms first, always*: a healthy masked count must
+  never surface an artifact whose terms the viewer does not hold.
+- **The existence criterion** — serve iff the masked count clears a declared bar
+  ([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)). It takes one
+  of two forms: **absolute** — masked count ≥ *N* visible members — or **proportional** — masked
+  count ≥ *p* of the artifact's **declared** membership. The proportional form is the one that
+  scales: a fixed bar of fifty protects a cluster of a hundred and does nothing for a cluster of
+  ten thousand, where fifty visible members is half a percent. The criterion is a disclosure
+  control, so it has no default and its absence is declared, not implied (§4.2). It never touches a
+  number: the count beside a served artifact is the masked count, unmodified (§3). What it protects
+  is the existence of a **corpus-derived grouping** — without it, a principal holding a sliver of
+  the corpus reconstructs its topic structure from hundreds of clusters each asserting *the
+  clustering found members here*.
+
+The proportional form reads the declared, unmasked membership size as a **predicate input** — it
+has no field in the representation and no wire shape carries it, because a corpus-wide count over
+items a principal may not see is C8 ([`annotation-representation.md`](annotation-representation.md)
+§2.4). ⊘ **It has no denominator for predicate membership, and this is an open owner rule**: *"the
+points inside this shape"* declares no member set and its size changes at every write. Either
+proportional criteria are refused on predicate layers, or a denominator is defined and priced;
+until ruled, a predicate layer can only declare an absolute criterion or none.
+
+The old three-mode enumeration was this two-by-two in three names, and this is the owning site for
+the translation:
+
+| The old mode name | In the two controls |
+|---|---|
+| **derived** | no own terms; criterion declared |
+| **substitutive** | own terms; no criterion |
+| **conjunctive** | own terms; criterion declared |
+| *(it had no name for this)* | no own terms, no criterion — a density level ([`annotation-representation.md`](annotation-representation.md) §10) |
+
+The fourth cell is a real configuration — an artifact whose existence discloses nothing and whose
+count is masked — and the recast reaches it without a special case. What the enumeration cost was
+that one schema word disabled a disclosure control: a corpus-derived clustering mis-declared
+*substitutive* served the existence and count of every cluster down to one member. Under the flag
+the criterion's absence is its own statement, unreachable by accident from an unrelated choice.
 
 Composition is **conjunction, never disjunction**, in the same shape as `M_sel = M_auth ∧ filters`.
 Satisfaction of an artifact's own gate label is the item-visibility predicate verbatim (§6.1) —
 intersection with the principal's satisfied set, not a conservative label join, which yields an
 empty required set for a disjunctive gate and admits everyone. That error has been made once
 already, in the slice gate, and was caught in review.
-
-**Whether the count threshold is a property of the gate mode is this document's standing
-contradiction, and it is an owner ruling, not a derivation** (review 2026-08-15; the record's §6,
-ruling 2). Two answers are live. §3 and §2.1 treat `min_visible_members` as a layer property the
-gate mode does not touch; this table's substitutive row, §4.2's register paragraph and §8.3 all read
-substitutive as switching the threshold off entirely. The worked examples split the same way —
-§8.2's boundaries declare substitutive *and* apply the threshold to their counts with rollup, §8.3's
-selections declare substitutive precisely to escape it — so whichever section an implementer reads
-decides the behaviour. The cost of the mode-bound reading, implemented as written: every substitutive
-artifact serves an exact masked count down to one, which is the failure §8.2's own trap paragraph
-names. The cost of independence: a layer that genuinely wants no threshold must say so in a field
-the declaration sketch (§4.2) does not yet carry. Neither reading is adopted here.
 
 **A layer has a gate too, and it governs reachability.** Whether a viewer may know this clustering
 exists at all, independent of any member. Resolved once per session and keyed on the layer version —
@@ -452,11 +471,23 @@ nobody thinks to check.
 cluster, so serving it announces the cluster; a label's visibility is therefore conjunctive with
 its cluster's. Terms first, applied to an edge rather than to a gate.
 
-## 6. The frontier is not a tree walk
+**Edge populations at point scale keep the rule and break the mechanism** (carried from the retired
+`derived-artifact-gating.md`, which recorded it first). A sparse graph over 10⁹ points carries
+10⁹–10¹⁰ edges, so a per-item visibility test is impossible however correct it is; edges at that
+scale need the *points'* machinery — an ordering, contiguous ranges, bitmap arithmetic. The
+structural form of their gate: with edges sorted by `(source, target)`, the visible set is the
+adjacency runs of visible sources intersected with visible targets — O(visible edges), bounded by
+the mask rather than by the corpus. Getting the gate right does not mean the population is handled:
+a correct rule at an impossible cardinality is not a design. ⊘ Point-scale edges are unscoped;
+nothing here builds them, and their sampling problem is parked by name in §11.
+
+## 6. The frontier is a per-artifact test
 
 §7.5 descends from the root, evaluating masked counts and stopping below threshold, so that
-insufficient visibility becomes rollup rather than suppression. That algorithm needs counts that
-shrink downward, which containment supplies for free.
+insufficient visibility becomes rollup rather than suppression. **That descent is dropped**
+([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md); ⊘ the amendment to §7.5
+is owed at promotion). The walk needs counts that shrink downward, which containment supplies for
+free.
 
 **Non-covering hierarchies do not supply it**, and the failure is quiet. A child may hold more
 visible members than its parent, so "descend while the count holds up" no longer describes a cut
@@ -471,17 +502,19 @@ count and hull describe an invented set while the label describes the declared o
 inconsistent statements about the same object, one of them ours. It also forecloses exactly the
 non-covering analyses this model exists to carry.
 
-**Replace it with a per-artifact test.** Gather the candidates intersecting the viewport, and test
-each independently against the threshold on its **own declared membership**. Serve those that pass.
-The hierarchy then does display work — where a child and its parent both pass, prefer the child at
-depth — and rollup emerges from independent decisions rather than being a property of the tree.
+**What replaces it is a per-artifact test.** Gather the candidates intersecting the viewport, and
+test each independently against the existence criterion on its **own declared membership**. Serve
+those that pass. The hierarchy then does display work — where a child and its parent both pass,
+prefer the child at depth — and rollup emerges from independent decisions rather than being a
+property of the tree. Where "descent" survives in this corpus it means that display pruning over
+per-artifact outcomes, never a walk.
 
 Three consequences, one of them a loss.
 
 **It needs nothing from the data.** No containment, no covering, no nesting between levels. Every
 artifact means what its creator said it means.
 
-**The disclosure control gets easier to defend, not harder.** `min_visible_members` is small-cell
+**The disclosure control gets easier to defend, not harder.** The existence criterion is small-cell
 suppression, and the survey found no analogue anywhere for the tree-walk form — which is why C1's
 outstanding review has no prior art whose failure modes it can borrow. A per-artifact test is a
 suppression decision on one cell, evaluated independently, which is the census case the literature
@@ -504,9 +537,9 @@ by the owner, 2026-08-15; recorded because it is the intuitive formulation of ro
 **The inference.** A viewer held at level *k* knows they were held. If their own visible points at
 level *k* obviously split — a tight sub-blob comfortably above the threshold on its own — then they
 can reason that their sub-blob would have passed at *k+1*, so the level was withheld on account of
-some **other** cluster at *k+1*, which must therefore exist and be below threshold for them. That is
-precisely the fact `min_visible_members` exists to hide: **the rule announces the suppression instead
-of concealing it.**
+some **other** cluster at *k+1*, which must therefore exist and be below the criterion for them. That
+is precisely the fact the existence criterion exists to hide: **the rule announces the suppression
+instead of concealing it.**
 
 **And it differences.** The signal is a single bit per level per viewport, so a viewer can pan the
 offending region in and out of view and watch the level appear and vanish, localising the invisible
@@ -542,9 +575,10 @@ less compensated.
 
 ### 6.2 Pruning is a policy, not a soundness property
 
-Stopping the descent at a failed parent can only ever show **less**: it never surfaces an artifact
-below threshold, and disabling it only reveals artifacts that each passed their own test. Both
-settings are fail-closed, which is what makes this configuration rather than a control.
+Display pruning — omitting the sub-structure of a parent that failed its own test — can only ever
+show **less**: it never surfaces an artifact below the criterion, and disabling it only reveals
+artifacts that each passed their own test. Both settings are fail-closed, which is what makes this
+configuration rather than a control.
 
 **Containment and pruning are independent, and must not be derived from one another.** Containment
 determines whether pruning is *lossless*. It does not determine whether pruning is *wanted*: "do
@@ -607,17 +641,17 @@ A 40M-document corpus. Two layers:
 | What | a Toponymy levelled clustering, 3 levels | its labels |
 | Members | 12 / ~400 / ~9,000 artifacts | ~3 per cluster |
 | Kind | structure-revealing | content-bearing |
-| Gate mode | derived, `min_visible_members = 50` | derived — containment |
+| Own terms / criterion | none / absolute 50 | none / none |
 | Edges | parent/child within the layer | into `clusters/2026-08` |
 | Pruning | on, level 1 → 2 | n/a |
 | Derived | count, centroid, hull | count |
 | Supplied | none | the label text, generating set declared |
 
-*The topics row's gate mode — "derived — containment" — is not one of §5's three modes* (review
-2026-08-15). It names a fourth: the label exists iff some version's containment passes, which is what
-the normative label rule (§7.6) already does, and what §2.3's no-version-satisfied behaviour assumes.
-Whether label existence follows content containment is the owner ruling §3 states; §5's mode set and
-this example cannot both stand as written.
+*The topics layer declares no criterion, so a label's existence rides entirely on containment: a
+viewer for whom no variation's generating set is contained sees no label
+([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)) — which is what
+the normative label rule (§7.6) already does. No fourth gate mode is needed; the containment
+conjunct is part of §3's one existence test.*
 
 One level-1 cluster and its neighbourhood:
 
@@ -657,7 +691,7 @@ sees 610. Neither ever meets the 184,000, and the hull each receives is over the
 members — different shapes, both correct.
 
 **Suppression is indistinguishable from absence.** B receives one child of three. Nothing in the
-response distinguishes "no such sub-cluster" from "below threshold", because unsatisfied candidates
+response distinguishes "no such sub-cluster" from "below the criterion", because unsatisfied candidates
 are omitted rather than refused (§7.6).
 
 **Containment is about which terms, not how much.** A sees 180 times more of the corpus than B and
@@ -668,35 +702,35 @@ reading the coverage figures.
 
 **Pruning has a price, here made concrete.** The build verification reports that
 `C_epitope_mapping` is not contained in its parent. Consider a third viewer **C** holding only the
-term covering those 900 stray documents: `|C_immunology ∩ M_auth| = 0`, so the parent fails, the
-descent stops, and C sees nothing — though `C_epitope_mapping` has 900 visible members and would
-pass comfortably. With pruning off for that level, C sees it. Neither behaviour is a disclosure;
-the caller chooses, knowing which edges are lossy.
+term covering those 900 stray documents: `|C_immunology ∩ M_auth| = 0`, so the parent fails, display
+pruning omits its sub-structure, and C sees nothing — though `C_epitope_mapping` has 900 visible
+members and passes its own test comfortably. With pruning off for that level, C sees it. Neither
+behaviour is a disclosure; the caller chooses, knowing which edges are lossy.
 
 ### 8.2 Administrative boundaries — supplied shape, masked number
 
-`boundaries/uk-2026`: 35,000 artifacts over LSOA → MSOA → LAD, a hierarchy that *is* covering.
-Substitutive gate — every principal may see every shape, because a boundary exists whether or not
-the corpus does. Content: the polygon and the name, both corpus-independent, so an empty generating
-set and unconditional service. The number is a masked count and may be zero.
+`boundaries/uk-2026`: 35,000 artifacts over LSOA → MSOA → LAD, a hierarchy that *is* covering. Own
+terms `public`, because a boundary exists whether or not the corpus does. Content: the polygon and
+the name, both corpus-independent, so an empty generating set and unconditional service. The number
+is a masked count and may be zero.
 
 The trap this example exists for: **drawing only the boundaries that contain visible points is
 small-cell suppression with a threshold of one.** Displaying a boundary would then assert *at least
 one visible item here* and omitting it would assert *none* — precisely the threshold the census
 literature identifies as too low, arrived at by a client-side decision that looks like no decision
-at all. Draw all of them; apply the threshold to the **count**, rolling a suppressed LSOA count up
-to its MSOA rather than leaving a hole.
+at all. The choice belongs in the declared criterion, not in the client: declare none, and every
+boundary is served with its exact masked count, zero included; declare one, and a boundary below it
+is **absent, whole** — shape, name and number together.
 
-*This example needs the threshold independent of the gate mode: the layer is substitutive and the
-threshold is still applied to its counts. Under the mode-bound reading — the other side of the
-contradiction §5 records — no threshold exists on this layer and every boundary serves an exact
-masked count down to one, the exact failure the paragraph above names. The example survives only one
-answer to that ruling.*
-
-That count-not-shape split was called `derived-artifact-gating.md` §5.2's *"first deliberately
-partial threshold"* and flagged as a weakening needing review. Under §4 it is not an exception: the
-supplied shape follows the gate, the derived count follows the mask, and the two were never one
-decision.
+**Nothing here suppresses or coarsens a number.** A ward and its district are two artifacts, on two
+levels of one layer, joined by an edge — not one artifact whose number is drawn two ways. A ward
+that fails the criterion is absent; its district holds more of the viewer's visible members, clears
+the criterion on its **own** count, and is served whole with its own exact number. The viewer
+receives a coarser object — which is what rollup always was, §6's per-artifact outcome arriving in
+the geographic case. There is no state in which a shape is served and its number withheld: an
+artifact with a withheld number is a partial artifact and forbidden
+([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md), which withdrew
+the "count-not-shape" split the retired `derived-artifact-gating.md` had flagged for review).
 
 ### 8.3 Per-analyst selections — the scattered set, and why a category is not enough
 
@@ -711,14 +745,13 @@ disclosure about vocabulary size (**C22**) that thousands of ephemeral sets woul
 And a category value's visibility is either membership-derived or an authored gate, where a private
 selection wants neither. Artifacts scale to 10<sup>7</sup> by design; a vocabulary does not.
 
-**The gate mode is what settles it, and this is the best case for the substitutive mode in this
-document.** A bookmark set of three items must not be suppressed by `min_visible_members`: that
-threshold is a disclosure control over *corpus* structure, and a hand-assembled selection's structure
-is the analyst's own. Gate it on the analyst's term, or a team's, and skip the threshold entirely.
-*As written, "skip the threshold" reads it as switched off by the substitutive mode — one side of the
-contradiction §5 records. Under the independence reading the same outcome needs the layer to declare
-no threshold, which the declaration sketch (§4.2) cannot yet say. The behaviour wanted here survives
-either ruling; the sentence describing it does not.*
+**The two controls are what settle it, and this is their best case in this document.** A bookmark
+set of three items must not be suppressed by an existence criterion: the criterion is a disclosure
+control over *corpus* structure, and a hand-assembled selection's structure is the analyst's own.
+So the layer sets the own-terms flag — the analyst's term, or a team's — and declares **no
+criterion**, in the field that means it (§4.2). Under the old enumeration that outcome arrived as a
+side effect of the word *substitutive*; under the flag it is its own deliberate statement
+([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)).
 
 Its count is still masked, which gives the behaviour that matters: a set of ten shared with a
 colleague who cannot see three of its members shows **seven**. Not an edge case — the system working,
@@ -738,8 +771,8 @@ attributed selections are artifacts.
 
 ### 8.4 A restricted analytic — the layer gate
 
-`clusters/incident-2026-08`, gate label `ir:analyst`, members gated conjunctively: the analyst term
-**and** the threshold.
+`clusters/incident-2026-08`, gate label `ir:analyst`, artifacts carrying own terms **and** a
+declared criterion — the old conjunctive cell (§5).
 
 A viewer without the term does not see the layer in `/v1/meta`, and naming it explicitly is
 indistinguishable — in outcome and in work — from naming a layer that has never existed. Their
@@ -749,9 +782,9 @@ without widening what they may see of the corpus. A gate narrows and never widen
 
 ### 8.5 A programme everyone can see, whose documents they cannot
 
-`programmes/portfolio`: one artifact per research programme, substitutive gate satisfied by any
-authenticated principal — staff must know a programme exists — over documents most of them cannot
-read.
+`programmes/portfolio`: one artifact per research programme, own terms satisfied by any
+authenticated principal and no criterion — staff must know a programme exists — over documents most
+of them cannot read.
 
 | Content | Kind | Served to a viewer with no visible members |
 |---|---|---|
@@ -781,15 +814,16 @@ cannot check, would serve every principal a shape describing documents they may 
 | Content | Cell | Consequence |
 |---|---|---|
 | Supplied centre and radius | supplied, corpus-derived | containment against the fitted membership |
-| Derived centroid | derived | always available, over visible members only |
-| Derived count | derived | always available |
+| Derived centroid | derived | over visible members only |
+| Derived count | derived | the masked count, unmodified |
 
-Which yields the behaviour worth noticing: **a viewer who fails containment still gets the cluster.**
-They receive its existence, its masked count and a centroid computed from what they can see — just
-not the authored circle. The artifact degrades to its derived content rather than disappearing, and
-the two geometries are never substituted for one another. That is the same split as §8.2's boundary,
-arrived at from the opposite direction: there the supplied shape was free and the number was gated;
-here the supplied shape is gated and the derived geometry is free.
+Which yields the behaviour worth noticing: **a viewer who fails containment on the fitted circle
+sees no cluster at all** ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
+The circle is corpus-derived, so failing its containment fails the artifact — there is no state in
+which the existence, count and a recomputed centroid are served while the authored circle is
+withheld. A caller who wants those viewers to see something declares it: a last-ranked **variation**
+carrying no corpus-derived supplied content (§2.3), whose containment is vacuous and which serves
+entire — existence, masked count, derived centroid — to everyone the gate admits.
 
 The general lesson the layer exists to record: **the axis is where the geometry came from, never
 whether the object is called a cluster, a polygon or a circle.** A supplied hull over an HDBSCAN
@@ -827,12 +861,11 @@ what gates are made of, and one level is all that is coherent.
 
 ## 9. What it costs
 
-**Membership storage is the dominant artifact and the one open sizing risk.** A level's membership
-sets sum to roughly the corpus; L levels cost L times that, before labels. This is the shape of the
-postings problem ([decision 0028](../decisions/0028-postings-requirement-and-the-pair-relation.md))
-and probably wants the same answer, but that is **assumed, not measured**, and it is what decides
-whether membership is materialised per artifact or computed on demand. Nothing here should be built
-before it is measured.
+**Membership storage is the dominant artifact, and it is measured.** A level's membership sets sum
+to roughly the corpus; L levels cost L times that, before labels. The campaign sized it at
+~1 B/member in row space — 794 MB at 10⁹ rows with 10⁷ artifacts
+([`annotation-representation.md`](annotation-representation.md) §2). Residency and packaging remain
+open there (§2.4, §11.3).
 
 **Per-artifact testing costs one `and_cardinality` per candidate on screen**, where the old descent
 paid one per node visited and pruned subtrees. Under the measured cost model — bitmap operations
@@ -846,13 +879,13 @@ affordable and is not on any request path.
 
 | Where | What changes |
 |---|---|
-| `derived-artifact-gating.md` | Three gates collapse to §4's one test plus §5's threshold; the artifact-scale assumption (10<sup>5</sup>) is wrong; *"each point is a member of some cluster set"* is struck; §8's per-session node handles are stale |
-| §7.5 | The descent is not a tree walk (spec §6). **This contradicts a normative document** and is the change most needing an owner ruling |
-| §7.6, §7.7 | A label is an artifact. **The ladder reduces to guidance** (§2.3): the service resolves ranked *versions* of one artifact by clearance and chooses between separate artifacts never |
+| `derived-artifact-gating.md` | **Retired at promotion.** Its taxonomy collapses into §4's one test plus §5's flag and criterion; what existed nowhere else — the point-scale edge argument, the edge gate's structural form, the induced-subgraph sampling problem — is carried at §5 and §11. Its advice that cluster identifiers are ephemeral per rebuild dies with it: identity survives an edit ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) |
+| §7.5 | The frontier is a per-artifact test, not a tree walk (spec §6). Ruled ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)); ⊘ **the amendment is owed at promotion** |
+| §7.6, §7.7 | A label is an artifact. The ladder reduces to caller guidance (§2.3): the service resolves ranked *variations* of one artifact by clearance and chooses between separate artifacts never. Ruled ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)); ⊘ **the §7.7 amendment is owed at promotion** |
 | §7.8 | Add: rollup terminates only if the caller supplies a covering level; a contrastive labeller's generating set includes the contrast material |
 | [Decision 0006](../decisions/0006-per-session-handles-retired.md) | Its node-handle carve-out is withdrawn |
-| `records-and-search.md`, `filter-index.md` | The artifact population is its own population, named by the request ([`annotation-representation.md`](annotation-representation.md) §7–§8); search over it has **no containment gate as specified**, a fail-open owed an owner ruling (the review record's §6, ruling 5) |
-| Appendix C | C1 gains layers as a differencing surface; the substitutive mode needs a row of C23's shape; artifact identifiers fall under C17; a corpus-independence declaration on supplied content needs a row of C12's shape (spec §4.2). Drill-down's proposed row dissolved by measurement ([`annotation-representation.md`](annotation-representation.md) §8), with a staleness residue carried in [`annotation-write-cycle.md`](annotation-write-cycle.md) §11 |
+| `records-and-search.md`, `filter-index.md` | The artifact population is its own population, named by the request ([`annotation-representation.md`](annotation-representation.md) §7–§8); search over it has **no containment gate as specified** — the route is withdrawn until the review's ruling 5 lands, the one ruling still open |
+| Appendix C | C1 gains layers as a differencing surface; the own-terms flag needs a row of C23's shape; artifact identifiers fall under C17; a corpus-independence declaration on supplied content needs a row of C12's shape (spec §4.2). Drill-down's proposed row dissolved by measurement ([`annotation-representation.md`](annotation-representation.md) §8), with a staleness residue carried in [`annotation-write-cycle.md`](annotation-write-cycle.md) §11 |
 
 ## 11. Open questions
 
@@ -862,21 +895,25 @@ affordable and is not on any request path.
   closure with no register row. The reviewed write cycle qualifies the route — the resolved set is
   candidacy, the live count decides — and the residue, a held identifier serving a stale pass, is
   carried in [`annotation-write-cycle.md`](annotation-write-cycle.md) §11.
-- **The filter axis is unstated, and the two documents differ** (review 2026-08-15). §6's
-  per-artifact test is defined against `M_auth` and this document never mentions `M_sel`; the
-  representation ([`annotation-representation.md`](annotation-representation.md) §6.3) still runs a
-  display threshold against `M_sel`. Under a filter, nothing says which number sits beside an
+- ⊘ **The filter axis is unresolved, and [decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)
+  removed the last mechanism that gave it a partial answer.** The two-threshold frontier — the
+  criterion against `M_auth` fixing depth, a display threshold against `M_sel` deciding how far
+  within it — went with the walk. Under a filter, nothing now says which number sits beside an
   artifact — §3's masked count, or the filtered one — or what prunes a cluster the filter has
-  emptied. Owed a statement alongside the threshold ruling.
-- **Multi-version membership** (§2.3): one declared membership, versions generated from different
-  samples, so the count beside a resolved version describes a set it was not generated from.
+  emptied. Until stated, the per-artifact test runs against `M_auth` alone and filters do not touch
+  artifact existence.
 - **Membership sizing** — measured, no longer open (~1 B/member, 794 MB at 10⁹ rows with 10⁷
   artifacts; [`annotation-representation.md`](annotation-representation.md) §2). Residency remains
   unpriced there (§11.3).
-- **Whether the artifact population gets its own column space** or shares the flat entity-indexed
-  one — posed against the withdrawn §7, and mostly answered by the representation's file set
-  ([`annotation-representation.md`](annotation-representation.md) §2.4); what remains open there is
-  the membership packaging and where supplied content lives (ruling 4).
+- ⊘ **Membership packaging** — one file per artifact does not survive the bundle's digest model at
+  10⁷ manifest entries; a packed form behind a bounded number of entries is owed
+  ([`annotation-representation.md`](annotation-representation.md) §2.4). Supplied content's home is
+  ruled — the record blob ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)).
+- **The induced-subgraph sampling problem**, parked by name (carried from the retired
+  `derived-artifact-gating.md`): an edge is drawable only if both endpoints are in the **served**
+  set, not merely the visible one, so a future graph domain must either restrict edges to
+  served × served — degree-biased — or let edges pull their endpoints into the served set,
+  perturbing the point sample. Unsolved; masked-degree aggregates remain the near-term graph story.
 - **C1's review**, now with several layers over the same points as an additional differencing
   surface, and with §6's per-artifact test as the thing being reviewed.
 - **Ordered subsets** — trajectories, paths, citation chains. A path drawn over partially visible
@@ -889,8 +926,8 @@ affordable and is not on any request path.
   ([`annotation-representation.md`](annotation-representation.md) §5.1).
 - **Second-order layers**, whose members' membership is artifacts rather than points. The model
   admits them; nothing has been checked.
-- **Whether a layer's descent policy is per layer or per level** where an artifact has parents in
-  more than one level, in which case the property belongs to the edge set.
+- **Whether a layer's display-pruning policy is per layer or per level** where an artifact has
+  parents in more than one level, in which case the property belongs to the edge set.
 
 ## 12. Provenance
 
@@ -909,7 +946,7 @@ subset of its points — which does not fit the attachment shape.
 worth an artifact — and was **corrected by the owner**: the reason to define an artifact over a
 category is precisely the information attached to it, and per-analyst selections are the case, since
 minting a vocabulary value per analyst is the wrong shape. The rewrite is the better argument for the
-substitutive gate mode than anything else in the document. §8.7 is the owner's observation on the
+own-terms gate than anything else in the document. §8.7 is the owner's observation on the
 same exchange.
 
 Spec §4.1 and §4.2 answer an owner question about how derived properties are declared, and whether
@@ -920,6 +957,13 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r3 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. Existence became one test
+(§3), the gate modes one flag beside an independent criterion (§5), the ladder ranked variations
+(§2.3), the frontier a per-artifact test settled rather than proposed (§6), and §8.2's rollup was
+rewritten as the finer artifact absent and the coarser one served whole — nothing anywhere
+suppresses or coarsens a number. §8.6's degrade-to-derived is deleted. What remains open is in the
+status header.
 
 **r2 — 2026-08-15.** Stage 0 adversarial review, three lenses
 ([record](../evidence/memos/2026-08-15-artifact-design-review.md)). The core — three object kinds,

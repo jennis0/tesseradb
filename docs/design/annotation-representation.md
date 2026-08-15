@@ -1,7 +1,7 @@
 # Annotations — the representation
 
 **Date:** 2026-08-15
-**Status:** Provisional — **reviewed, findings not yet ruled on** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)). Companion to [`annotations.md`](annotations.md), which owns the *model*; this owns what the model is made of. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) — reviewed, dispositioned — supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. **To become normative:** the owner rulings in §12, headed by where artifact entity IDs come from (§4), where supplied content lives (§2.4), and search's containment gate (§8); and the unmeasured items §11.3 names.
+**Status:** Provisional — **reviewed and ruled** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md); the rulings are decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). Companion to [`annotations.md`](annotations.md), which owns the *model*; this owns what the model is made of. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) — reviewed, dispositioned — supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. **To become normative:** what genuinely remains — search's containment gate (§8, the one ruling still open), the filter axis (§6.3), membership packaging (§2.4), the proportional criterion's denominator for predicate membership (model §5), the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it), and the unmeasured items §11.3 names.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
 **Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
@@ -17,7 +17,7 @@
 The model says an artifact is an identity, a membership, a gate and content, grouped into layers
 (model §2). It does not say what any of that is in memory, and the review found that the obvious
 answer — put artifacts in entity space and inherit the point machinery — re-opens the deny lane, the
-disclosure threshold and an I2 channel through routes nobody analysed.
+existence criterion and an I2 channel through routes nobody analysed.
 
 Eight questions decide the representation. They are answered in order, and §2 decides the rest.
 
@@ -104,7 +104,7 @@ declared and frozen, which is true of a clustering and false of everything geome
 
 | Source | Changes when | Stored as | Masked count |
 |---|---|---|---|
-| **Enumerated** — the caller declares the members | the layer is **regenerated** | a row-space bitmap, ~1 B/member (§2) | one `and_cardinality` |
+| **Enumerated** — the caller declares the members | the layer is **refreshed** (⊘ by replacement today, by edit once that pass lands — [decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) | a row-space bitmap, ~1 B/member (§2) | one `and_cardinality` |
 | **Spatial predicate** — *"the points inside this shape"* | **a point is written** | the **geometry only**; row ranges derived | `range_cardinality` over its ranges |
 | **Attribute predicate** — *"the points carrying this value"* | **a point is written** | nothing new — the existing value column and postings | the existing filter machinery |
 
@@ -115,7 +115,7 @@ which is §10's density-level shortcut arriving for a second kind of artifact. T
 
 **And it never goes stale.** This is the asymmetry that matters and it corrects a claim made
 elsewhere in this document: a newly ingested point inside a boundary is a member **immediately**,
-where a newly ingested point near a cluster is in no cluster until the layer is regenerated
+where a newly ingested point near a cluster is in no cluster until the layer is refreshed
 (§2.2.1). Boundaries stay current; clusterings do not. A deployment mixing both should expect them to
 age differently and should not be surprised by it.
 
@@ -127,8 +127,10 @@ for a 40 000-member corridor, so **~0.3–1.2 ms per artifact per request** (*mo
 document does not specify: a nationwide boundary level evaluated per query is seconds. Neither
 representation escapes the geometry; they differ in whether the cost is paid at rest or at read.
 
-**Nothing above changes the model.** The gate modes, the containment test and the count rule are
-indifferent to where membership came from (model §3–§5). What changes is §5's lifecycle, where
+**Nothing above changes the model.** The own-terms flag, the existence criterion, the containment
+test and the count rule are indifferent to where membership came from (model §3–§5) — ⊘ except
+that a proportional criterion has no denominator for predicate membership, an open owner rule
+(model §5). What changes is §5's lifecycle, where
 "ingest does not touch artifact membership" holds only for the enumerated row.
 
 ### 2.1 Why row space, measured
@@ -234,7 +236,7 @@ gets. That is the same asymmetry §2.1 rests on, arriving in a second place.
 **Ingest does not fragment *enumerated* artifact membership, because it does not touch it.** A
 declared member set is frozen at declaration — I8's shape, stated in
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §3.1 — so a newly ingested point joins no cluster until
-the layer is regenerated. Between regenerations it is uncovered — visible as a point, in no cluster —
+the layer is refreshed. Between refreshes it is uncovered — visible as a point, in no cluster —
 which is the same shape as §7.6's labels going stale rather than unsafe, and which §7.7's extractive
 tier already exists to cover. **For that class, what ingest adds is noise, not fragmentation.**
 
@@ -271,13 +273,13 @@ is the obvious design and will be proposed again.
 
 ```
 artifacts/<layer>/
-  registry.json                     # gate, structure, descent policy, derived vocabulary,
+  registry.json                     # gate, structure, pruning policy, derived vocabulary,
                                     #   slices, zoom→level map, hierarchy kind
   levels/<k>/meta.json              # artifact count, entity_base, zoom range,
                                     #   membership source, containment verification result
   levels/<k>/members/<ordinal>.roaring   # enumerated membership, entity space (§2, §2.1)
   levels/<k>/geometry.arrow         # predicate membership: the shape only (§2.0)
-  levels/<k>/artifacts.arrow        # per ordinal: content and version references,
+  levels/<k>/artifacts.arrow        # per ordinal: content and variation references,
                                     #   optional caller stable key (§5.2)
   edges.arrow                       # (layer, level, ordinal) → (layer, level, ordinal)
 ```
@@ -288,25 +290,32 @@ against the code). Every bundle file is a manifest entry, digested at write and 
 10⁷ artifacts that is 10⁷ entries. The membership bytes are affordable — 794 MB *measured* (§2) —
 and the packaging is not. Membership needs a packed form behind a bounded number of manifest
 entries; the record blob's block directory is the existing precedent for many small objects behind
-one entry. Picking the packaging is the owner's, listed beneath the five rulings in the review
-record's §6.
+one entry. ⊘ Picking the packaging is the owner's, and it is the one layout question decisions
+0074–0081 did not settle.
 
-**Supplied content itself is not here — and where it lives is an owner ruling, not a settled fact**
-(the review record's §6, ruling 4). As drafted, label text, descriptions and authored names live in
-the record blob at the artifact's entity: entity-addressed, no `M_auth` involvement, the one piece
-of the withdrawn reuse claim that survived review, and the reason artifacts carry entity IDs at all.
-**⊘ But the record blob cannot carry §5.0.1's in-place content edit as it exists**: its layers are
-disjoint by construction and probed base-first — no shadowing, no update (verified against the
-code). An implementer writing an edit as a new layer gets the **pre-edit text served silently**,
-which breaks the model's emergency path — suppress, edit the leaking version out, unsuppress — on
-the one route that exists for withdrawing a leak. The choice: keep supplied content in the record
-blob, and the in-place edit and the emergency path's edit step do not exist; or move it into the
-level's own files, where an update is an ordinary write and the record blob carries points only.
-Cost of ruling late: the layer registry gets built over whichever answer the implementer assumed.
+**Supplied content itself is not here: it lives in the record blob — the store points use —
+addressed at the artifact's own entity**
+([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)). Two riders
+travel with that. The blob addresses by rank in its **own** has-row bitmap — the bitmap of entities
+that carry a record, which has nothing to do with row space — so an artifact having no row is
+simply irrelevant to it; this is the one piece of the withdrawn reuse claim that survived review,
+and the reason artifacts carry entity IDs at all. And living in the blob is a **storage fact with
+no authorisation consequence**: *"entity-addressed, no `M_auth` involvement"* is true of the store
+and must not be read as licence to serve what it returns — containment is evaluated by the serving
+route against the composed mask, every request, cached nowhere; the blob's job is to hold bytes and
+hand them back. The trap an implementer will meet here: an edit written as an **additional record
+layer** serves the **pre-edit text, silently**, because the stack takes the first matching layer
+and rests on layers being disjoint. ⊘ **How supplied content is edited is deferred to its own
+design pass** *(owner, 2026-08-15)*; until it lands, republishing the layer is the only way to
+change it, and the emergency withdrawal that exists is suppress, then republish (model §2.3).
 
 **An artifact's unmasked own-count is deliberately not stored.** It is the obvious field to add and it
 is C8: a corpus-wide count over items a principal may not see, one careless line from being served
-beside a masked one. **No build-time box is stored either**, and that is a change from the withdrawn
+beside a masked one. The proportional existence criterion
+([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)) *reads* the
+declared cardinality as a predicate input — the build computes it, the test consumes it, and no
+field and no wire shape carries it, which is the guard that replaces "do not store it". **No
+build-time box is stored either**, and that is a change from the withdrawn
 draft rather than an omission: §2.1's row-space membership answers candidacy as a masked question, so
 the one unmasked aggregate the design previously kept has nothing left to do. **The file set holds no
 corpus-wide quantity at all**, which is a stronger position than justifying one.
@@ -336,14 +345,16 @@ signature. Re-run at native density
 arithmetic these shapes do not approach.** The honest worst case is not an elongated region but a
 **scattered** one — a sparse subset of an area — which is real and was not measured.
 
-**Public, enumerable nesting makes differencing arithmetic, and §8.2's rollup does not close it.**
-`derived-artifact-gating.md` §6 already names this: administrative geographies are the textbook
-differencing vector *because* an attacker need not discover the structure first. §8.2 says a
-suppressed count rolls up to the coarser area — but serving a district's count alongside all but one
-of its wards makes the missing one a subtraction. The census answer is **complementary suppression**:
-withhold additional cells so the residual cannot be recovered. **That is not in this design**, it is
-materially more expensive than a per-cell threshold, and it is the one place the geographic case needs
-machinery the semantic case does not. ⊘ **Unresolved**, and it belongs to C1's outstanding review.
+**Public, enumerable nesting makes differencing arithmetic, and per-artifact absence does not close
+it.** The retired `derived-artifact-gating.md` named this first: administrative geographies are the
+textbook differencing vector *because* an attacker need not discover the structure first. A ward
+below its existence criterion is absent, whole, and its district is served whole with its own exact
+count (model §8.2) — but serving a district's count alongside all but one of its wards makes the
+missing one a subtraction. The census answer is **complementary suppression**: withhold additional
+cells — here, additional artifacts — so the residual cannot be recovered. **That is not in this
+design**, it is materially more expensive than a per-cell criterion, and it is the one place the
+geographic case needs machinery the semantic case does not. ⊘ **Unresolved**, and it belongs to
+C1's outstanding review.
 
 **Non-Morton grids lose the free-membership shortcut.** §10 notes that a Morton-cell density level
 needs no stored membership, the cell being a prefix of the row id. H3, S2 and geohash cells are *not*
@@ -419,14 +430,14 @@ The review's central finding was that visibility was defined twice — as a gate
 `M_auth` membership in the withdrawn reuse level — and that every reuse route used the second. The
 two are not the same, and one of the gaps is a fail-open.
 
-**A derived-gated artifact carries no terms**, so it appears in no posting and is never in `M_auth`
+**An artifact without own terms — a clustering's — appears in no posting and is never in `M_auth`**
 (§6.3 builds the mask by unioning term postings and nothing else). Any route testing artifact
 visibility by intersection with `M_auth` therefore answers *invisible* for every clustering artifact
 and every viewer.
 
 **And `M_auth` is where suppression acts.** A gate evaluated against the principal's satisfied term
 set is the *pre-overlay* predicate; the artifact's own deleted/suppressed disposition is consulted
-nowhere. Suppressing a cluster would leave it serving — members untouched, threshold still clearing —
+nowhere. Suppressing a cluster would leave it serving — members untouched, criterion still clearing —
 which violates the standing rule that a suppression applies to every request the moment it is
 accepted, and is the fail-open class the corpus has caught twice.
 
@@ -438,26 +449,24 @@ flowchart TB
   V -->|yes| X["absent, every route"]
   V -->|no| F{"layer gate<br/>satisfied?"}
   F -->|no| X
-  F -->|yes| G{"gate mode"}
-  G -->|derived| T["masked own-count ≥ min_visible_members"]
-  G -->|substitutive| S["own terms ∩ satisfied ≠ ∅"]
-  G -->|conjunctive| C["both"]
-  T --> R["visible"]
-  S --> R
-  C --> R
+  F -->|yes| T{"own terms, if flagged:<br/>terms ∩ satisfied ≠ ∅?"}
+  T -->|no| X
+  T -->|yes| C{"existence criterion, if declared:<br/>masked own-count clears it?"}
+  C -->|no| X
+  C -->|yes| G{"some variation's contents<br/>all contained in M_auth?"}
+  G -->|no| X
+  G -->|yes| R["serve that variation, entire"]
 ```
 
 *The overlay test is first and unconditional. `verdict` is the existing per-entity composition
 (`deleted > suppressed > buffered`, write-path §5.3), single-sourced, so an artifact reaches it by
-the same route a point does.*
-
-**The substitutive branch as drawn takes a side in a contradiction the model has not resolved**
-(model §5; the review record's §6, ruling 2). It carries no count-threshold test — the mode-bound
-reading — while the model's §3 declares the threshold a layer property the gate mode does not touch.
-Implemented as drawn, every substitutive artifact serves its existence and an exact masked count
-down to one, the failure the model's own boundary example names. The predicate's overall shape —
-overlay first, then the layer gate, then the mode — is settled; which branches the threshold sits on
-is the ruling.
+the same route a point does. The remaining branches are the conjuncts of the model's one existence
+test (model §3, §5; decisions
+[0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md),
+[0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md),
+[0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)): the own-terms flag and the
+criterion are independent declarations, composed by conjunction and never disjunction, and a
+failure anywhere is the same absence.*
 
 **Every artifact-population route evaluates this predicate and no other** — the viewport, drill-down,
 filters, search, edge traversal, metadata. Where a route cannot afford it, the route does not exist;
@@ -478,48 +487,57 @@ outlive the reachability of what it labels.
 **Artifacts still get entity IDs**, because the deny lane, `tessera_id` and the overlay all address
 by entity. What they do not get is membership in `M_auth`, or the assumption that a bitmap
 intersection answers a visibility question. The reserved range is a **list** of 2¹⁶-aligned blocks,
-not one block: each regeneration consumes ~10⁷ IDs and any fixed block exhausts.
+not one block, and a run that fills is extended by appending the next block **downward** — the
+artifact region grows from `u32::MAX` towards the points
+([decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md)), so an appended
+block can never interleave with a point segment: interleaving is unrepresentable under two regions,
+not merely avoided. Each wholesale replacement consumes ~10⁷ IDs and any fixed block exhausts.
 
 ⊘ **Decision 0072 is settled and not built, and nothing in this document may assume it is in force**
 ([decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md), marked per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md); review 2026-08-15, verified
 against the code). The decision relaxes I9 — a slot returns to the allocator at the fold that
 reconciles every durable structure naming it — but the allocator as built is monotone with no free
-list and refuses at `u32::MAX`, and `tessera_id` carries no generation field. Until it is built,
-exhaustion is permanent: a 10⁷-artifact layer regenerated daily consumes the identifier space in
-about fourteen months, after which **every write refuses, points included**. That refusal is
+list, and `tessera_id` carries no generation field. Until it is built, exhaustion is permanent, and
+the burn rate is a property of **replacement**, not of the model
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)): a
+10⁷-artifact layer wholesale-replaced daily consumes the identifier space in about fourteen months,
+after which **every write refuses, points included** — ⊘ replacement is the only refresh that
+exists until the edit pass lands; an edit keeps identities and spends nothing. The refusal is
 fail-closed and loud; what must not happen meanwhile is sizing or scheduling anything on the
-assumption that IDs come back. The block list stands in either state: a regeneration needs a
+assumption that IDs come back. The block list stands in either state: a layer publish needs a
 contiguous run it can take at once.
 
-**Where those runs come from is the review's structural blocker, ruled before the storage layout
-rather than after** (the record's §2; §6, ruling 1). As written here, artifact runs are taken from
-the same monotone space as points. Three point-side structures are dense over entity *ranges*
-rather than counts — verified in the code: a flush or merge extent's row table is dense over
-`[entity_lo, entity_hi]`; a merge allocates one slot per entity across its whole window; and the
-fold's pre-flight estimate charges four bytes per entity up to the highest one, then **refuses the
-fold** when the total exceeds the host. A ten-million-wide artifact run allocated mid-stream
-therefore punches a hole that every straddling merge pays for in resident memory and every fold
-pays for in its budget — and the budget never comes back down, so nightly regeneration walks it
-upward until the fold refuses. The fold is the only thing that executes deletions and reclaims
-dropped layers, so the symptom is a slow stall of the whole retirement path, nowhere near its
-cause.
-
-✔ **Ruled** *(owner, 2026-08-15, [decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md))*:
+**Where those runs come from is ruled**
+*(owner, 2026-08-15, [decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md))*:
 artifacts keep entity IDs, and **row-less entities are allocated downward from `u32::MAX`** while
-points continue upward from 0. Every bound above is derived from a **segment extent**, and an
-artifact appears in no segment, so an artifact ID above every point enters none of those spans and
-costs nothing; what cost anything was a run sitting *between* two point segments that later merge,
-and two regions make that unrepresentable rather than merely unlikely. The pattern is already this
-repository's, in the ingest buffer's downward term-extension IDs. A downward allocator still returns
-a contiguous run, so §2.3's ordinal arithmetic is untouched; what the decision adds is a second
-durable mark, and the recovery obligation that goes with it — the restart seed derives from ingest
-rows and overlay entries alone today, so an artifact allocation raises nothing, and a rotation could
-otherwise re-issue its ID to a point.
+points continue upward from 0; exhaustion is the two marks meeting. The hazard this dissolves: three
+point-side structures are dense over entity *ranges* derived from **segment extents** — a flush or
+merge extent's row table, a merge's per-entity slots, the fold's pre-flight budget — and an
+artifact run sitting *between* two point segments that later merge would be a permanent hole every
+straddling merge pays for in resident memory and every fold in its budget. An artifact appears in
+no segment, so an ID above every point enters none of those spans and costs nothing, and two
+regions make the interleaving unrepresentable rather than merely unlikely. The pattern is already
+this repository's, in the ingest buffer's downward term-extension IDs. A downward allocator still
+returns a contiguous run, so §2.3's ordinal arithmetic is untouched; what the decision adds is a
+second durable mark, and the recovery obligation that goes with it — the restart seed derives from
+ingest rows and overlay entries alone today, so an artifact allocation raises nothing, and a
+rotation could otherwise re-issue its ID to a point.
 
 ## 5. Write, update, delete
 
-**Regeneration is a layer lifecycle event, not 10⁷ deletions.** Pushing a replaced clustering
+**Two operations refresh a layer, and the difference between them is identity**
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). An
+**edit** updates existing artifacts — membership, content, gate — and everything survives:
+identity, bookmarks, edges into them, and suppressions, because a suppression addresses an entity
+and that entity is still there. A **replacement** creates a successor layer and drops the
+predecessor, and **nothing carries across — correctly**: new identities are new objects, and
+whether the new layer's "same" cluster is the same object is not something the service can know.
+⊘ **Edit is deferred to its own design pass; replacement is the only operation that exists today**,
+so until the edit pass lands a re-clustering does lose suppressions, edges and bookmarks, and
+callers should be told so plainly rather than discovering it.
+
+**Replacement is a layer lifecycle event, not 10⁷ deletions.** Pushing a replaced clustering
 through the deny lane would deliver 20× the `overlay_soft_limit` (500,000, write-path §7) as a single
 event, into a lane sized for trickle denies, retiring at a fold with no artifact pass. Instead, the
 slice lifecycle applies unchanged ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3 — ⊘
@@ -532,6 +550,7 @@ with different membership would silently repoint every bookmark that named it.
 |---|---|---|
 | New clustering | layer create; build writes its levels | — |
 | Replace a clustering | create the successor, drop the predecessor | fold reclaims |
+| Refresh a clustering in place | ⊘ **edit — deferred to its own design pass**; until then, replacement is the only route | — |
 | Suppress one artifact | deny lane, by entity | Rule S — on unsuppress |
 | Delete one artifact | deny lane, by entity | Rule F — at the fold that executes it |
 | Analyst creates a selection | control verb (§5.1) | as above |
@@ -572,7 +591,11 @@ delete-plus-re-ingest at no cost to anybody.
 this. An analyst adds a document to a selection, corrects a label's text, redraws a ward boundary,
 shares a private set with their team. Delete-and-recreate mints a new identity, and a new identity
 breaks every bookmark, every caller-side join and every share — which is what stable identity was
-adopted *for* (§5.2, C17). **So edit is a first-class operation, and 0047 does not transfer wholesale.**
+adopted *for* (§5.2, C17). **So edit is a first-class operation of the model
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)), and 0047
+does not transfer wholesale.** ⊘ **Its design is deferred to a pass of its own** *(owner,
+2026-08-15)*; nothing before Stage 7 waits on it, and what follows is the shape that pass inherits,
+not a route that exists.
 
 **What 0047's argument actually protects is authorisation**, so the contract decomposes by what is
 being edited rather than refusing the operation:
@@ -584,15 +607,17 @@ being edited rather than refusing the operation:
 | **Gate — widening** | in place, version bumped | a viewer gaining access is not a fail-open |
 | **Gate — narrowing** | **suppress, then re-grant** | this is 0047's case exactly: an in-place narrowing is a revocation that bypasses the deny lanes. Suppression is immediate under Rule S and is checked before anything else on every route (§4) |
 
-⊘ **The content row names an operation no structure currently performs** (review 2026-08-15). While
-supplied content lives in the record blob, whose layers are disjoint and never updated in place
-(§2.4), "in place" has no route — and an edit written as a new blob layer serves the pre-edit text
-silently. The row exists under one answer to ruling 4; §2.4 states the options and their costs.
+⊘ **The content row names an operation no structure currently performs** (review 2026-08-15).
+Supplied content lives in the record blob
+([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)), whose layers are
+disjoint and never updated in place (§2.4), so "in place" has no route yet — and an edit written as
+a new blob layer serves the pre-edit text silently. Supplying the route is the edit pass's first
+job.
 
 **The version bump is the whole mechanism, and it costs one thing already measured.** A session's
 resolved visibility set (§8) is cached, so an edit after resolution would otherwise leave that session
 on a stale answer — harmless when the change widens, **fail-open when it narrows**, since a shrunken
-membership may now fall below the threshold. Keying the resolved set on `(layer, version)` and bumping
+membership may now fall below the criterion. Keying the resolved set on `(layer, version)` and bumping
 on every edit makes the session re-resolve lazily at its next touch: *measured* 883 ms at 10⁷
 artifacts, once, against a mask build the session already pays (§8). **The same key that already
 handles generation flips handles edits**, which is why this needs no second mechanism.
@@ -600,54 +625,38 @@ handles generation flips handles edits**, which is why this needs no second mech
 **Identity survives all of it**, which is the point. A selection edited a hundred times is the same
 artifact throughout, and the bookmark taken on day one still resolves.
 
-### 5.0.2 A suppression does not survive regeneration, and the design compels the operation that loses it
+### 5.0.2 What survives a refresh: everything under edit, nothing under replacement
 
-**This is a fail-open in substance, and the point path already ruled the other way**
-*(review round two, verified)*. Model §2.3's emergency path — suppress, edit, unsuppress — holds only
-while the entity survives. **Regeneration mints new entities** (§5.2), a suppression addresses the old
-one under Rule S, and nothing carries it forward: the same leaking label re-emerges from the same
-pipeline under a fresh entity and serves.
+**Two operations, distinguished by identity, and the deny semantics follow the identity**
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). An
+**edit** keeps the entity, so a suppression — which addresses an entity — survives it natively:
+model §2.3's emergency path holds because the thing suppressed is still there. A **replacement**
+ends the entity, and the suppression ends with it. That is correct rather than a gap: whether the
+successor layer's "same" cluster is the same object is not something the service can know — the
+clustering may have split, merged or reshaped it — and a service that guessed would be inventing an
+identity the caller never asserted. Losing per-artifact state is the *meaning* of replacing an
+analysis, not an accident of it.
 
-**§5.0.4 makes it compulsory rather than merely possible.** A regeneration that would dangle a
-dependent is refused, so the caller **must** republish a label layer whenever its clustering
-regenerates. An owner who suppressed a leaking label finds it back the day the next clustering lands,
-with no unsuppress ever issued. Rule S is honoured to the letter — the dead entity stays suppressed —
-and defeated in substance.
+An earlier revision of this section made the opposite call: a publish-time refusal — a layer
+holding live suppressions could not be published over unless every suppressed artifact's stable key
+was absent from the successor or arrived already suppressed — which made the stable key mandatory
+for any layer that had ever taken a suppression. **The refusal is withdrawn.** It existed to make a
+suppression survive an event that ends the object it addresses; with edit as the ordinary refresh,
+the case it protected against is a caller deliberately replacing an analysis. Automatic replay onto
+the successor stays declined for the same reason it always was: a missing key, a renamed artifact
+or a reshaped clustering each silently un-hides something an owner hid.
 
-**Points do not have this hole, deliberately.**
-[Decision 0047](../decisions/0047-edit-is-delete-plus-reingest.md) rules that *"a **suppressed**
-holder still collides. Suppression is temporary hiding, not deletion… Deleted ⇒ forgotten; suppressed
-⇒ still the holder"* — a suppressed `external_id` **blocks** re-ingest. Artifacts get strictly weaker
-deny semantics because regeneration has no holder to collide with: every generation is a fresh
-identity by construction, and §5.2's stable key is connected to nothing in the deny lane.
+**What replaces the refusal is a report.** An operator who suppressed something and then replaced
+the layer under it is *told* that a suppression no longer addresses anything — the same operability
+signal as the fold's degraded-content report, on the same control-plane credential. ⊘ Neither
+report is built. The stable key returns to being optional (§5.2): a caller-side mapping across
+generations, offered because only the caller knows two objects are the same.
 
-**The rule, and it is a publish-time refusal rather than a fold-time repair.** A regeneration is a
-build-plane publish; the fold only reclaims what the drop released (§5.0.3). So the check belongs
-where the successor is published, when both generations are known:
-
-> **A layer holding live suppressions cannot be published over.** The successor is refused unless,
-> for every suppressed artifact, its stable key is either **absent** from the successor or **arrives
-> already suppressed**.
-
-**Which makes the stable key mandatory for any layer that has ever taken a suppression** — §5.2 offers
-it as optional, and this is the case that removes the option. A caller who has never suppressed
-anything is unaffected; one who has must carry keys forward or clear the suppressions first, which is
-a deliberate act by someone entitled to make it.
-
-**Replaying suppressions onto the successor automatically is the tempting alternative and is
-declined.** It fails open in exactly the cases that matter — a missing key, a renamed artifact, a
-caller who reshaped the clustering so the "same" cluster is no longer the same set — and each failure
-silently un-hides something an owner hid. A refusal makes the operator do the reconciliation the
-service cannot do for them, which is the fail-closed direction and the same posture as the
-dangling-edge refusal (§5.0.4).
-
-**This makes artifact deny semantics match the point path's** rather than being quietly weaker.
-[Decision 0047](../decisions/0047-edit-is-delete-plus-reingest.md) makes a suppressed `external_id`
-**collide** so a re-ingest cannot resurrect a hidden point; the rule above is that collision, expressed
-against the only durable identity an artifact has across generations. ⊘ **This is still an owner
-ruling**, because it changes what a deny guarantees and because it makes a previously optional field
-mandatory under a condition — but it is written as the recommended shape rather than as an open
-question, since leaving it open leaves a fail-open in the document.
+⊘ **Until the edit pass lands, replacement is the only refresh that exists**, so today a
+re-clustering does lose its suppressions — the same leaking label re-emerging from the same
+pipeline arrives under a fresh entity and serves. The operator's tool for that interim is the layer
+gate and layer suppression, plus the report above once built; callers should be told the interim
+cost plainly rather than discovering it.
 
 ### 5.0.3 The fold rebuilds artifact row forms, and it must do so inline
 
@@ -734,14 +743,18 @@ row space.
 An edge names `(layer, level, ordinal)` (§2.3), so **a target must exist before an edge into it**, and
 that is a real ordering constraint the point path has no analogue for.
 
-**Regenerating a target layer dangles every edge into it**, because a regenerated layer mints new
-entity runs and new ordinals (§5.2). A label layer pointing at last month's clustering points at
-nothing.
+**Replacing a target layer dangles every edge into it — and only replacement does**
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)): a
+replacement mints new entity runs and new ordinals (§5.2), so a label layer pointing at last
+month's clustering points at nothing, while an edited clustering keeps its identities and its edges
+keep pointing at them. ⊘ Edit is deferred, so today every refresh is a replacement and pays this.
 
-**So a layer declares the layers it edges into, and a regeneration that would dangle a dependent is
+**So a layer declares the layers it edges into, and a replacement that would dangle a dependent is
 refused rather than completed.** The caller republishes the dependents in the same operation or drops
-them first. The alternative — cascading silently — would leave labels attached to clusters they were
-not generated from, which is worse than an outage and is exactly the class **I8** exists to prevent.
+them first — the refusal is the caller declaring an intent whose dependents they must republish,
+not a tax on every refresh. The alternative — cascading silently — would leave labels attached to
+clusters they were not generated from, which is worse than an outage and is exactly the class
+**I8** exists to prevent.
 
 ### 5.1 Runtime-created artifacts
 
@@ -759,22 +772,22 @@ row; an artifact never acquires a row, so no existing drain covers it, and parki
 buffer pins WAL rotation permanently. Where the record drains to — the registry plane, a level's own
 files, a new structure — is unanswered, and the create verb cannot be implemented until it is.
 
-### 5.2 Identity across regeneration, which does not survive by default
+### 5.2 Identity across a refresh: kept by an edit, ended by a replacement
 
-An artifact's identity is its entity ID, minted at build, never reused. **A regenerated layer mints
-new ones**, so a bookmark taken against last month's clustering resolves to nothing, and a caller's
-own annotations joined to an artifact die with it.
+An artifact's identity is its entity ID, minted at build. **An edit keeps it — a selection edited a
+hundred times is the same artifact throughout — and a replacement mints new ones**
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)): a
+bookmark taken against a replaced clustering resolves to nothing, and a caller's own annotations
+joined to its artifacts die with it. With edit as the ordinary refresh and replacement the rare
+event — changing the analysis, not refreshing it — the retirement of per-session node handles
+(model §7, C17) rests on identity that the dominant path preserves. ⊘ Edit is deferred; until its
+pass lands every refresh is a replacement and bookmarks are honestly documented as expiring.
 
-This is a real limit and it **weakens an argument made elsewhere**: model §7 retires per-session node
-handles partly because a viewer bookmarks and a caller joins, and C17's accepted trade is cited in
-support. If the dominant layer type is replaced monthly, that stability is worth much less than the
-argument assumes.
-
-**The available fix is a caller-supplied stable key per artifact**, carried in `artifacts.arrow` and
-resolved through a per-layer index — *"the immunology cluster"*, identified across generations by
-the caller because only the caller knows the two are the same. Without one, artifact identity is
-generation-scoped and bookmarks are honestly documented as expiring. **Recommended: offer the key,
-make it optional, and state the default plainly.** Ruling in §12.
+**The stable key is optional, and stays so.** A caller may supply one per artifact, carried in
+`artifacts.arrow` and resolved through a per-layer index — *"the immunology cluster"*, identified
+across generations by the caller because only the caller knows the two are the same. It is a
+caller-side mapping across replacements, nothing more; no refusal and no deny-lane machinery hangs
+off it (§5.0.2).
 
 ## 6. Serving
 
@@ -865,17 +878,18 @@ draw the whole level, mask the counts.** There is no descent and no frontier, be
 a boundary discloses nothing (§8.2) — the disclosure is entirely in the number beside it.
 
 ***Corpus-derived hierarchies with no canonical scale — the clustering case.*** An embedding
-projection has no units, so a level corresponds to no zoom and there is nothing to declare. If the
-layer is **nested**, the frontier selects: the disclosure threshold against `M_auth` fixes maximum
-depth and the display threshold against `M_sel` decides how far within it. If it is **stacked**, there
-is no frontier to run and the choice of level is the client's.
+projection has no units, so a level corresponds to no zoom and there is nothing to declare. Every
+candidate is tested independently against the existence criterion on its own membership
+([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)); if the layer is
+**nested**, display pruning then decides how much passing sub-structure to show, and if it is
+**stacked** the choice of level is the client's.
 
-⊘ **The two-threshold frontier in that paragraph is one of two answers the corpus gives, and the
-model gives the other** (review 2026-08-15). The model replaced the descent with a per-artifact test
-against `M_auth` (model §6) and never mentions `M_sel` — the filtered mask, `M_auth ∧ filters` —
-again. Under a filter, nothing now says which number sits beside an artifact — the masked count, or
-the filtered one — or what prunes a cluster the filter has emptied. Owed a statement alongside the
-threshold ruling; until then neither this paragraph nor the model's silence is the specification.
+⊘ **The filter axis is unresolved, and decision 0080 removed the last mechanism that gave it a
+partial answer.** An earlier revision here ran a display threshold against `M_sel` — the filtered
+mask, `M_auth ∧ filters` — inside the walk; the walk is gone. Under a filter, nothing now says
+which number sits beside an artifact — the masked count, or the filtered one — or what prunes a
+cluster the filter has emptied. Until the owner states it, the per-artifact test runs against
+`M_auth` alone and filters do not touch artifact existence.
 
 ***Client-chosen.*** **Which layers render is the client's decision, and which level within one.**
 Every competent map tool lets a user toggle annotation layers, and nothing here should obstruct
@@ -889,7 +903,7 @@ which is request selection.
 
 | The client's | The server's |
 |---|---|
-| which layers and levels to request, and which to render | which **artifacts within** a level are served — the threshold is a disclosure control and does not move with a request |
+| which layers and levels to request, and which to render | which **artifacts within** a level are served — the existence criterion is a disclosure control and does not move with a request |
 | screen size, pixel budget, label density | the counts, never recomputed or trimmed client-side |
 
 The client must never **synthesise** a level the server did not serve — clustering the points it holds
@@ -912,25 +926,19 @@ regime fixes is who decides **within** a level, which is never the client.
 ## 7. Filters
 
 **An artifact's membership as a filter is a real capability and a real hazard, and the two split by
-gate mode.**
+whether the layer declares an existence criterion.**
 
 The hazard, which the withdrawn draft declared free: per-tile counts under a membership filter are
-exact at any zoom, so at maximum depth they give per-point cluster assignment — the quantity
-`min_visible_members` exists to bound, at a granularity of one. Boolean composition
+exact at any zoom, so at maximum depth they give per-point cluster assignment — the quantity the
+existence criterion exists to bound, at a granularity of one. Boolean composition
 ([decision 0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md)) then
 supplies differences between layers directly, which is the differencing attack C1's outstanding
 review is concerned with, handed over as a feature.
 
-| Layer gate | Membership as a filter | Why |
+| Layer declares | Membership as a filter | Why |
 |---|---|---|
-| **Substitutive** — selections, boundaries | admitted, unrestricted | no threshold governs these; the viewer defined or is cleared for the set, and filtering by it discloses nothing the gate withheld |
-| **Derived** — clusterings | admitted **only** for a Q1-visible artifact, and per-tile counts inherit `min_visible_members` | the threshold is the disclosure control; a route around it is a route around C1's mitigation |
-| **Conjunctive** | as derived | the threshold still governs |
-
-*The substitutive row's "no threshold governs these" is the mode-bound reading of the contradiction
-the model records (model §5; the review record's §6, ruling 2). Under the independence reading a
-substitutive layer may carry a threshold, and its filter row then inherits it exactly as the derived
-row does.*
+| **No criterion** — selections, boundaries | admitted, unrestricted | the layer declared that existence discloses nothing; the viewer defined or is cleared for the set, and filtering by it discloses nothing the gate withheld |
+| **A criterion** — clusterings | admitted **only** for a visible artifact, and per-tile counts inherit the criterion | the criterion is the disclosure control; a route around it is a route around C1's mitigation |
 
 Naming a non-visible artifact as a filter must be refused **work-indistinguishably** from naming one
 that never existed — the same problem as §8, and they should be solved together rather than
@@ -985,7 +993,7 @@ artifact's row-space bitmap, cheap per artifact but a function of its size, whic
    fold — but the count that matters is *masked*, and a stored unmasked count is C8. This route is
    named only to record that it does not work.
 
-**Measured, and (2) wins: the escalation dissolves.** Resolving every artifact's threshold for a
+**Measured, and (2) wins: the escalation dissolves.** Resolving every artifact's criterion for a
 session costs **883 ms** at 10⁷ artifacts and 245 ms at 10⁵, against the corpus's *measured* 588 ms
 realistic-worst-case mask build — **~1.5× one authorise-time step a session already pays**, once per
 layer, cacheable for the session and invalidated on the same generation key as everything else. With
@@ -1018,13 +1026,13 @@ artifacts carry.
 **Never the artifact cardinality.** A count of artifacts in a layer is a corpus-wide count over
 objects the principal may not individually see, which is C8's row.
 
-**One consequence of publishing the supplied-content kinds**, and it reverses a closed register row.
-A viewer who knows a layer declares a shape, and receives an artifact without one, learns that its
-generating set contains items outside their mask. C3 currently records — as **Closed** — that a
-principal never learns of content they cannot see, the refusal itself carrying no information. Under
-the model's *omit the content, keep the artifact* rule that is no longer true. Either withheld
-content is made indistinguishable from undeclared content, or **C3 reopens and needs its row**. Named
-in §12; the model document does not currently list C3 among what it changes.
+**Publishing the supplied-content kinds is safe, and the reason is
+[decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md).** The hazard was a
+viewer who knows a layer declares a shape receiving an artifact without one — learning that its
+generating set reaches outside their mask. That state no longer exists: an artifact failing
+containment on any of the resolved variation's contents is absent, whole, so no served artifact
+ever lacks a content its layer declares. **C3 holds as written** — there is no shell to be
+distinguishable from absence, and no mechanism is owed.
 
 ## 10. Levels as a general shape
 
@@ -1054,28 +1062,27 @@ for tiles and once for the frontier.
 
 **The hazard, and it is why the unification needs stating carefully: these levels share a shape, and
 each carries its own disclosure rule.** Density cells serve exact masked counts at any depth with no
-threshold, accepted under **C18** because §7.1 already discloses those counts exactly. Clusters carry
-`min_visible_members`. Recasting one as the other invites applying the threshold to density — which
-breaks the underlay for nothing — or applying the underlay's rule to clusters, which is C1's
-mitigation deleted.
+criterion, accepted under **C18** because §7.1 already discloses those counts exactly. Clusterings
+declare one. Recasting one as the other invites declaring a criterion on density — which breaks the
+underlay for nothing — or omitting the clustering's, which is C1's mitigation deleted.
 
-***Serve always* is a disclosure rule, not the absence of one**, and the distinction is the whole
-guard: a rule that must be derived and recorded per layer cannot be arrived at by default, whereas an
-absence can. A level arriving with no declared gate is refused at parse rather than inheriting the
-underlay's permissiveness because it happens to be shaped like one.
+***No criterion* is a declaration, not the absence of one**
+([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)), and the
+distinction is the whole guard: a rule that must be recorded per layer cannot be arrived at by
+default, whereas an absence can. A level arriving with no declared gate is refused at parse rather
+than inheriting the underlay's permissiveness because it happens to be shaped like one.
 
-**The matrix decides existence, and it does not decide the count rule — which an earlier revision
-claimed it did** (review 2026-08-15). Existence it handles: a Morton cell is **corpus-independent**
+**The matrix decides existence, and it does not decide the criterion — which is a per-layer
+declaration, never a derivation.** Existence it handles: a Morton cell is **corpus-independent**
 — the grid is a function of the quantisation bounds `/v1/meta` publishes, and a cell exists whether
-or not any point falls in it — so a density level is a `public` substitutive layer whose artifacts
-disclose nothing by existing, where a cluster's existence is corpus-derived and threshold-gated. But
-density cells and administrative boundaries occupy the **same** cell of the matrix with opposite
-count rules: the underlay serves exact masked counts at any depth with no threshold (C18), while the
-model's boundary example (model §8.2) applies the threshold to boundary counts with rollup. So the
-count rule is a per-layer declaration, not a derivation — and the two rules interact: a public
-polygon decomposes into Morton cells, so a suppressed boundary count is recoverable by summing the
-underlay beneath it. The threshold's owner and the underlay are ruled together (the record's §6,
-ruling 2), and C1's differencing review inherits the pair.
+or not any point falls in it — so a density level is the model's fourth cell, no own terms and no
+criterion (model §5), whose artifacts disclose nothing by existing, where a cluster's existence is
+corpus-derived and criterion-gated. But density cells and administrative boundaries occupy the
+**same** cell of the matrix with opposite declarations: the underlay serves exact masked counts at
+any depth with no criterion (C18), while a boundary layer may declare one, under which a boundary
+below it is absent whole (model §8.2). The two declarations interact: a public polygon decomposes
+into Morton cells, so the count of a boundary absent under its criterion is recoverable by summing
+the underlay beneath it — C1's differencing review inherits the pair.
 
 **Scope, stated because this is where a design of this kind runs away.** The unification is recorded;
 rebuilding the density underlay or the category layer on it is **not proposed**. Those are built,
@@ -1156,8 +1163,10 @@ in-memory by necessity as well as by design, and reports resident sizes alongsid
 | M8 held member count constant by stride-decimation | 56× shape sensitivity | §2.6: **1.4–4.6×** |
 
 **Written since round two, and now needing measurement rather than design:** the fold's artifact pass
-(§5.0.3) and the suppression-across-regeneration refusal (§5.0.2). Both were named as gaps by
-reviewers; neither is a gap now, and both carry ⊘ marks where they rest on unmeasured cost.
+(§5.0.3), named as a gap by reviewers and no longer one, carrying ⊘ marks where it rests on
+unmeasured cost. (The publish-time suppression refusal written in the same round is withdrawn —
+[decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md), §5.0.2 —
+and needs nothing.)
 
 **Still unsettled:**
 
@@ -1183,27 +1192,43 @@ reviewers; neither is a gap now, and both carry ⊘ marks where they rest on unm
 - **M5**, the narrow-width scan constants, which the column's survival (§2.0.0) makes live again for
   `filter-index.md`'s own purposes.
 
-## 12. Rulings needed
+## 12. Rulings
 
-**The review's five, in its dependency order** (the record's §6; none is this document's to decide):
+**The review's five, and where they landed:**
 
-1. **Where artifact entity IDs come from** (§4) — the same monotone space accepting the holes, a
-   separate identifier region, or a cap on merge-window width. Blocks the addressing scheme, the
-   storage layout and the fold's artifact pass, so it is ruled first.
-2. **Is the count threshold independent of the gate mode?** The model owns the contradiction
-   (model §5); this document takes the mode-bound side in §4's predicate and §7's filter table, and
-   both sites are marked.
-3. **Does a label's existence follow its content's containment** — the fourth gate mode, which is
-   what the normative label rule (§7.6) already does? The model owns it (model §3); the C3 item
-   below is its face in this document.
-4. **Where does supplied content live** (§2.4) — the record blob, or the level's own files. Decides
-   whether §5.0.1's in-place edit and the model's emergency path exist at all.
-5. **Search gates on containment** (§8) — the route is withdrawn until ruled; the term-signature
-   shape is recorded there as under consideration, not specified. Includes what the artifact
-   population's authoritative candidate set is, given it is never `M_auth`.
+1. ✔ **Where artifact entity IDs come from** —
+   [decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md): row-less entities
+   allocate downward from `u32::MAX`, points continue upward, interleaving unrepresentable (§4).
+2. ✔ **The masked count is an existence criterion, independent of the gate** —
+   [decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md), with the gate
+   itself recast as one flag beside it
+   ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)) (§4, §7; model §5).
+3. ✔ **An artifact is served whole or not at all** —
+   [decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md): existence
+   follows containment because a failed containment removes the artifact; C3 holds (§9).
+4. ✔ **Supplied content lives in the record blob** —
+   [decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) (§2.4); ⊘ the
+   edit route is deferred to its own design pass.
+5. ⊘ **Search gates on containment** (§8) — **still open, the one ruling that is.** The route is
+   withdrawn until ruled; the term-signature shape is recorded there as under consideration, not
+   specified. Includes what the artifact population's authoritative candidate set is, given it is
+   never `M_auth`.
 
-Beneath those, cheaper (the review's own list): the fold's Rule F membership clause (§5.0.3, live
-once decision 0072 is built), the filter axis (§6.3), and a packaging for membership (§2.4).
+Alongside those: variations are a general artifact property with a caller-supplied ranking
+([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)), the
+frontier is a per-artifact test
+([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)), and replacement is
+distinguished from edit by identity
+([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md), which
+withdrew §5.0.2's publish-time refusal).
+
+**Still open beneath them:** the fold's Rule F membership clause (§5.0.3, live once decision 0072
+is built), ⊘ the filter axis (§6.3), ⊘ a packaging for membership (§2.4), ⊘ the proportional
+criterion's denominator for predicate membership (model §5), and:
+
+- **Membership as a filter** (§7). Admitted under the criterion for criterion-bearing layers, or
+  declined? Unchanged by the campaign — it is a disclosure question, not a cost one.
+  *Recommendation: admit with the criterion inherited.*
 
 **This document's own residue:**
 
@@ -1216,24 +1241,12 @@ once decision 0072 is built), the filter axis (§6.3), and a packaging for membe
   residency model, so the code is a fourth field and the record layout is a real choice; and §2.2.1's
   multi-slice question is **deferred rather than answered**, which is safe only while one slice
   exists.
-- **The suppression-across-regeneration refusal** (§5.0.2), which makes the stable key mandatory for
-  any layer that has taken a suppression. Recommended and written; needs the ruling because it changes
-  what a deny guarantees. *Cost if wrong:* a caller must clear suppressions before regenerating.
 - ✔ **What a point deletion does to the content generated from it** — **ruled**, via the write
   cycle ([`annotation-write-cycle.md`](annotation-write-cycle.md) §9, owner 2026-08-15): `G` is
   entity-space truth with no row form, withdrawal is emergent from containment at the deny's ack,
   and strict/permissive is the caller's declaration with strict the default. The freeze-`|G|` rule
   this section once requested a ruling on is withdrawn as unsound there. §5.0.3 is corrected toward
   it.
-- **Membership as a filter** (§7). Admitted under the threshold for derived layers, or declined?
-  Unchanged by the campaign — it is a disclosure question, not a cost one — and its substitutive row
-  inherits ruling 2. *Recommendation: admit with the threshold inherited.*
-- **C3** (§9) — one face of ruling 3, not independent of it. Model §2.3 reads labels as vanishing
-  when no version satisfies, under which C3 holds as written; the model's §3 keep-the-artifact rule
-  leaves withheld content distinguishable from undeclared content, reopening C3 for the general case
-  (§8.6's degrade-to-derived behaviour). The label-existence ruling decides which reading stands;
-  if keep-the-artifact survives, either C3 gains a row or withheld and undeclared content are made
-  indistinguishable at the cost of §8.6.
 
 **Resolved by measurement, and recorded so they are not re-opened:**
 
@@ -1291,6 +1304,14 @@ document had one cause — reasoning about entity space while designing a row-sp
 error was invisible from inside the argument that made it.
 
 ## Appendix R
+
+**r3 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. The entity-ID region is
+settled downward (§4), the visibility predicate carries the flag, the criterion and variation
+containment as one conjunction (§4), supplied content's home is the record blob with the edit route
+⊘ deferred (§2.4), §5.0.2's publish-time suppression refusal is replaced by 0081's
+edit/replacement split with the stable key optional again, and §5 distinguishes the two refresh
+operations, replacement being the only one built. §12 now records four of the five rulings landed;
+search's gate remains the open one.
 
 **r2 — 2026-08-15.** Stage 0 adversarial review, three lenses
 ([record](../evidence/memos/2026-08-15-artifact-design-review.md)), run after the campaign and the
