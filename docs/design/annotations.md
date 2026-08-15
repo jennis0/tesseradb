@@ -419,6 +419,11 @@ test ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)
   the corpus reconstructs its topic structure from hundreds of clusters each asserting *the
   clustering found members here*.
 
+⊘ **The proportional form also breaks rollup's monotonicity** (§6): a ratio does not shrink from
+parent to child, so a passing child can sit beneath a failing parent in a properly nested tree
+([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)). A layer
+declaring it must expect gaps in its lineage.
+
 The proportional form reads the declared, unmasked membership size as a **predicate input** — it
 has no field in the representation and no wire shape carries it, because a corpus-wide count over
 items a principal may not see is C8 ([`annotation-representation.md`](annotation-representation.md)
@@ -486,13 +491,31 @@ nothing here builds them, and their sampling problem is parked by name in §11.
 §7.5 descends from the root, evaluating masked counts and stopping below threshold, so that
 insufficient visibility becomes rollup rather than suppression. **That descent is dropped**
 ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md); ⊘ the amendment to §7.5
-is owed at promotion). The walk needs counts that shrink downward, which containment supplies for
-free.
+is owed at promotion), and artifacts are tested independently instead.
 
-**Non-covering hierarchies do not supply it**, and the failure is quiet. A child may hold more
-visible members than its parent, so "descend while the count holds up" no longer describes a cut
-through the tree: a failing parent can sit above a passing child. The frontier stops being
-well-defined and the symptom is a rendering oddity, not an error.
+**A tree and a level set are different structures, and neither carries the other**
+([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)). A nested
+layer's hierarchy is its **edges** and it declares no levels: a condensed tree is unbalanced, so one
+region splits at depth two and another at depth nine, and a level number would say nothing about
+position in the lineage. Levels are for resolutions that are semantic and balanced — an
+administrative hierarchy, where a ward is a ward everywhere — and for **stacked** layers, whose
+levels are independent analyses with no lineage at all.
+
+**Rollup then needs no walk, and its condition is the criterion's form.** A child's members are a
+subset of its parent's, so under an **absolute** criterion its masked count is never larger: a child
+that fails while its parent passes leaves the parent served, tested on its own. That is rollup,
+falling out of per-artifact testing. ⊘ **A proportional criterion breaks it** — a ratio does not
+shrink downward, so a parent at 5% of 10 000 declared members can fail a 10% rule while its child at
+50% of 200 passes it, with the child a strict subset throughout. A layer declaring `min_fraction`
+must expect gaps in its lineage. No disclosure follows either way, since each artifact passed its own
+test; what follows is a rendering consequence the caller chooses.
+
+**What remains is frontier *selection*, which is a display concern.** Where a parent and a child both
+pass, something must choose or the map draws both and counts the same points twice at two sizes.
+That is a computation over the edges — for each passing artifact, does a descendant also pass — and
+it is what §6.2's pruning policy names. It carries no disclosure argument in either direction:
+serving the frontier serves strictly less than serving every passer, and serving every passer reveals
+nothing beyond what each artifact's own presence already does.
 
 **The descent is what should bend, not the data.** An earlier draft of this document defined a
 node's *reach* as its own members unioned with its descendants', restoring monotonicity by

@@ -68,23 +68,19 @@ slices     = ["embedding-2026-08"]
 membership = "enumerated"
 access       = { artifacts_carry_own = false }   # a cluster exists because the data does
 visible_when = { min_fraction = 0.05 }
-hierarchy    = { kind = "nested", prune_children = false }
+hierarchy    = { kind = "nested", prune_children = true }
 content      = { derived = ["centroid", "hull"] }
-levels = [
-  { level = 0, title = "Coarse" },
-  { level = 1, title = "Mid" },
-  { level = 2, title = "Fine" },
-]
+# no levels: a nested layer's hierarchy is its edges (decision 0082)
 ```
 
 ```json
 {
   "layer": "clusters/hdbscan-2026-08",
-  "level": 2,
+  "level": 0,
   "stable_key": "c-vaccine-trials",
   "membership": { "external_ids": ["2401.00123", "2401.00456", "…31 000 of them"] },
   "edges": [
-    { "layer": "clusters/hdbscan-2026-08", "level": 1, "stable_key": "c-immunology" }
+    { "layer": "clusters/hdbscan-2026-08", "level": 0, "stable_key": "c-immunology" }
   ]
 }
 ```
@@ -94,13 +90,22 @@ label, no variations. Its count, centroid and hull are recomputed per viewer fro
 are never carried here — an unmasked hull in a payload would be the build-time geometry the design
 deleted, arriving through the write path instead of the file layout.
 
-**`nested`, and the edge is the point.** HDBSCAN's condensed tree splits branches, so a child's
-members are a **subset** of its parent's and the lineage is explicit — throwing it away would discard
-something the algorithm computed. What is *not* true is that children **exhaust** a parent: points
-fall out as noise at each split, 20–25% of them on this corpus, so a parent holds members no child
-holds. Those two are different claims and merging them is the mistake an earlier draft of this memo
-made, and put into [decision 0080](../../decisions/0080-the-frontier-is-a-per-artifact-test.md)
-before the owner caught it.
+**`nested`, no levels, and the edge is the whole structure**
+([decision 0082](../../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)). A
+condensed tree is unbalanced — one region splits at depth two, another at depth nine — so cutting it
+into levels would give numbers that say nothing about position in the lineage. Every artifact sits at
+level 0 and the tree is in the edges.
+
+**HDBSCAN's children are subsets of their parents**, since a split divides a branch, so the lineage is
+explicit and throwing it away discards something the algorithm computed. What is *not* true is that
+children **exhaust** a parent: points fall out as noise at each split, 20–25% of them on this corpus.
+Those two are different claims, and merging them is the mistake an earlier draft of this memo made and
+put into [decision 0080](../../decisions/0080-the-frontier-is-a-per-artifact-test.md) before the owner
+caught it.
+
+⊘ **Note the tension with `min_fraction` above.** Subset membership makes *absolute* criteria monotone
+down the tree, so rollup falls out for free; a proportional one does not, so this layer may show a
+fine cluster with nothing coarser above it. Both are safe; only one gives rollup.
 
 **The stacked case is a different layer, not this one.** Three *independent* runs at three
 `min_cluster_size` settings — which is what the measurement campaign produced — genuinely have no
