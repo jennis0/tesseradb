@@ -1,6 +1,6 @@
 # Tessera — Concurrency and Lifecycle Design
 
-**Status:** Draft r9 — r8 plus decisions 0058 and 0059: §7.2's single-flight waiters block, bounded and cancellable, and the 429 it used to produce on every race is now the answer at the end of a wait. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
+**Status:** Draft r10 — a correction, not a design change: the compaction fold is **built**, so both removal rules are in force and §3.2's "nothing else retires at all" is withdrawn. No mechanism changes. r9 stands otherwise — decisions 0058 and 0059: §7.2's single-flight waiters block, bounded and cancellable, and the 429 it used to produce on every race is now the answer at the end of a wait. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
 
 **Owns:** the mechanism level of the lifecycle **on the read side and in the infrastructure** — thread and state ownership, the generation lifecycle and its retention, geometry-versus-authorisation, WAL *recovery*, caching and single-flight, the router/worker protocol, and the crash matrix. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
 
@@ -157,9 +157,10 @@ deferred** (owner-ruled 2026-08-03; the deny-lifecycle design pass,
 
 The store boundary is what makes the fail-open collapse unexpressible.
 
-> **⊘ Only the unsuppress rule exists.** There is no compaction fold (§5.3), so **nothing else
-> retires at all** — fail-closed, and not the mechanism. An overlay soft limit alarms on depth
-> and does not act, there being no fold to schedule.
+**Both rules are built.** A suppression retires on its unsuppress; a deletion retires at the fold
+that executes it, against an executed set the fold derives from what its publication demonstrably
+removed rather than from a stamp ([`compaction.md`](compaction.md) §4). The overlay soft limit
+alarms on depth and does not act — the fold has its own schedule (compaction §9).
 
 ### 3.3 Fragment builds always read current postings
 
@@ -362,7 +363,7 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 2. **Generations immutable and Arc-shared; drain-list reclaim is remove → verify → reclaim.** A drain entry is slimmed geometry, never an `Arc<Generation>` — §2.1.
 3. **Geometry identity never fixes authorisation.** The effective watermark in composition is the fragment's own, and a request composes against the same generation's overlay whatever stamp it presented.
 4. **Two version axes** matching design §8.5.
-5. **Two removal rules, never conflated** *(amended by the 2026-08-03 ruling — was "three rules", with deletions on a stamp ledger)*: suppressions retire only on unsuppress (Rule S); deletions at the compaction fold that executes them (Rule F). Giving a suppression any other retirement route is fail-open. *The fold is unbuilt, so today nothing retires — §3.2.*
+5. **Two removal rules, never conflated** *(amended by the 2026-08-03 ruling — was "three rules", with deletions on a stamp ledger)*: suppressions retire only on unsuppress (Rule S); deletions at the compaction fold that executes them (Rule F). Giving a suppression any other retirement route is fail-open. *Both built — §3.2.*
 6. **Fragments build from current postings only.** *Built. The retirement-floor backstop is superseded with the stamp ledger — Rule F's safety is the fold's prefix rotating the fragment identity — §3.2.*
 7. **Protocol postcard over socketpairs; worker WAL wins lease arbitration.** *Unbuilt — §6.*
 8. **Single-flight waiters block, bounded and cancellable** *(amended by decision 0058 — was "waiters do not block", a concurrent arrival refused with a 429 rather than parked)*: a concurrent arrival on a building key is served that build's result, and the 429 remains only for a wait that outran its budget. Still a caching decision with a client-visible outcome, and the permit occupancy it admits is bounded by the budget rather than by a per-principal cap (decision 0059) — §7.2.
@@ -370,6 +371,13 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 10. **Injected failures are indistinguishable from real ones in variant and order**, and the conformance harness extends this mechanism rather than adding a second — §7.3.
 
 ## Appendix R — Review record
+
+**r10** (2026-08-14) is a correction. §3.2 carried a marker saying no compaction fold exists and
+that nothing but an unsuppress retires; the fold is built, normative and reviewed against its
+implementation ([`compaction.md`](compaction.md) r11), and it retires deletions against an executed
+set derived from what its publication removed. The marker is withdrawn and §9's rule 5 says both
+rules are built. **No mechanism changes, and Rule S is untouched** — a suppression still retires
+only on its unsuppress, which is the half that is fail-open if it ever acquires a second route.
 
 **r9** (2026-08-09) applies decisions
 [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and

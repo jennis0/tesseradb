@@ -4171,9 +4171,10 @@ impl Executor {
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
-            // A merge and a fold rewrite geometry, never the filter artefact, so the columns are
-            // carried forward. The rebuild `filter-index.md` §6 specifies at the fold is unbuilt;
-            // when it lands it replaces this clone rather than adding beside it.
+            // A **merge** rewrites geometry, never the filter artefact, so the columns are carried
+            // forward here. The fold is the one that rebuilds them, in its own pass 4a
+            // (`filter-index.md` §6.2), and it publishes through its own seam rather than through
+            // this path.
             filter_columns: Arc::clone(&live.filter_columns),
             segments_version,
             // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.

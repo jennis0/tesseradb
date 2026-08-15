@@ -69,7 +69,11 @@ Then, depending on what you are after:
   per-flush extent with its coalesce and the fold's attribute pass, and a conformance differential
   that covers I12's mask half. **Text joined them** — a token index, `match`, and a fold that merges
   its layers. Lists are not.
-- **How any of it is checked.** [`conformance.md`](conformance.md).
+- **How any of it is checked.** [`conformance.md`](conformance.md) for the invariants and the leak
+  register; [`correctness-suite.md`](correctness-suite.md) for whether the data itself is right —
+  every stage from build to the fold, every column family in each of its three homes, a read
+  battery after every stage, and the sizes, endurance runs and server profiles each is exercised
+  at. Provisional, and almost none of it is built.
 - **How fast it is, and how that is known.** [`measurement.md`](measurement.md) owns the benchmark
   suite's axes, denominators and reporting conventions;
   [`performance-suite.md`](performance-suite.md) applies them to the per-item surface — what the
@@ -111,6 +115,7 @@ architecture design.
 | [`records-and-search.md`](records-and-search.md) | Provisional | The general per-item data model: five type families (number, datetime, category, keyword, text), the `type`/`render`/`index`/`multi` declaration that replaced the placement set, the three-home storage rule with the record blob, the keyword and text index mechanisms, the icu4x analyser, staged masked scoring and phrase, and multi-valued fields. **Its first three epics are built** — the declaration, the record blob, the render-column route (§2, §3, §6.2), the keyword family in place of `utf8` (§4.3), and the text family end to end: the icu4x analyser, the token index through all three producers, and `match` (§4.4, decision 0070). Exact phrase, multi-value and scoring are not, in that order (§13). r7, reviewed, all rulings made (decisions 0067–0070) |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
 | [`performance-suite.md`](performance-suite.md) | Provisional | The per-item surface's performance suite: `records-and-search.md` §6.4's budget table as the index, the read and write arms that discharge it, layer count as an axis, and the gates. **Nothing in it is built**, and its audit finds two of §6.4's eleven rows carrying an engine-level figure, none carrying one at 10⁹ |
+| [`correctness-suite.md`](correctness-suite.md) | Provisional | Whether the data is *right*, as distinct from whether the guarantees hold: the eight-stage sequence from build to the fold, the read battery that runs after every stage, the three-home reduction that makes the type axis finite, the endurance backstop (thousands of writes, 100+ folds) and the memory-constrained profile — over the generative corpus, total verification, stage invariance and the structural verifier that decide correctness. **Nothing in it is built** beyond the identity half of `tessera verify`; the seam it addresses is deep checks at 10⁴ against shallow ones at 10⁸ |
 | [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
 | [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |
 | [`inventory.md`](inventory.md)(inventory.md) | Generated | Every invariant and leak-register row, so a change to either is a one-line diff |

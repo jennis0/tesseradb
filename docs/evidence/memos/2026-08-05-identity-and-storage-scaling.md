@@ -19,8 +19,9 @@ truly stable without breaking the rest of the system.
 
 **Q1 — storage over time.** The write-path machinery (window → flush → merge → coalesce) is
 sound and measured; three of its four growth axes are bounded repeatedly and indefinitely. Two
-real gaps remain: **the fold does not exist** (nothing retires, nothing reclaims — the provisional
-`compaction.md` answers it but carries three undispositioned fatal findings), and **the segment
+real gaps remained when this ran: **the fold did not exist** (nothing retired, nothing reclaimed —
+the then-provisional `compaction.md` answered it but carried three undispositioned fatal findings;
+it is normative and built since, and those findings are dispositioned), and **the segment
 axis is unbounded in the shipped configuration** — merge saturates at tier 2 (~149 MiB) and the
 live segment count then grows at ~1 per 4M rows ingested, without limit (measured, §1.2 below).
 The first is the roadmap's known debt; the second needs a one-line ruling nobody has made.

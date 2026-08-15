@@ -22,9 +22,11 @@ what each would catch are in the harness's module doc.
 
 1. **Visibility is ~99% tick.** The two mechanical terms are ~0.5 s and tens of milliseconds; the
    wait is `ingest.flush_max_age_secs`, default **90 s**.
-2. **On-disc bytes are ~2.0–2.6× the live working set, and only grow.** Nothing reclaims a merge's
-   consumed segments, because ⊘ the compaction fold does not exist. Provision for the on-disc
-   number.
+2. **On-disc bytes are ~1.3–1.6× the live working set, and only grow.** Nothing reclaimed a
+   merge's consumed segments in this campaign, there being no compaction fold when it ran.
+   Provision for the on-disc number. **The fold has since been built** and reclamation is its
+   §6; these figures are the unreclaimed shape and are not a measurement of what a deployment
+   running folds holds.
 3. **The per-(tile × segment) cost model holds** — arch §11.3's prediction, confirmed: at z8 it
    *falls* from 6.9 µs to 1.4 µs as the 5M run's corpus grows 4×, and sits at 1.6 µs at 10M.
    Constant per pair; the request cost is the product.
@@ -190,13 +192,14 @@ lower at 1.32× because its 9.4 GiB base is never merged and so never orphaned.
 **On-disc bytes are what a disc actually holds, and they only ever grow.** A merge's consumed
 segments and a coalesce's consumed tiers stay on disc: every side-manifest below the current `n`
 still names them, and a step-down serves one of those (contracts §2.3). Reclaiming them belongs to
-compaction, and **⊘ the compaction fold does not exist**. The per-round disc growth is bimodal and
+compaction, and **no compaction fold existed when this ran** — it has since been built, so the
+growth below is the unreclaimed shape rather than a steady state. The per-round disc growth is bimodal and
 says so plainly: **+9.0–9.4 MiB on an ordinary round, +46.6 MiB on a round a merge lands in** — the
 merge writes its output and orphans its inputs, so it costs disc rather than reclaiming it.
 
-The early ratios (5.26× at round 0) are an artefact of a small live set beside a fixed build
-segment; the steady-state figure is the 2.0–2.6× band, and it does not trend down. **A deployment
-provisions for the on-disc number.** Nothing in the corpus previously recorded this ratio.
+The early ratios are an artefact of a small live set beside a fixed build segment; the steady-state
+figure is the 1.32–1.59× band above, and it does not trend down. **A deployment provisions for the
+on-disc number.** Nothing in the corpus previously recorded this ratio.
 
 ## 3. Read latency by zoom
 

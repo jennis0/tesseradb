@@ -403,7 +403,7 @@ fn an_unsuppress_after_a_merge_restores_the_item_that_was_suppressed() {
 /// its tombstone into the manifest it commits.
 ///
 /// Rule F (write-path §5.4): a deletion retires **only** at the compaction fold that executes it,
-/// and the fold does not exist — so nothing here retires, and the delete must still be in force
+/// and no fold runs in this case — so nothing here retires, and the delete must still be in force
 /// after the merge has rewritten the segment its row lived in. A merge is row-count preserving by
 /// design (it is not the fold), so the deleted row is still *present* in the merged segment; what
 /// must survive is the overlay entry that hides it.
@@ -439,7 +439,7 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
             .tombstones
             .contains(&deleted.raw()),
         "the merge's manifest must carry the tombstone forward — nothing retires it before the \
-         fold, and the fold does not exist"
+         fold, and no fold runs here"
     );
 
     drop(engine);

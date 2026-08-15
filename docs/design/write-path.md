@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r8, 2026-08-06
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r10, 2026-08-14
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -763,7 +763,7 @@ collapse the two that remain, whose separation carries the whole argument:
 
 | store | holds | removed by | durable home |
 |---|---|---|---|
-| `deleted: Bitmap` (entity space) | accepted deletes, fold pending | ⊘ **its compaction fold** — nothing today | WAL (`ChangeByEntity`/snapshot); manifest `tombstones` |
+| `deleted: Bitmap` (entity space) | accepted deletes, fold pending | **its compaction fold**, against the executed set the fold derives from what its publication removed (compaction §4) | WAL (`ChangeByEntity`/snapshot); manifest `tombstones` |
 | `suppressed: Bitmap` (entity space) | active suppressions | **unsuppress only** — nothing else touches it, and the bitmap carries no stamp any retirement machinery could ever act on | WAL/snapshot; manifest `deny` |
 
 Precedence over the two, plus the ingest buffer, is `deleted > suppressed > buffered`, single-sourced in one
@@ -791,8 +791,9 @@ suite rather than silently re-exposing a deleted item.
 ### 5.4 What removes each fact — the retirement position
 
 *(Owner-ruled 2026-08-03, deny-lifecycle design pass; recorded in the implementation plan's
-constraints. The ruling replaced lifecycle §3.2's stamp ledger, which now points here — spec §13.3. Until compaction exists the difference is unobservable: nothing retires
-either way.)*
+constraints. The ruling replaced lifecycle §3.2's stamp ledger, which now points here — spec §13.3.
+The difference between the two rules is now observable, the fold having been built: a deletion's
+entry leaves the overlay in the fold's own publication, and a suppression's never does.)*
 
 - **Rule S** — an entry leaves `suppressed` only by its unsuppress. Non-retirable while active
   by construction: no fragment rebuild ever excludes a suppressed entity, so its invisibility
@@ -1205,7 +1206,7 @@ fold's asymmetry, the diverged-node publication gate, and the reader's honour-be
 | `ingest_queue_bound` | 32 | the command queue; 429 with drain-derived `Retry-After` (1–300 s clamp) |
 | `ingest_admission` | 64 | concurrent ingest handlers; 429 with a service-rate-derived `Retry-After` (1–300 s clamp) |
 | `ingest_max_batch_rows` / `_bytes` | 10,000 / 16 MiB | 422 / route-level refusal (decision 0036) |
-| `overlay_soft_limit` | 500,000 | the pressure gauge; alarms, does not act (⊘ no fold to schedule) |
+| `overlay_soft_limit` | 500,000 | the pressure gauge; alarms, does not act — the fold has its own schedule (compaction §9) |
 | `wal_hard_limit_bytes` | 8 GiB | a **startup relation** on the command queue's worst case (+1 GiB deny headroom); ⊘ not a runtime ceiling — nothing measures the live log (ruled nice-to-have) |
 | `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection. With `tier_width`, sets where the size ladder saturates — a read-path constant (§7, decision 0049) |
 | `tier_width` | 4 | segments per size class before a merge is selected. **Widening it leaves *more* live segments**, not fewer (§7) |
@@ -1381,6 +1382,15 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r10 (2026-08-14) — a correction: the fold retires, and three sites still said it did not.**
+Rule F's executing fold is built and normative ([`compaction.md`](compaction.md) r11, reviewed
+three times including once against the implementation); it derives its executed set from what its
+publication demonstrably removed and retires against it. So §5.3's overlay table gives `deleted` a
+real remover, §5.4's ruling note stops saying the two rules are indistinguishable, and §10's
+`overlay_soft_limit` stops saying there is no fold to schedule. **No mechanism changes and Rule S
+is untouched.** r9's entry below is left as written, including its "nothing retires yet" — a review
+trail that edits away what it found at the time stops being one.
 
 **r9 (2026-08-06) — Rule F's gaps are closed, and §5.4 stops enumerating them.** The publication
 seam now carries the fold's rewritten postings, the bundle identity and the fragment cache it keys,

@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (24 rows)
+## Leak register (26 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -61,6 +61,8 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C22** | A category code discloses vocabulary size | Low | Accepted — owner ruling |
 | **C23** | An authored gate label on a vocabulary value | Medium | Accepted — caller's control (⊘ not built) |
 | **C24** | Filter execution time on a public category column | Low | Accepted — condition of decision 0063 |
+| **C25** | Filter execution time on a text column's match | Low | Accepted — condition of decision 0067 |
+| **C26** | Drill-down decompression time over the record blob | Low | Accepted — named at the record blob's design |
 
 ## Documents
 
@@ -68,28 +70,32 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r41 | 21 |
+| `annotation-representation.md` | Provisional — under review | 3 |
+| `annotations.md` | Provisional — under review | 1 |
+| `architecture.md` | Normative — r41 | 23 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
-| `concurrency-lifecycle.md` | Normative — r9 | 14 |
-| `conformance.md` | Normative — r9 | 15 |
-| `contracts.md` | Normative — r28 | 19 |
+| `concurrency-lifecycle.md` | Normative — r10 | 13 |
+| `conformance.md` | Normative — r10 | 15 |
+| `contracts.md` | Normative — r30 | 19 |
+| `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `delta-serving.md` | Provisional — under review | 3 |
 | `derived-artifact-gating.md` | Provisional — under review |  |
-| `filter-index.md` | Provisional — under review | 11 |
+| `filter-index.md` | Provisional — under review | 12 |
+| `filter-result-cache.md` | Provisional — under review | 7 |
 | `filter-surface.md` | Provisional — under review | 7 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 8 |
-| `performance-suite.md` | Provisional — under review | 8 |
-| `records-and-search.md` | Provisional — under review | 21 |
+| `performance-suite.md` | Provisional — under review | 9 |
+| `records-and-search.md` | Provisional — under review | 29 |
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r15 | 24 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `write-path.md` | Normative for the write path. Owner sign | 22 |
+| `write-path.md` | Normative for the write path. Owner sign | 20 |
