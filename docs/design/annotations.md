@@ -200,12 +200,19 @@ first, because only the first is a question about access.
 survive.** If one version turns out to disclose, suppress the **artifact** — immediate under Rule S,
 fail-closed, and the intermediate state is the safe one — then edit the bad version out
 ([`annotation-representation.md`](annotation-representation.md) §5.0.1 makes content edits
-first-class) and unsuppress. Two steps, no new machinery, and the artifact is hidden throughout
-rather than partially exposed. **⊘ The edit step has no route as currently specified**: supplied
-content is placed in the record blob, whose layers are disjoint and never updated in place, so an
-"in-place" content edit has nothing to perform it — where supplied content lives is an owner ruling
-(the review record's §6, ruling 4), and this path exists only under one of its answers. Until it is
-ruled, the only withdrawal that works is leaving the suppression standing.
+first-class) and unsuppress. **⊘ The edit step is deferred to a design pass of its own** *(owner,
+2026-08-15)*, so the path as written does not exist yet and the withdrawal that does is **suppress,
+then republish the layer without the offending content**. That is slower and it is not weaker: the
+suppression acts at the ack, fail-closed, and the republish makes it permanent.
+
+**Editing is not the obstacle it was drafted as, and the reason is worth keeping.** Bundle files are
+immutable and digest-verified, so nothing is mutated under a live reader — but every writer here
+already publishes rather than mutates, a record lives in a single 256 KiB block and never straddles
+two, and a publication is a write-then-rename. An edit is therefore a republish of the extent the
+content sits in, which is small when that extent is the artifact population's own. What must **not**
+be done is writing the edit as an additional record layer: the stack takes the first matching layer
+and rests on layers being disjoint, so a second layer for the same entity serves the **pre-edit text,
+silently** — the trap this paragraph originally mistook for a prohibition.
 
 **Two properties were claimed to follow, and one of them is contradicted elsewhere in this
 document.** *A viewer who satisfies no version receives nothing for that artifact* — under which
