@@ -899,6 +899,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // global sort+dedup (a duplicate pair shares its ordinal, hence its batch), and one batch
     // covering everything reproduces the pre-batching assignment exactly.
     let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
+    // Geometry in entity order, filled by the assignment walk below rather than by a pass of its
+    // own. Allocated here because that walk is where both indices are in hand: `entity` ascends
+    // with position, so these two writes stream, and the *ordinal* is the random side — a gather
+    // beside the random write into `entity_of_ordinal` this walk already performs, which is the
+    // cheapest place in the build to pay for it. A standalone permute over the same data measured
+    // slower at 25M than the pass it replaced (docs/artifact-delivery.md), because it is serial
+    // where a points-file scan decodes on a worker pool.
+    let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
+    let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
+    let x_of_entity = x_map.as_mut_slice();
+    let y_of_entity = y_map.as_mut_slice();
     // Exact per-term post-dedup counts, accumulated as bands are emitted; drives the band
     // sweep's offsets. u32 is sound (a term's entities are distinct, so count <= n < 2^32).
     let mut term_counts: Vec<u32> = vec![0; term_count as usize];
@@ -991,6 +1002,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         for (position, rec) in recs.iter().enumerate() {
             let entity = (entity_base + position as u64) as u32;
             entity_of_ordinal[rec.ordinal as usize] = entity;
+            // Geometry into entity order, here rather than in a pass of its own. Every ordinal is
+            // visited exactly once across all batches (they partition ordinal space) and entity is
+            // a fresh position each time, so every slot is written exactly once — the same
+            // bijection the old scan relied on, reached without a traversal.
+            x_of_entity[entity as usize] = x_of_ordinal[rec.ordinal as usize];
+            y_of_entity[entity as usize] = y_of_ordinal[rec.ordinal as usize];
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
             for &value in sig {
@@ -1015,6 +1032,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "batches assigned {entity_base} entities for {n} items"
         )));
     }
+    // The ordinal-space geometry has served its two readers — the sort's Morton tiebreak and the
+    // assignment walk — and is released here rather than at the end of the build. At 10⁹ that is
+    // 8 GB of dirty mapped pages returned before the band sweep and the postings write start
+    // competing for page cache.
+    drop(x_ord_map);
+    drop(y_ord_map);
     let band_receipts: Vec<spill::SpillReceipt> = band_writers
         .into_iter()
         .map(|w| w.finish())
@@ -1209,32 +1232,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         if args.mint_external_ids { n } else { 0 },
     );
 
-    // ---- 8. geometry, permuted into entity order -------------------------------------
-    // **No I/O: step 3b read the file, and this only moves what it read.** `entity_of_ordinal` is
-    // a bijection over `0..n` — entity ids are positions in the batch's signature order, and the
-    // batches partition ordinal space — so every slot is written exactly once and none is left at
-    // (0, 0). That is the property the old scan needed its id-anchor check to establish about the
-    // *file*; here it is a property of an array this function built, so the checks stayed behind
-    // in 3b with the read they belong to.
-    //
-    // 32-bit fixed point per axis, not coordinates: the cell code and its residual both fall out
-    // by shift and mask, so no stage re-quantises (see `input::PointRow`).
-    //
-    // The scatter is the same random write pattern the old scan performed, minus the parquet
-    // decode in front of it — so this stage is strictly cheaper than the one it replaces. Its cost
-    // is a second pair of mapped arrays for as long as the permute runs; the ordinal pair is
-    // released immediately afterwards, and both are page cache rather than anonymous memory.
-    let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
-    let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
-    let x_of_entity = x_map.as_mut_slice();
-    let y_of_entity = y_map.as_mut_slice();
-    for ordinal in 0..n as usize {
-        let entity = entity_of_ordinal[ordinal] as usize;
-        x_of_entity[entity] = x_of_ordinal[ordinal];
-        y_of_entity[entity] = y_of_ordinal[ordinal];
-    }
-    drop(x_ord_map);
-    drop(y_ord_map);
+    // ---- 8. the declared attribute tail ----------------------------------------------
+    // **Geometry is already in entity order**: the assignment walk placed it as it assigned, so
+    // there is no geometry stage here at all — no read, and no permute. 32-bit fixed point per
+    // axis, not coordinates: the cell code and its residual both fall out by shift and mask, so
+    // no stage re-quantises (see `input::PointRow`).
     // The declared attribute tail, read **here** and not at the segment write, because this is
     // where the two things that resolve it are still alive: `source_ids` maps a file's id to its
     // ordinal, and `entity_of_ordinal` maps that ordinal to the entity the build assigned it.
@@ -1254,7 +1256,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     drop(source_ids);
     drop(entity_of_ordinal);
 
-    timer.end(BuildStage::GeometryPermute, n);
+    timer.end(BuildStage::AttributeTail, n);
 
     // ---- 8b. attribute filter postings (filter-index §4) -------------------------------
     // Its own stage, after entity assignment and before the tiler sort: entity ids are final

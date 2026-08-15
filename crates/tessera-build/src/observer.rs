@@ -27,7 +27,8 @@ pub enum BuildStage {
     PairsPack,
     /// 3b. **The one pass over the points file's geometry**, scattered by ordinal — early, because
     ///    the signature sort breaks ties on the Morton code (decision 0073) and entity ids do not
-    ///    exist yet. What used to be read again at [`BuildStage::GeometryPermute`] is read here.
+    ///    exist yet. It is put into entity order by [`BuildStage::Assignment`], which is walking
+    ///    both indices anyway; there is no second geometry pass and no permute stage.
     GeometryRead,
     /// 4. The signature sort — permanent under I9, and the reason entity IDs cannot be
     ///    reassigned later.
@@ -40,7 +41,7 @@ pub enum BuildStage {
     ExternalIds,
     /// 8. Geometry permuted from ordinal into entity order, plus the declared attribute tail. No
     ///    points-file I/O: [`BuildStage::GeometryRead`] did the reading.
-    GeometryPermute,
+    AttributeTail,
     /// 8b. Entity-space filter postings, one file per `index = true` column. Its own
     ///    stage rather than a rider on `PostingsWrite`, which runs before the attribute values
     ///    have been read; zero-length for a schema that declares no filterable column.
@@ -64,7 +65,7 @@ impl BuildStage {
             BuildStage::Assignment => "assignment",
             BuildStage::PostingsWrite => "postings_write",
             BuildStage::ExternalIds => "external_ids",
-            BuildStage::GeometryPermute => "geometry_permute",
+            BuildStage::AttributeTail => "attribute_tail",
             BuildStage::FilterPostings => "filter_postings",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
@@ -81,7 +82,7 @@ impl BuildStage {
         BuildStage::Assignment,
         BuildStage::PostingsWrite,
         BuildStage::ExternalIds,
-        BuildStage::GeometryPermute,
+        BuildStage::AttributeTail,
         BuildStage::TilerSort,
         BuildStage::SegmentWrite,
         BuildStage::Manifests,

@@ -140,17 +140,17 @@ direction on both the pre-sort and the tie-refinement path.
 **What the real 2.4M corpus says** (*measured* 2026-08-15, builds of the same corpus through the
 shipped writer, warm cache, `categories-subclass`, **minimum of three runs**):
 
-| | baseline | tiebreak | + the pass rework |
-|---|---:|---:|---:|
-| build wall time | 7.34 s | 8.84 s (+20%) | **8.20 s (+12%)** |
-| points-file passes | 3 | 4 | **3** |
-| `postings.arrow`, `pairs.parquet`, `morton.u32` | | **byte-identical** | **byte-identical** |
-| mean monotone run in `permutation.bin` | 2.00 | **49.19** | 49.19 |
+| | baseline | shipped |
+|---|---:|---:|
+| build wall time, 2.4M | 7.34 s | 8.35 s (+14%) |
+| build wall time, 25M | 22.11 s | 25.11 s (+14%) |
+| points-file passes | 3 | **3** |
+| `postings.arrow`, `pairs.parquet`, `morton.u32` | | **byte-identical** |
+| mean monotone run in `permutation.bin` | 2.00 | **49.19** |
 
-**Read the timings as ±1 s.** Single runs of this build vary by that much on this machine, and an
-earlier revision of this section quoted **+49%** from one — that figure was noise and is withdrawn,
-along with the precise `+0.33 s record / +3.04 s pass` split derived the same way. Three-run minima
-are what the table carries.
+**Read single runs as ±1 s at 2.4M and ±5 s at 25M**, and quote minima of three. An earlier revision
+of this section carried **+49%** from one run — noise, withdrawn, along with the precise
+`+0.33 s record / +3.04 s pass` split derived the same way.
 
 **Two results correct the design.** M3's *"postings byte-identical"* now holds end to end rather
 than in a re-derivation — and it is structural, not luck: a signature group occupies the same
@@ -159,17 +159,43 @@ permutation claim was *"~1 → ~44"*; the measured pair is **2.00 → 49.19**, b
 baseline for a random permutation is 2, not 1. The direction and the destination hold; **the ratio
 is 24.6×, not 44×**, and anything quoting the old baseline is quoting a mistake.
 
-**The rework, and what it bought.** The build read the points file three times before the tiebreak —
-source ids, a re-read for external ids, and geometry in entity order — and the tiebreak made it
-four, because the sort needs geometry that entity-space stages had not yet read. Geometry now lands
-**once**, in ordinal space, early enough for the sort; the old geometry scan becomes a scatter
-through `entity_of_ordinal` with no I/O at all. Back to three passes, and the bundle it produces is
-**byte-identical** to the four-pass one — every file, with only `created_at` moving.
+**Where the geometry read goes, settled at 25M** (*measured*, minimum of three warm runs; every
+variant produces a **byte-identical** bundle, `created_at` aside):
 
-⊘ **What remains is +12%, and it is not the pass.** The residue is the wider sort record, the extra
-comparator field, the permute loop and two more mapped arrays held across the batch loop. Whether
-that is worth a second attempt — a 12-byte record reading codes back out of the mapped array — is
-unmeasured, and cheaper to answer at 25M than at 2.4M where it is inside the noise.
+| | 2.4M | 25M | |
+|---|---:|---:|---|
+| baseline, no tiebreak | 7.34 s | 22.11 s | |
+| **a)** separate Morton read — four points passes | 8.84 s | 28.56 s | +29% |
+| **b)** geometry read once, standalone permute | 8.20 s | **30.66 s** | +39% — *worse than (a)* |
+| **c)** geometry read once, **fused into the assignment walk** | 8.35 s | **25.11 s** | **+14%** — shipped |
+
+**2.4M cannot answer this question and nearly gave the wrong answer.** At that size the corpus fits
+one batch, all three variants sit within a second of each other, and (b) looked like the winner. At
+25M (b) is the worst of them. Anything decided from the small tier here would have gone into the
+10⁹ rebuild backwards.
+
+**The diagnosis that mattered was not the one this file first recorded.** (b) was written believing
+the standalone permute added random access. It does not: the scatter into entity-ordered geometry
+exists in *every* variant, including the baseline, where it sits inside the geometry scan's own join
+callback — and at 25M that callback iterates ordinals ascending too, because one join chunk covers
+the corpus. What (b) actually did was trade **parallel** work for **serial**: `scan_points` decodes
+row groups on a worker pool, so the pass it removed was multi-threaded streaming, and the permute
+that replaced it is a single-threaded traversal. That correction came from an independent
+algorithmic pass over the stage, and it is what produced (c).
+
+**(c) pays for the geometry move where the build is already paying.** The assignment walk visits
+every item with both indices in hand, randomly writing `entity_of_ordinal` and randomly incrementing
+a per-term counter; adding two gathers to a loop already stalling on memory costs far less than a
+traversal of its own. Entity ids ascend with position there, so the geometry *writes* stream. The
+ordinal-space arrays are released as soon as that walk ends — at 10⁹ that returns 8 GB of dirty
+mapped pages before the band sweep and postings write start competing for cache.
+
+⊘ **What survives is +14%, consistent across both tiers**, and it is the tiebreak itself: the wider
+sort record, the extra comparator field, the ordinal-space arrays and the two gathers. ⊘ **And the
+10⁹ ordering is modelled, not measured** — the argument that (a) cannot win there is that ~25 GB of
+points will not stay in page cache beside the build's own scratch, so its fourth pass becomes real
+I/O rather than a cached decode. That is the claim to check when a 10⁹ build is first run, and it is
+the reason (a)'s 25M win over (b) was not taken as the answer.
 
 ### Stage 2 — One flat level, served with masked counts
 
