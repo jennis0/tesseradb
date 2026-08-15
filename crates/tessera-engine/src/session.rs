@@ -302,6 +302,23 @@ pub struct SliceSegments {
     pub segments: usize,
 }
 
+/// One partition's live geometry position — [`Engine::partition_status`]'s element, and what
+/// `/control/status` publishes as contracts §3.4's per-partition block.
+///
+/// Defined here rather than re-exported from `tessera-store`, for [`SliceSegments`]' reason: the
+/// server may not depend on the store (SA §3), so a value it publishes must be nameable from this
+/// crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionStatus {
+    pub partition: String,
+    /// The geometry version: bumped by flush, merge and fold publications, never by an
+    /// overlay/buffer update — the [`Generation`] field of the same name.
+    pub segments_version: u64,
+    /// The highest entity id folded into published row geometry — moved by flush, held still by
+    /// merge and fold.
+    pub watermark: u64,
+}
+
 /// Engine-level failures. Every variant here is fail-closed (Global Constraint 3): none of them
 /// hand back a partial or best-effort result.
 #[derive(Debug)]
@@ -1563,6 +1580,37 @@ impl Engine {
             .collect();
         counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
         counts
+    }
+
+    /// Each partition's live `(segments_version, watermark)` — the per-partition status block of
+    /// contracts §3.4, and the stage barrier correctness-suite §12.3 reads: a version bump is how
+    /// a driver knows a flush, merge or fold published, and the watermark is how it knows which
+    /// entities the published geometry covers.
+    ///
+    /// **One generation load for the whole vector**, so the version and the watermark agree with
+    /// each other — two loads could straddle a publication and pair a new version with an old
+    /// watermark. Both scalars live on the generation rather than per partition: this build
+    /// publishes one partition (`tessera-build` writes exactly one), so the generation's pair *is*
+    /// that partition's pair. A multi-partition deployment flushes partitions independently
+    /// (contracts §0.3 deviation 4), so partitioning's arrival moves these two fields onto
+    /// per-partition state — the vector shape here is what keeps that a value change rather than
+    /// a second status surface.
+    pub fn partition_status(&self) -> Vec<PartitionStatus> {
+        let generation = self.generation.load();
+        let mut rows: Vec<PartitionStatus> = generation
+            .bundle
+            .partitions
+            .keys()
+            .map(|partition| PartitionStatus {
+                partition: partition.clone(),
+                segments_version: generation.segments_version,
+                watermark: generation.watermark,
+            })
+            .collect();
+        // Sorted for `live_segment_counts`' reason: the map's order means nothing, and an operator
+        // diffing two status responses must not see a reordering that means nothing either.
+        rows.sort_by(|a, b| a.partition.cmp(&b.partition));
+        rows
     }
 
     /// The row-projection cache's operator gauges — what `/control/status` publishes as

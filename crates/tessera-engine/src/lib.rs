@@ -45,7 +45,8 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 // judgement, and a caller that could ask separately could also act on a stale answer.
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
-    default_compute_threads, Engine, EngineConfig, EngineError, Session, SliceSegments,
+    default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,
+    SliceSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers

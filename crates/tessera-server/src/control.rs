@@ -421,37 +421,54 @@ struct RawIngestItem {
 /// caller-declared scalar.
 const RESERVED_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
 
-/// One value out of an ingest batch's column, tagged with the spelling
-/// `MANIFEST.declared_scalars` would use for its type — `None` for a column type this build
-/// cannot store, which is refused by name rather than by dropping the column.
+/// One value out of an ingest batch's column, read **at the column's declared wire type**
+/// ([`DeclaredScalar::wire_type`]) — `None` when the Arrow column is not that type, which the
+/// caller refuses naming both types rather than by dropping the column.
 ///
-/// **The tag comes from `ScalarType::arrow_type_name` via [`DeclaredScalar::scalar_type`], not
-/// from a table written here.** This function used to carry its own spellings — `uint64` where
-/// the flush path parsed `u64` — so a manifest one accepted was one the other refused. Both were
-/// unreachable while `declared_scalars` was written empty unconditionally; populating it is
-/// exactly what would have made them collide.
-fn scalar_of(col: &dyn Array, row: usize) -> Option<(WalScalar, &'static str)> {
+/// # The declaration drives the decode, and the match is exhaustive over `ScalarType`
+///
+/// Two constructions have failed here, and this shape exists against both:
+///
+/// * **A second type table.** An earlier form carried its own type spellings — `uint64` where the
+///   flush path parsed `u64` — so a manifest one path accepted was one the other refused. The
+///   spellings are gone entirely: the expected type arrives as a [`ScalarType`], and the one
+///   spelling in any refusal is [`ScalarType::arrow_type_name`]'s.
+/// * **Inferring the type from the array.** The successor answered "which type is this column?"
+///   by a chain of downcasts, and a chain holds exactly the types its author remembered — the
+///   compiler has nothing to check it against. Six declarable types (`bool`, `i8`, `i16`, `i32`,
+///   `f64`, `timestamp_us`) were declarable, buildable and un-ingestable that way,
+///   `timestamp_us` invisibly so: Arrow's `TimestampMicrosecondArray` is a distinct type that no
+///   `Int64Array` downcast reaches.
+///
+/// Matching on [`ScalarType`] makes the completeness structural rather than remembered: a type
+/// added to the declarable set fails to compile here until this function says what an ingest
+/// batch carries for it. `Keyword` and `Text` never arrive — `wire_type` maps both to `Utf8` —
+/// but decode identically rather than panicking, because a string *is* their wire form.
+fn scalar_at(col: &dyn Array, row: usize, ty: ScalarType) -> Option<WalScalar> {
     use arrow::array::{
-        Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     let any = col.as_any();
-    if let Some(a) = any.downcast_ref::<UInt8Array>() {
-        Some((WalScalar::U8(a.value(row)), "u8"))
-    } else if let Some(a) = any.downcast_ref::<UInt16Array>() {
-        Some((WalScalar::U16(a.value(row)), "u16"))
-    } else if let Some(a) = any.downcast_ref::<UInt32Array>() {
-        Some((WalScalar::U32(a.value(row)), "u32"))
-    } else if let Some(a) = any.downcast_ref::<UInt64Array>() {
-        Some((WalScalar::U64(a.value(row)), "u64"))
-    } else if let Some(a) = any.downcast_ref::<Int64Array>() {
-        Some((WalScalar::I64(a.value(row)), "i64"))
-    } else if let Some(a) = any.downcast_ref::<Float32Array>() {
-        Some((WalScalar::F32(a.value(row)), "f32"))
-    } else if let Some(a) = any.downcast_ref::<StringArray>() {
-        Some((WalScalar::Utf8(a.value(row).to_string()), "utf8"))
-    } else {
-        None
-    }
+    Some(match ty {
+        ScalarType::Bool => WalScalar::Bool(any.downcast_ref::<BooleanArray>()?.value(row)),
+        ScalarType::U8 => WalScalar::U8(any.downcast_ref::<UInt8Array>()?.value(row)),
+        ScalarType::U16 => WalScalar::U16(any.downcast_ref::<UInt16Array>()?.value(row)),
+        ScalarType::U32 => WalScalar::U32(any.downcast_ref::<UInt32Array>()?.value(row)),
+        ScalarType::U64 => WalScalar::U64(any.downcast_ref::<UInt64Array>()?.value(row)),
+        ScalarType::I8 => WalScalar::I8(any.downcast_ref::<Int8Array>()?.value(row)),
+        ScalarType::I16 => WalScalar::I16(any.downcast_ref::<Int16Array>()?.value(row)),
+        ScalarType::I32 => WalScalar::I32(any.downcast_ref::<Int32Array>()?.value(row)),
+        ScalarType::I64 => WalScalar::I64(any.downcast_ref::<Int64Array>()?.value(row)),
+        ScalarType::F32 => WalScalar::F32(any.downcast_ref::<Float32Array>()?.value(row)),
+        ScalarType::F64 => WalScalar::F64(any.downcast_ref::<Float64Array>()?.value(row)),
+        ScalarType::TimestampUs => {
+            WalScalar::TimestampUs(any.downcast_ref::<TimestampMicrosecondArray>()?.value(row))
+        }
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+            WalScalar::Utf8(any.downcast_ref::<StringArray>()?.value(row).to_string())
+        }
+    })
 }
 
 /// One category cell: its value key resolved to the pinned code, at the column's declared width.
@@ -616,27 +633,18 @@ fn parse_ingest_batch(
                 )));
             };
             // One row's worth is enough to identify the column's type, and a batch with no rows has
-            // no scalar to mistype.
-            let expected = d.wire_type().arrow_type_name();
-            if batch.num_rows() > 0 {
-                match scalar_of(col.as_ref(), 0) {
-                    Some((_, actual)) if actual == expected => {}
-                    Some((_, actual)) => {
-                        return Err(ApiError::Contract(format!(
-                            "ingest body: column '{}' is {actual}, but MANIFEST.declared_scalars \
-                             declares it {expected}",
-                            d.name
-                        )));
-                    }
-                    None => {
-                        return Err(ApiError::Contract(format!(
-                            "ingest body: column '{}' is of a type this build cannot store \
-                             (u8, u16, u32, u64, i64, f32 and utf8 are what `WalScalar` \
-                             carries); refused rather than dropped",
-                            d.name
-                        )));
-                    }
-                }
+            // no scalar to mistype. The decode is keyed by the declaration (see `scalar_at`), so
+            // "wrong type" and "a type this build cannot store" are one refusal: either way the
+            // column is not what the manifest says an ingest batch carries for it.
+            let expected = d.wire_type();
+            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: column '{}' is {:?}, but MANIFEST.declared_scalars declares \
+                     it {} (contracts §2.6); refused rather than dropped",
+                    d.name,
+                    col.data_type(),
+                    expected.arrow_type_name()
+                )));
             }
         }
 
@@ -665,11 +673,8 @@ fn parse_ingest_batch(
                     // put absence; a number has no spare bit pattern, so it travels beside the
                     // value as `WalScalar::Null`.
                     None if col.is_null(i) => WalScalar::Null,
-                    None => {
-                        scalar_of(col.as_ref(), i)
-                            .expect("every declared column's type was checked above")
-                            .0
-                    }
+                    None => scalar_at(col.as_ref(), i, d.wire_type())
+                        .expect("every declared column's type was checked above"),
                 };
                 scalars.push(value);
             }
@@ -1703,11 +1708,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     // credential. `ready` is computed by the *same* `is_ready` the probe
     // calls, not a second predicate, so the two can never drift.
     //
-    // Contracts §3.4 specifies `readiness` as a **per-partition** field, beside `segments_version`
-    // and `watermark`. This build has one partition and no per-partition status block, so the flag
-    // lives inside `write_executor` rather than claiming the top-level `readiness` key the
-    // per-partition form will need.
+    // Contracts §3.4's per-partition block — `{segments_version, watermark, readiness}` per
+    // partition — is emitted below as `partitions`. `readiness` appears there *and* as
+    // `write_executor.ready`: the first is the contract's field, the second is the operator's
+    // glance beside the posture string it is derived from, and both are this one evaluation of
+    // the same `is_ready` the probes call, so the three surfaces cannot drift.
     let executor = state.engine.write_executor_stats();
+    let ready = is_ready(executor.posture);
+    let partitions = state.engine.partition_status();
     // **`tessera_engine::FragmentCacheStats`, never `tessera_authz::...`** — `check-layers.sh`
     // denies a `tessera-server → tessera-authz` edge (SA §3), and the re-export at
     // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
@@ -1720,6 +1728,21 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let segments: Vec<tessera_engine::SliceSegments> = state.engine.live_segment_counts();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
+        // Contracts §3.4's per-partition block, and the write path's stage barrier
+        // (correctness-suite §12.3): the version bump is how a harness knows a flush, merge or
+        // fold *published* rather than was accepted, and the watermark is which entities the
+        // published geometry covers — without them the only barrier is a sleep. A vector of one
+        // until partitioning lands; the values are read in one generation load
+        // (`Engine::partition_status`), so the pair cannot straddle a publication.
+        "partitions": partitions
+            .iter()
+            .map(|p| serde_json::json!({
+                "partition": p.partition,
+                "segments_version": p.segments_version,
+                "watermark": p.watermark,
+                "readiness": ready,
+            }))
+            .collect::<Vec<_>>(),
         "compute": {
             "admission": gate.admission,
             "queue": gate.queue,
@@ -1731,7 +1754,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         },
         "write_executor": {
             "posture": executor.posture.as_str(),
-            "ready": is_ready(executor.posture),
+            "ready": ready,
             "work_submitted": executor.work_submitted,
             "deny_submitted": executor.deny_submitted,
             "wal_appends": executor.wal_appends,
@@ -1767,7 +1790,21 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "flush_requested": executor.flush_requested,
                 "buffered_items": executor.buffered_items,
                 "overlay_publications": executor.overlay_publications,
+                // The visibility barrier's second half (decision 0044 D1; correctness-suite
+                // §12.3): an established session serves its old row projection until the
+                // background refresh replaces it, so a count read after the version bump alone
+                // is short by exactly the round's batch — measured, not supposed. This counts
+                // projections the refresh *produced* (`Engine::refreshes`), so it moves only
+                // where a session's projection was resident to refresh, and it also moves at a
+                // merge, whose publication runs the same pass.
+                "refreshes": state.engine.refreshes(),
             },
+            // The two maintenance publications, beside the flush counters for the same reader.
+            // `merges` pairs with a `segments_version` bump; `coalesces` is the one stage whose
+            // barrier *must* be a counter — the entity-space coalesce moves no row and bumps no
+            // version by design (write-path §7), so this is the only wire evidence one ran.
+            "coalesces": executor.coalesces,
+            "merges": executor.merges,
             // Published beside the EWMA rather than folded into it: the EWMA is written only when a
             // job finishes, so during one long job it reports the previous regime. The 429
             // derivations take `max` of the two (`ExecutorStats::service_nanos_for_estimate`); an

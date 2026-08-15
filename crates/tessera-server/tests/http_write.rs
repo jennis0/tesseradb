@@ -2186,6 +2186,162 @@ async fn control_compact_is_accepted_and_deferred() {
     );
 }
 
+/// **The stage barriers of `/control/status` move when their stages run** (contracts §3.4's
+/// per-partition block; correctness-suite §12.3). A presence check would be satisfied by a field
+/// wired to a constant, and a barrier that never moves is worse than none — a harness would wait
+/// on it for ever. So what is asserted is movement, per stage:
+///
+/// - a **flush** bumps `partitions[].segments_version`, raises `partitions[].watermark` over the
+///   ingested entities, and — once the background refresh replaces the resident projection —
+///   moves `flush.refreshes`. The session issues a viewport *before* the first flush, because the
+///   refresh counts projections it produced, and it produces one only where a session's
+///   projection was resident to refresh;
+/// - a **row-space merge** (four same-tier flush extents; `tier_width` 4) moves
+///   `write_executor.merges`;
+/// - an **entity-space coalesce** (eight same-tier delta tiers; `CoalescePolicy` width 8) moves
+///   `write_executor.coalesces` — the one stage that moves no row and bumps no version by design
+///   (write-path §7), which is why its barrier has to be a counter at all.
+///
+/// The driving protocol is correctness-suite §12.3's own: `flush_max_age_secs` is 90 s against a
+/// seconds-scale test, so no tick fires on its own and every tick below is pulled by
+/// `POST /control/flush`. A pulled tick dispatches everything currently eligible, so the merge
+/// and the coalesce arrive on the same clock with no trigger route of their own — each becomes
+/// eligible when enough flush rounds have accumulated its inputs.
+#[tokio::test]
+async fn status_stage_barriers_move_when_their_stages_run() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // A resident projection for the refresh to replace: authorise and view once, before any flush.
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let viewport_req = serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+    });
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&viewport_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // The baseline. Every barrier field is present from the first read — a counter that appears
+    // when it first moves is one an operator cannot alert on — and nothing has run yet.
+    let before = control_status(&server).await;
+    let partitions = before["partitions"].as_array().expect("a partitions array");
+    assert_eq!(partitions.len(), 1, "this build publishes one partition");
+    let version_before = partitions[0]["segments_version"]
+        .as_u64()
+        .expect("a geometry version");
+    let watermark_before = partitions[0]["watermark"].as_u64().expect("a watermark");
+    assert_eq!(partitions[0]["readiness"], true, "a healthy node: {before}");
+    assert_eq!(before["write_executor"]["coalesces"], 0);
+    assert_eq!(before["write_executor"]["merges"], 0);
+    assert_eq!(before["write_executor"]["flush"]["refreshes"], 0);
+
+    // Pull ticks until every stage has run. Four tiny flush extents are one size tier (they all
+    // clamp to the merge floor), so the merge becomes eligible at the fifth pulled tick; eight
+    // delta tiers make the coalesce eligible a few ticks later. Sixteen rounds is headroom, not
+    // a tuned figure.
+    let mut status = before;
+    for round in 1..=16u64 {
+        let (code, body) = post_ingest(
+            &server,
+            &format!("barrier-{round}"),
+            &rows_from(30_000 + round * 10, 2),
+            true,
+        )
+        .await;
+        assert_eq!(code, 200, "round {round}'s ingest must land: {body}");
+        let resp = server
+            .client
+            .post(server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 202);
+
+        // Barrier on the round's own publication, exactly as a harness would: the flush counter,
+        // not a sleep. The bound is generous for `poll_until_in_flight`'s reason.
+        let mut published = false;
+        for _ in 0..10_000 {
+            status = control_status(&server).await;
+            if status["write_executor"]["flush"]["flushes"].as_u64() == Some(round) {
+                published = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            published,
+            "round {round}'s flush did not publish within the poll bound: {status}"
+        );
+
+        if status["write_executor"]["merges"].as_u64() > Some(0)
+            && status["write_executor"]["coalesces"].as_u64() > Some(0)
+        {
+            break;
+        }
+    }
+
+    // The flush barrier: the version bumped and the watermark now covers the ingested entities.
+    let partitions = status["partitions"].as_array().expect("a partitions array");
+    let version_after = partitions[0]["segments_version"].as_u64().unwrap();
+    let watermark_after = partitions[0]["watermark"].as_u64().unwrap();
+    assert!(
+        version_after > version_before,
+        "a published flush must bump the geometry version: {version_before} -> {version_after}"
+    );
+    assert!(
+        watermark_after > watermark_before,
+        "a published flush must raise the watermark over the entities it gave geometry: \
+         {watermark_before} -> {watermark_after}"
+    );
+
+    // The maintenance barriers: both counters moved, so a driver watching them saw each stage
+    // finish rather than inferring it from a sleep.
+    assert!(
+        status["write_executor"]["merges"].as_u64() > Some(0),
+        "sixteen same-tier flush extents never made a merge eligible (tier_width is 4): {status}"
+    );
+    assert!(
+        status["write_executor"]["coalesces"].as_u64() > Some(0),
+        "sixteen delta tiers never made a coalesce eligible (the width is 8): {status}"
+    );
+
+    // The refresh barrier: the resident projection was replaced. Asynchronous behind the
+    // publication, so polled rather than read once.
+    let mut refreshed = false;
+    for _ in 0..10_000 {
+        let now = control_status(&server).await;
+        if now["write_executor"]["flush"]["refreshes"].as_u64() > Some(0) {
+            refreshed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(
+        refreshed,
+        "the background refresh never replaced the resident projection, so a harness waiting on \
+         this barrier would wait for ever"
+    );
+}
+
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
 ///
 /// `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer *demand* is
@@ -4114,4 +4270,290 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
 
     // And the re-bound id is operable: a suppress addresses the new life, answered 200.
     assert_eq!(change("suppress", fresh).await.status(), 200);
+}
+
+/// Every declarable plain scalar type, by the manifest spelling `contracts §2.6` admits it under.
+/// One fixture declares them all, so the round-trip below enumerates the set rather than the types
+/// someone remembered — which is the defect shape it exists against: `/control/ingest` once decoded
+/// seven types by a downcast chain while the schema declared fourteen, so a `bool`, `i8`, `i16`,
+/// `i32`, `f64` or `timestamp_us` column was declarable, buildable and un-ingestable.
+const SCALAR_TAIL_TYPES: [&str; 12] = [
+    "bool", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "timestamp_us",
+];
+
+/// One `index = true` column per declarable type, named `c_<type>` so the schema, the points file,
+/// the ingest batch and the filter loop are all driven from [`SCALAR_TAIL_TYPES`]. `bool` and
+/// `timestamp_us` are additionally rendered: the hot-column tail is written at flush from the same
+/// buffered scalars the extents are, so a flush that could not place either value in a row would
+/// fail the publication this test barriers on.
+fn scalar_tail_schema_toml() -> String {
+    SCALAR_TAIL_TYPES
+        .iter()
+        .map(|ty| {
+            let render = if matches!(*ty, "bool" | "timestamp_us") {
+                "render = true\n"
+            } else {
+                ""
+            };
+            format!("[[attribute]]\nname  = \"c_{ty}\"\ntype  = \"{ty}\"\nindex = true\n{render}\n")
+        })
+        .collect()
+}
+
+const SCALAR_TAIL_N: u64 = 8;
+
+/// The value the ingested item carries in each column — one per type, every one distinct from
+/// [`scalar_tail_base`]'s, so an `eq` on it selects the ingested item and nothing else. Each is
+/// deliberately outside the narrower widths' ranges (and fractional for the floats), so a decode
+/// that silently re-typed a column could not still produce these values.
+fn scalar_tail_planted(ty: &str) -> serde_json::Value {
+    match ty {
+        "bool" => serde_json::json!(true),
+        "u8" => serde_json::json!(200u8),
+        "u16" => serde_json::json!(60_000u16),
+        "u32" => serde_json::json!(4_000_000_000u32),
+        "u64" => serde_json::json!(5_000_000_000u64),
+        "i8" => serde_json::json!(-100i8),
+        "i16" => serde_json::json!(-30_000i16),
+        "i32" => serde_json::json!(-2_000_000_000i32),
+        "i64" => serde_json::json!(-5_000_000_000i64),
+        "f32" => serde_json::json!(2.5f32),
+        "f64" => serde_json::json!(-1234.25f64),
+        "timestamp_us" => serde_json::json!(1_700_000_000_000_000i64),
+        other => unreachable!("no planted value for '{other}'"),
+    }
+}
+
+/// What every base item carries: `false`, `1`, `1.0` — never equal to the planted value.
+fn scalar_tail_base_column(ty: &str, n: usize) -> Arc<dyn arrow::array::Array> {
+    scalar_tail_column(ty, serde_json::Value::Null, n)
+}
+
+/// An Arrow column of `n` rows for `c_<ty>`, at the type's wire form. `planted` is the JSON value
+/// [`scalar_tail_planted`] chose (so the batch builder and the filter loop cannot disagree about
+/// what was ingested), or `Null` for the base value.
+fn scalar_tail_column(ty: &str, planted: serde_json::Value, n: usize) -> Arc<dyn arrow::array::Array> {
+    use arrow::array::{
+        BooleanArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    };
+    let int = |base: i64| -> Vec<i64> {
+        let v = planted.as_i64().or_else(|| planted.as_u64().map(|u| u as i64));
+        vec![v.unwrap_or(base); n]
+    };
+    match ty {
+        "bool" => Arc::new(BooleanArray::from(vec![planted.as_bool().unwrap_or(false); n])),
+        "u8" => Arc::new(UInt8Array::from_iter_values(int(1).iter().map(|&v| v as u8))),
+        "u16" => Arc::new(UInt16Array::from_iter_values(int(1).iter().map(|&v| v as u16))),
+        "u32" => Arc::new(UInt32Array::from_iter_values(int(1).iter().map(|&v| v as u32))),
+        "u64" => Arc::new(UInt64Array::from_iter_values(int(1).iter().map(|&v| v as u64))),
+        "i8" => Arc::new(Int8Array::from_iter_values(int(1).iter().map(|&v| v as i8))),
+        "i16" => Arc::new(Int16Array::from_iter_values(int(1).iter().map(|&v| v as i16))),
+        "i32" => Arc::new(Int32Array::from_iter_values(int(1).iter().map(|&v| v as i32))),
+        "i64" => Arc::new(Int64Array::from_iter_values(int(1))),
+        "f32" => Arc::new(Float32Array::from(vec![planted.as_f64().unwrap_or(1.0) as f32; n])),
+        "f64" => Arc::new(Float64Array::from(vec![planted.as_f64().unwrap_or(1.0); n])),
+        "timestamp_us" => Arc::new(TimestampMicrosecondArray::from(int(1_000))),
+        other => unreachable!("no column builder for '{other}'"),
+    }
+}
+
+/// A bundle whose schema declares the full scalar tail, over [`SCALAR_TAIL_N`] base items.
+fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
+    use parquet::arrow::ArrowWriter;
+    use tessera_build::{build, BuildArgs};
+
+    let points = tmp.join("points.parquet");
+    let pairs = tmp.join("pairs.parquet");
+    let n = SCALAR_TAIL_N as usize;
+    let mut fields = vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ];
+    let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
+        Arc::new(arrow::array::UInt64Array::from_iter_values(0..SCALAR_TAIL_N)),
+        Arc::new(arrow::array::Float64Array::from_iter_values(
+            (0..SCALAR_TAIL_N).map(|e| ((e * 37) % 1000) as f64),
+        )),
+        Arc::new(arrow::array::Float64Array::from_iter_values(
+            (0..SCALAR_TAIL_N).map(|e| ((e * 53) % 1000) as f64),
+        )),
+    ];
+    for ty in SCALAR_TAIL_TYPES {
+        let column = scalar_tail_base_column(ty, n);
+        fields.push(Field::new(format!("c_{ty}"), column.data_type().clone(), false));
+        columns.push(column);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    write_pairs_n(&pairs, SCALAR_TAIL_N);
+
+    let schema_path = tmp.join("scalar-tail-schema.toml");
+    std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
+    let args = BuildArgs {
+        points,
+        pairs,
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: tessera_build::schema::Schema::parse(&schema_path, &Default::default()).unwrap(),
+    };
+    build(&args).expect("the scalar-tail fixture build should succeed");
+}
+
+/// One ingest batch of one item, carrying [`scalar_tail_planted`]'s value in every declared column
+/// at that column's wire type — `Timestamp(Microsecond)` for `timestamp_us`, not `Int64`, which is
+/// the pair the downcast-chain defect could never have told apart.
+fn build_scalar_tail_ingest_batch() -> Vec<u8> {
+    let mut fields = vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+    ];
+    let external_id = external_id_of(9_600_001);
+    let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
+        Arc::new(BinaryArray::from_iter_values([external_id.as_slice()])),
+        Arc::new(Float32Array::from(vec![5.0f32])),
+        Arc::new(Float32Array::from(vec![5.0f32])),
+        Arc::new(StringArray::from(vec!["0"])),
+    ];
+    for ty in SCALAR_TAIL_TYPES {
+        let column = scalar_tail_column(ty, scalar_tail_planted(ty), 1);
+        fields.push(Field::new(format!("c_{ty}"), column.data_type().clone(), false));
+        columns.push(column);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// **Every type the schema can declare round-trips: ingested over the wire, flushed, and read back
+/// through the served surface.** The read-back is a per-column `eq` filter on the planted value,
+/// asserted to match exactly the ingested item — a buffered entity matches no filter by design
+/// (`filter-index.md` §5), so the value that answers has crossed the whole seam: Arrow decode to
+/// `WalScalar`, WAL, buffer, and the flush extent the filter scans.
+///
+/// This is the regression test for the missing-arm defect (`control.rs`'s `scalar_at` doc): six of
+/// these twelve types were declarable and buildable but refused at ingest with a 422, so the 200
+/// asserted first is half the test. Enumerating [`SCALAR_TAIL_TYPES`] rather than naming the six
+/// keeps the assertion complete against the next type the set grows by.
+#[tokio::test]
+async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_scalar_tail_fixture(&bundle_root, tmp.path());
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .header("x-tessera-batch-id", "scalar-tail")
+        .header("content-type", "application/octet-stream")
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .body(build_scalar_tail_ingest_batch())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        status, 200,
+        "every declared column at its wire type must be ingestable: {body}"
+    );
+
+    // Flush, and barrier on the publication — the counter, not a sleep.
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    let mut published = false;
+    for _ in 0..10_000 {
+        let status = control_status(&server).await;
+        if status["write_executor"]["flush"]["flushes"].as_u64() == Some(1) {
+            published = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(published, "the flush never published");
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let viewport = |filters: Option<serde_json::Value>| {
+        let mut body = serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        });
+        if let Some(filters) = filters {
+            body["filters"] = filters;
+        }
+        server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+    };
+
+    // The premise: the flushed item is visible at all, alongside the base corpus.
+    let resp = viewport(None).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (tiles, _) = decode_viewport(&resp.bytes().await.unwrap());
+    let visible: u64 = tiles.iter().map(|t| t.1).sum();
+    assert_eq!(
+        visible,
+        SCALAR_TAIL_N + 1,
+        "the base corpus plus the flushed item must be visible"
+    );
+
+    for ty in SCALAR_TAIL_TYPES {
+        let mut filters = serde_json::Map::new();
+        filters.insert(
+            format!("c_{ty}"),
+            serde_json::json!({ "eq": scalar_tail_planted(ty) }),
+        );
+        let resp = viewport(Some(serde_json::Value::Object(filters))).await.unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "column 'c_{ty}' must accept an eq filter"
+        );
+        let (tiles, points) = decode_viewport(&resp.bytes().await.unwrap());
+        let matched: u64 = tiles.iter().map(|t| t.2).sum();
+        assert_eq!(
+            matched, 1,
+            "column 'c_{ty}': the ingested value must come back through the filter — no more \
+             (a re-typed value), no fewer (a dropped one)"
+        );
+        assert_eq!(
+            points.len(),
+            1,
+            "column 'c_{ty}': the matching item is drawn"
+        );
+    }
 }
