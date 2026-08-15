@@ -10,15 +10,24 @@ number: it uses the masked count as the criterion deciding whether the artifact 
 *(owner, 2026-08-15)*. The number beside a served artifact is the masked count, unmodified, as it
 always was.
 
-Two mechanisms had been collapsed into one name:
+**Correction, same day** *(owner, 2026-08-15)*: this section first claimed a **second mechanism**
+existed beside the criterion — *"count suppression / rollup: serve the artifact, withhold or coarsen
+its number"* — citing [`annotations.md`](../design/annotations.md) §8.2's boundaries. **There is no
+such mechanism, and inventing one contradicted
+[decision 0076](0076-an-artifact-is-served-whole-or-not-at-all.md)**, under which an artifact with a
+withheld number is a partial artifact and forbidden.
 
-| | What it does | Where it belongs |
-|---|---|---|
-| **The existence criterion** (this decision) | serve the artifact iff its masked count clears the bar | corpus-derived groupings, whose *existence* is evidence about data the viewer cannot see |
-| **Count suppression / rollup** | serve the artifact, withhold or coarsen its number | [`annotations.md`](../design/annotations.md) §8.2's boundary rollup — a different mechanism, not this one, and not settled here |
+**A ward and a district are two artifacts, on two levels of one layer, joined by an edge — not one
+artifact whose number is drawn two ways.** So "rolling a suppressed ward count up to its district" is
+not an operation on a number at all: the ward fails its criterion and is **absent, whole**; the
+district contains more of the viewer's visible members, clears the criterion on its own count, and is
+**served whole, with its own exact number**. What the viewer sees is a coarser object, which is what
+rollup always was.
 
-Conflating them is what made the model appear to say three incompatible things about substitutive
-layers. It said one thing about two mechanisms.
+That is [decision 0080](0080-the-frontier-is-a-per-artifact-test.md)'s statement — *rollup emerges
+from independent per-artifact decisions rather than being a property of the walk* — arriving in the
+geographic case, and the two should be read together. The count beside any served artifact is its own
+masked count, unmodified. **Nothing suppresses a number.**
 
 ## The decision
 
