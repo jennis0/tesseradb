@@ -1,6 +1,6 @@
 # Tessera — Concurrency and Lifecycle Design
 
-**Status:** Draft r10 — a correction, not a design change: the compaction fold is **built**, so both removal rules are in force and §3.2's "nothing else retires at all" is withdrawn. No mechanism changes. r9 stands otherwise — decisions 0058 and 0059: §7.2's single-flight waiters block, bounded and cancellable, and the 429 it used to produce on every race is now the answer at the end of a wait. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
+**Status:** Draft r11 — decision 0071 applied to §7.3: the fault switchboard gains the three publication-seam pause sites and the faults build's arming surface, and its gate narrows from "nothing `cargo build` produces can carry it" to "no default-features build carries it", asserted both ways by `check-layers.sh` rule 2. r10 stands otherwise — a correction, not a design change: the compaction fold is **built**, so both removal rules are in force and §3.2's "nothing else retires at all" is withdrawn. No mechanism changes. r9 stands otherwise — decisions 0058 and 0059: §7.2's single-flight waiters block, bounded and cancellable, and the 429 it used to produce on every race is now the answer at the end of a wait. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
 
 **Owns:** the mechanism level of the lifecycle **on the read side and in the infrastructure** — thread and state ownership, the generation lifecycle and its retention, geometry-versus-authorisation, WAL *recovery*, caching and single-flight, the router/worker protocol, and the crash matrix. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
 
@@ -330,11 +330,13 @@ The refusal it replaced was not backpressure and calling it that hid the defect:
 
 ### 7.3 Fault injection
 
-Four properties of §4 occur only when durability *fails*: a suppression applied despite a disk-full append, a poisoned WAL tripping the not-ready posture, an ack that must not precede its swap, a deny that must not queue behind work. None is reachable by a test that can only ask the executor to succeed. The write path therefore carries a fault switchboard — WAL append and fsync failures, and two pause sites — behind a feature enabled only through a self dev-dependency, so nothing `cargo build` produces can carry it.
+Four properties of §4 occur only when durability *fails*: a suppression applied despite a disk-full append, a poisoned WAL tripping the not-ready posture, an ack that must not precede its swap, a deny that must not queue behind work. None is reachable by a test that can only ask the executor to succeed. The write path therefore carries a fault switchboard — WAL append and fsync failures, and five pause sites: two on the ack contract, and three at the publication seams a crash test needs and an arbitrary kill essentially never lands on (before a side-manifest commits into the live prefix, before the fold's `CURRENT` flip, and between a merge's execution on the pool and its publication on the executor).
+
+The switchboard reaches a build by exactly two routes, and no default-features build carries it (decision [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md)): the self dev-dependencies, which is how every test in the tree gets it, and a declared, default-off `fault-injection` feature on `tessera-server` and `tessera-cli` — the correctness suite's *faults build*, which carries a bearer-gated `/control/faults/*` arming surface (arm a named site, observe a thread has arrived, release) and goes to its own target directory, never `target/release/tessera`. `check-layers.sh` rule 2 asserts the guarantee from the resolved feature graph, in both directions: the default resolution reaches no `fault-injection`, and the faults build does.
 
 **The fidelity rule: an injected failure must be indistinguishable from a real one, in variant and in order.** A real WAL returns an IO error on the failing call and a poisoned error on every call after it, so an injected failure does the same. Returning "poisoned" on the *first* call would diverge on precisely the error that the 500 mapping, the operator alarm and the deny-apply-anyway branch all switch on — the one call whose variant matters most. The real sequence is pinned independently by a test that provokes a genuine IO error; if the two ever disagree, everything depending on injection is measuring the harness.
 
-Two pause sites, not one, because one cannot discriminate the ordering it exists to protect. *After-fsync* proves nothing about the relative order of swap and ack — both are still ahead of the parked thread. *Before-ack* is armed **inside** the ack function rather than at its call site, so it travels with the ack: a build that acks before it swaps parks there with the swap still ahead of it and fails on engine state alone. There is deliberately no "abort" action: a panic unwinds and runs the drop guards, which a `SIGKILL` does not, so a harness offering it would let a worker model a clean shutdown and call it a crash.
+Two ack sites, not one, because one cannot discriminate the ordering it exists to protect. *After-fsync* proves nothing about the relative order of swap and ack — both are still ahead of the parked thread. *Before-ack* is armed **inside** the ack function rather than at its call site, so it travels with the ack: a build that acks before it swaps parks there with the swap still ahead of it and fails on engine state alone. There is deliberately no "abort" action: a panic unwinds and runs the drop guards, which a `SIGKILL` does not, so a harness offering it would let a worker model a clean shutdown and call it a crash — a real crash is a killed process, parked demonstrably at a seam site, which is exactly what the arming surface exists to arrange. Three seam sites and not more, because the write path has exactly three commit points where bytes exist on disc and nothing durable names them; a kill anywhere else is indistinguishable from a kill at the nearest seam, and each site parks the thread holding no lock.
 
 **This pre-empts the conformance design's pause points by three stages, with different vocabulary and a different home** (conformance §5, which specifies eight differently-named pause points behind a `conformance` cargo feature). They are the same mechanism. Whichever stage builds the conformance harness must extend this one rather than build a second beside it.
 
@@ -371,6 +373,17 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 10. **Injected failures are indistinguishable from real ones in variant and order**, and the conformance harness extends this mechanism rather than adding a second — §7.3.
 
 ## Appendix R — Review record
+
+**r11** (2026-08-15) applies decision
+[0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md) to §7.3.
+**The claim that changed sides is "nothing `cargo build` produces can carry it"** — true while the
+self dev-dependency was the only enablement route, and false the moment the feature became
+declarable on `tessera-server` and `tessera-cli` for the correctness suite's faults build. The
+guarantee narrowed to *no default-features build carries it*, which is what every deployment gets,
+and `check-layers.sh` rule 2 now asserts it in both directions from the resolved feature graph.
+The switchboard also gained the three publication-seam pause sites and the faults build's arming
+surface, so "two pause sites" became five. The fidelity rule, the no-abort rule and the
+hold-no-lock rule are unchanged; the ack-ordering argument is untouched.
 
 **r10** (2026-08-14) is a correction. §3.2 carried a marker saying no compaction fold exists and
 that nothing but an unsuppress retires; the fold is built, normative and reviewed against its

@@ -230,7 +230,17 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     //
     // Nothing is stored in `AppState`: the engine owns the handle, so `/control/*` reaches the
     // executor through `state.engine` exactly as it reached the WAL before.
+    #[cfg(not(feature = "fault-injection"))]
     engine.start_write_executor(config.ingest_queue_bound)?;
+    // The faults build (decision 0071): the executor starts with a switchboard, disarmed — every
+    // site is a no-op until `/control/faults/arm` names one — and `AppState` keeps the other end
+    // so the control plane arms the thread that pauses.
+    #[cfg(feature = "fault-injection")]
+    let faults = {
+        let faults = Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
+        engine.start_write_executor_with_faults(config.ingest_queue_bound, Arc::clone(&faults))?;
+        faults
+    };
     // The two cache bounds, validated above.
     engine.set_cache_bounds(
         config.row_projection_cache_bytes,
@@ -286,6 +296,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         session_credential: config.session_credential.clone(),
         operator_credential: config.operator_credential.clone(),
         dev_cors_origins: config.dev_cors_origins.clone(),
+        #[cfg(feature = "fault-injection")]
+        faults,
     });
 
     // Loud, and at `warn`, because the key's effect is to let a page from another origin present a

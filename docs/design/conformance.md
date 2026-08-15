@@ -1,6 +1,6 @@
 # Tessera — Conformance Suite Design
 
-**Status:** Draft r10 — a correction, not a design change: the compaction fold is **built**, and three of this document's claims that it does not exist are wrong. Scripts 2, 3 and 6 move from "no machinery to test" to **untested machinery**, which is a testing gap where it previously was not one (§0, §2, §5). **No coverage row moves** — §4.6 is untouched, per decision 9. r9 stands otherwise: I12's mask half is covered by the attribute-filter differential in the form filter-surface §9 specifies, its frontier half blocked on the label service with I3; script 5 is unreconstructable and the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
+**Status:** Draft r11 — §5's marker refreshed to decision 0071's state of the world: five pause sites, the seam three landed by extending the switchboard as the marker demands, and the gate now "no default-features build", the feature being declarable for the correctness suite's faults build. §5's eight points remain unbuilt. r10 stands otherwise — a correction, not a design change: the compaction fold is **built**, and three of this document's claims that it does not exist are wrong. Scripts 2, 3 and 6 move from "no machinery to test" to **untested machinery**, which is a testing gap where it previously was not one (§0, §2, §5). **No coverage row moves** — §4.6 is untouched, per decision 9. r9 stands otherwise: I12's mask half is covered by the attribute-filter differential in the form filter-surface §9 specifies, its frontier half blocked on the label service with I3; script 5 is unreconstructable and the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
 
 **Owns:** the design of `conformance/` and `reference/` — harness architecture, oracle interfaces, fixtures, the invariant matrix's concrete test forms, the interleaving machinery, and what "pass" means. The implementation plan (§10.1) is blunt that the suite is the deliverable; this document exists so it is designed, not accreted.
 
@@ -175,7 +175,7 @@ A third, `fsync_offset()`, was specified here and **retired rather than built** 
 >
 > **`fsync_offset()` is not needed and will not be built.** The crash tests below require the WAL's last-synced position, and the WAL already publishes it durably: the sidecar `<name>.sync` holds an 8-byte little-endian offset, written write-tmp-then-rename and fsynced with its directory entry after every WAL fsync, because replay itself needs it (lifecycle; `wal.rs`, "the durable prefix"). The harness reads that file. A command would have added a feature-gated introspection surface to expose a number already on disk — and worse, would have had the engine report on the very property under test. **Two of the three commands remain unbuilt:** `evict_fragment` exists as a Rust method used by Rust tests and reachable from no HTTP route, so the Python suite cannot call it; `ledger_state()` does not exist, and the stamp ledger it was specified to report is **deleted from the spec** rather than unbuilt (write-path §5.4), so what it must report is the overlay's entry states alone — above.
 >
-> **A different pause mechanism already exists.** None of the eight pause points exists and the `conformance` feature does not exist. What exists instead is the write path's fault switchboard, with two pause sites, WAL append and fsync failure injection, and a step log, behind a feature enabled only through a self dev-dependency (lifecycle §7.3). Different names, a different gate, and a home in the engine rather than in `conformance/`. It is the same mechanism, three stages early, and it carries a rule this section does not state — **an injected failure must be indistinguishable from a real one in variant and in order.** The stage that builds this section must extend that switchboard. Building a second pause mechanism beside the first is the outcome this marker exists to prevent, and it is the natural one, because the two designs share no vocabulary.
+> **A different pause mechanism already exists.** None of the eight pause points exists and the `conformance` feature does not exist. What exists instead is the write path's fault switchboard, with five pause sites (two on the ack contract, three at the publication seams), WAL append and fsync failure injection, and a step log, reaching a build only through self dev-dependencies or the declared, default-off `fault-injection` feature on `tessera-server`/`tessera-cli` — the correctness suite's faults build (decision 0071; lifecycle §7.3). Different names, a different gate, and a home in the engine rather than in `conformance/`. It is the same mechanism, three stages early, and it carries a rule this section does not state — **an injected failure must be indistinguishable from a real one in variant and in order.** The stage that builds this section must extend that switchboard — as the correctness suite's seam sites already have, which is the precedent to follow rather than re-argue. Building a second pause mechanism beside the first is the outcome this marker exists to prevent, and it is the natural one, because the two designs share no vocabulary.
 
 
 **The scripts** (the plan's seven, plus one):
@@ -224,6 +224,15 @@ A differential failure is a defect until proven a fixture bug. The oracle change
 9. **Coverage is reported, not claimed.** §4.6 is the matrix of record, and a row moves only when a test moves with it.
 
 ## Appendix R — Review record
+
+**r11** (2026-08-15) refreshes §5's marker to what exists after decision
+[0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md): the fault
+switchboard's pause sites went from two to five (the correctness suite's three publication-seam
+sites landed **by extending the switchboard**, the route this marker demands), and its gate is no
+longer "only through a self dev-dependency" — the feature is declarable on
+`tessera-server`/`tessera-cli` for the faults build, and the guarantee is now "no default-features
+build carries it". §5's own eight pause points remain unbuilt and the marker's instruction stands
+unchanged; nothing else in this document moves.
 
 **r10** (2026-08-14) is a correction. This document said in three places that the compaction fold
 does not exist; it is built, normative and reviewed three times against its implementation

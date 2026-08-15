@@ -10,6 +10,13 @@ default = []
 # gates because cargo unifies features across a `--workspace` build, so the compile-time gate
 # alone cannot be trusted to stay off in a binary built alongside `tessera-bench`.
 bench-timing = ["tessera-engine/bench-timing"]
+# The correctness suite's faults build (decision 0071): the write executor's fault switchboard,
+# its three publication-seam pause sites, and the bearer-gated /control/faults/* arming surface.
+# OFF by default, and the default build is what every deployment gets — a binary built with this
+# goes to ITS OWN target directory (see tessera-cli's feature comment for the command), never
+# target/release/tessera, which the oracle harness owns. `scripts/check-layers.sh` rule 2 asserts
+# no default-features release build reaches the switchboard, from the resolved feature graph.
+fault-injection = ["tessera-engine/fault-injection", "tessera-lifecycle/fault-injection"]
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
@@ -36,6 +43,10 @@ arrow = { workspace = true }
 rustc-hash = "1"
 
 [dev-dependencies]
+# Self dev-dependency, the same shape as tessera-lifecycle's and tessera-engine's: this crate's
+# integration tests run against the faults build so the arming surface is exercised over real
+# HTTP, and `cargo tree -e normal` does not see this edge — which is what keeps rule 2 green.
+tessera-server = { path = ".", features = ["fault-injection"] }
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
 tessera-spatial = { path = "../tessera-spatial" }

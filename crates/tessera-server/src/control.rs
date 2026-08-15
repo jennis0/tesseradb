@@ -241,12 +241,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     // inherited so the 422's detail can name a number that is true.
     let changes_route =
         post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
-    Router::new()
+    let router = Router::new()
         .route("/control/ingest", ingest_route)
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
         .route("/control/flush", post(flush))
-        .route("/control/compact", post(compact))
+        .route("/control/compact", post(compact));
+    // The faults build's arming surface (decision 0071) — absent from a default build rather
+    // than mounted and refusing, and above the credential layer below like every other route.
+    #[cfg(feature = "fault-injection")]
+    let router = router
+        .route("/control/faults/arm", post(faults_arm))
+        .route("/control/faults/arrivals", get(faults_arrivals))
+        .route("/control/faults/release", post(faults_release));
+    router
         // **The whole plane's credential check, in one place** — see
         // [`require_operator_credential`]. `Router::layer` rather than a `route_layer` per route:
         // the point of this construction is that a route added below inherits the check without
@@ -1682,6 +1690,73 @@ async fn flush(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
     state.engine.request_fold();
     StatusCode::ACCEPTED
+}
+
+/// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
+/// correctness-suite §12.3). **The faults build only**; a default build does not mount the route.
+///
+/// Minimal by design — arm a named site, observe a thread has arrived
+/// ([`faults_arrivals`]), release ([`faults_release`]) — because that is everything a driver
+/// needs to pause, kill and resume. Everything else the switchboard offers (failure injection,
+/// the step log, `fire_after` counts, the panic action) stays in-process, where a test can hold
+/// the invariants that make it meaningful.
+///
+/// `Stall` is the only action the wire can arm, deliberately: a crash is the driver's own
+/// `SIGKILL` against a demonstrably parked process, and the panic action models an unwind — drop
+/// guards run, the WAL closes — which no crash test may read as a crash
+/// (`tessera_lifecycle::faults::PauseAction`'s own rule).
+#[cfg(feature = "fault-injection")]
+async fn faults_arm(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FaultSiteRequest>,
+) -> Result<StatusCode, ApiError> {
+    let site = parse_pause_site(&req.site)?;
+    state
+        .faults
+        .arm_pause(site, tessera_lifecycle::faults::PauseAction::Stall);
+    Ok(StatusCode::OK)
+}
+
+/// `GET /control/faults/arrivals?site=<name>` — how many times the executor has reached the
+/// named site since it was armed. The driver polls this rather than sleeping: a non-zero count
+/// under a stall arming means a thread is demonstrably parked, which is the precondition for a
+/// kill (correctness-suite §12.3's crash modifier).
+#[cfg(feature = "fault-injection")]
+async fn faults_arrivals(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(req): axum::extract::Query<FaultSiteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let site = parse_pause_site(&req.site)?;
+    Ok(Json(serde_json::json!({
+        "site": site.name(),
+        "arrivals": state.faults.arrivals(site),
+    })))
+}
+
+/// `POST /control/faults/release` — release every parked thread and disarm every site. The
+/// release-all form, matching `FaultSwitchboard::release`: a driver that finished (or abandoned)
+/// a leg must not be able to leave the executor wedged on a site it forgot.
+#[cfg(feature = "fault-injection")]
+async fn faults_release(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.faults.release();
+    StatusCode::OK
+}
+
+/// The one JSON/query shape both fault routes share: a pause site, by its switchboard name.
+#[cfg(feature = "fault-injection")]
+#[derive(serde::Deserialize)]
+struct FaultSiteRequest {
+    site: String,
+}
+
+#[cfg(feature = "fault-injection")]
+fn parse_pause_site(name: &str) -> Result<tessera_lifecycle::faults::PauseSite, ApiError> {
+    tessera_lifecycle::faults::PauseSite::from_name(name).ok_or_else(|| {
+        ApiError::Contract(format!(
+            "unknown pause site {name:?}; the sites are after_fsync, before_ack, \
+             before_manifest_publish, before_current_flip, before_merge_publish"
+        ))
+    })
 }
 
 /// **The precedent for [`require_operator_credential`], and the reason it is a layer.** R5 requires

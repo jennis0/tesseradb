@@ -7,6 +7,21 @@ edition = "2021"
 name = "tessera"
 path = "src/main.rs"
 
+[features]
+# The correctness suite's faults build (decision 0071): a `tessera` binary whose write executor
+# carries the fault switchboard, its three publication-seam pause sites, and the bearer-gated
+# /control/faults/* arming surface. OFF by default — the default build is what every deployment
+# gets. A binary built with this goes to ITS OWN path, never target/release/tessera, which
+# reference/oracle/harness.py builds with default features always and whose doc forbids any
+# non-default binary at that path:
+#
+#   cargo build --release -p tessera-cli --features fault-injection --target-dir target/faults
+#
+# The binary lands at target/faults/release/tessera. `scripts/check-layers.sh` rule 2 asserts,
+# from the resolved feature graph, that no default-features release build reaches the
+# switchboard — and that this build does.
+fault-injection = ["tessera-server/fault-injection"]
+
 [dependencies]
 tessera-build = { path = "../tessera-build" }
 # The `tokenise` verb only — the conformance oracle's access to the shipped analyser, so the two

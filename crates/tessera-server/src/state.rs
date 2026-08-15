@@ -570,6 +570,12 @@ pub struct AppState {
     /// no CORS layer at all. See [`crate::cors`] for why this is a development affordance and why
     /// the control plane never consults it.
     pub dev_cors_origins: Vec<String>,
+    /// The write executor's fault switchboard — the faults build only (decision 0071), absent
+    /// from the struct in a default build rather than present and inert. The same `Arc` the
+    /// executor consults, so `/control/faults/*` arms the thread that actually pauses. Bearer
+    /// auth is the router layer's, like every other control route.
+    #[cfg(feature = "fault-injection")]
+    pub faults: std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>,
 }
 
 impl AppState {

@@ -8,12 +8,14 @@ default = []
 # Deliberate WAL/executor fault injection — see `src/faults.rs`, which argues why the hooks live
 # beside the executor rather than with the conformance suite's own pause points.
 #
-# Enabled ONLY through the self dev-dependency below, never as a normal dependency of anything.
-# `cargo build` does not build dev-dependencies, so nothing `cargo build` produces can carry this
-# code. Note honestly what that does NOT buy: `cargo test --workspace` still unifies the feature
-# across the workspace, exactly as `bench-timing` does — measured, not assumed. So the rule that
-# actually matters is the one `scripts/check-layers.sh` enforces: no NORMAL dependency may enable
-# it, and no shipped crate's behaviour may depend on it.
+# Two enablement routes, both deliberate (decision 0071): the self dev-dependency below (tests),
+# and the declared, default-off `fault-injection` feature on tessera-server/tessera-cli (the
+# correctness suite's faults build, to its own target directory). `cargo build` does not build
+# dev-dependencies and the server/CLI feature is off by default, so no default-features build
+# carries this code. Note honestly what that does NOT buy: `cargo test --workspace` still unifies
+# the feature across the workspace, exactly as `bench-timing` does — measured, not assumed. So the
+# rule that actually matters is the one `scripts/check-layers.sh` enforces: no DEFAULT-FEATURES
+# release build may reach it, answered from the resolved feature graph.
 fault-injection = []
 
 [dependencies]

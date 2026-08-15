@@ -29,11 +29,22 @@
 //! is exactly the discrimination a count cannot make. `publish_merge` re-derives the mask over the
 //! new row space for this reason; these are the tests that hold it to it.
 //!
-//! **Not covered here, deliberately:** a suppression that arrives *between* a merge's execution on
-//! the pool and its publication on the executor. `publish_merge` re-derives from the live overlay
-//! at swap time, so the ordering is sound by construction, but there is no pause site between
-//! those two points and a test that raced them would assert on scheduling. Reaching it needs a
-//! pause site in the merge publication path, which is the same hook a crash-mid-merge test needs.
+//! **The seam between a merge's execution on the pool and its publication on the executor now
+//! has its pause site** — `faults::PauseSite::BeforeMergePublish`, the first statement of
+//! `publish_merge` (decision 0071; correctness-suite §12.3) — and
+//! `the_merge_publication_seam_parks_the_executor…` below holds it to the pause-site contract:
+//! executed on the pool, parked before publication, nothing swapped, and the publication lands on
+//! release. That parked state is what a crash-mid-merge test kills into: the merged segment an
+//! orphan, its inputs untouched.
+//!
+//! **Still not covered here, and now for a sharper reason:** a suppression *accepted* in that
+//! window. `publish_merge` re-derives the deny mask from the live overlay at swap time, so the
+//! ordering is sound by construction — but the pause site cannot assemble the interleaving,
+//! because the parked thread *is* the deny lane's thread: no deny can be accepted while the
+//! executor is parked, and one submitted then is applied after the release completes the
+//! publication. Constructing "deny accepted after execution, before publication" would need a
+//! pause on the **pool's** side of the seam, which is not one of the three ruled sites. The
+//! re-derive at swap time remains the argument, held by the suppression cases above.
 
 mod common;
 
@@ -56,8 +67,8 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
-fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
-    let mut engine = Engine::open(
+fn open_engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
+    Engine::open(
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
@@ -70,11 +81,29 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
             ..config_uncapped()
         },
     )
-    .expect("engine opens");
+    .expect("engine opens")
+}
+
+fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
+    let mut engine = open_engine_at(tmp, root);
     engine
         .start_write_executor(64)
         .expect("the executor starts once");
     engine
+}
+
+/// [`engine_at`], with the executor run against a switchboard the test holds the other end of —
+/// the seam-pause case below is its one caller.
+fn engine_at_with_faults(
+    tmp: &std::path::Path,
+    root: &std::path::Path,
+) -> (Engine, std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>) {
+    let mut engine = open_engine_at(tmp, root);
+    let faults = std::sync::Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(64, std::sync::Arc::clone(&faults))
+        .expect("the executor starts once");
+    (engine, faults)
 }
 
 fn whole_extent() -> ViewportRequest<'static> {
@@ -881,5 +910,100 @@ fn a_configured_segment_floor_reaches_selection_and_changes_which_segments_merge
     assert!(
         rows.iter().all(Option::is_some),
         "every flushed entity still has a row: {rows:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The publication seam — decision 0071's pause site, held to the pause-site contract.
+// ---------------------------------------------------------------------------------------------
+
+/// **The executor parks between a merge's execution and its publication, and proceeds on
+/// release** — the hook this module's doc recorded as missing, now held: arrive, block, proceed.
+///
+/// The parked state is the crash-mid-merge state (correctness-suite §10.1): the merged segment
+/// exists on the pool's say-so and nothing else — no side-manifest names it, no swap has
+/// happened, row space is unpermuted and the served set is untouched. A driver that kills a
+/// server parked here restarts into a bundle whose inputs all stand and whose merge output is an
+/// orphan, which is §12.3's discard rule for this seam.
+///
+/// Arrival alone cannot distinguish "parked" from "about to publish", so the case settles briefly
+/// after the arrival before asserting nothing published — a `Stall` that failed to block becomes
+/// a reliable failure rather than a racy pass.
+#[test]
+fn the_merge_publication_seam_parks_the_executor_between_execution_and_publication() {
+    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+    const WAIT: Duration = Duration::from_secs(30);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let (engine, faults) = engine_at_with_faults(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    let items: Vec<(EntityId, String)> = flush_interleaved_segments(&engine)
+        .into_iter()
+        .flatten()
+        .collect();
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let served_before = served_ids(&engine, &session);
+    let segments_before = segment_count(&engine);
+    let rows_before = rows_of(&engine, &entities);
+
+    faults.arm_pause(PauseSite::BeforeMergePublish, PauseAction::Stall);
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+
+    // Arrives — and an arrival here is itself proof the pool's execution completed, because
+    // `publish_merge` is reached only with a `CompletedMerge` in hand.
+    faults.await_arrivals(PauseSite::BeforeMergePublish, 1, WAIT);
+
+    // Blocks: executed, and nothing published — no swap, no permutation, no served change.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        engine.write_executor_stats().merges,
+        0,
+        "a parked merge has published nothing"
+    );
+    assert_eq!(
+        segment_count(&engine),
+        segments_before,
+        "the consumed segments all still stand while the executor is parked"
+    );
+    assert_eq!(
+        rows_of(&engine, &entities),
+        rows_before,
+        "row space is unpermuted while the executor is parked"
+    );
+    assert_eq!(
+        served_ids(&engine, &session),
+        served_before,
+        "the served set is untouched while the executor is parked"
+    );
+
+    // Proceeds: release, and the publication lands whole.
+    faults.release();
+    wait_until("the released merge publishes", || {
+        engine.write_executor_stats().merges >= 1
+    });
+    assert!(
+        segment_count(&engine) < segments_before,
+        "the released merge brought the segment count down"
+    );
+    assert_ne!(
+        rows_of(&engine, &entities),
+        rows_before,
+        "the released merge permuted row space — an identity permutation would make the \
+         parked-state assertions above vacuous (see flush_interleaved_segments)"
+    );
+    assert_eq!(
+        served_ids(&engine, &session),
+        served_before,
+        "and every item is served across it, at the same identities"
     );
 }

@@ -2575,6 +2575,7 @@ dependencies = [
  "tessera-engine",
  "tessera-lifecycle",
  "tessera-plugin",
+ "tessera-server",
  "tessera-spatial",
  "tessera-types",
  "tessera-wire",

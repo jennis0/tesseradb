@@ -4089,6 +4089,11 @@ impl Executor {
     /// The cost of the split is one extra `segments_version` bump per merge — one more refresh
     /// round, nothing a viewer observes.
     fn publish_merge(&mut self, completed: crate::merge::CompletedMerge) {
+        // The seam between the merge's execution on the pool and its publication here: the merged
+        // segment exists, its inputs stand, and this thread has committed to nothing — it has not
+        // yet read the overlay it will re-derive the deny mask from. First statement, so a parked
+        // executor holds no lock and has taken no decision a kill would tear.
+        self.pause_point(PauseSiteArg::BeforeMergePublish);
         let started = std::time::Instant::now();
         // **A node whose durable state disagrees with what it is serving publishes nothing**
         // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
@@ -4120,6 +4125,9 @@ impl Executor {
         );
 
         let manifest_n = self.allocate_manifest_n();
+        // The publication seam: the merged segment's files are on disc and nothing durable names
+        // them until this write returns (correctness-suite §12.3).
+        self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = tessera_store::write_segments_manifest(
             &self.prefix_dir(&live),
             &completed.plan.partition,
@@ -5016,6 +5024,13 @@ impl Executor {
             return;
         }
         // **The commit point.** Everything above is reversible; nothing below is.
+        //
+        // Which makes this the simplest publication seam in the system: a kill parked here leaves
+        // a complete, synced `v#####` tree `CURRENT` never named, and the startup sweep reclaims
+        // it whole — no per-file bookkeeping (correctness-suite §12.3, compaction §7). The fold's
+        // manifest writes above deliberately carry no pause site of their own: their crash story
+        // is this one's.
+        self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
             tessera_store::write_current(&self.bundle_root, &completed.prefix, &manifest_digest)
         {
@@ -5410,6 +5425,9 @@ impl Executor {
         );
 
         let manifest_n = self.allocate_manifest_n();
+        // The publication seam: the coalesced extents are on disc and nothing durable names them
+        // until this write returns (correctness-suite §12.3).
+        self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = tessera_store::write_segments_manifest(
             &self.prefix_dir(&live),
             &completed.plan.partition,
@@ -7213,6 +7231,10 @@ impl Executor {
                 &live.bundle.manifest.vocabularies,
             );
             let n = self.allocate_manifest_n();
+            // The publication seam, per partition: the dispositions are WAL-durable either way,
+            // so a kill parked here loses only the restore path's freshness — which is exactly
+            // what a crash test at this seam asserts (correctness-suite §12.3).
+            self.pause_point(PauseSiteArg::BeforeManifestPublish);
             if let Err(e) = tessera_store::write_segments_manifest(
                 &self.prefix_dir(&live),
                 partition,
@@ -7419,6 +7441,11 @@ impl Executor {
         // here discards the flush: its files become orphans nothing references, the buffer is
         // retained, the next tick re-plans. The same posture as every other flush failure, and
         // the reason the write precedes the swap.
+        //
+        // And therefore the publication seam: the segment's files are on disc, the WAL still holds
+        // every row they carry, and nothing durable names them until this write returns
+        // (correctness-suite §12.3).
+        self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = tessera_store::write_segments_manifest(
             &self.prefix_dir(&live),
             &completed.partition,
@@ -7866,11 +7893,12 @@ impl Executor {
         respond.fail(error);
     }
 
-    /// Reach an armed pause site, if any. Test builds only; a no-op otherwise.
+    /// Reach an armed pause site, if any. Fault-injection builds only; a no-op otherwise.
     ///
-    /// The two sites are `faults::PauseSite`'s, and the reason there are two is argued there: with
-    /// only the after-fsync one, parking proves nothing about the relative order of the swap and
-    /// the ack, because both are still ahead of the parked executor.
+    /// The sites are `faults::PauseSite`'s, which is where each is argued: two discriminate the
+    /// ack contract's ordering, and three park this thread at the write path's publication seams
+    /// for the correctness suite's crash modifier. Every call site holds no lock — a pause inside
+    /// one would wedge this thread against its own waiters.
     #[cfg(feature = "fault-injection")]
     fn pause_point(&self, site: PauseSiteArg) {
         use tessera_lifecycle::faults::PauseAction;
@@ -7887,7 +7915,7 @@ impl Executor {
     fn pause_point(&self, _site: PauseSiteArg) {}
 }
 
-/// The pause-site argument, so the executor's two call sites read the same in both builds.
+/// The pause-site argument, so the executor's call sites read the same in both builds.
 ///
 /// In a fault-injection build this **is** [`tessera_lifecycle::faults::PauseSite`]. In a shipped
 /// build the module does
@@ -7901,6 +7929,9 @@ type PauseSiteArg = tessera_lifecycle::faults::PauseSite;
 enum PauseSiteArg {
     AfterFsync,
     BeforeAck,
+    BeforeManifestPublish,
+    BeforeCurrentFlip,
+    BeforeMergePublish,
 }
 
 #[cfg(test)]

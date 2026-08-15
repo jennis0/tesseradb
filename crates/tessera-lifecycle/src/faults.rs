@@ -1,4 +1,4 @@
-//! Deliberate fault injection for the write executor — **test builds only**.
+//! Deliberate fault injection for the write executor — **never in a default-features build**.
 //!
 //! ## Why this exists
 //!
@@ -10,12 +10,29 @@
 //!
 //! ## The compile gate, and exactly what it does and does not buy
 //!
-//! Everything in this module is behind `feature = "fault-injection"`, enabled **only via a self
-//! dev-dependency** (`tessera-lifecycle = { path = ".", features = ["fault-injection"] }` in this
-//! crate's own `[dev-dependencies]`, and the same in `tessera-engine`'s).
+//! Everything in this module is behind `feature = "fault-injection"`, reachable by exactly two
+//! routes (decision 0071):
 //!
-//! **What that buys: `cargo build` does not build dev-dependencies, so nothing `cargo build`
-//! produces can carry this code.** Measured, not assumed.
+//! - **a self dev-dependency** (`tessera-lifecycle = { path = ".", features = ["fault-injection"]
+//!   }` in this crate's own `[dev-dependencies]`, and the same shape in `tessera-engine`'s and
+//!   `tessera-server`'s) — how every test in the tree gets it; and
+//! - **a declared, default-off feature on `tessera-server` and `tessera-cli`** — how the
+//!   correctness suite's driver gets a *served binary* that carries the seam pause sites. That
+//!   binary is built to **its own target directory**, never `target/release/tessera`, which the
+//!   oracle harness builds with default features always:
+//!
+//!   ```text
+//!   cargo build --release -p tessera-cli --features fault-injection --target-dir target/faults
+//!   ```
+//!
+//! **What the gate buys: no default-features build carries this code.** `cargo build` does not
+//! build dev-dependencies, and the server/CLI feature is off unless a build asks for it by name —
+//! so the release binary every deployment gets cannot carry the switchboard. Measured, not
+//! assumed, and asserted from the *resolved feature graph* by `scripts/check-layers.sh` rule 2:
+//! **no default-features release build reaches `fault-injection`**. The narrower claim that used
+//! to stand here — *no normal dependency edge anywhere enables it* — was retired by decision 0071,
+//! because the faults build enables it on normal edges deliberately; what the guard still refuses
+//! is that enablement ever becoming anyone's default.
 //!
 //! **What it does not buy, stated because the obvious reading overclaims:** a `cargo test
 //! --workspace` build still unifies the feature across the workspace and
@@ -25,12 +42,13 @@
 //! ["bench-timing"]`, so a `cargo build --workspace --release` reaches it and cannot reach this.
 //!
 //! The consequence to respect rather than re-derive: a `#[cfg(feature = "fault-injection")]` block
-//! compiles differently under `cargo test -p tessera-server` than under `cargo test --workspace`.
-//! So **nothing outside this crate and `tessera-engine`'s own tests may let its behaviour depend on
-//! this feature** — `crates/tessera-server/tests/http.rs` already demonstrates the footgun with a
-//! `bench-timing` block that silently covers less when the feature is absent.
-//! `scripts/check-layers.sh` asserts the part that can be asserted: no *normal* dependency anywhere
-//! enables it.
+//! compiles differently under `cargo test -p tessera-lifecycle` than under `cargo test
+//! --workspace`. So nothing may let a *default* build's behaviour depend on this feature —
+//! `crates/tessera-server/tests/http.rs` already demonstrates the footgun with a
+//! `bench-timing` block that silently covers less when the feature is absent. The crates that
+//! *declare* the feature (`tessera-server`, `tessera-cli`) depend on it only to add the arming
+//! surface and the switchboard's construction; every default-build code path is identical with
+//! and without it.
 //!
 //! ## The fidelity rule
 //!
@@ -127,9 +145,11 @@ pub enum Step {
     Ack,
 }
 
-/// Where in the executor's `append → fsync → apply → swap → ack` sequence a pause point sits.
+/// Where the executor parks: two sites inside the ack contract's `append → fsync → apply → swap
+/// → ack` sequence, and three at the write path's publication seams (decision 0071;
+/// correctness-suite §10.1, §12.3).
 ///
-/// **Two sites, because one cannot discriminate the ordering it exists to protect.** With only
+/// **Two ack sites, because one cannot discriminate the ordering it exists to protect.** With only
 /// [`PauseSite::AfterFsync`], parking proves nothing about the *relative* order of the swap and
 /// the ack: both are still ahead of the parked executor, so a build that acked first and swapped
 /// second parks in exactly the same place and presents exactly the same engine state. Measured,
@@ -137,6 +157,13 @@ pub enum Step {
 /// assertion in `ack_follows_fsync_then_swap` passed and only the step-log assertion failed.
 /// [`PauseSite::BeforeAck`] is what closes that — see its own doc for why its *position inside
 /// `ack`* rather than at a call site is the load-bearing part.
+///
+/// **Three seam sites, because the write path has exactly three commit points a crash test needs
+/// and an arbitrary kill essentially never lands on** — instants where bytes exist on disc and
+/// nothing durable names them. Every other line of a publication is on one side of a commit
+/// point or the other, so a kill there is indistinguishable from a kill at the nearest seam; a
+/// further site would add arming surface without adding a reachable state. Each variant's doc
+/// names its crash story, which is §12.3's discard rule for that seam.
 #[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseSite {
@@ -156,16 +183,81 @@ pub enum PauseSite {
     /// with no reference to the step log. Any rewrite of the executor's ack loop is caught by that
     /// discrimination, because the point moves with the code rather than with the line.
     BeforeAck,
+    /// Before a side-manifest commits into the **live** prefix: the publication's files are on
+    /// disc, and nothing durable names them yet.
+    ///
+    /// The first of the three **publication-seam** sites (correctness-suite §10.1, §12.3). The
+    /// two above discriminate the *ack contract*; these three park the executor at the instants a
+    /// crash test needs, because an arbitrary `SIGKILL` essentially never lands on one. A killed
+    /// process parked here leaves exactly the state §12.3's discard table names: the side-manifest
+    /// being written, and any segment file it names that no earlier manifest does — orphans a
+    /// restart never opens.
+    ///
+    /// Fires at **every** executor-side side-manifest commit into the live prefix — flush, merge,
+    /// coalesce, and the overlay's deny-state write — because all four share one crash story. It
+    /// deliberately does **not** fire for the fold's manifest writes: those land in a prefix
+    /// nothing references until `CURRENT` names it, so their crash story is
+    /// [`PauseSite::BeforeCurrentFlip`]'s (the whole unflipped prefix is discardable), and a site
+    /// that fired for both would hand a driver two different discard rules under one name.
+    BeforeManifestPublish,
+    /// Before the fold's `CURRENT` rename: the folded prefix is complete and synced, and no
+    /// durable pointer names it.
+    ///
+    /// The fold's commit point is a single rename — everything before it is reversible, nothing
+    /// after it is — which makes this the seam whose crash story is simplest: a kill while parked
+    /// here leaves a whole `v#####` tree `CURRENT` never named, and the startup sweep reclaims it
+    /// (compaction §7). No per-file bookkeeping, which is why the correctness suite builds its
+    /// crash modifier against this site first.
+    BeforeCurrentFlip,
+    /// Between a merge's execution on the pool and its publication on the executor: the merged
+    /// segment exists, its inputs are untouched, and the executor has not begun to publish.
+    ///
+    /// The hook `tessera-engine/tests/merge.rs`'s module doc recorded as missing — both for a
+    /// crash-mid-merge test (kill while parked: the output segment is an orphan, the inputs still
+    /// stand) and for ordering a suppression against the publication that re-derives the deny mask
+    /// over the new row space. Sited at the top of the executor's `publish_merge`, before it reads
+    /// the live overlay, so a parked executor has committed to nothing.
+    BeforeMergePublish,
 }
 
 #[cfg(feature = "fault-injection")]
 impl PauseSite {
-    const COUNT: usize = 2;
+    const COUNT: usize = 5;
     fn index(self) -> usize {
         match self {
             PauseSite::AfterFsync => 0,
             PauseSite::BeforeAck => 1,
+            PauseSite::BeforeManifestPublish => 2,
+            PauseSite::BeforeCurrentFlip => 3,
+            PauseSite::BeforeMergePublish => 4,
         }
+    }
+
+    /// The wire name the control plane's arming surface speaks — one vocabulary, defined beside
+    /// the sites so the driver's names cannot drift from the switchboard's
+    /// (correctness-suite §12.3 writes `kill_at=PauseSite.BEFORE_CURRENT_FLIP`; these are those
+    /// names, lowered).
+    pub fn name(self) -> &'static str {
+        match self {
+            PauseSite::AfterFsync => "after_fsync",
+            PauseSite::BeforeAck => "before_ack",
+            PauseSite::BeforeManifestPublish => "before_manifest_publish",
+            PauseSite::BeforeCurrentFlip => "before_current_flip",
+            PauseSite::BeforeMergePublish => "before_merge_publish",
+        }
+    }
+
+    /// The inverse of [`PauseSite::name`]. `None` for an unknown name — the arming surface's 422.
+    pub fn from_name(name: &str) -> Option<Self> {
+        [
+            PauseSite::AfterFsync,
+            PauseSite::BeforeAck,
+            PauseSite::BeforeManifestPublish,
+            PauseSite::BeforeCurrentFlip,
+            PauseSite::BeforeMergePublish,
+        ]
+        .into_iter()
+        .find(|site| site.name() == name)
     }
 }
 
@@ -327,6 +419,16 @@ impl FaultSwitchboard {
                 .unwrap_or_else(|e| e.into_inner());
             pause = guard;
         }
+    }
+
+    /// How many times the executor has reached `site` since it was armed. Non-blocking.
+    ///
+    /// [`FaultSwitchboard::await_arrivals`] is the in-process form and panics on timeout, which is
+    /// right for a test and wrong for an HTTP handler; this is the observation the control plane's
+    /// arming surface polls instead. A driver that has armed [`PauseAction::Stall`] and reads a
+    /// non-zero count here knows a thread is parked at the site — the precondition for a kill.
+    pub fn arrivals(&self, site: PauseSite) -> u64 {
+        self.pause.lock().unwrap_or_else(|e| e.into_inner())[site.index()].arrivals
     }
 
     /// The executor's side of one pause site. Returns the action to take, having already blocked

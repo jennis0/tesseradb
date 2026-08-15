@@ -167,26 +167,54 @@ if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tesse
   fail=1
 fi
 
-# 2. FAULT INJECTION STAYS OUT OF SHIPPED BUILDS. `fault-injection` is enabled only through a self
-#    dev-dependency, and `cargo build` does not build dev-dependencies -- so nothing `cargo build`
-#    produces can carry it. That property is worth exactly as much as the "only via dev-deps" part,
-#    so assert it rather than document it. (Measured caveat, stated honestly in the feature's own
-#    comment: `cargo test --workspace` DOES unify the feature across the workspace, exactly as
-#    `bench-timing` does. This rule guards the release path, which is the one that matters.)
+# 2. FAULT INJECTION STAYS OUT OF THE DEFAULT-FEATURES RELEASE BUILD (decision 0071). The claim
+#    this rule holds NARROWED deliberately: it used to be "no normal dependency edge anywhere
+#    enables fault-injection", and that stopped being true when the feature became declarable on
+#    tessera-server and tessera-cli -- a `--features fault-injection` build enables it across
+#    normal edges on purpose, and that faults build goes to its own target directory, never
+#    target/release/tessera. What every deployment gets is the DEFAULT-FEATURES build, so the rule
+#    now asserts exactly that: the default resolution -- the one `cargo build --workspace
+#    --release` performs -- reaches no fault-injection anywhere. Rule 2b below is the same
+#    guarantee's other face.
 #
 #    ASK CARGO, DO NOT GREP THE MANIFEST. The first version of this rule read manifest text and
 #    exempted any manifest containing a `^fault-injection = ` line -- i.e. it exempted, wholesale,
 #    `tessera-lifecycle/Cargo.toml` and `tessera-engine/Cargo.toml`, the only two manifests that
-#    could ever acquire a normal dependency enabling the feature. Demonstrated, not inferred:
+#    could then acquire a normal dependency enabling the feature. Demonstrated, not inferred:
 #    setting tessera-engine's `tessera-lifecycle` dependency to `features = ["fault-injection"]`
 #    left the rule green while `cargo tree -e normal -p tessera-cli` showed the switchboard reaching
-#    the release binary. The resolved feature set is the only thing that can answer this question,
-#    and `-e normal` is what excludes the self dev-dependency edge the gate is built on.
+#    the release binary. The resolved feature set is the only thing that can answer this question;
+#    `-e normal` is what excludes the self dev-dependency edges the test gate is built on.
+#
+#    THE ABSENCE OF A FEATURES FLAG IS NOW LOAD-BEARING, not an omission: no-flag is how cargo
+#    resolves the default build. Adding `--all-features` "for thoroughness" turns the declared
+#    faults build itself red, and the natural repair -- exempting those lines -- is the manifest
+#    exemption failure above, re-arrived at. Re-demonstrated red after the narrowing (2026-08-15,
+#    the same planted edge as the first demonstration) and reverted green, so the rule is known to
+#    still fail on the edge it was written to catch.
 if cargo tree -e normal --workspace -f "{p} {f}" | grep -n 'fault-injection'; then
-  echo "FAIL: 'fault-injection' is enabled on a NORMAL dependency edge (lines above)."
-  echo "      The gate's whole guarantee is that cargo build cannot reach it, and a normal edge"
-  echo "      puts the fault switchboard in the shipped binary. It may be enabled ONLY through the"
-  echo "      self dev-dependency in tessera-lifecycle/tessera-engine's [dev-dependencies]."
+  echo "FAIL: 'fault-injection' is in the DEFAULT-FEATURES resolution on a normal edge (lines"
+  echo "      above), so a plain cargo build ships the fault switchboard. It may reach a binary"
+  echo "      only through the declared, default-off feature on tessera-server/tessera-cli"
+  echo "      (decision 0071) or the self dev-dependencies in [dev-dependencies]."
+  fail=1
+fi
+
+# 2b. AND THE FAULTS BUILD MUST REACH IT -- the other face of the same guarantee, so the pair is
+#     falsifiable in both directions. Without this, unwiring the feature chain (dropping
+#     tessera-server's forward to tessera-engine's, say) still passes rule 2, every functional
+#     test, and the whole gate -- while the "faults build" the correctness suite's driver boots
+#     carries no switchboard, no seam sites and no arming surface, and every crash stage
+#     silently tests nothing. Same instrument as rule 2: the resolved feature graph, this time
+#     under the one flag the faults build is defined by. Demonstrated red by setting tessera-cli's
+#     `fault-injection = []` (the forward to tessera-server dropped), and reverted green
+#     (2026-08-15).
+if ! cargo tree -e normal -p tessera-cli --features fault-injection -f "{p} {f}" \
+     | grep 'tessera-lifecycle' | grep -q 'fault-injection'; then
+  echo "FAIL: a tessera-cli build with --features fault-injection does not resolve"
+  echo "      tessera-lifecycle with the feature, so the faults build (decision 0071) carries no"
+  echo "      switchboard and the correctness suite's crash stages test nothing. The feature"
+  echo "      chain cli -> server -> engine -> lifecycle has been unwired."
   fail=1
 fi
 

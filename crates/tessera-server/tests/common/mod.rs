@@ -28,6 +28,7 @@ use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig};
+use tessera_lifecycle::faults::FaultSwitchboard;
 use tessera_plugin::Passthrough;
 use tessera_server::state::{AppState, ComputeGate, IngestAdmission, SessionRegistry};
 use tessera_spatial::Bounds;
@@ -236,6 +237,7 @@ pub async fn spawn_server_with_stream_flush(
         Vec::new(),
         stream_flush_bytes,
         stream_write_stall_ms,
+        Arc::new(FaultSwitchboard::new()),
     )
     .await
 }
@@ -419,6 +421,30 @@ async fn mount_server_with(
         dev_cors_origins,
         1 << 20,
         10_000,
+        Arc::new(FaultSwitchboard::new()),
+    )
+    .await
+}
+
+/// As [`mount_server`], for an engine the caller started with
+/// `start_write_executor_with_faults` — the **same** `Arc` must be handed here, or
+/// `/control/faults/*` arms a board no thread ever consults. The one entry point behind the
+/// faults-surface tests; every other mount stores a fresh, disarmed board, which is inert.
+pub async fn mount_server_with_faults(
+    engine: Engine,
+    max_k: usize,
+    compute_gate: ComputeGate,
+    faults: Arc<FaultSwitchboard>,
+) -> TestServer {
+    mount_server_with_flush(
+        engine,
+        max_k,
+        compute_gate,
+        generous_ingest_limits(),
+        Vec::new(),
+        1 << 20,
+        10_000,
+        faults,
     )
     .await
 }
@@ -426,6 +452,7 @@ async fn mount_server_with(
 /// [`mount_server_with`], with the streamed viewport's flush threshold and write-stall budget
 /// explicit — the tests that pin the multi-frame and shed paths mount a threshold far below one
 /// response's bytes and a stall far below the default.
+#[allow(clippy::too_many_arguments)]
 async fn mount_server_with_flush(
     engine: Engine,
     max_k: usize,
@@ -434,6 +461,7 @@ async fn mount_server_with_flush(
     dev_cors_origins: Vec<String>,
     stream_flush_bytes: usize,
     stream_write_stall_ms: u64,
+    faults: Arc<FaultSwitchboard>,
 ) -> TestServer {
     let state = Arc::new(AppState {
         engine,
@@ -461,6 +489,7 @@ async fn mount_server_with_flush(
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         dev_cors_origins,
+        faults,
     });
 
     let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
