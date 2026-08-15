@@ -13,11 +13,17 @@
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
-# ## The two scales, and why they differ
+# ## The four scales, and why they differ
 #
-#     scale   items        prose indexed        bundle
-#     2m4     2,422,486    title + abstract     ~1.4 GB
-#     25m     25,200,000   title                ~3 GB
+#     scale   items          prose indexed        bundle
+#     2m4     2,422,486      title + abstract     ~1.4 GB
+#     25m     25,200,000     title                ~2.7 GB
+#     250m    250,000,000    none                 ~5 GB
+#     1b      1,000,000,000  none                 ~20 GB
+#
+# The two large scales are worth starting deliberately rather than by default: between them they
+# are ~135 GB of bundle and the better part of an afternoon to build. `--scale 2m4 --scale 25m`
+# is the pair to reach for while working on the client.
 #
 # Abstracts stop at the small scale because they are 954 characters against a title's 73: the record
 # blob holding 25.2M of them is ~26 GB, and its index ~4 GB on top. The viewer draws its filter
@@ -136,18 +142,25 @@ export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 bundle_override=""
 run_viewer=1
 rebuild=0
+build_only=0
 scales=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scale)      scales+=("$2"); shift 2 ;;
     --bundle)     bundle_override="$2"; shift 2 ;;
     --no-viewer)  run_viewer=0; shift ;;
+    --build-only) build_only=1; shift ;;
     --rebuild)    rebuild=1; shift ;;
     -h|--help)    sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)            echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[[ ${#scales[@]} -eq 0 ]] && scales=(2m4 25m)
+# `1b` is deliberately NOT in the default set, and the reason is the served side rather than the
+# build: its hot columns alone are 11.16 GiB resident (the figure the build prints), so on a
+# machine that does not have that to spare *on top of* the other scales, adding it to the picker
+# makes every scale slower rather than adding one that works. Build it with
+# `--scale 1b --build-only` and serve it by itself with `--scale 1b`.
+[[ ${#scales[@]} -eq 0 ]] && scales=(2m4 25m 250m)
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
@@ -171,11 +184,11 @@ cargo build --release -p tessera-cli
 # Per scale: items, the label the picker shows, and the port triple. Ports are fixed per scale
 # rather than allocated, so a `curl` in a second terminal keeps working across restarts and the
 # smoke scripts need no discovery step.
-items_of()   { case "$1" in 2m4) echo 2422486 ;; 25m) echo 25200000 ;; *) echo 0 ;; esac; }
+items_of()   { case "$1" in 2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;; *) echo 0 ;; esac; }
 prose_of()   { case "$1" in 2m4) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
-viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; *) echo 0 ;; esac; }
-session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; *) echo 0 ;; esac; }
-control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; *) echo 0 ;; esac; }
+viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; *) echo 0 ;; esac; }
+session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; *) echo 0 ;; esac; }
+control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; *) echo 0 ;; esac; }
 
 # `--bundle` is the escape hatch: one server, one entry in the picker, no build.
 if [[ -n "$bundle_override" ]]; then
@@ -201,9 +214,18 @@ build_scale() {
   schema="$DATA/demo/schema-$scale.toml"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
-  if [[ -d "$bundle" ]]; then
+  # `CURRENT` is written last, so its presence — not the directory's — is what says the build
+  # finished. A build killed partway (an OOM, a Ctrl-C, a laptop lid) leaves `v00000` holding a
+  # truncated segment, and reusing that directory serves a corpus with a hole in it rather than
+  # failing: the bundle opens, `/readyz` passes, and the map is quietly missing whatever the
+  # writer had not reached. Discard and rebuild instead.
+  if [[ -d "$bundle" && -e "$bundle/CURRENT" ]]; then
     say "reusing $scale at $bundle (--rebuild to discard it)"
     return
+  fi
+  if [[ -d "$bundle" ]]; then
+    say "discarding an incomplete $scale bundle at $bundle (no CURRENT — a build died partway)"
+    rm -rf "$bundle"
   fi
 
   for f in "$points" "$schema" "$DATA/demo/archive.parquet" \
@@ -224,11 +246,69 @@ build_scale() {
 
   say "building the $scale bundle ($(items_of "$scale") items)"
   mkdir -p "$DEV"
+
+  # **Minting is dropped above 10⁸ items, and the reason is a pass the memory budget cannot
+  # reach.** `pipeline.rs`' own table bounds three passes by the corpus rather than by the plan:
+  # `source_ids` at 8N, minted external ids at 20N, and geometry + tiler + segment at 28N. Only
+  # the per-batch and per-band rows answer to `--memory-budget`, so at 250,000,000 items the
+  # minting pass alone is ~5 GB on top of the ~7 GB the geometry pass needs, and no batch size
+  # moves either — measured, by four builds at four budgets all dying at the same 4.8 GB of
+  # output. Minting is off by default in the binary for an unrelated and better reason
+  # (contracts §2.4: an external id is not manufactured for an item whose caller supplied none),
+  # and the demo wants none of it — the viewer addresses items by `tessera_id`. It stays on at
+  # the small scales only to keep those bundles comparable with the bench fixtures.
+  local mint_external="--mint-external-ids"
+  if [[ "$(items_of "$scale")" -gt 100000000 ]]; then
+    mint_external=""
+    echo "minting no external ids at this scale (the 20N pass; see build_scale)"
+  fi
+  # Timed, and the peak RSS kept alongside the wall clock. A build that runs for hours at the
+  # upper scales should say how long it took without the operator having to have watched it, and
+  # peak RSS is the figure that decides whether the *next* scale fits on the machine at all —
+  # which is not something the bundle on disk records. `/usr/bin/time -v`, not the shell builtin:
+  # the builtin reports no memory.
+  local t0=$SECONDS
   # `--limit` matches the points file: the pairs file covers a larger corpus, and an unlimited
   # build refuses rather than silently dropping the entities it cannot place.
   # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
   # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
   # and in particular means nothing to the *other* scale's bundle.
+  # `TESSERA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
+  # sizes its batches from `MemAvailable` at the moment it starts — which is the right default on
+  # a machine doing nothing else, and wrong on one where the page cache for a 51 GB points file
+  # and a 107 GB bundle is competing for the same pages. Naming a budget under the machine's RAM
+  # buys spill instead of pressure, and the upper scales are where that trade is worth making.
+  # `TESSERA_BUILD_MEMORY_MAX` (e.g. `9G`) runs the build inside a transient cgroup rather than
+  # loose on the machine. This is not the same lever as the budget above and does not replace it:
+  # the budget bounds the build's *own structures*, while the cgroup additionally charges the
+  # **page cache** for a 51 GB points file and a 107 GB bundle against the same ceiling. Without
+  # it, a build that honours its budget perfectly still drives the machine into reclaim, and the
+  # observed failure is not an OOM kill — it is the box going unresponsive with nothing logged,
+  # because the kernel never had a reason to kill anything. With it, the kernel reclaims this
+  # cgroup's cache instead, and an interactive session stays answerable.
+  #
+  # `MemorySwapMax=0` is part of the same intent: swapping the build is what makes a box feel
+  # dead, and failing inside the cgroup is the better outcome. The binary reads the limit too
+  # (pipeline.rs `detect_memory_budget` consults cgroup v2 `memory.max`), so the plan it prints
+  # already accounts for it.
+  #
+  # **`MemoryHigh` defaults to `infinity`, and setting it below what the build wants is worse than
+  # setting nothing.** `memory.high` does not cap — it throttles, and the kernel will keep a
+  # process just under it indefinitely rather than let it through. Measured at 250,000,000 items
+  # with `MemoryHigh=7G`: 147,562 breaches, a cgroup stalled on memory 72% of every 60 seconds,
+  # 449 seconds of CPU burnt in reclaim out of 466 elapsed, and **zero bytes of bundle written**.
+  # Lifting it to `infinity` on the same running build resumed it at 449 MiB/min. `MemoryMax` is
+  # the number to set; it reclaims this cgroup's page cache first and only kills if the anonymous
+  # working set genuinely exceeds it, which is the protection actually wanted.
+  local -a scope=()
+  if [[ -n "${TESSERA_BUILD_MEMORY_MAX:-}" ]]; then
+    scope=(systemd-run --user --scope -q --collect
+           -p "MemoryMax=$TESSERA_BUILD_MEMORY_MAX"
+           -p "MemoryHigh=${TESSERA_BUILD_MEMORY_HIGH:-infinity}"
+           -p "MemorySwapMax=0")
+  fi
+  "${scope[@]}" \
+  /usr/bin/time -v -o "$DEV/build-$scale.time" \
   ./target/release/tessera build \
     --points "$points" \
     --pairs  "$DATA/scaled/pairs/categories-subclass.pairs.parquet" \
@@ -237,11 +317,25 @@ build_scale() {
     --values "primary_category=$DATA/demo/primary_category.parquet" \
     --out "$bundle" --limit "$(items_of "$scale")" \
     --extent 0,65536,0,65536 --slice s0 \
-    --mint-external-ids --mint-id-key --no-oracle-pairs
+    ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
+    $mint_external --mint-id-key --no-oracle-pairs
+  local peak
+  peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEV/build-$scale.time")
+  printf 'built %s in %dm%02ds, peak %s, %s on disk\n' \
+    "$scale" "$(( (SECONDS - t0) / 60 ))" "$(( (SECONDS - t0) % 60 ))" \
+    "$peak" "$(du -sh "$bundle" | cut -f1)" | tee -a "$DEV/build-times.txt"
 }
 
 if [[ -z "$bundle_override" ]]; then
   for scale in "${scales[@]}"; do build_scale "$scale"; done
+fi
+
+# `--build-only` exists for the scales whose build and whose serving have different appetites: the
+# 10⁹ bundle is hours of work that wants the machine to itself, and starting a server on top of it
+# the moment it lands is the opposite of what is wanted.
+if [[ $build_only -eq 1 ]]; then
+  say "built; not serving (--build-only)"
+  exit 0
 fi
 
 # ----------------------------------------------------------------------------------- the servers
@@ -339,6 +433,8 @@ done
     case "$scale" in
       2m4) label="arXiv 2.4M · titles + abstracts" ;;
       25m) label="arXiv 25M · titles" ;;
+      250m) label="arXiv 250M · no prose" ;;
+      1b) label="arXiv 1B · no prose" ;;
       custom) label="$bundle_override" ;;
     esac
     printf '{"id":"%s","label":"%s","items":%s,"prose":[%s],' \
