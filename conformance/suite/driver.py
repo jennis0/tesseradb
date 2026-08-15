@@ -113,7 +113,7 @@ from oracle.harness import (
 )
 
 from .battery import Battery, Recorded, Viewport, build_battery, record
-from .entitlement import Delta, Entity, Nothing, Rows, Unexplained, diff
+from .entitlement import CappedDelta, Delta, Entity, Nothing, Rows, Uncheckable, Unexplained, diff
 
 
 class StageInvarianceViolation(AssertionError):
@@ -295,13 +295,24 @@ def _suite_config(
     session_port: int,
     control_port: int,
     compute_threads: int | None = None,
+    big_batches: bool = False,
 ) -> str:
-    # θ saturated and both caps above any fixture total — §10's saturation precondition, without
-    # which a point-set comparison is confounded by the selection refilling behind a removed row.
+    # θ and both caps above any *fixture* total, so at fixture size every tile is saturated and
+    # the diff compares exact membership. No cap clears every corpus — saturation is observed per
+    # tile by the diff (§10; `suite.entitlement`), and these values only set where the fallback
+    # to counts begins.
     # The merge cap sits below the catalogue base segment's ~3.2 MB so the base excludes itself
     # from selection (module doc); the config loader refuses the value if the base ever shrinks
     # under it, which is the loud failure this suite wants.
     threads_line = "" if compute_threads is None else f"compute_threads = {compute_threads}\n"
+    # A plan asking for large batches raises both ceilings together: rows alone would leave the
+    # byte ceiling binding first, and the pair is what the WAL-headroom relation is stated over.
+    batch_lines = (
+        f"ingest_max_batch_rows = {BIG_BATCH_ROWS}\n"
+        f"ingest_max_batch_bytes = {BIG_BATCH_BYTES}"
+        if big_batches
+        else ""
+    )
     return f"""
 [bundle]
 path = "{bundle_root}"
@@ -330,7 +341,27 @@ max_merged_segment_bytes = 1048576
 [ingest]
 flush_max_age_secs = 86400
 compaction_window_start = "off"
+{batch_lines}
 """
+
+#: How large a single `/control/ingest` batch may be, when a plan asks for one.
+#:
+#: **Two ceilings bound this, and the tighter one is not the obvious one.** The WAL-headroom
+#: relation — `ingest_queue_bound × ingest_max_batch_bytes` plus the reserved deny headroom under
+#: `wal_hard_limit_bytes` — allows about 224 MiB at the shipped defaults. It is not what binds. A
+#: **64 MiB per-connection ceiling** is, and its argument is sharper: an ingest body is buffered in
+#: full before any handler runs, so this key is what *one* credentialed connection costs, and
+#: nothing bounds how many arrive — the resident relation bounds the admitted window, not the queue
+#: of uploads in front of it. Measured, not read: 200 MiB was refused at startup by that ceiling
+#: while satisfying the WAL relation comfortably.
+#:
+#: **What a plan may then pose is bounded by the row's width on the wire, not by the row count**,
+#: and the refusal is a 422 at the door — before decoding, so it costs no queue slot and no WAL
+#: append. Measured against this corpus: 500,000 rows overflow 32 MiB, so a row exceeds 67 B
+#: encoded. The byte cap therefore sits at the ceiling and the row count is chosen to fit under it
+#: with margin, which is the order these two must be reasoned in.
+BIG_BATCH_ROWS = 250_000
+BIG_BATCH_BYTES = 64 * 1024 * 1024
 
 
 def _poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
@@ -563,6 +594,7 @@ class SuiteHarness:
                 session_port,
                 control_port,
                 compute_threads=self.profile.compute_threads,
+                big_batches=os.environ.get("TESSERA_SUITE_BIG_BATCHES") == "1",
             )
         )
         env = os.environ.copy()
@@ -1325,7 +1357,7 @@ class StageResult:
     stage: Stage
     before: Recorded | None
     after: Recorded
-    delta: Delta | Unexplained | None
+    delta: Delta | CappedDelta | Uncheckable | Unexplained | None
 
 
 def run_plan(h: SuiteHarness, plan: Sequence[Stage]) -> list[StageResult]:

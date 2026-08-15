@@ -1,7 +1,7 @@
 # The correctness suite — operations, data types, scale and server profiles
 
-**Date:** 2026-08-14
-**Status:** Provisional (r6) — **not approved**. Supersedes `data-fidelity.md`, whose three
+**Date:** 2026-08-15
+**Status:** Provisional (r7) — **not approved**. Supersedes `data-fidelity.md`, whose three
 mechanisms become this document's §9–§11 over the oracle of §8. Reviewed twice: the mechanisms
 under the correctness lens (r2), the build under the implementability lens (r6). **To become
 normative:** owner sign-off; rulings on the three points marked *judgement call* at their claims
@@ -405,11 +405,27 @@ after. Asserting flush changes nothing would be asserting that mechanism away.
 
 **Two preconditions, both of which a naive harness gets wrong.**
 
-*Selection must be saturated wherever point sets rather than counts are compared.* Under a
-non-saturated selection — *k* below the visible count in a tile — removing a served row admits the
-next-priority row behind it, so a one-row delta on the wire can follow a one-row delta in the corpus
-without the two being the same row. The scale harness already raises θ and the mark cap above the
-corpus total for this reason; that configuration is a precondition of this section.
+*Point sets are comparable only over saturated tiles — and saturation is a property of each tile,
+observed per response, not a configuration the harness can pin.* Under a truncated selection —
+`served` below a tile's visible count — removing a served row admits the next-priority row behind
+it, so a one-row delta on the wire can follow a one-row delta in the corpus without the two being
+the same row. An earlier revision discharged this by configuration, θ and the mark caps raised
+"above the corpus total"; a cap large enough for every corpus does not exist, and the wording
+never noticed its own ceiling. Measured at 10⁷ items: the whole-extent tile is a million-mark
+window over ten million visible rows, an ingest-only stage recorded rows *vanishing* — displaced
+out of the served window, nothing wrong with the engine — and the zoom levels disagreed with each
+other, each having a different visible-to-cap ratio. The discriminator is in the response itself:
+a tile whose `served` equals its `matched` (its `visible`, unfiltered) was not truncated and its
+point set is complete; a tile where `served < matched` was capped and supports only count
+comparison, `visible` and `matched` being mask arithmetic the cap cannot touch. The diff
+therefore admits point-set claims per tile, treats rows entering or leaving a capped window as
+displacement rather than defect, holds capped tiles to their counts — per tile where the evidence
+over the tile is complete, in full-extent sum always — and, because counts in a capped region can
+be compensated by construction, reports a recording in which *every* tile is capped as
+uncheckable for point sets rather than quietly passing on counts alone. The battery carries one
+full-extent viewport deep enough to hold saturated tiles at scale (`suite.battery`'s deep
+viewport; depth divides the per-tile load by 4^zoom), so a membership surface outlives the
+shallow viewports' truncation, and its absence is a stated failure, never a silent narrowing.
 
 *The comparison surface must be named, and canonicalised.* Every viewport body carries a trailer
 whose fields include the request's elapsed wall-clock (contracts §3.2), and the pin and staleness
@@ -1052,6 +1068,26 @@ to a case a reader can inspect. 18 The census's cost at 10⁹ and the deep verif
 run's ingest cost are both measured, settling spec §9.2's modelled figures and spec §11's cadence.
 
 ## Appendix R — Review record
+
+**r7** (2026-08-15) — §10's saturation precondition corrected at the claim, found by laddering
+the endurance tier to a 10⁷-item corpus. The section stated saturation as something the harness
+arranges — θ and the mark caps pinned above the corpus total — and that discharge has a ceiling
+the wording never noticed: no cap clears every corpus, and above it the whole-extent viewport is
+a bounded window over an unbounded visible set. Measured on a real run at a 10⁷ base: a write
+stage entitled to 15,300 appearing rows recorded four rows *vanishing* — displaced out of the
+served window, nothing wrong with the engine — the zoom levels disagreed with each other (each
+has a different visible-to-cap ratio), and tile 0's `visible` moved by exactly the ingested count
+while only two thirds of the rows were attributable in the sample. Saturation is now what it
+always was on the wire: a per-tile fact of each response (`served == matched`), observed by the
+diff rather than assumed from configuration. Point sets are compared over saturated tiles; capped
+tiles are held to their counts, per tile where attribution is complete and in full-extent sum
+always; displacement is recognised rather than reported as a defect; and a recording whose every
+tile is capped is declared uncheckable for point sets — stated in the result and equal to no
+entitlement, because a check that quietly stops checking is worse than one that fails. The
+battery gains a deep full-extent viewport (zoom 5 — the deepest whose underlay fits the default
+cell budget) so a membership surface outlives the shallow viewports' truncation, and unit tests
+pin the two edges: displacement in a capped tile satisfies the stage's entitlement, and a
+genuinely lost row in a saturated tile fails it even when every other tile is capped.
 
 **r6** (2026-08-15) — §12–§14 reviewed under the implementability lens, the review the r4 entry
 said they had not had. **No mechanism changed; §1–§11's rationale was out of scope and untouched.**

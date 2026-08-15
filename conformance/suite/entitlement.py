@@ -16,6 +16,40 @@ way. Items are named by ``fx_key``, the planted join column (correctness-suite �
 *is* the item identity, and a second name for it would be drift), which every served points row
 carries and which is the only identity that survives a rebuild.
 
+**Saturation is decided per tile, from the response itself — never by configuration.** A point-set
+comparison is sound only over a tile whose served set is complete: under a truncated selection,
+removing a served row admits the next-priority row behind it, so rows move on the wire that never
+moved in the corpus — displacement, not change (§10). No configuration arranges completeness. The
+suite once pinned θ and the mark caps "above any fixture total", which is true at fixture size and
+false at ten million items, where the whole-extent tile holds ten million visible rows against a
+million-mark budget. But every tile's own row in the tiles batch already says whether truncation
+happened: ``served == matched`` means it did not — `matched` is the selection's pool, and on an
+unfiltered viewport it equals `visible` (`tessera-engine`'s viewport module states the pair) — and
+``served < matched`` means it did. The diff therefore:
+
+- takes **membership evidence** only from untruncated tiles (and from drill-down flips, which no
+  selection truncates): a row added or removed there is a genuine appear or vanish, and every
+  untruncated tile covering an evidenced item must agree with the evidence;
+- treats a row entering or leaving a **capped window** as displacement — unattributable, and
+  deliberately not a defect — unless an untruncated tile elsewhere contradicts it;
+- holds every tile, capped or not, to the **counts** the cap cannot touch: `served` must track
+  this query's own point rows everywhere; `visible` and `matched` are mask arithmetic,
+  independent of the cap, checked per tile wherever the evidence over that tile's region is
+  complete and summed over the full extent always — the sums must agree across viewports, with
+  the underlay, and (through [`CappedDelta`]'s equality) with the entitlement's own net movement;
+- **refuses to go soft**: when every non-empty tile of every unfiltered viewport is capped, no
+  point-set entitlement is checkable at all, and the result is [`Uncheckable`] — equal to no
+  entitlement — rather than a count comparison quietly presented as the full check. In a capped
+  region counts can be compensated by construction (a dropped row and a leaked row sum to zero),
+  which is why the battery carries a viewport deep enough to hold saturated tiles
+  (`suite.battery`'s deep viewport) and why its absence must be loud rather than absorbed.
+
+At fixture size every tile is untruncated, the evidence is the corpus's whole delta, and the
+result is an exact [`Delta`]. At scale the result is a [`CappedDelta`] — membership where it was
+observable, the net count everywhere — whose equality against a declared [`Delta`] is
+subset-plus-net rather than set equality, and which never equals ``Nothing()``: bytes-equal is
+the only way to have changed nothing.
+
 **What the diff refuses to launder.** ``Nothing`` is bytes-equal on every canonical surface —
 never "the row sets agree". A byte change that moves no row (an order change, a re-encoding, a
 count surface disagreeing with the points that back it) is returned as [`Unexplained`], which
@@ -26,11 +60,12 @@ changed recording must decompose exactly:
 
 - the points surfaces' added/removed rows, order-preserved in the residual (removing the vanished
   rows from *before* and the appeared rows from *after* must leave identical sequences);
-- per-tile count deltas equal to those rows' tiles — ``visible`` from every appeared/vanished
-  item (they are mask-visible by construction), ``matched``/``served`` from the rows this query
-  itself served, so a filtered viewport that matches none of them is still held to its ``visible``
-  movement;
-- underlay cell deltas equal to the same items' cells at ``zoom + underlay_offset``;
+- per-tile count deltas consistent with those rows: ``served`` moving with the rows this query
+  itself served, in every tile; ``matched`` moving with ``visible`` on unfiltered viewports and
+  with the served rows in untruncated filtered tiles; ``visible`` moving with the evidenced
+  items wherever the tile's evidence is complete, its full-extent sum agreeing everywhere;
+- underlay cell deltas equal to the evidenced items' cells at ``zoom + underlay_offset`` wherever
+  the covering tile's evidence is complete, the cell sum agreeing with the tiles' sum;
 - the trailer equal but for ``points`` (which must track the served delta) and ``flushes`` (a
   deterministic function of served bytes, so a stage entitled to change content is entitled to
   move it — but it must not move when the served bytes did not);
@@ -41,12 +76,10 @@ changed recording must decompose exactly:
   category values have other visible holders (a vocabulary-extending flush is real and out of
   this suite's scope).
 
-**Preconditions inherited from §10, stated here because the diff silently depends on them:**
-selection saturated (θ and both caps above the corpus total — otherwise removing a served row
-admits the next one behind it and a one-row delta on the wire is not the corpus's one-row delta),
-and every battery viewport covering the full extent (the cross-viewport consistency rule — every
-unfiltered viewport must report the same appeared/vanished sets — is only sound when they all see
-the whole corpus).
+**One precondition inherited from §10, stated here because the diff silently depends on it:**
+every battery viewport covers the full extent, so each one's `visible` column sums to the same
+composed total and an evidenced item lies inside every viewport's tiling. Saturation is *not* a
+precondition — it is observed per tile, above.
 """
 
 from __future__ import annotations
@@ -68,25 +101,28 @@ from .canonical import Json, Streamed
 FX_COLUMN = "fx_key"
 
 
+def _show_set(s: frozenset[int]) -> str:
+    if not s:
+        return "∅"
+    sample = ", ".join(f"{v:#x}" for v in sorted(s)[:3])
+    return f"{{{sample}{', …' if len(s) > 3 else ''}}} ({len(s)})"
+
+
 @dataclass(frozen=True)
 class Delta:
     """What a stage changed, in item identities: the sets that appeared and vanished.
 
     ``Delta(∅, ∅)`` — [`Nothing`] — is the strongest assertion in the suite, and [`diff`] returns
-    it only for bytes-equal recordings (module doc).
+    it only for bytes-equal recordings (module doc). [`diff`] returns this type at all only when
+    every unfiltered viewport's tiles were untruncated in both recordings, so the sets are the
+    corpus's whole delta and equality against a declared entitlement is exact.
     """
 
     appeared: frozenset[int]
     vanished: frozenset[int]
 
     def __repr__(self) -> str:  # compact in assertion messages
-        def show(s: frozenset[int]) -> str:
-            if not s:
-                return "∅"
-            sample = ", ".join(f"{v:#x}" for v in sorted(s)[:3])
-            return f"{{{sample}{', …' if len(s) > 3 else ''}}} ({len(s)})"
-
-        return f"Delta(appeared={show(self.appeared)}, vanished={show(self.vanished)})"
+        return f"Delta(appeared={_show_set(self.appeared)}, vanished={_show_set(self.vanished)})"
 
 
 def Nothing() -> Delta:
@@ -111,6 +147,76 @@ def Rows(items: Iterable[int]) -> Delta:
     entitled to change answers, because the background refresh exists to change them
     (decision 0044 D1)."""
     return Delta(frozenset(items), frozenset())
+
+
+@dataclass(frozen=True, eq=False)
+class CappedDelta:
+    """A changed recording pair in which some tiles were capped: membership evidence where the
+    tiles were complete, the net count everywhere (module doc).
+
+    ``appeared``/``vanished`` are the *evidenced* sets — items whose movement an untruncated tile
+    or a drill-down flip proved — and ``net_visible`` is the full-extent sum of every `visible`
+    delta, which every viewport and the underlay were already held to agree on. Equality against
+    a declared [`Delta`] is therefore subset-plus-net: nothing unentitled moved where membership
+    was observable, and the counts account for every entitled item, everywhere. It never equals
+    ``Nothing()`` — a recording that changed at all is not "changed nothing", and displacement
+    under a stage entitled to no corpus movement is a defect the selection's determinism forbids.
+
+    The displacement tallies and tile counts are diagnostic, carried so an assertion message
+    shows how much of the comparison was membership and how much fell back to counts.
+    """
+
+    appeared: frozenset[int]
+    vanished: frozenset[int]
+    net_visible: int
+    displaced_in: int
+    displaced_out: int
+    truncated_tiles: int
+    comparable_tiles: int
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, CappedDelta):
+            return (self.appeared, self.vanished, self.net_visible) == (
+                other.appeared,
+                other.vanished,
+                other.net_visible,
+            )
+        if isinstance(other, Delta):
+            if not other.appeared and not other.vanished:
+                return False  # Nothing() means bytes-equal, and these recordings differ
+            return (
+                self.appeared <= other.appeared
+                and self.vanished <= other.vanished
+                and self.net_visible == len(other.appeared) - len(other.vanished)
+            )
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return (
+            f"CappedDelta(appeared={_show_set(self.appeared)}, "
+            f"vanished={_show_set(self.vanished)}, net visible {self.net_visible:+d}; "
+            f"{self.displaced_in} row(s) displaced into / {self.displaced_out} out of "
+            f"{self.truncated_tiles} capped tile(s), membership compared over "
+            f"{self.comparable_tiles})"
+        )
+
+
+@dataclass(frozen=True)
+class Uncheckable:
+    """Every non-empty tile of every unfiltered viewport was capped: the point-set half of any
+    entitlement is uncheckable, and this result says so instead of quietly passing on counts.
+
+    Equal to no [`Delta`], so ``diff(...) == entitlement`` fails for every declared entitlement —
+    a check that silently stopped checking would be worse than one that fails (module doc). The
+    remedy is a battery surface, not a bigger cap: deepen the battery until some tiles saturate
+    (`suite.battery`'s deep viewport carries the arithmetic).
+    """
+
+    reasons: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        shown = "\n  - ".join(self.reasons)
+        return f"Uncheckable(\n  - {shown}\n)"
 
 
 @dataclass(frozen=True)
@@ -188,6 +294,14 @@ def _tile_map(canon: Streamed) -> dict[int, tuple[int, int, int]]:
     }
 
 
+def _truncated(tiles: dict[int, tuple[int, int, int]]) -> frozenset[int]:
+    """The tiles this recording's selection truncated: ``served < matched``. `matched` rather
+    than `visible` because it is the selection's own pool — on an unfiltered viewport the two are
+    equal (module doc), and on a filtered one a complete *matched* window is exactly what makes
+    the tile's point set comparable."""
+    return frozenset(t for t, (_v, m, s) in tiles.items() if s < m)
+
+
 def _cell_map(canon: Streamed) -> dict[int, int]:
     table = _tables(canon.underlay)
     if table is None:
@@ -205,6 +319,13 @@ def _prefix_of(code: int, depth: int) -> int:
     return code >> (64 - 2 * depth) if depth else 0
 
 
+def _label(query: Viewport) -> str:
+    return (
+        f"viewport(zoom={query.zoom}, filters={'yes' if query.filters else 'no'}, "
+        f"form={'tiles' if query.tiles else 'bbox'})"
+    )
+
+
 @dataclass
 class _VpDiff:
     rows_before: list[_Row]
@@ -216,7 +337,7 @@ class _VpDiff:
 def _analyse_viewport(
     query: Viewport, before: Streamed, after: Streamed, reasons: list[str]
 ) -> _VpDiff:
-    label = f"viewport(zoom={query.zoom}, filters={'yes' if query.filters else 'no'}, form={'tiles' if query.tiles else 'bbox'})"
+    label = _label(query)
     rows_before = _point_rows(before, label, reasons)
     rows_after = _point_rows(after, label, reasons)
 
@@ -248,64 +369,108 @@ def _check_viewport_counts(
     before: Streamed,
     after: Streamed,
     vd: _VpDiff,
-    appeared: frozenset[int],
-    vanished: frozenset[int],
-    code_of_fx: dict[int, int],
+    placed_appeared: dict[int, int],
+    placed_vanished: dict[int, int],
+    truncated: frozenset[int],
+    visible_truncated: frozenset[int] | None,
     reasons: list[str],
-) -> None:
-    label = f"viewport(zoom={query.zoom}, filters={'yes' if query.filters else 'no'}, form={'tiles' if query.tiles else 'bbox'})"
+) -> int:
+    """One viewport's count surfaces against the evidence, per the module doc's rules; returns
+    the full-extent sum of the `visible` deltas — the net corpus movement this viewport reports,
+    which [`diff`] holds equal across every viewport.
 
-    # Expected per-tile movement. `visible` moves with every appeared/vanished item — they are
-    # mask-visible by construction (they were, or became, *served* under a saturated selection in
-    # an unfiltered viewport) — while `matched`/`served` move only with the rows this query itself
-    # served, which is what lets one rule cover filtered and unfiltered viewports alike.
-    expected: dict[int, list[int]] = defaultdict(lambda: [0, 0, 0])
-    for fx in appeared:
-        expected[_prefix_of(code_of_fx[fx], query.zoom)][0] += 1
-    for fx in vanished:
-        expected[_prefix_of(code_of_fx[fx], query.zoom)][0] -= 1
-    for row in vd.added:
-        tile = _prefix_of(row.code, query.zoom)
-        expected[tile][1] += 1
-        expected[tile][2] += 1
-    for row in vd.removed:
-        tile = _prefix_of(row.code, query.zoom)
-        expected[tile][1] -= 1
-        expected[tile][2] -= 1
+    ``placed_appeared``/``placed_vanished`` are the evidenced items that have a served code (a
+    flip-evidenced item nothing served has no position and can join no per-tile expectation — it
+    still counts through the measured net). ``truncated`` is this viewport's own truncated-tile
+    set over the pair; ``visible_truncated`` is the truncation set governing `visible`
+    attribution — the viewport's own for an unfiltered query, the same-zoom unfiltered
+    viewport's for a filtered one (its own truncation says nothing about *visible*
+    completeness), or `None` when no such viewport exists and only the sums bind.
+    """
+    label = _label(query)
 
     tiles_before = _tile_map(before)
     tiles_after = _tile_map(after)
-    for tile in sorted(set(tiles_before) | set(tiles_after) | set(expected)):
+
+    # This query's own served movement per tile — what `served` (and a complete filtered tile's
+    # `matched`) must track.
+    own: dict[int, int] = defaultdict(int)
+    for row in vd.added:
+        own[_prefix_of(row.code, query.zoom)] += 1
+    for row in vd.removed:
+        own[_prefix_of(row.code, query.zoom)] -= 1
+
+    # The evidenced corpus movement per tile — what `visible` must track where attribution is
+    # complete. Evidenced items are mask-visible by construction (they were, or became, served —
+    # or their drill-down answered 200).
+    placed: dict[int, int] = defaultdict(int)
+    for code in placed_appeared.values():
+        placed[_prefix_of(code, query.zoom)] += 1
+    for code in placed_vanished.values():
+        placed[_prefix_of(code, query.zoom)] -= 1
+
+    net = 0
+    for tile in sorted(set(tiles_before) | set(tiles_after) | set(placed) | set(own)):
         b = tiles_before.get(tile, (0, 0, 0))
         a = tiles_after.get(tile, (0, 0, 0))
-        actual = (a[0] - b[0], a[1] - b[1], a[2] - b[2])
-        if actual != tuple(expected.get(tile, [0, 0, 0])):
+        dv, dm, ds = a[0] - b[0], a[1] - b[1], a[2] - b[2]
+        net += dv
+        if ds != own[tile]:
             reasons.append(
-                f"{label}: tile {tile} moved (visible, matched, served) by {actual}, but the "
-                f"attributable rows say {tuple(expected.get(tile, [0, 0, 0]))}"
+                f"{label}: tile {tile} moved `served` by {ds:+d} where its own point rows "
+                f"moved {own[tile]:+d} — the count surface disagrees with the rows that back it"
+            )
+        if query.filters is None:
+            if dm != dv:
+                reasons.append(
+                    f"{label}: tile {tile} moved `matched` by {dm:+d} against `visible` "
+                    f"{dv:+d} — on an unfiltered viewport the two are one quantity"
+                )
+        elif tile not in truncated and dm != own[tile]:
+            reasons.append(
+                f"{label}: tile {tile} was not truncated, yet `matched` moved {dm:+d} where "
+                f"its complete served window moved {own[tile]:+d}"
+            )
+        if visible_truncated is not None and tile not in visible_truncated and dv != placed[tile]:
+            reasons.append(
+                f"{label}: tile {tile} moved `visible` by {dv:+d}, but the evidenced items say "
+                f"{placed[tile]:+d}"
             )
     if before.tiles != after.tiles and tiles_before == tiles_after:
         reasons.append(f"{label}: tiles bytes differ without a value difference")
 
-    # The underlay counts visible items per cell at depth `zoom + offset` (§3.3), so it moves
-    # with the same item sets as `visible`.
-    depth = query.zoom + query.underlay_offset
-    cell_expected: dict[int, int] = defaultdict(int)
-    for fx in appeared:
-        cell_expected[_prefix_of(code_of_fx[fx], depth)] += 1
-    for fx in vanished:
-        cell_expected[_prefix_of(code_of_fx[fx], depth)] -= 1
-    cells_before = _cell_map(before)
-    cells_after = _cell_map(after)
-    for cell in sorted(set(cells_before) | set(cells_after) | set(cell_expected)):
-        actual_delta = cells_after.get(cell, 0) - cells_before.get(cell, 0)
-        if actual_delta != cell_expected.get(cell, 0):
+    # The underlay counts visible items per cell at depth `zoom + offset` (§3.3): per cell where
+    # the covering tile's evidence is complete, and in sum always — two counts of one visible set.
+    if query.underlay_offset:
+        depth = query.zoom + query.underlay_offset
+        cell_placed: dict[int, int] = defaultdict(int)
+        for code in placed_appeared.values():
+            cell_placed[_prefix_of(code, depth)] += 1
+        for code in placed_vanished.values():
+            cell_placed[_prefix_of(code, depth)] -= 1
+        cells_before = _cell_map(before)
+        cells_after = _cell_map(after)
+        cell_net = 0
+        for cell in sorted(set(cells_before) | set(cells_after) | set(cell_placed)):
+            actual_delta = cells_after.get(cell, 0) - cells_before.get(cell, 0)
+            cell_net += actual_delta
+            covering = cell >> (2 * query.underlay_offset)
+            if (
+                visible_truncated is not None
+                and covering not in visible_truncated
+                and actual_delta != cell_placed[cell]
+            ):
+                reasons.append(
+                    f"{label}: underlay cell {cell} moved by {actual_delta:+d}, expected "
+                    f"{cell_placed[cell]:+d}"
+                )
+        if cell_net != net:
             reasons.append(
-                f"{label}: underlay cell {cell} moved by {actual_delta}, expected "
-                f"{cell_expected.get(cell, 0)}"
+                f"{label}: the underlay's cells moved {cell_net:+d} in total where the tiles' "
+                f"`visible` moved {net:+d} — two counts of one visible set disagree"
             )
-    if before.underlay != after.underlay and cells_before == cells_after:
-        reasons.append(f"{label}: underlay bytes differ without a value difference")
+        if before.underlay != after.underlay and cells_before == cells_after:
+            reasons.append(f"{label}: underlay bytes differ without a value difference")
 
     # The trailer's remainder: `points` must track the served delta exactly; `flushes` is a
     # deterministic function of served bytes (canonical module doc), so it may move only when
@@ -333,13 +498,17 @@ def _check_viewport_counts(
                 f"{label}: trailer `{key}` went {trailer_before.get(key)!r} -> "
                 f"{trailer_after.get(key)!r} with no served-content change to carry it"
             )
+    return net
 
 
-def diff(before: Recorded, after: Recorded) -> Delta | Unexplained:
-    """Reduce two recordings of one battery to the [`Delta`] between them (module doc).
+def diff(before: Recorded, after: Recorded) -> Delta | CappedDelta | Uncheckable | Unexplained:
+    """Reduce two recordings of one battery to what changed between them (module doc).
 
-    Returns [`Nothing`]'s delta only when every surface is bytes-equal; a [`Delta`] when every
-    changed byte is attributable to the appeared/vanished item sets; [`Unexplained`] otherwise.
+    Returns [`Nothing`]'s delta only when every surface is bytes-equal; an exact [`Delta`] when
+    every unfiltered viewport's tiles were untruncated in both recordings — fixture size — and
+    every changed byte is attributable to the appeared/vanished sets; a [`CappedDelta`] when some
+    tiles were capped but a membership surface remains; [`Uncheckable`] when none does; and
+    [`Unexplained`] whenever a change is attributable to no entitlement at all.
     """
     if set(before) != set(after):
         return Unexplained(
@@ -355,6 +524,15 @@ def diff(before: Recorded, after: Recorded) -> Delta | Unexplained:
         q: _analyse_viewport(q, before[q], after[q], reasons) for q in viewports
     }
 
+    # Per-viewport truncation over the pair: a tile admits membership claims only when neither
+    # recording truncated it — a set comparison needs both sides complete.
+    trunc: dict[Viewport, frozenset[int]] = {}
+    nonempty: dict[Viewport, set[int]] = {}
+    for q in viewports:
+        tiles_b, tiles_a = _tile_map(before[q]), _tile_map(after[q])
+        trunc[q] = _truncated(tiles_b) | _truncated(tiles_a)
+        nonempty[q] = set(tiles_b) | set(tiles_a)
+
     # Item identity is carried by every served row; both sides of every viewport contribute, so a
     # row that exists only before (a vanished item) still names itself.
     code_of_fx: dict[int, int] = {}
@@ -364,38 +542,121 @@ def diff(before: Recorded, after: Recorded) -> Delta | Unexplained:
             code_of_fx[row.fx] = row.code
             fx_of_tessera[row.tessera_id] = row.fx
 
-    # The global sets come from the unfiltered viewports, which must agree exactly — they all
-    # cover the full extent (module doc), so the same items appeared to each of them.
-    unfiltered = [q for q in viewports if q.filters is None]
-    appeared = frozenset(
-        fx for q in unfiltered for fx in (r.fx for r in analysed[q].added)
-    )
-    vanished = frozenset(
-        fx for q in unfiltered for fx in (r.fx for r in analysed[q].removed)
-    )
-    for q in unfiltered:
-        got_a = frozenset(r.fx for r in analysed[q].added)
-        got_v = frozenset(r.fx for r in analysed[q].removed)
-        if got_a != appeared or got_v != vanished:
-            reasons.append(
-                f"unfiltered viewports disagree about what changed: zoom {q.zoom} saw "
-                f"appeared={sorted(got_a)[:4]} vanished={sorted(got_v)[:4]} against the union "
-                f"appeared={sorted(appeared)[:4]} vanished={sorted(vanished)[:4]}"
-            )
+    # -- membership evidence (module doc): untruncated tiles of every viewport — an unfiltered
+    # one's complete tile is the visible set, a filtered one's the matched set, and a matched
+    # appear/vanish is the row's own because no stage edits a row in place (decision 0047: edit
+    # is delete + re-ingest) — plus drill-down flips, which no selection truncates.
+    appeared: set[int] = set()
+    vanished: set[int] = set()
     for q in viewports:
-        if q.filters is None:
-            continue
-        got_a = frozenset(r.fx for r in analysed[q].added)
-        got_v = frozenset(r.fx for r in analysed[q].removed)
-        if not (got_a <= appeared and got_v <= vanished):
-            reasons.append(
-                f"the filtered viewport served a change no unfiltered viewport saw: "
-                f"appeared={sorted(got_a - appeared)[:4]} vanished={sorted(got_v - vanished)[:4]}"
-            )
+        for row in analysed[q].added:
+            if _prefix_of(row.code, q.zoom) not in trunc[q]:
+                appeared.add(row.fx)
+        for row in analysed[q].removed:
+            if _prefix_of(row.code, q.zoom) not in trunc[q]:
+                vanished.add(row.fx)
 
+    item_payloads: dict[Item, tuple[dict | None, dict | None]] = {}
+    for q in before:
+        if not isinstance(q, Item):
+            continue
+        payload_before = before[q].payload if isinstance(before[q], Json) else None
+        payload_after = after[q].payload if isinstance(after[q], Json) else None
+        item_payloads[q] = (payload_before, payload_after)
+        status_before = payload_before["status"] if payload_before else None
+        status_after = payload_after["status"] if payload_after else None
+        if (status_before, status_after) in ((200, 404), (404, 200)):
+            fx = fx_of_tessera.get(q.tessera_id)
+            if fx is None:
+                reasons.append(
+                    f"item {q.tessera_id} flipped {status_before} -> {status_after} but no "
+                    f"recorded viewport ever served it — the flip cannot be attributed to any "
+                    f"item identity"
+                )
+            elif status_after == 404:
+                vanished.add(fx)
+            else:
+                appeared.add(fx)
+
+    # -- displacement, and the contradictions it may not hide: a row entering or leaving a capped
+    # window is unattributable and not a defect — unless complete evidence elsewhere says the
+    # item moved the other way, in which case two surfaces disagree about the corpus.
+    displaced_in = displaced_out = 0
     for q in viewports:
-        _check_viewport_counts(
-            q, before[q], after[q], analysed[q], appeared, vanished, code_of_fx, reasons
+        label = _label(q)
+        for row in analysed[q].added:
+            if _prefix_of(row.code, q.zoom) in trunc[q]:
+                if row.fx in vanished:
+                    reasons.append(
+                        f"{label}: item {row.fx:#x} entered a capped window while a complete "
+                        f"tile elsewhere shows it vanished"
+                    )
+                elif row.fx not in appeared:
+                    displaced_in += 1
+        for row in analysed[q].removed:
+            if _prefix_of(row.code, q.zoom) in trunc[q]:
+                if row.fx in appeared:
+                    reasons.append(
+                        f"{label}: item {row.fx:#x} left a capped window while a complete tile "
+                        f"elsewhere shows it appeared"
+                    )
+                elif row.fx not in vanished:
+                    displaced_out += 1
+
+    # -- cross-viewport consistency: every unfiltered viewport whose covering tile of an
+    # evidenced item is untruncated must show the same movement — its point set over that tile
+    # is complete, so silence there contradicts the evidence. (At fixture size, where nothing is
+    # truncated, this is exactly "the unfiltered viewports must agree". A *filtered* viewport is
+    # never required to show an item — the item may simply not match its filter.)
+    unfiltered = [q for q in viewports if q.filters is None]
+    for q in unfiltered:
+        label = _label(q)
+        added_fx = {r.fx for r in analysed[q].added}
+        removed_fx = {r.fx for r in analysed[q].removed}
+        for fx in sorted(appeared):
+            code = code_of_fx.get(fx)
+            if code is None:
+                continue
+            if _prefix_of(code, q.zoom) not in trunc[q] and fx not in added_fx:
+                reasons.append(
+                    f"{label}: item {fx:#x} appeared per complete evidence elsewhere, but this "
+                    f"viewport's covering tile is complete and does not serve it as new"
+                )
+        for fx in sorted(vanished):
+            code = code_of_fx.get(fx)
+            if code is None:
+                continue
+            if _prefix_of(code, q.zoom) not in trunc[q] and fx not in removed_fx:
+                reasons.append(
+                    f"{label}: item {fx:#x} vanished per complete evidence elsewhere, but this "
+                    f"viewport's covering tile is complete and still serves it"
+                )
+
+    # -- counts, per viewport, and the net every full-extent surface must agree on.
+    placed_appeared = {fx: code_of_fx[fx] for fx in appeared if fx in code_of_fx}
+    placed_vanished = {fx: code_of_fx[fx] for fx in vanished if fx in code_of_fx}
+    unfiltered_trunc_at = {q.zoom: trunc[q] for q in unfiltered}
+    nets: dict[Viewport, int] = {}
+    for q in viewports:
+        visible_truncated = (
+            trunc[q] if q.filters is None else unfiltered_trunc_at.get(q.zoom)
+        )
+        nets[q] = _check_viewport_counts(
+            q,
+            before[q],
+            after[q],
+            analysed[q],
+            placed_appeared,
+            placed_vanished,
+            trunc[q],
+            visible_truncated,
+            reasons,
+        )
+    if len(set(nets.values())) > 1:
+        summary = ", ".join(f"{_label(q)}: {n:+d}" for q, n in nets.items())
+        reasons.append(
+            f"the viewports disagree on the corpus's net visible movement — every one covers "
+            f"the full extent, so their `visible` sums must move together ({summary})"
         )
 
     for q in changed:
@@ -405,13 +666,9 @@ def diff(before: Recorded, after: Recorded) -> Delta | Unexplained:
                 f"{surface} changed — no stage in this suite's plans is entitled to it"
             )
 
-    # Drill-down flips must be exactly the appeared/vanished items, in both directions: a flip
-    # nothing explains, and an item that should have flipped and did not.
-    for q in before:
-        if not isinstance(q, Item):
-            continue
-        payload_before = before[q].payload if isinstance(before[q], Json) else None
-        payload_after = after[q].payload if isinstance(after[q], Json) else None
+    # Drill-down consistency in both directions: a stable item may not sit in an evidenced set,
+    # a flipped item may not contradict one, and a body may not move under a stable status.
+    for q, (payload_before, payload_after) in item_payloads.items():
         fx = fx_of_tessera.get(q.tessera_id)
         if payload_before == payload_after:
             if fx in vanished and payload_before and payload_before["status"] == 200:
@@ -428,15 +685,16 @@ def diff(before: Recorded, after: Recorded) -> Delta | Unexplained:
         status_before = payload_before["status"] if payload_before else None
         status_after = payload_after["status"] if payload_after else None
         if status_before == 200 and status_after == 404:
-            if fx not in vanished:
+            if fx in appeared:
                 reasons.append(
-                    f"item {q.tessera_id} flipped 200 -> 404 but no viewport lost it "
-                    f"(fx {fx if fx is None else hex(fx)})"
+                    f"item {q.tessera_id} (fx {fx:#x}) flipped 200 -> 404 while complete "
+                    f"evidence shows it appearing"
                 )
         elif status_before == 404 and status_after == 200:
-            if fx not in appeared:
+            if fx in vanished:
                 reasons.append(
-                    f"item {q.tessera_id} flipped 404 -> 200 but no viewport gained it"
+                    f"item {q.tessera_id} (fx {fx:#x}) flipped 404 -> 200 while complete "
+                    f"evidence shows it vanishing"
                 )
         else:
             reasons.append(
@@ -444,24 +702,49 @@ def diff(before: Recorded, after: Recorded) -> Delta | Unexplained:
                 f"({status_before} -> {status_after}) — a record field moved under a stable item"
             )
 
+    truncation_seen = any(trunc[q] for q in unfiltered)
+    comparable_surface = any(nonempty[q] - trunc[q] for q in unfiltered)
+    blind_statement = (
+        "every non-empty tile in every unfiltered viewport was capped (served < visible) in at "
+        "least one recording — no point-set entitlement is checkable over these recordings, and "
+        "counts alone can be compensated; the battery needs a viewport deep enough to hold "
+        "saturated tiles (suite.battery's deep viewport)"
+    )
     if reasons:
+        if truncation_seen and not comparable_surface:
+            reasons.append(blind_statement)
         return Unexplained(tuple(reasons))
-    if not appeared and not vanished:
-        return Unexplained(
-            (
-                "recordings differ but no served row appeared or vanished — the change is not "
-                "expressible as an entitlement",
+    if not truncation_seen:
+        if not appeared and not vanished:
+            return Unexplained(
+                (
+                    "recordings differ but no served row appeared or vanished — the change is "
+                    "not expressible as an entitlement",
+                )
             )
-        )
-    return Delta(appeared, vanished)
+        return Delta(frozenset(appeared), frozenset(vanished))
+    if not comparable_surface:
+        return Uncheckable((blind_statement,))
+    net = next(iter(nets.values())) if nets else 0
+    return CappedDelta(
+        appeared=frozenset(appeared),
+        vanished=frozenset(vanished),
+        net_visible=net,
+        displaced_in=displaced_in,
+        displaced_out=displaced_out,
+        truncated_tiles=sum(len(trunc[q]) for q in viewports),
+        comparable_tiles=sum(len(nonempty[q] - trunc[q]) for q in viewports),
+    )
 
 
 __all__ = [
+    "CappedDelta",
     "Delta",
     "Entity",
     "FX_COLUMN",
     "Nothing",
     "Rows",
+    "Uncheckable",
     "Unexplained",
     "diff",
 ]

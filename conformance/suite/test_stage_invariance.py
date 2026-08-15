@@ -79,8 +79,9 @@ from .driver import (
 from .entitlement import Nothing, Rows, Unexplained, _tables, diff
 
 BBOX = (0.0, 0.0, 65536.0, 65536.0)
-#: Saturation (§10): above the corpus total plus everything the plan ingests, so served == visible
-#: in every tile and a removed row admits nothing behind it.
+#: Above the corpus total plus everything the plan ingests, so at this fixture size every tile is
+#: saturated (served == visible, observed per response — §10) and every diff below is the exact
+#: membership comparison rather than the capped fallback.
 K = 200_000
 #: The mid-coverage principal: 10%, two grants — enough visibility that every surface has content.
 GRANTS = tuple(next(c for c in cat.catalogue() if c.name == "crossover_above").grants)

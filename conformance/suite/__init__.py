@@ -50,10 +50,12 @@ from .battery import (  # noqa: E402
 )
 from .canonical import Batches, Canonical, Json, Streamed, canonicalise_viewport  # noqa: E402
 from .entitlement import (  # noqa: E402
+    CappedDelta,
     Delta,
     Entity,
     Nothing,
     Rows,
+    Uncheckable,
     Unexplained,
     diff,
 )
@@ -63,6 +65,7 @@ __all__ = [
     "Batches",
     "Battery",
     "Canonical",
+    "CappedDelta",
     "Categories",
     "Delta",
     "Entity",
@@ -75,6 +78,7 @@ __all__ = [
     "Region",
     "Rows",
     "Streamed",
+    "Uncheckable",
     "Unexplained",
     "Viewport",
     "build_battery",

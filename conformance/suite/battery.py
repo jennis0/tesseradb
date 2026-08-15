@@ -20,6 +20,19 @@ an [`Absent`] entry — an explicitly marked absence rather than a query that si
 so the day it lands a test fails and the marker is promoted to a live query instead of quietly
 shadowing a surface that now exists.
 
+**The battery always carries one viewport deep enough to hold saturated tiles** ([`DEEP_ZOOM`]),
+because the stage-invariance comparison needs a surface where membership is comparable and
+saturation cannot be arranged — it is a per-tile fact of each response, not a configuration
+(`suite.entitlement`'s module doc; correctness-suite §10). Selection truncates per tile once a
+tile's visible count passes the mark budget, and a truncated tile supports only count
+comparison: at ten million items the whole-extent tile is a million-mark window over ten million
+visible rows, and rows displaced out of that window read as vanished. Depth divides the load —
+a zoom-*z* full-extent viewport spreads the corpus over 4^*z* tiles — so the deep viewport's
+tiles stay saturated roughly a thousandfold past the corpus that caps the zoom-0 one, and the
+diff keeps a membership surface while the shallow viewports fall back to counts. When even the
+deep tiles truncate, the diff reports the recording as uncheckable for point sets rather than
+quietly narrowing to counts; the remedy is a deeper battery, and this constant is where it goes.
+
 Queries are frozen and hashable — they are `Recorded`'s keys, and a recording is compared against
 another recording *of the same query* by lookup, never by position. `filters` is therefore carried
 as canonical JSON text rather than a dict; [`build_battery`] does the encoding and the recorder
@@ -121,6 +134,14 @@ Battery = tuple[Union[Query, Absent], ...]
 
 Recorded = dict[Query, Canonical]
 
+#: The depth of the battery's membership surface (module doc): 1,024 full-extent tiles, each
+#: holding 1/1024th of the corpus, so per-tile saturation survives three orders of magnitude
+#: past the whole-extent viewport's ceiling. Five is also the deepest full-extent viewport whose
+#: underlay fits the engine's default cell budget — 1,024 tiles × 4^offset cells must stay under
+#: `max_underlay_cells` (8,192), which is why the deep viewport requests ``underlay_offset = 1``
+#: (4,096 cells) rather than the battery's usual 2 (16,384 would be refused at the door).
+DEEP_ZOOM = 5
+
 
 def build_battery(
     meta: dict,
@@ -142,7 +163,9 @@ def build_battery(
     key is minted per fixture); at least one is required, because a battery without the
     drill-down has no reader of the record blob at all. `filters`, when given, adds one filtered
     viewport beside the unfiltered ones rather than replacing them — a battery whose every
-    viewport is filtered never exercises the unfiltered `matched = visible` surface.
+    viewport is filtered never exercises the unfiltered `matched = visible` surface. A
+    [`DEEP_ZOOM`] viewport rides every battery whose own `zooms` stop short of it — the
+    membership surface the module doc argues.
     """
     if not item_ids:
         raise ValueError(
@@ -165,6 +188,12 @@ def build_battery(
         Viewport(slice_id, zoom, bbox=bbox, k=k, underlay_offset=underlay_offset)
         for zoom in zooms
     ]
+    if max(zooms) < DEEP_ZOOM:
+        # The membership surface (module doc): deep enough that its tiles stay saturated —
+        # observed per response, never arranged — after the shallow viewports truncate.
+        entries.append(
+            Viewport(slice_id, DEEP_ZOOM, bbox=bbox, k=k, underlay_offset=1)
+        )
     if filters is not None:
         entries.append(
             Viewport(
@@ -288,6 +317,7 @@ __all__ = [
     "Absent",
     "Battery",
     "Categories",
+    "DEEP_ZOOM",
     "Item",
     "Meta",
     "Query",

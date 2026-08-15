@@ -72,8 +72,8 @@ N = 4096
 INGEST = (N, N + 64)
 BBOX = (0.0, 0.0, 65536.0, 65536.0)
 SLICE_ID = "s0"
-#: Saturation (§10's precondition, inherited): above every visible total, so the row half sees
-#: every visible row and a denied row's absence is the corpus's, not the selection's.
+#: Above every visible total at this fixture size, so every tile is saturated, the row half sees
+#: every visible row, and a denied row's absence is the corpus's, not the selection's.
 K = 200_000
 #: The census half's fixed depth: 256 tiles over the extent — fine enough to localise, small
 #: enough that the comparison is readable when it fails.
