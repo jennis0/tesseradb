@@ -2442,6 +2442,7 @@ dependencies = [
  "tempfile",
  "tessera-analyse",
  "tessera-build",
+ "tessera-corpus",
  "tessera-server",
  "tessera-spatial",
  "tessera-store",
@@ -2449,6 +2450,18 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tessera-corpus"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "parquet",
+ "proptest",
+ "tempfile",
+ "tessera-spatial",
+ "tessera-types",
 ]
 
 [[package]]

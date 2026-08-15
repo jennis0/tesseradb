@@ -15,6 +15,7 @@ members = [
     "crates/tessera-server",
     "crates/tessera-filter-write",
     "crates/tessera-build",
+    "crates/tessera-corpus",
     "crates/tessera-cli",
     "crates/tessera-bench",
 ]

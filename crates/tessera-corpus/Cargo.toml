@@ -1,0 +1,18 @@
+[package]
+name = "tessera-corpus"
+version = "0.1.0"
+edition = "2021"
+
+# The correctness suite's generator (`correctness-suite.md` §8, §12.1). The dependency rule is
+# §13's and `scripts/check-layers.sh` enforces it: tessera-types and tessera-spatial and nothing
+# else in the workspace. A generator that can read an artefact stops being a second statement of
+# the corpus and becomes a transcription of the thing it checks.
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+tessera-spatial = { path = "../tessera-spatial" }
+arrow = { workspace = true }
+parquet = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

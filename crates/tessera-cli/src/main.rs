@@ -122,6 +122,13 @@ enum Command {
     Verify {
         /// Bundle root (the directory containing `CURRENT`).
         bundle: PathBuf,
+        /// Also run the deep structural pass (correctness-suite §11): postings sorted,
+        /// duplicate-free and bounded; the external-id locator and its sidecar agreeing in both
+        /// directions; dictionary extents positional and never repeating a descriptor; and
+        /// `pairs.parquet` matching the base postings it was written with. Point it at a bundle
+        /// no live engine is publishing into.
+        #[arg(long)]
+        deep: bool,
     },
     /// Analyse text through the shipped tokeniser, one input per line, tokens tab-separated.
     ///
@@ -147,11 +154,74 @@ enum Command {
         #[arg(long)]
         identity: bool,
     },
+    /// The correctness suite's generated corpus: expected items by served join key, and expected
+    /// masked counts per tile (`docs/design/correctness-suite.md` §8, §12.1).
+    ///
+    /// **The suite's access to the generator**, on the `tokenise` precedent: expected answers must
+    /// come from the same statement of the corpus the fixtures were materialised from, and a
+    /// Python reimplementation would put the fixture under test rather than the system. The verb
+    /// granularity is deliberate — one `items` call per recorded response and one `census` per
+    /// run, never a call per row — so the O(n) work stays in Rust and the driver compares vectors.
+    Corpus {
+        #[command(subcommand)]
+        command: CorpusCommand,
+    },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     Serve {
         /// Path to `tessera.toml` (SA §7).
         #[arg(short = 'c', long = "config")]
         config: PathBuf,
+    },
+}
+
+/// The corpus extent both verbs default to: the cell grid's own coordinates, which is what the
+/// conformance fixtures build against (contracts §2.5 — the grid is 2^16 × 2^16).
+const GRID_EXTENT: &str = "0,65536,0,65536";
+
+#[derive(Subcommand)]
+enum CorpusCommand {
+    /// Expected properties for served rows: `fx_key` values in (one decimal per line), an Arrow
+    /// IPC stream out on stdout — each key's item identity, position and every declared field.
+    ///
+    /// Takes no `--n`, and that absence is the point: an item's properties depend on the seed and
+    /// the item alone (the generator is prefix-stable), so the verb answers for any key a
+    /// response carried without being told how large the corpus was. The keys are `fx_key`
+    /// values — item identities — never `tessera_id`s, which invert to entity ids and say nothing
+    /// about items (correctness-suite §8).
+    Items {
+        /// The run's seed.
+        #[arg(long)]
+        seed: u64,
+        /// Where the fx_key values come from: `-` for stdin, else a file path.
+        #[arg(long)]
+        ids: PathBuf,
+        /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
+        #[arg(long, value_parser = parse_extent, default_value = GRID_EXTENT)]
+        extent: Bounds,
+    },
+    /// Expected masked count per depth-`zoom` tile for one principal: an Arrow IPC stream on
+    /// stdout, `(tile, count)` ascending, non-empty tiles only.
+    ///
+    /// Per tile rather than one global total, because a single number passes any defect that
+    /// moves rows between tiles while preserving the sum (correctness-suite §9.2). The counts are
+    /// what the *corpus* holds: denies the harness has had accepted are its own to subtract.
+    Census {
+        /// The run's seed.
+        #[arg(long)]
+        seed: u64,
+        /// The corpus size — the one derivation-free use of n: the census's loop bound.
+        #[arg(long)]
+        n: u64,
+        /// Tile depth, 0..=16.
+        #[arg(long)]
+        zoom: u8,
+        /// The principal's grant, in the mask catalogue's term-set encoding: comma-separated
+        /// decimal term descriptors (the `builtin:passthrough` label form).
+        #[arg(long)]
+        grant: String,
+        /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
+        #[arg(long, value_parser = parse_extent, default_value = GRID_EXTENT)]
+        extent: Bounds,
     },
 }
 
@@ -594,6 +664,187 @@ fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) 
     );
 }
 
+/// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
+/// items out. The corpus is constructed with `n = 0` because the lookups take no part in it —
+/// see the verb's own doc.
+fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
+    use arrow::array::{
+        ArrayRef, Float32Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
+        UInt64Builder,
+    };
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    let corpus = match tessera_corpus::Corpus::new(seed, 0, extent) {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            eprintln!("corpus items: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let text = if ids == Path::new("-") {
+        use std::io::Read;
+        let mut buffer = String::new();
+        if let Err(e) = std::io::stdin().lock().read_to_string(&mut buffer) {
+            eprintln!("corpus items: reading stdin: {e}");
+            return ExitCode::FAILURE;
+        }
+        buffer
+    } else {
+        match std::fs::read_to_string(ids) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("corpus items: {}: {e}", ids.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let mut fx_key = UInt64Builder::new();
+    let mut e_col = UInt64Builder::new();
+    let mut x = Float32Builder::new();
+    let mut y = Float32Builder::new();
+    let mut weight = UInt32Builder::new();
+    let mut seen_at = TimestampMicrosecondBuilder::new();
+    let mut bay = StringBuilder::new();
+    let mut tag = StringBuilder::new();
+    let mut blurb = StringBuilder::new();
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(fx) = line.parse::<u64>() else {
+            // Refused rather than skipped: a non-decimal line means the caller is feeding this
+            // verb something other than fx_key values, and a silently shortened answer would be
+            // compared as if it were complete.
+            eprintln!(
+                "corpus items: line {}: '{line}' is not a decimal fx_key",
+                line_no + 1
+            );
+            return ExitCode::FAILURE;
+        };
+        let e = corpus.item_of_fx_key(fx);
+        let item = corpus.item(e);
+        fx_key.append_value(fx);
+        e_col.append_value(e);
+        x.append_value(item.x);
+        y.append_value(item.y);
+        weight.append_option(item.weight);
+        seen_at.append_option(item.seen_at);
+        bay.append_option(item.bay);
+        tag.append_option(item.tag.as_deref());
+        blurb.append_option(item.blurb.as_deref());
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("fx_key", DataType::UInt64, false),
+        Field::new("e", DataType::UInt64, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("weight", DataType::UInt32, true),
+        Field::new(
+            "seen_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("bay", DataType::Utf8, true),
+        Field::new("tag", DataType::Utf8, true),
+        Field::new("blurb", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(fx_key.finish()) as ArrayRef,
+            Arc::new(e_col.finish()),
+            Arc::new(x.finish()),
+            Arc::new(y.finish()),
+            Arc::new(weight.finish()),
+            Arc::new(seen_at.finish()),
+            Arc::new(bay.finish()),
+            Arc::new(tag.finish()),
+            Arc::new(blurb.finish()),
+        ],
+    )
+    .expect("columns built to one length from one loop");
+    let schema = batch.schema();
+    write_arrow_stdout(&schema, &[batch], "corpus items")
+}
+
+/// `tessera corpus census` (correctness-suite §9.2, §12.1): the expected masked count per tile,
+/// computed in one O(n) pass here so the driver compares two count vectors.
+fn corpus_census(seed: u64, n: u64, zoom: u8, grant: &str, extent: Bounds) -> ExitCode {
+    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    if zoom > 16 {
+        eprintln!("corpus census: zoom {zoom} exceeds grid depth 16 (contracts §2.5)");
+        return ExitCode::FAILURE;
+    }
+    let grant = match tessera_corpus::Grant::parse(grant) {
+        Ok(grant) => grant,
+        Err(e) => {
+            eprintln!("corpus census: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let corpus = match tessera_corpus::Corpus::new(seed, n, extent) {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            eprintln!("corpus census: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let counts = corpus.census(zoom, &grant);
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tile", DataType::UInt64, false),
+        Field::new("count", DataType::UInt64, false),
+    ]));
+    // Chunked: at deep zooms the tile vector can run to millions of rows, and a bounded batch
+    // size keeps the stream's consumers (and this process's transient) flat.
+    let batches: Vec<RecordBatch> = counts
+        .chunks(1 << 16)
+        .map(|chunk| {
+            let tiles = UInt64Array::from_iter_values(chunk.iter().map(|(tile, _)| *tile));
+            let totals = UInt64Array::from_iter_values(chunk.iter().map(|(_, count)| *count));
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(tiles) as ArrayRef, Arc::new(totals)],
+            )
+            .expect("two columns of one chunk's length")
+        })
+        .collect();
+    write_arrow_stdout(&schema, &batches, "corpus census")
+}
+
+/// One Arrow IPC stream on stdout. An empty batch list still writes a valid stream carrying only
+/// the schema — "no tiles" must be distinguishable from "no output".
+fn write_arrow_stdout(
+    schema: &std::sync::Arc<arrow::datatypes::Schema>,
+    batches: &[arrow::record_batch::RecordBatch],
+    verb: &str,
+) -> ExitCode {
+    let out = std::io::stdout().lock();
+    let write = || -> Result<(), arrow::error::ArrowError> {
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(out, schema)?;
+        for batch in batches {
+            writer.write(batch)?;
+        }
+        writer.finish()
+    };
+    match write() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{verb}: writing Arrow stream: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -790,8 +1041,8 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Command::Verify { bundle } => match tessera_build::verify(&bundle) {
-            Ok(report) => {
+        Command::Verify { bundle, deep } => {
+            let print_shallow = |report: &tessera_build::VerifyReport| {
                 println!(
                     "OK {} ({}): {} partition(s), {} slice(s), {} segment(s), {} rows, \
                      entity_id_high_water {}",
@@ -803,12 +1054,49 @@ fn main() -> ExitCode {
                     report.rows,
                     report.entity_id_high_water
                 );
-                ExitCode::SUCCESS
+            };
+            if deep {
+                match tessera_build::verify_deep(&bundle, &tessera_build::VerifyOpts::default()) {
+                    Ok(report) => {
+                        print_shallow(&report.shallow);
+                        println!(
+                            "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
+                             record(s), {} external-id binding(s)",
+                            report.terms,
+                            report.delta_tiers,
+                            report.pairs_rows,
+                            report.dict_records,
+                            report.external_id_bindings
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("FAILED {}: {e}", bundle.display());
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                match tessera_build::verify(&bundle) {
+                    Ok(report) => {
+                        print_shallow(&report);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("FAILED {}: {e}", bundle.display());
+                        ExitCode::FAILURE
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("FAILED {}: {e}", bundle.display());
-                ExitCode::FAILURE
-            }
+        }
+        Command::Corpus { command } => match command {
+            CorpusCommand::Items { seed, ids, extent } => corpus_items(seed, &ids, extent),
+            CorpusCommand::Census {
+                seed,
+                n,
+                zoom,
+                grant,
+                extent,
+            } => corpus_census(seed, n, zoom, &grant, extent),
         },
         Command::Serve { config } => {
             tracing_subscriber::fmt::init();

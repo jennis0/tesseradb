@@ -30,6 +30,19 @@ deny tessera-filter-write tessera-store
 deny tessera-filter-write tessera-spatial
 deny tessera-server tessera-filter-write
 deny tessera-filter tessera-filter-write
+# The corpus generator is a second statement of the corpus, and only stays one while it cannot
+# read an artefact (correctness-suite §13): a generator that learned to open a bundle, an engine
+# type or a filter structure becomes a transcription of the thing it checks, and total
+# verification then compares the system against itself. Exhaustive rather than a deny list —
+# tessera-types and tessera-spatial (the *definitions* of ids and quantisation) are the only
+# workspace edges it may have, so any OTHER workspace edge fails, including one added by a
+# well-meaning refactor to a crate this comment never heard of.
+if cargo tree -p tessera-corpus --prefix none -e normal --depth 1 | tail -n +2 \
+     | grep '^tessera-' | grep -vE '^tessera-(types|spatial) '; then
+  echo "FORBIDDEN: tessera-corpus may depend on tessera-types and tessera-spatial and nothing"
+  echo "           else in the workspace (correctness-suite §13; lines above are the violation)"
+  fail=1
+fi
 # lifecycle §7's sync-engine rule, made mechanical (D-D): the engine's intra-request parallelism
 # is rayon's plain-thread pool, never tokio — an async runtime inside a supposedly synchronous
 # engine would reintroduce exactly the reactor-blocking hazard D-A moved off the server's own
