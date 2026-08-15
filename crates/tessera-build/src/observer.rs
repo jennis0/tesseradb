@@ -25,6 +25,11 @@ pub enum BuildStage {
     Dictionary,
     /// 3. One pass over the pairs file, packing `ordinal << 32 | term_id`, then sort and dedup.
     PairsPack,
+    /// 3b. One pass over the points file, scattering each item's Morton code by ordinal so the
+    ///    signature sort can break ties on it (decision 0073). Its own stage because it is a whole
+    ///    extra pass over the points file, and a cost that size should be visible to the bench
+    ///    rather than hidden inside its neighbours.
+    MortonCodes,
     /// 4. The signature sort — permanent under I9, and the reason entity IDs cannot be
     ///    reassigned later.
     SignatureSort,
@@ -54,6 +59,7 @@ impl BuildStage {
             BuildStage::SourceIds => "source_ids",
             BuildStage::Dictionary => "dictionary",
             BuildStage::PairsPack => "pairs_pack",
+            BuildStage::MortonCodes => "morton_codes",
             BuildStage::SignatureSort => "signature_sort",
             BuildStage::Assignment => "assignment",
             BuildStage::PostingsWrite => "postings_write",
@@ -66,10 +72,11 @@ impl BuildStage {
         }
     }
 
-    pub const ALL: [BuildStage; 11] = [
+    pub const ALL: [BuildStage; 12] = [
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
+        BuildStage::MortonCodes,
         BuildStage::SignatureSort,
         BuildStage::Assignment,
         BuildStage::PostingsWrite,

@@ -187,7 +187,7 @@ enum Command {
         seed: u64,
     },
 
-    /// Blank-database ingest: `tessera build` decomposed into its eleven pipeline stages.
+    /// Blank-database ingest: `tessera build` decomposed into its twelve pipeline stages.
     IngestBuild {
         #[arg(long, value_delimiter = ',', default_values_t = [250_000u64, 2_422_486, 25_000_000])]
         scale: Vec<u64>,

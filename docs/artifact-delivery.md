@@ -133,12 +133,41 @@ restart. **Data:** none new.
 batch plan's residency model widened to match — a model left at 12 would plan a batch the loop
 cannot hold. The codes reach the sort through a mapped `morton-of-ordinal.u32`, filled by its own
 pass over the points file, because an ordinal exists only once the source ids are sorted and the
-first pass sees the file's order rather than the corpus's. Two things that cost, both ⊘ unmeasured
-and both this stage's: **one extra sequential pass** over the points file, and **4 B/item of
-anonymous memory** in the batch, against the alternative of reading the code out of the mapped
-array inside the comparator. **No existing test moved** — the suite pinned signature *grouping* and
-never the order inside a group — so the new one asserts the direction on both the pre-sort and the
-tie-refinement path.
+first pass sees the file's order rather than the corpus's. **No existing test moved** — the suite
+pinned signature *grouping* and never the order inside a group — so the new one asserts the
+direction on both the pre-sort and the tie-refinement path.
+
+**What the real 2.4M corpus says** (*measured* 2026-08-15, two builds of the same corpus through the
+shipped writer, warm cache, `categories-subclass`):
+
+| | before | after | |
+|---|---:|---:|---|
+| `postings.arrow`, `pairs.parquet`, `morton.u32` | | | **byte-identical** |
+| permutation, `row-entity`, `columns.arrow`, external ids | | | changed, as they must |
+| mean monotone run in `permutation.bin` | 2.00 | **49.19** | **24.6×** |
+| build wall time | 6.93 s | 10.30 s | **+49%** |
+| peak RSS | 202 MB | 214 MB | +5.5% |
+
+**Two of these correct the design.** M3's *"postings byte-identical"* now holds end to end rather
+than in a re-derivation — and it is structural, not luck: a signature group occupies the same
+contiguous entity range however its interior is ordered, so a term's postings cannot move. M7's
+permutation claim was *"~1 → ~44"*; the measured pair is **2.00 → 49.19**, because the uncorrelated
+baseline for a random permutation is 2, not 1. The direction and the destination hold; **the ratio
+is 24.6×, not 44×**, and anything quoting the old baseline is quoting a mistake.
+
+**And one is a cost the decision under-stated.** [Decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md)
+called the build-side effect second-order, reasoning about the sort record. It is not: the build is
+**+49%** at 2.4M. Decomposed by running the wide record with the pass switched off, the split is
+**+0.33 s for the record and the extra key component, +3.04 s for the pass** — so the layout
+question the decision left open is settled and it is the wrong lever: at 12 bytes with an
+indirection it would recover about a tenth of what was lost.
+
+⊘ **The lever is the pass, and there is a recovery worth its own change.** The build reads the
+points file **twice** already — once for source ids, once for geometry in entity order — and this
+made it three. If the new pass also captured `(qx, qy)` by ordinal, the geometry scan becomes a
+permutation of arrays already in hand, taking the build to **two** passes: net faster than before
+the tiebreak. Not done here, because it restructures a stage that feeds the tiler, the geometry
+anchor check and the sub-cell residual, and that is a change with its own argument to make.
 
 ### Stage 2 — One flat level, served with masked counts
 

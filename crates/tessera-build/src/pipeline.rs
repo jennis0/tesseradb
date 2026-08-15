@@ -846,6 +846,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         }
         resolve(&mut chunk, morton_of_ordinal)?;
     }
+    timer.end(BuildStage::MortonCodes, n);
 
     drop(source_ids);
     drop(term_keys);
