@@ -70,8 +70,6 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `annotation-representation.md` | Provisional — under review | 3 |
-| `annotations.md` | Provisional — under review | 1 |
 | `architecture.md` | Normative — r41 | 23 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
