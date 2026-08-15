@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 312" width="860" height="312" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>Two pipelines with identical stages in different order: aggregating before gating derives numbers from unreadable documents; masking before aggregating derives them only from the visible set.</title>
+<rect x="0" y="0" width="860" height="312" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="ar1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Where the mask sits relative to aggregation</text>
+
+        <text x="20" y="58" font-size="11.5" fill="#5b6a75" letter-spacing="1">A &#160;&#160;AGGREGATE, THEN GATE &#8212; ENFORCEMENT AT RETRIEVAL (THE SURVEYED DEFAULT)</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="72" width="170" height="48" rx="2"/>
+          <rect x="230" y="72" width="200" height="48" rx="2"/>
+          <rect x="470" y="72" width="180" height="48" rx="2"/>
+          <rect x="690" y="72" width="140" height="48" rx="2"/>
+        </g>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="105" y="92">full corpus</text>
+          <text x="330" y="92">count · cluster · label</text>
+          <text x="560" y="92">permission gate</text>
+          <text x="760" y="98">viewer</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="105" y="109">every item</text>
+          <text x="330" y="109">computed over everything</text>
+          <text x="560" y="109">trim · threshold · withhold</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar1)">
+          <line x1="192" y1="96" x2="226" y2="96"/>
+          <line x1="432" y1="96" x2="466" y2="96"/>
+          <line x1="652" y1="96" x2="686" y2="96"/>
+        </g>
+        <text x="230" y="150" font-size="12.5" fill="#7d6111">the quantities shown were derived from documents the viewer cannot read — the gate withholds them, but did not shape them</text>
+
+        <text x="20" y="196" font-size="11.5" fill="#5b6a75" letter-spacing="1">B &#160;&#160;MASK, THEN AGGREGATE &#8212; TESSERA'S ORDERING</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20"  y="210" width="170" height="48" rx="2"/>
+          <rect x="470" y="210" width="180" height="48" rx="2"/>
+          <rect x="690" y="210" width="140" height="48" rx="2"/>
+        </g>
+        <rect x="230" y="210" width="200" height="48" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <g font-size="13" fill="#101820" text-anchor="middle">
+          <text x="105" y="230">full corpus</text>
+          <text x="330" y="230">the viewer's visible set</text>
+          <text x="560" y="230">count · cluster · label</text>
+          <text x="760" y="236">viewer</text>
+        </g>
+        <g font-size="11" fill="#5b6a75" text-anchor="middle">
+          <text x="105" y="247">every item</text>
+          <text x="330" y="247">one bitmap per session</text>
+          <text x="560" y="247">computed inside the set</text>
+        </g>
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#ar1)">
+          <line x1="192" y1="234" x2="226" y2="234"/>
+          <line x1="432" y1="234" x2="466" y2="234"/>
+          <line x1="652" y1="234" x2="686" y2="234"/>
+        </g>
+        <text x="230" y="290" font-size="12.5" fill="#0e6f8a">every displayed quantity is computable from the visible set alone — a gated global aggregate is treated as a disclosure, not a filtered view</text>
+      
+
+</svg>

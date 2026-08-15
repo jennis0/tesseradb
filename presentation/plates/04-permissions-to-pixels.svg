@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 532" width="860" height="532" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>Granted terms' postings union into an entity-space mask whose runs are contiguous; the mask is projected once per session into map-ordered row space, where tiles are counted as contiguous ranges.</title>
+<rect x="0" y="0" width="860" height="532" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="ar3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">From a viewer's permissions to per-tile counts</text>
+
+        <!-- postings -->
+        <text x="170" y="58" font-size="11.5" fill="#5b6a75" letter-spacing="1">PERMISSION INDEX &#8212; ITEMS IN PERMISSION ORDER ("ENTITY SPACE")</text>
+        <text x="160" y="88" font-size="12" fill="#101820" text-anchor="end">term "project-x"</text>
+        <rect x="170" y="72" width="640" height="24" fill="#ffffff" stroke="#b7c2c9"/>
+        <rect x="210" y="73" width="160" height="22" fill="#0e6f8a" opacity="0.55"/>
+        <text x="160" y="122" font-size="12" fill="#101820" text-anchor="end">term "region-eu"</text>
+        <rect x="170" y="106" width="640" height="24" fill="#ffffff" stroke="#b7c2c9"/>
+        <rect x="490" y="107" width="160" height="22" fill="#0e6f8a" opacity="0.55"/>
+        <text x="818" y="88" font-size="11" fill="#5b6a75"> </text>
+
+        <line x1="430" y1="134" x2="430" y2="158" stroke="#101820" stroke-width="1.2" marker-end="url(#ar3)"/>
+        <text x="444" y="150" font-size="11.5" fill="#5b6a75">union of the granted terms — once per session</text>
+
+        <!-- mask strip -->
+        <text x="160" y="178" font-size="12" fill="#101820" text-anchor="end">the viewer's mask</text>
+        <rect x="170" y="162" width="640" height="28" fill="#ffffff" stroke="#b7c2c9"/>
+        <rect x="210" y="163" width="160" height="26" fill="#0e6f8a"/>
+        <rect x="490" y="163" width="160" height="26" fill="#0e6f8a"/>
+        <g stroke="#b7c2c9" stroke-width="0.7">
+          <line x1="250" y1="162" x2="250" y2="190"/><line x1="290" y1="162" x2="290" y2="190"/><line x1="330" y1="162" x2="330" y2="190"/>
+          <line x1="530" y1="162" x2="530" y2="190"/><line x1="570" y1="162" x2="570" y2="190"/><line x1="610" y1="162" x2="610" y2="190"/>
+        </g>
+        <text x="170" y="214" font-size="11.5" fill="#101820">item IDs are permanent, and assigned <tspan fill="#0e6f8a">grouped by permission</tspan> — so a term's items are contiguous and a mask is a few compressed runs</text>
+        <text x="170" y="231" font-size="11.5" fill="#5b6a75">measured: 8.9–36.7× smaller postings, up to 130× faster to union, than ungrouped assignment</text>
+
+        <!-- crossing -->
+        <g stroke="#9aa8b1" stroke-width="1">
+          <line x1="230" y1="194" x2="230" y2="330"/>
+          <line x1="270" y1="194" x2="270" y2="330"/>
+          <line x1="310" y1="194" x2="190" y2="330"/>
+          <line x1="350" y1="194" x2="510" y2="330"/>
+          <line x1="510" y1="194" x2="310" y2="330"/>
+          <line x1="550" y1="194" x2="790" y2="330"/>
+          <line x1="590" y1="194" x2="590" y2="330"/>
+          <line x1="630" y1="194" x2="370" y2="330"/>
+        </g>
+        <text x="672" y="262" font-size="12" fill="#101820">projected into row order</text>
+        <text x="672" y="279" font-size="11" fill="#5b6a75">once per session, then cached —</text>
+        <text x="672" y="294" font-size="11" fill="#5b6a75">~10.7 s at 10⁹ for the broadest</text>
+        <text x="672" y="309" font-size="11" fill="#5b6a75">viewer, so never per request</text>
+
+        <!-- row strip -->
+        <rect x="170" y="334" width="640" height="28" fill="#ffffff" stroke="#b7c2c9"/>
+        <g fill="#0e6f8a">
+          <rect x="171" y="335" width="39" height="26"/>
+          <rect x="210" y="335" width="80" height="26"/>
+          <rect x="330" y="335" width="40" height="26"/>
+          <rect x="490" y="335" width="40" height="26"/>
+          <rect x="570" y="335" width="40" height="26"/>
+          <rect x="770" y="335" width="39" height="26"/>
+        </g>
+        <g stroke="#b7c2c9" stroke-width="0.7">
+          <line x1="210" y1="334" x2="210" y2="362"/><line x1="250" y1="334" x2="250" y2="362"/><line x1="290" y1="334" x2="290" y2="362"/>
+          <line x1="370" y1="334" x2="370" y2="362"/><line x1="530" y1="334" x2="530" y2="362"/><line x1="610" y1="334" x2="610" y2="362"/>
+        </g>
+        <text x="160" y="352" font-size="12" fill="#101820" text-anchor="end">the same items,</text>
+        <text x="160" y="367" font-size="11" fill="#5b6a75" text-anchor="end">in map order</text>
+
+        <!-- tile brackets -->
+        <g fill="none" stroke="#101820" stroke-width="1.2">
+          <path d="M170,370 L170,380 L330,380 L330,370"/>
+          <path d="M334,370 L334,380 L490,380 L490,370"/>
+          <path d="M494,370 L494,380 L650,380 L650,370"/>
+          <path d="M654,370 L654,380 L810,380 L810,370"/>
+        </g>
+        <g font-size="12" fill="#101820" text-anchor="middle">
+          <text x="250" y="400">tile 0 — 4</text>
+          <text x="412" y="400">tile 1 — 1</text>
+          <text x="572" y="400">tile 2 — 2</text>
+          <text x="732" y="400">tile 3 — 1</text>
+        </g>
+        <text x="170" y="426" font-size="11.5" fill="#101820">row order = map position (Morton — next plate), so every tile is one <tspan fill="#0e6f8a">contiguous range</tspan>: a visible count is an exact bit-count over a range,</text>
+        <text x="170" y="443" font-size="11.5" fill="#101820">touching no document data — cost proportional to <tspan fill="#0e6f8a">compressed blocks touched, never items matched</tspan></text>
+
+        <text x="170" y="480" font-size="11.5" fill="#5b6a75">why two orderings: new items re-rank map order continuously, but permission sets must never be renumbered — the projection absorbs the churn;</text>
+        <text x="170" y="497" font-size="11.5" fill="#5b6a75">and an ordering spent on permission grouping cannot also be spatial. The two meet only at this projection.</text>
+        <text x="170" y="521" font-size="11.5" fill="#5b6a75">internal item IDs never reach a client — the wire carries an opaque keyed permutation of them, so gaps and adjacency reveal nothing</text>
+      
+
+</svg>

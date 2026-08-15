@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 584" width="860" height="584" font-family="ui-sans-serif, system-ui, sans-serif">
+<title>A schema.toml attribute block on the left; four example declarations routed by their flags to three storage homes — the hot column read per rendered mark, the entity-space search structure read per query, and the record blob read per click.</title>
+<rect x="0" y="0" width="860" height="584" fill="#fbfcfc"/>
+
+
+        <defs>
+          <marker id="arT" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
+        </defs>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">One TOML block per field decides where its bytes live — and therefore when they are ever read</text>
+
+        <text x="20" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">THE DECLARATION — schema.toml</text>
+        <rect x="20" y="62" width="430" height="164" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <g font-size="11" font-family="ui-monospace, Menlo, Consolas, monospace">
+          <text x="36" y="84"  fill="#101820">[[attribute]]</text>
+          <text x="36" y="101" fill="#101820">name       = "archive"</text>
+          <text x="36" y="118" fill="#101820">type       = "category"   <tspan fill="#5b6a75"># or a number width,</tspan></text>
+          <text x="36" y="135" fill="#101820">width      = "u8"         <tspan fill="#5b6a75">#   timestamp, keyword, text</tspan></text>
+          <text x="36" y="152" fill="#0e6f8a">render     = true         <tspan fill="#5b6a75"># drawn on the map</tspan></text>
+          <text x="36" y="169" fill="#0e6f8a">index      = true         <tspan fill="#5b6a75"># searchable / filterable</tspan></text>
+          <text x="36" y="186" fill="#101820">vocabulary = "declared"   <tspan fill="#5b6a75"># or discovered at ingest</tspan></text>
+          <text x="36" y="203" fill="#101820">listing    = "public"     <tspan fill="#5b6a75"># who may learn the value list</tspan></text>
+        </g>
+
+        <text x="480" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHAT THE BUILD DOES WITH IT</text>
+        <g font-size="11.5">
+          <text x="480" y="78"  fill="#101820">tessera build compiles the schema into the bundle's</text>
+          <text x="480" y="94"  fill="#101820">MANIFEST; the engine serves only what it declares, and</text>
+          <text x="480" y="110" fill="#101820">/v1/meta advertises the filter operands derived from it</text>
+          <text x="480" y="140" fill="#5b6a75">name and type are required; every flag defaults to false —</text>
+          <text x="480" y="156" fill="#5b6a75">the cheapest placement, made costlier only by an explicit word</text>
+          <text x="480" y="186" fill="#5b6a75">categories must also declare width, vocabulary and listing:</text>
+          <text x="480" y="202" fill="#5b6a75">disclosure and migration controls never default</text>
+        </g>
+
+        <text x="20" y="254" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHERE THE BYTES LIVE — ONE HOME PER FIELD, CHOSEN BY THE FLAGS</text>
+        <g stroke="#c8d2d8" fill="#ffffff">
+          <rect x="20" y="266" width="254" height="40" rx="2"/>
+          <rect x="20" y="314" width="254" height="40" rx="2"/>
+          <rect x="20" y="362" width="254" height="40" rx="2"/>
+          <rect x="20" y="410" width="254" height="40" rx="2"/>
+        </g>
+        <g font-size="11.5" fill="#101820">
+          <text x="34" y="283">recency — f32</text>
+          <text x="34" y="331">archive — category (u8)</text>
+          <text x="34" y="379">submitter — keyword</text>
+          <text x="34" y="427">doi — keyword</text>
+        </g>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="34" y="298">render = true</text>
+          <text x="34" y="346">render + index</text>
+          <text x="34" y="394">index = true</text>
+          <text x="34" y="442">no flags</text>
+        </g>
+
+        <rect x="470" y="262" width="370" height="68" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
+        <text x="486" y="284" font-size="12" fill="#101820">RENDER — the hot column</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="486" y="301">row space, fixed width, mmap'd — read per rendered</text>
+          <text x="486" y="315">mark (~10⁵ a viewport); never compressed</text>
+        </g>
+        <rect x="470" y="350" width="370" height="68" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="486" y="372" font-size="12" fill="#101820">INDEX — the search structure</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="486" y="389">entity space, scanned under the viewer's mask — read</text>
+          <text x="486" y="403">once per query; categories add per-value bitmaps</text>
+        </g>
+        <rect x="470" y="438" width="370" height="68" rx="2" fill="#ffffff" stroke="#c8d2d8"/>
+        <text x="486" y="460" font-size="12" fill="#101820">INSPECT — the record blob</text>
+        <g font-size="10.5" fill="#5b6a75">
+          <text x="486" y="477">compressed blocks (3.0× measured) — one block read</text>
+          <text x="486" y="491">per click (~0.25 ms); never on the render or query path</text>
+        </g>
+
+        <g stroke="#101820" stroke-width="1.2" marker-end="url(#arT)">
+          <line x1="278" y1="286" x2="466" y2="288"/>
+          <line x1="278" y1="328" x2="466" y2="304"/>
+          <line x1="278" y1="340" x2="466" y2="372"/>
+          <line x1="278" y1="382" x2="466" y2="386"/>
+          <line x1="278" y1="430" x2="466" y2="468"/>
+        </g>
+
+        <g font-size="11">
+          <text x="20" y="530" fill="#101820">the routing rule: place by how often a value is read, not by what it is — per mark, per query and per click are four orders of magnitude apart</text>
+          <text x="20" y="548" fill="#5b6a75">store once: a field's bytes live in exactly one home; a rendered column is already filterable over the request's own rows, at no extra storage</text>
+          <text x="20" y="566" fill="#5b6a75">refused at parse, each naming itself: render on keyword or text (not fixed width), render on a multi-valued field, a category missing its controls</text>
+        </g>
+      
+
+</svg>
