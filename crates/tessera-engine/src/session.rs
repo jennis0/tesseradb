@@ -710,6 +710,8 @@ pub struct Engine {
     pub(crate) fold_paused: Arc<AtomicBool>,
     /// See [`Engine::set_fold_publication_paused_for_test`]. Always `false` in a shipped build.
     pub(crate) fold_publication_paused: Arc<AtomicBool>,
+    /// See [`Engine::set_merge_publication_paused_for_test`]. Always `false` in a shipped build.
+    pub(crate) merge_publication_paused: Arc<AtomicBool>,
     /// How many row projections were built from the whole fragment rather than derived from the
     /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
     ///
@@ -1036,6 +1038,7 @@ impl Engine {
         let merge_enabled = Arc::new(AtomicBool::new(true));
         let fold_paused = Arc::new(AtomicBool::new(false));
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
+        let merge_publication_paused = Arc::new(AtomicBool::new(false));
 
         Ok(Engine {
             generation: Arc::clone(&generation),
@@ -1064,6 +1067,7 @@ impl Engine {
             merge_enabled: Arc::clone(&merge_enabled),
             fold_paused: Arc::clone(&fold_paused),
             fold_publication_paused: Arc::clone(&fold_publication_paused),
+            merge_publication_paused: Arc::clone(&merge_publication_paused),
             full_projection_builds: AtomicU64::new(0),
         })
     }
@@ -1159,6 +1163,28 @@ impl Engine {
     /// The condition a test waits on instead of guessing at the hold with a sleep.
     pub fn fold_is_holding_for_test(&self) -> bool {
         self.write.health().fold_holding.load(Ordering::SeqCst)
+    }
+
+    /// Hold a **completed** merge in its channel, undrained, so a flush can publish **inside the
+    /// merge's flight** — see [`crate::write::MaintenanceDeps::merge_publication_paused`] for the
+    /// window and why it is a real one. [`Self::set_fold_publication_paused_for_test`]'s shape,
+    /// including the wake: the executor draining nothing is what parks it, so unpausing must ring
+    /// the doorbell.
+    pub fn set_merge_publication_paused_for_test(&self, paused: bool) {
+        self.merge_publication_paused.store(paused, Ordering::SeqCst);
+        if !paused {
+            self.write.wake();
+        }
+    }
+
+    /// Whether a completed merge is waiting, undrained, at
+    /// [`Self::set_merge_publication_paused_for_test`]'s hold. The condition a test waits on
+    /// instead of guessing at the hold with a sleep.
+    pub fn merge_publication_is_held_for_test(&self) -> bool {
+        self.write
+            .health()
+            .merge_completed_pending
+            .load(Ordering::SeqCst)
     }
 
     pub fn set_refresh_paused_for_test(&self, paused: bool) {
@@ -2076,6 +2102,7 @@ impl Engine {
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
                 fold_publication_paused: Arc::clone(&self.fold_publication_paused),
+                merge_publication_paused: Arc::clone(&self.merge_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
                     pool: Arc::clone(&self.pool),
@@ -2130,6 +2157,7 @@ impl Engine {
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
                 fold_publication_paused: Arc::clone(&self.fold_publication_paused),
+                merge_publication_paused: Arc::clone(&self.merge_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
                     pool: Arc::clone(&self.pool),

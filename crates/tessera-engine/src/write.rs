@@ -2009,6 +2009,7 @@ impl WritePath {
                     configured_merge_bytes: flush.configured_merge_bytes,
                     fold_paused: flush.fold_paused,
                     fold_publication_paused: flush.fold_publication_paused,
+                    merge_publication_paused: flush.merge_publication_paused,
                     compaction: flush.compaction,
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
@@ -2801,6 +2802,15 @@ pub(crate) struct MaintenanceDeps {
     /// fail-closed; what this makes is that same window deterministic, so compaction §12's
     /// obligation 9 is a test rather than an argument.
     pub(crate) fold_publication_paused: Arc<AtomicBool>,
+    /// Whether a **completed** merge is left undrained in its channel —
+    /// `Engine::set_merge_publication_paused_for_test`. Always `false` in a shipped build.
+    ///
+    /// [`Self::fold_publication_paused`]'s shape, opening the merge's own window: a flush
+    /// publishing between a merge's plan and its publication, which is the interleaving under
+    /// which the merge's rebase must keep the live manifest's watermark rather than its
+    /// plan-time snapshot (`crate::merge::rebase_into`). Reachable in production on any tick a
+    /// merge and a flush share, microseconds wide unassisted; this makes it deterministic.
+    pub(crate) merge_publication_paused: Arc<AtomicBool>,
     /// When a fold is dispatched with nobody asking for one — see
     /// [`crate::compact::CompactionSchedule`].
     pub(crate) compaction: crate::compact::CompactionSchedule,
@@ -2937,6 +2947,23 @@ fn code_at_declared_width(width: ScalarType, code: u32) -> WalScalar {
         ScalarType::U8 => WalScalar::U8(code as u8),
         ScalarType::U16 => WalScalar::U16(code as u16),
         _ => WalScalar::U32(code),
+    }
+}
+
+/// Why [`Executor::commit_side_manifest`] did not commit: the manifest would regress durable
+/// state, or the store could not write it. One type so every publication site's failure arm
+/// reports whichever it was through the `error = %e` it already has.
+enum ManifestCommitRefused {
+    Regresses(crate::geometry::ManifestRegression),
+    Store(tessera_store::StoreError),
+}
+
+impl std::fmt::Display for ManifestCommitRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManifestCommitRefused::Regresses(r) => r.fmt(f),
+            ManifestCommitRefused::Store(e) => e.fmt(f),
+        }
     }
 }
 
@@ -3625,6 +3652,8 @@ struct Executor {
     fold_paused: Arc<AtomicBool>,
     /// See [`MaintenanceDeps::fold_publication_paused`].
     fold_publication_paused: Arc<AtomicBool>,
+    /// See [`MaintenanceDeps::merge_publication_paused`].
+    merge_publication_paused: Arc<AtomicBool>,
     /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     compaction: crate::compact::CompactionSchedule,
     /// When the last fold attempt **started**, as a Unix timestamp — half of the operand
@@ -4061,6 +4090,11 @@ impl Executor {
 
     /// Apply every completed merge waiting from the pool, and report whether any did.
     fn publish_completed_merges(&mut self) -> bool {
+        // Left in the channel rather than dropped — see
+        // `MaintenanceDeps::merge_publication_paused`. Always false in a shipped build.
+        if self.merge_publication_paused.load(Ordering::SeqCst) {
+            return false;
+        }
         let mut any = false;
         while let Ok(completed) = self.merge_done.try_recv() {
             self.publish_merge(completed);
@@ -4128,7 +4162,8 @@ impl Executor {
         // The publication seam: the merged segment's files are on disc and nothing durable names
         // them until this write returns (correctness-suite §12.3).
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
-        if let Err(e) = tessera_store::write_segments_manifest(
+        if let Err(e) = self.commit_side_manifest(
+            &partition_data.manifest,
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -5012,7 +5047,8 @@ impl Executor {
                 }
             };
         let manifest_n = self.allocate_manifest_n();
-        if let Err(e) = tessera_store::write_segments_manifest(
+        if let Err(e) = self.commit_side_manifest(
+            live_manifest,
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
@@ -5428,7 +5464,8 @@ impl Executor {
         // The publication seam: the coalesced extents are on disc and nothing durable names them
         // until this write returns (correctness-suite §12.3).
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
-        if let Err(e) = tessera_store::write_segments_manifest(
+        if let Err(e) = self.commit_side_manifest(
+            &partition_data.manifest,
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -6416,6 +6453,33 @@ impl Executor {
         n
     }
 
+    /// Commit one partition's side-manifest — **the only route to
+    /// `tessera_store::write_segments_manifest` in this crate**, and the durable half of the
+    /// publication guard.
+    ///
+    /// `crate::geometry::check_publishable` refuses a *generation* that regresses the watermark,
+    /// but every publication writes its manifest before it swaps, and assembles it by editing a
+    /// clone of the live one — a seam the swap guard cannot see, and the one through which the
+    /// merge's rebase regressed the durable watermark by a batch whenever a flush shared its
+    /// flight. So the manifest's own ordered scalars are checked against `live_manifest` — the
+    /// live partition manifest at this publication — here, where every publication converges
+    /// (see [`crate::geometry::check_manifest_publishable`] for what is compared and why). A
+    /// refusal leaves each caller its usual failure posture: nothing written, files orphaned,
+    /// the next tick re-plans.
+    fn commit_side_manifest(
+        &self,
+        live_manifest: &tessera_store::manifest::SegmentsManifest,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        next: &tessera_store::manifest::SegmentsManifest,
+    ) -> Result<(), ManifestCommitRefused> {
+        crate::geometry::check_manifest_publishable(live_manifest, next)
+            .map_err(ManifestCommitRefused::Regresses)?;
+        tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
+            .map_err(ManifestCommitRefused::Store)
+    }
+
     fn next_window_seq(&mut self) -> u64 {
         self.window_seq += 1;
         self.window_seq
@@ -7235,7 +7299,8 @@ impl Executor {
             // so a kill parked here loses only the restore path's freshness — which is exactly
             // what a crash test at this seam asserts (correctness-suite §12.3).
             self.pause_point(PauseSiteArg::BeforeManifestPublish);
-            if let Err(e) = tessera_store::write_segments_manifest(
+            if let Err(e) = self.commit_side_manifest(
+                &partition_data.manifest,
                 &self.prefix_dir(&live),
                 partition,
                 n,
@@ -7446,7 +7511,8 @@ impl Executor {
         // every row they carry, and nothing durable names them until this write returns
         // (correctness-suite §12.3).
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
-        if let Err(e) = tessera_store::write_segments_manifest(
+        if let Err(e) = self.commit_side_manifest(
+            &partition_data.manifest,
             &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,

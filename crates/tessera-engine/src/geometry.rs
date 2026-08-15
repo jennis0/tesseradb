@@ -248,6 +248,11 @@ impl std::error::Error for GeometryRefused {}
 /// past every entity accepted since the fold's snapshot. Composition treats an entity at or above
 /// the watermark as buffered rather than rowed, so a lowered watermark makes every entity in the
 /// gap invisible to every principal: fail-closed, silent, and cleared only by the next flush.
+///
+/// **This guard sees only the generation.** The side-manifest a publication writes *before* the
+/// swap is assembled separately, by editing a clone of the live one, and a stale value stamped
+/// into the clone passes here untouched — [`check_manifest_publishable`] is the durable twin that
+/// covers that seam.
 pub(crate) fn check_publishable(
     live: &Generation,
     prefix: &str,
@@ -269,6 +274,65 @@ pub(crate) fn check_publishable(
             segments_version,
             GeometryRefusedReason::WatermarkRegresses,
         ));
+    }
+    Ok(())
+}
+
+/// A durable scalar a side-manifest write would move backwards — why
+/// [`check_manifest_publishable`] refused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ManifestRegression {
+    pub(crate) field: &'static str,
+    pub(crate) live: u64,
+    pub(crate) offered: u64,
+}
+
+impl std::fmt::Display for ManifestRegression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing a side-manifest whose `{}` ({}) is behind the live manifest's ({}): the \
+             disc is what a restart believes, and a regressed value there under-reports durably \
+             while the running process keeps serving the right one",
+            self.field, self.offered, self.live
+        )
+    }
+}
+
+/// Whether `next` may be committed to disc over the state `live` — the live partition manifest at
+/// the instant of publication — already records. The durable twin of [`check_publishable`], run by
+/// `Executor::commit_side_manifest` at the one place a side-manifest becomes durable.
+///
+/// **Why the swap guard alone was not enough.** A publication writes its manifest *before* it
+/// swaps, and assembles it by editing a clone of the live one — while the generation it will offer
+/// [`check_publishable`] is built directly from live values. So a field the edit stamps with a
+/// plan-time value regresses on disc with nothing in its way: the generation sails through the
+/// swap guard, and every later publication clones the regressed manifest forward. That is not
+/// hypothetical — the merge's rebase did exactly it to `watermark` when a flush shared its flight
+/// (caught by the endurance tier, 2026-08-15), and what contained it was an accident: the boot
+/// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
+///
+/// **What is compared: every ordered scalar the manifest carries** — `watermark` and
+/// `entity_id_high_water`; everything else in a `SegmentsManifest` is a list or map with
+/// per-field replacement rules no total order describes. A new ordered scalar joins this
+/// comparison when it is added, or it inherits the silent version of the defect above.
+pub(crate) fn check_manifest_publishable(
+    live: &tessera_store::manifest::SegmentsManifest,
+    next: &tessera_store::manifest::SegmentsManifest,
+) -> Result<(), ManifestRegression> {
+    if next.watermark < live.watermark {
+        return Err(ManifestRegression {
+            field: "watermark",
+            live: live.watermark,
+            offered: next.watermark,
+        });
+    }
+    if next.entity_id_high_water < live.entity_id_high_water {
+        return Err(ManifestRegression {
+            field: "entity_id_high_water",
+            live: live.entity_id_high_water,
+            offered: next.entity_id_high_water,
+        });
     }
     Ok(())
 }
@@ -401,5 +465,54 @@ mod tests {
     fn the_refusal_names_the_row_projection_cache() {
         let text = GeometryRefusedReason::SegmentsVersionNotIncreasing.to_string();
         assert!(text.contains("row-projection cache"), "{text}");
+    }
+
+    /// A side-manifest with only its two ordered scalars set — [`check_manifest_publishable`]
+    /// reads nothing else off it.
+    fn manifest_at(
+        watermark: u64,
+        entity_id_high_water: u64,
+    ) -> tessera_store::manifest::SegmentsManifest {
+        tessera_store::manifest::SegmentsManifest {
+            watermark,
+            entity_id_high_water,
+            segments: Vec::new(),
+            deltas: Vec::new(),
+            dict_extents: Vec::new(),
+            attr_extents: Vec::new(),
+            record_extents: Vec::new(),
+            text_extents: Vec::new(),
+            external_id_runs: Vec::new(),
+            locator_extents: Vec::new(),
+            tombstones: Vec::new(),
+            deny: Vec::new(),
+            vocabulary_extensions: Vec::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
+    /// **A side-manifest may raise a durable scalar or leave it, never lower it.**
+    ///
+    /// Equal is the shape every clone-and-edit publication (merge, coalesce, deny, fold) commits;
+    /// higher is a flush. Lower is the merge-rebase defect this guard exists for: a plan-time
+    /// value stamped into a clone of a manifest a flush advanced during the flight.
+    ///
+    /// **Mutations this kills:** dropping either comparison; making one strict (every non-flush
+    /// publication commits the live values unchanged, so `>` would refuse them all).
+    #[test]
+    fn a_side_manifest_may_not_regress_a_durable_scalar() {
+        let live = manifest_at(100, 200);
+
+        assert!(check_manifest_publishable(&live, &manifest_at(100, 200)).is_ok());
+        assert!(check_manifest_publishable(&live, &manifest_at(101, 201)).is_ok());
+
+        let refused = check_manifest_publishable(&live, &manifest_at(99, 200))
+            .expect_err("a plan-time watermark behind the live manifest's is refused");
+        assert_eq!(refused.field, "watermark");
+        assert_eq!((refused.live, refused.offered), (100, 99));
+
+        let refused = check_manifest_publishable(&live, &manifest_at(100, 199))
+            .expect_err("a regressed high-water is refused");
+        assert_eq!(refused.field, "entity_id_high_water");
     }
 }

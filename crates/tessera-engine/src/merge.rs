@@ -143,6 +143,10 @@ pub(crate) struct MergeContext {
     /// *backwards* on any interior merge, and composition treats everything at or above it as
     /// buffer-resident — so entities that already have rows would be looked for in a buffer that
     /// no longer holds them. See `MergeSpec::watermark`.
+    ///
+    /// **Plan-time snapshots, and publication never reads them back**: a flush publishing during
+    /// this merge's flight advances the live values, so [`rebase_into`] keeps the cloned live
+    /// manifest's own — these exist only because `execute_merge`'s output shape requires them.
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
 }
@@ -329,10 +333,14 @@ pub(crate) fn rebase_into(
             .iter()
             .map(|(rel, digest)| (rel.clone(), digest.clone())),
     );
-    manifest.watermark = completed.output.watermark;
-    manifest.entity_id_high_water = manifest
-        .entity_id_high_water
-        .max(completed.output.entity_id_high_water);
+    // `watermark` and `entity_id_high_water` keep the values `manifest` — a clone of the *live*
+    // partition manifest, taken at publication — already carries. Those are the live values, and
+    // the live values are what a merge publishes: it moves no entity into or out of the visible
+    // set, so it has nothing to say about either (write-path §7). The completed unit's own copies
+    // are plan-time snapshots, one flush stale whenever a flush published during the merge's
+    // flight; a manifest stamped from them regresses on disc while the generation keeps the live
+    // value, which `check_manifest_publishable` now refuses at the commit rather than trusting
+    // every rebase to remember.
     true
 }
 

@@ -684,6 +684,99 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     }
 }
 
+/// **A reboot reads back a watermark no lower than the one the running process served**, across
+/// the interleaving of a merge and a flush on one write path.
+///
+/// A merge's plan is taken against one watermark; a flush publishing during its flight advances
+/// the live value; the merge publishes last. The side-manifest the merge commits is a clone of
+/// the live one and must keep the flush's watermark — a merge moves no entity into or out of the
+/// visible set, so it has nothing to say about the watermark at all (write-path §7). Stamping its
+/// plan-time snapshot instead regressed the durable value by one batch, silently: the boot
+/// rebuilds the buffer by `has_row`, not by the watermark, so every answer stayed right while the
+/// durable record under-reported — which is how it survived until the endurance tier compared the
+/// disc against the wire. The publication hold is what makes the flight deterministic
+/// (`Engine::set_merge_publication_paused_for_test`); unassisted, the window is one pool
+/// scheduling race wide.
+///
+/// **Mutations this kills:** re-stamping `manifest.watermark` (or `entity_id_high_water`) from
+/// the completed unit in `crate::merge::rebase_into`; and gutting `check_manifest_publishable`,
+/// which is what turns the same mistake on the next durable scalar into a refused write rather
+/// than a silent regression.
+#[test]
+fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+
+    let watermark_served = {
+        let (engine, _items) = engine_with_pending_merge(&tmp, &root);
+
+        // The merge executes and completes, but its publication is held — the flight, made wide
+        // enough to land a flush in.
+        engine.set_merge_publication_paused_for_test(true);
+        engine.set_merge_for_test(true);
+        engine.request_flush();
+        wait_until("the merge to complete and hold", || {
+            engine.merge_publication_is_held_for_test()
+        });
+        // Off again, so the tick that publishes the flush below does not dispatch a second merge
+        // over the same four extents.
+        engine.set_merge_for_test(false);
+
+        // The flush that advances the watermark past the merge's plan.
+        let batch: Vec<UnallocatedRow> = (0..ROWS_EACH)
+            .map(|t| {
+                let descriptors = vec![b"0".to_vec()];
+                UnallocatedRow {
+                    external_id: Some(format!("late-{t}").into_bytes()),
+                    slice: "s0".to_string(),
+                    x: ((t * TIER_WIDTH) * 20) as f32,
+                    y: 45.0,
+                    scalars: Vec::new(),
+                    terms: engine.resolve_terms(&descriptors),
+                    descriptors,
+                }
+            })
+            .collect();
+        engine
+            .accept_ingest(batch, "batch-late".to_string(), [9u8; 32])
+            .expect("ingest is accepted");
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the late flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+        let watermark_served = engine.generation().watermark;
+
+        engine.set_merge_publication_paused_for_test(false);
+        wait_until("the merge to publish", || {
+            engine.write_executor_stats().merges >= 1
+        });
+
+        let generation = engine.generation();
+        assert_eq!(
+            generation.watermark, watermark_served,
+            "a merge moves the watermark for no one, in memory included"
+        );
+        assert_eq!(
+            generation.bundle.partitions["default"].manifest.watermark,
+            watermark_served,
+            "the manifest the merge published must carry the live watermark, not its plan-time \
+             snapshot — the manifest is what a restart believes, and every later publication \
+             clones it forward"
+        );
+        watermark_served
+    };
+
+    let reopened = open_engine_at(tmp.path(), &root);
+    let read_back = reopened.generation().watermark;
+    assert!(
+        read_back >= watermark_served,
+        "the reboot read back watermark {read_back} where the running process served \
+         {watermark_served} — the durable record regressed by the batch the flush published \
+         inside the merge's flight"
+    );
+}
+
 /// **A racer inside a merge's refresh window is shed, not made to pay the rebuild** — decision
 /// 0044's bounded 429 residual, and the one place the design accepts a refusal.
 ///
