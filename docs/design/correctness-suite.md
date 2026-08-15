@@ -6,9 +6,9 @@ mechanisms become this document's §9–§11 over the oracle of §8. Reviewed tw
 under the correctness lens (r2), the build under the implementability lens (r6). **To become
 normative:** owner sign-off; rulings on the three points marked *judgement call* at their claims
 (flush's entitlement in §10, the deep verifier's cadence in §11, and whether the source digest is
-amended into `contracts.md` §2.2); and **a ruling on how fault injection reaches a served binary**
-(§10.1), which is the one thing here that cannot be started without one, because closing it moves
-a fail-closed guard.
+amended into `contracts.md` §2.2). **How fault injection reaches a served binary is ruled** —
+decision [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md), by
+its own build rather than a runtime switch.
 **Reads against:** architecture §4 (I2, I7, I9, I11), §11.3; [`conformance.md`](conformance.md) §1,
 §2, §4.6, §6; [`write-path.md`](write-path.md) §5.4, §7, §14; [`compaction.md`](compaction.md) §3,
 §6, §9; [`records-and-search.md`](records-and-search.md) §1–§4; [`contracts.md`](contracts.md) §2.2,
@@ -686,13 +686,15 @@ rather than left to be rediscovered:
 
 - `flush_max_age_secs` is set long, so no tick fires on its own and the driver owns the clock.
 - `POST /control/flush` pulls a tick. **A pulled tick dispatches everything currently eligible**,
-  so isolating a stage means arranging that only it is eligible. **The knobs are not configuration**
-  — `serve.tier_width` and `serve.segment_floor_bytes` are parsed by the server and reach the
-  engine nowhere, which hard-codes a tier width of 4 and a 16 MiB floor, and the coalesce's width
-  of 8 has no key at all. Isolation is therefore write-counting against those fixed constants, with
-  `max_merged_segment_bytes` — the one live knob — set below the base segment so it excludes itself
-  from every merge window. A tick stage's barrier asserts the flush counter did **not** move, so a
-  plan that mis-counted fails as a plan defect rather than as a false invariance result.
+  so isolating a stage means arranging that only it is eligible. The knobs are `serve.tier_width`,
+  `serve.segment_floor_bytes` and `serve.coalesce_width`, and `max_merged_segment_bytes` set below
+  the base segment so it excludes itself from every merge window. **All three selection widths were
+  inert when this was first written** — parsed, validated and discarded, the engine hard-coding 4
+  and 16 MiB while the coalesce had no key at all — which is why the suite's first stage plan
+  counted writes against those constants instead. They are live now, and a width below 2 is refused
+  at startup rather than silently never merging. A tick stage's barrier asserts the flush counter
+  did **not** move, so a plan that mis-counted fails as a plan defect rather than as a false
+  invariance result.
 - Rotation rides flush publication and the growth tick, so a `Rotate` stage is a write shaped to
   cross the rotation threshold rather than a request. **It has no wire barrier** — no rotation
   counter reaches `/control/status` — so the only observable is the WAL member index on disc. That
@@ -762,25 +764,22 @@ tests already name as the hook a crash-mid-merge case needs.
 A pause site must park a thread **holding no lock**, or the deadlock is discovered in CI rather
 than in review.
 
-> **⊘ Blocked on a ruling, and the obstacle is the gate rather than the sites.** The switchboard
-> is behind a feature enabled *only* through self dev-dependencies in `tessera-lifecycle` and
-> `tessera-engine`. Neither `tessera-server` nor `tessera-cli` declares it, `cargo build` does not
-> build dev-dependencies, and the conformance harness builds `target/release/tessera` with default
-> features always — its own doc forbidding any non-default binary at that path. **So no server the
-> driver can boot is able to carry a pause site**, and §13's "a control-plane route so the driver
-> can reach them" contradicts the switchboard's own scoping rule, which forbids anything outside
-> those two crates depending on the feature.
->
-> This is an owner decision because closing it moves a fail-closed guard: `check-layers.sh` asserts
-> that **no normal dependency edge anywhere enables fault injection**, which is what keeps it out of
-> a release binary. The two routes are (a) plumb the feature through `tessera-server` and
-> `tessera-cli`, build that binary to its own path, and narrow the guard from "no normal edge" to
-> "no edge reachable from a default-features release build" — cheaper, and it weakens a rule whose
-> present strength is that it needs no reasoning to check; or (b) a runtime-gated debug surface,
-> off unless a config key is set, which keeps the compile guard intact and puts the sites in the
-> shipped binary behind a switch. **Neither is chosen here.** Until it is, crash atomicity is
-> reachable only from Rust tests that re-execute themselves as a child process, which is what the
-> existing WAL crash coverage does and does not reach a publication seam.
+**The feature becomes declarable on `tessera-server` and `tessera-cli`, and a binary built with it
+goes to its own path** (decision [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md)).
+The default-features build is unchanged and is what every deployment gets; the driver boots the
+faults build for a stage carrying a `kill`, and the ordinary one otherwise.
+
+The guard this moves is worth naming, because it is the reason the question needed a ruling.
+`check-layers.sh` rule 2 asserts that **no normal dependency edge anywhere enables fault
+injection**, answered from the resolved feature graph rather than from manifest text — the
+distinction being load-bearing, since an earlier version of that rule exempted manifests by text
+and stayed green while the switchboard reached the release binary. The assertion narrows to **no
+default-features release build reaches it**. It stays mechanical and must be rewritten
+deliberately rather than relaxed by exemption.
+
+> **⊘ Not implemented.** No seam site exists and neither does the second build. Until they do,
+> crash coverage stops at the WAL: the existing tests re-execute the test binary as a child and
+> kill it, which reaches no publication seam.
 
 ### 12.4 The verifier's deep mode
 
@@ -871,7 +870,7 @@ catches the most.
 | 5 | `tessera-corpus` and its two verbs (§12.1) | — | ground truth is computable at any size |
 | 6 | **total verification** and the census (§9) | 5 | every served value checked at its own identity; nothing missing or extra |
 | 7 | the profiles (§12.5) | 3 | the memory regime a 10⁹ deployment runs in is exercised at 10⁷ |
-| 8 | **the fault-injection gating ruling**, then the seam pause sites and **crash atomicity** (§10.1, §12.3) | 3, and an owner ruling | every publication killable at its seam, and asserted atomic |
+| 8 | the feature on `tessera-server`/`tessera-cli` and its own build (decision 0071), then the seam pause sites and **crash atomicity** (§10.1, §12.3) | 3 | every publication killable at its seam, and asserted atomic |
 | 9 | the endurance tier (§6), with a kill injected at a sampled fold | 3, 4, 8 | reclamation, monotonicity and ladder saturation over a long life, crashes included |
 
 **Row 2 is new and is the one a builder hits first.** The barriers this document relied on do not
@@ -880,8 +879,8 @@ its own handler says the per-partition block contracts §3.4 specifies is unbuil
 executor's `coalesces`, `merges` and `refreshes` counters never reach the JSON. Without them a
 driver cannot tell that a stage finished, and a suite whose barrier is a sleep is a flake generator.
 
-Rows 1–7 need no owner ruling and nothing that does not exist. **Row 8 does need one** (§10.1), and
-it is the only row that cannot be started on a reading of this document alone.
+No row now waits on a ruling. Row 8's was made — decision 0071 — and it is the only row whose first
+commit is a build-system change rather than a test.
 
 > **⊘ Rows 1–5 are built; 6–9 are outstanding.** The table is a sequence, not a status record —
 > the issues are that — and it is marked here only because "none of this is built" became false.
