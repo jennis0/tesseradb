@@ -19,6 +19,11 @@ markdown file, no ledger, no plan. This repo learned that the hard way: it accum
 plans whose checkboxes were entirely unticked while the work was in fact complete, because
 completion was tracked somewhere else that was never committed.
 
+**One exception is live, by owner direction (2026-08-15): the artifact work is tracked in
+[`../artifact-delivery.md`](../artifact-delivery.md)**, which is the sole authority for its stages.
+The rule the convention protects is unchanged — one place, not two — so that file moves in the
+change that moves the work, and the two artifact issues carry no status while it stands.
+
 There are no milestones. For one owner and a fleet of agents they add ceremony without adding a
 query you cannot already run.
 
