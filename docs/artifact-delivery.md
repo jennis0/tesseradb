@@ -20,8 +20,7 @@ overlap; the rest take it so that a stage's diff stays separable and the main tr
 [`design/annotation-representation.md`](design/annotation-representation.md) (the representation),
 [`design/annotation-write-cycle.md`](design/annotation-write-cycle.md) (the write cycle) — all three
 **reviewed and ruled** (decisions 0074–0081), provisional pending promotion;
-[`design/derived-artifact-gating.md`](design/derived-artifact-gating.md),
-superseded and retired at promotion; [`design/correctness-suite.md`](design/correctness-suite.md) §12 (the fixture
+[`design/correctness-suite.md`](design/correctness-suite.md) §12 (the fixture
 machinery this extends); [`probes/dataset.md`](../probes/dataset.md) (the corpus);
 [`probes/2026-08-15-artifact-representation/`](../probes/2026-08-15-artifact-representation/) (the
 campaign every sizing figure below comes from). Ordering precedent:

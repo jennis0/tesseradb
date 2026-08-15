@@ -38,7 +38,7 @@ size as the span it covers rather than as the size of any piece of work in it.
 
 **One companion has already split off.** The gating of *derived artifacts* — clusters,
 labels, hulls, boundary polygons, edges — is
-**`derived-artifact-gating.md`**. It left on 2026-08-01 because it is not
+[`annotations.md`](annotations.md) and its two companions. It left on 2026-08-01 because it is not
 a client question: it generalises design §7.5 and §7.6, its audience is a security
 reviewer, and it carries a live disclosure question that belongs with C1's review rather
 than with an integrator. §9.1 keeps the pointer and the three conclusions this document
@@ -61,8 +61,8 @@ region breakdowns, cluster counts, anything with a number in it — through the 
 verbs into panels, legends and DOM. It is low-volume, exact, and **never** derivable
 from the mark channel, because the marks are a sample and the numbers are not.
 
-**"Number" is too narrow, and the derived-artifact work corrects it** *(2026-08-01; see
-`derived-artifact-gating.md`)*. A cluster hull is an aggregate over the
+**"Number" is too narrow, and the artifact work corrects it** *(2026-08-01; see
+[`annotations.md`](annotations.md) §9)*. A cluster hull is an aggregate over the
 visible set, so a client that draws a hull around the *k* points it holds has committed the
 sample-as-set error **in geometry** — the same failure in a shape nobody thinks to check.
 So this is the **exact masked-aggregate channel**, and geometry travels on it: hulls,
@@ -1135,7 +1135,11 @@ tied to point visibility. The design gates three of them by three different rule
 containment, §7.5 threshold, C2 none), and the framework connecting them —
 together with the cardinality axis that separates artifact-scale members from edges, the
 three forms a polygon can take, and a live question about differencing the frontier — is
-**`derived-artifact-gating.md`**.
+[`annotations.md`](annotations.md), with [`annotation-representation.md`](annotation-representation.md)
+for what the model is made of and [`annotation-write-cycle.md`](annotation-write-cycle.md) for its
+write cycle. The three gates collapsed to one containment test plus one existence criterion
+(decisions 0075, 0076, 0079); the edge material and the induced-subgraph sampling problem are
+carried in the model's §5 and §11.
 
 It was split out on 2026-08-01: it had grown to a quarter of this document while answering
 a question that is not a client question. It generalises two sections of the specification,

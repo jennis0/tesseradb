@@ -86,7 +86,6 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `delta-serving.md` | Provisional — under review | 3 |
-| `derived-artifact-gating.md` | Provisional — under review |  |
 | `filter-index.md` | Provisional — under review | 12 |
 | `filter-result-cache.md` | Provisional — under review | 7 |
 | `filter-surface.md` | Provisional — under review | 7 |

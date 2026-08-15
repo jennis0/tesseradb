@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-15
 **Status:** Provisional — **reviewed and ruled** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md); the rulings are decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). **To become normative:** what genuinely remains — search's containment gate (the review's ruling 5, still open), the filter axis (§11), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4), the proportional criterion's denominator for predicate membership (§5), the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it), and the measurements [`annotation-representation.md`](annotation-representation.md) §11.3 names — plus the amendments owed to the normative architecture at promotion: §7.5's descent ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)) and §7.7's ladder ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)). [`annotation-write-cycle.md`](annotation-write-cycle.md) is reviewed and dispositioned; where this document disagrees with it, that one wins.
-**Supersedes** [`derived-artifact-gating.md`](derived-artifact-gating.md), whose taxonomy this collapses — three gates become one containment test plus one existence criterion (§4, §5) — and which is retired at promotion. What existed nowhere else is carried here: the point-scale cardinality argument for edges and the structural form of an edge gate (§5), and the induced-subgraph sampling problem, parked by name (§11).
+**Supersedes** the retired `derived-artifact-gating.md`, whose taxonomy this collapses — three gates become one containment test plus one existence criterion (§4, §5); that document is deleted (2026-08-15). What existed nowhere else is carried here: the point-scale cardinality argument for edges and the structural form of an edge gate (§5), and the induced-subgraph sampling problem, parked by name (§11).
 **Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), [0006](../decisions/0006-per-session-handles-retired.md), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are cited as **spec §n**.
 
@@ -16,7 +16,7 @@
 
 The service serves things that are not points — clusters, labels, boundaries, regions, tags — and
 the corpus has three rules for them in two sections, with a fourth artifact type left to find
-precedent among contradictory answers. [`derived-artifact-gating.md`](derived-artifact-gating.md)
+precedent among contradictory answers. The retired `derived-artifact-gating.md`
 identified the unification: each is *a named subset of the point set plus an attachment*. It
 unified the **gate** and stopped there.
 
