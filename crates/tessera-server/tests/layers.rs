@@ -235,3 +235,189 @@ async fn the_layer_routes_require_the_operator_credential() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+// ---- publication -------------------------------------------------------------------------------
+
+/// Base64 the way `/control/changes` does it — external ids are bytes, not text.
+fn member(source_id: u64) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
+}
+
+async fn publish(
+    server: &TestServer,
+    layer: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    // A layer name is path-shaped, so its slash is percent-encoded into the one path segment the
+    // route captures — the same encoding the drop route already takes.
+    let encoded = layer.replace('/', "%2F");
+    let resp = server
+        .client
+        .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// The publication round trip, and the fields the response must not carry.
+///
+/// **A `tessera_id` per artifact and never an ordinal.** An ordinal is a position in a dense level,
+/// so two of them tell the holder how many artifacts sit between — a corpus-wide count over objects
+/// they may not individually see, which is C8's row. The identifier is the only artifact address
+/// that crosses the wire, and it is what a later suppression names.
+#[tokio::test]
+async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let (status, _) = register(&server, declaration("clusters/a", None)).await;
+    assert_eq!(status, 201);
+
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [
+                { "stable_key": "c0", "members": [member(0), member(1), member(2)] },
+                { "stable_key": "c1", "members": [member(3), member(4)] },
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let artifacts = body["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 2);
+    let mut ids = std::collections::BTreeSet::new();
+    for (i, artifact) in artifacts.iter().enumerate() {
+        assert_eq!(artifact["stable_key"], ["c0", "c1"][i]);
+        assert!(
+            artifact["tessera_id"].is_string(),
+            "string-encoded, since a bare JSON number loses a u64 past 2^53: {artifact}"
+        );
+        assert!(ids.insert(artifact["tessera_id"].as_str().unwrap().to_string()));
+        assert!(
+            artifact.get("ordinal").is_none(),
+            "an ordinal is a position in a dense level, so it never crosses the wire: {artifact}"
+        );
+        assert!(
+            artifact.get("members").is_none() && artifact.get("size").is_none(),
+            "and neither does an unmasked membership or its count: {artifact}"
+        );
+    }
+    assert_eq!(server.state.engine.published_artifacts(), 2);
+}
+
+/// **An unresolvable member refuses the batch rather than being dropped.** A silently dropped member
+/// shrinks both the masked count a viewer is shown and the declared size the proportional criterion
+/// divides by — so a typo in a pipeline would move artifacts across their own existence threshold,
+/// in the direction of hiding them, with nothing anywhere saying so.
+#[tokio::test]
+async fn an_unresolvable_member_refuses_the_whole_batch() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration("clusters/a", None)).await;
+
+    use base64::Engine as _;
+    let nonexistent = base64::engine::general_purpose::STANDARD.encode(external_id_of(u64::MAX));
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [
+                { "stable_key": "c0", "members": [member(0)] },
+                { "stable_key": "c1", "members": [member(1), nonexistent] },
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+    let detail = body.to_string();
+    assert!(
+        detail.contains("member 1 of artifact 1"),
+        "the refusal names the coordinate the caller's pipeline holds: {detail}"
+    );
+    assert_eq!(
+        server.state.engine.published_artifacts(),
+        0,
+        "and the first artifact was not published either — the batch is the commit unit"
+    );
+}
+
+/// A refusal the caller can act on: their own declaration measured against the deployment's rules.
+#[tokio::test]
+async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says_why() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let mut spatial = declaration("regions/uk", None);
+    spatial["membership"] = json!("spatial");
+    spatial["visible_when"] = json!({ "min_visible": 25 });
+    assert_eq!(register(&server, spatial).await.0, 201);
+
+    let (status, body) = publish(
+        &server,
+        "regions/uk",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "stable_key": "c0", "members": [member(0)] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body.to_string().contains("predicate"),
+        "it names what is wrong with the declaration, not an opaque code: {body}"
+    );
+
+    // And a name nobody registered is refused by the same route, saying the same kind of thing.
+    let (status, _) = publish(
+        &server,
+        "clusters/never",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "stable_key": "c0", "members": [member(0)] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422);
+}
+
+/// An idset guards a keyed identifier and means nothing beside an external id, so accepting one
+/// there would imply a check that never ran.
+#[tokio::test]
+async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration("clusters/a", None)).await;
+
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "idset": 1,
+            "artifacts": [{ "stable_key": "c0", "members": [member(0)] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "tessera",
+            "artifacts": [{ "stable_key": "c0", "members": ["12345"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("idset"), "{body}");
+}

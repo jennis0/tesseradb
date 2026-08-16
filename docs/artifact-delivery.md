@@ -266,9 +266,23 @@ the reason (a)'s 25M win over (b) was not taken as the answer.
 **Capability:** a viewer sees the clusters their own visible set generates, with a count that is
 never the cluster's size.
 
-- Enumerated membership: entity-space Roaring on disk (`members/<ordinal>.roaring`), the derived
-  **row-space** operator built at open, member-wise and never range-wise.
-- The visibility predicate in one place, overlay first: `verdict` → layer gate → own terms ∧
+- ✔ Enumerated membership, entity space only, and the publication that gets it there: a batch is
+  one WAL record and one fsync, ordinals are claimed densely from the level's cursor on the
+  executor, and a level that outgrows its 65 536-entity reservation appends another block — carried
+  in the record, because ordinals walk the runs in *allocation* order and a re-derived extension
+  would renumber everything above it. `PUT /control/layers/{name}/artifacts` accepts members by
+  external id or `tessera_id`, resolves them once at the boundary, and refuses the whole batch on an
+  unresolvable one: a dropped member moves both the count a viewer is shown and the size the
+  proportional criterion divides by.
+- ⊘ **Membership has no home outside the WAL yet, and rotation is pinned from the first publication
+  onwards.** Nothing else on disk carries one — segments carry rows and postings, manifests carry
+  the registry — so reclaiming a member holding a publication destroys the only copy and leaves the
+  artifact registered, still addressable, and served as absent. The pin is the fail-closed reading
+  of the open packaging question below; a log that grows is noticed where a membership that vanishes
+  is not. **Closing the packaging decision is what lifts it.**
+- ✔ The derived **row-space** operator, built member-wise and never range-wise. Building it at open
+  and rebuilding it on a generation move is the projection cache, still owed.
+- ✔ The visibility predicate in one place, overlay first: `verdict` → layer gate → own terms ∧
   existence criterion (decision 0079).
 - The existence criterion (decision 0075), enforced on the **live** count; the session's resolved
   visibility set as candidacy only, keyed on `(layer, version, generation)`.

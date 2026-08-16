@@ -93,7 +93,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use tessera_types::layer::{LayerDeclaration, ReservedRuns};
+use tessera_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
 use tessera_types::EntityId;
 
 /// One declared-scalar value carried by a WAL row.
@@ -319,6 +319,49 @@ pub enum WalRecord {
     /// is settled and unbuilt). Reclaiming them is that decision's work, and its condition is that
     /// the membership-reconciliation clause ships with it.
     LayerDrop { name: String },
+    /// A batch of artifacts published into one level of one layer.
+    ///
+    /// **The WAL is currently the only durable home for a membership**, which makes this record
+    /// load-bearing in a way the others are not: nothing else on disk carries one. Rotation is
+    /// therefore pinned at the oldest surviving publication (`Executor::rotate_wal`), and the log
+    /// grows from the first publication onwards. That is the fail-closed reading of an open
+    /// question — ⊘ the packaging of membership on disk is the owner's, and it is the one layout
+    /// decision 0074–0081 did not settle — not a steady state anyone should mistake for one.
+    ///
+    /// **A batch and not a record per artifact.** A clustering publishes its whole level at once,
+    /// and one fsync per cluster would make a run of ten thousand clusters ten thousand syncs. The
+    /// batch is the commit unit: either every artifact in it exists or none does, which is also the
+    /// only reading under which the ordinals it claims are contiguous.
+    ArtifactPublish {
+        layer: String,
+        level: u32,
+        /// Blocks appended to this level's reservation because the batch outgrew it, in allocation
+        /// order. **Empty in the ordinary case**, and carried here rather than derived because a
+        /// re-derivation at replay would renumber every artifact above the extension: ordinals walk
+        /// the runs in allocation order, so an extension that landed in a different place would
+        /// move entities under the suppressions naming them.
+        extend_runs: Vec<EntityRun>,
+        artifacts: Vec<PublishedArtifact>,
+    },
+}
+
+/// One artifact inside a [`WalRecord::ArtifactPublish`].
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishedArtifact {
+    /// Its position in the level. Assigned by the engine from a dense cursor and **recorded**, so
+    /// replay lands the batch where it was acked rather than wherever a re-count would put it.
+    pub ordinal: u32,
+    /// The entity backing that ordinal. Derivable from the layer's runs, and carried anyway for the
+    /// reason [`WalRecord::LayerCreate`] carries its ids: replay applies what was decided.
+    pub entity: EntityId,
+    /// The caller's own key, if they supplied one.
+    pub stable_key: Option<String>,
+    /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
+    /// membership is a frozen projection, correct until the first fold and then naming other
+    /// people's documents (`membership.rs`).
+    pub members: Vec<u8>,
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
@@ -407,7 +450,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// discriminant moves — and the bump is still required, because a version-9 reader meeting a
 /// version-10 log would decode the new variants' bytes as whatever it thinks that index means. A
 /// layer registration decoded as an ingest batch is not a degraded read, it is a corrupt one.
-const WAL_VERSION: u16 = 10;
+/// Version 11 adds [`WalRecord::ArtifactPublish`], appended on the same rule.
+const WAL_VERSION: u16 = 11;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1680,6 +1724,59 @@ mod tests {
 
         let (_wal, replayed) = Wal::open(&path).unwrap();
         assert_eq!(replayed, vec![create, dropped]);
+    }
+
+    #[test]
+    fn an_artifact_publication_round_trips_with_its_memberships_and_its_extension() {
+        // The membership is the whole point of the record and the only copy of it on disk, so a
+        // field that failed to survive here is a served cluster that comes back empty.
+        use crate::membership::{deserialise_members, serialise_members};
+        use croaring::Bitmap;
+        use tessera_types::layer::EntityRun;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+
+        let first = Bitmap::of(&[1, 2, 3, 70_000, 4_000_000]);
+        let second = Bitmap::new();
+        let publish = WalRecord::ArtifactPublish {
+            layer: "clusters/hdbscan-2026-08".into(),
+            level: 0,
+            extend_runs: vec![EntityRun {
+                start: 4_294_705_152,
+                end: 4_294_770_688,
+            }],
+            artifacts: vec![
+                PublishedArtifact {
+                    ordinal: 65_535,
+                    entity: EntityId::new(4_294_836_223),
+                    stable_key: Some("c-0017".into()),
+                    members: serialise_members(&first),
+                },
+                // An artifact whose members have all been deleted is a real state, and an
+                // absent `stable_key` is the other optional field — both under postcard, which
+                // decodes positionally, so this is the pair that would misread first.
+                PublishedArtifact {
+                    ordinal: 65_536,
+                    entity: EntityId::new(4_294_705_152),
+                    stable_key: None,
+                    members: serialise_members(&second),
+                },
+            ],
+        };
+
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&publish).unwrap();
+        wal.fsync().unwrap();
+        drop(wal);
+
+        let (_wal, replayed) = Wal::open(&path).unwrap();
+        assert_eq!(replayed, vec![publish]);
+        let WalRecord::ArtifactPublish { artifacts, .. } = &replayed[0] else {
+            unreachable!()
+        };
+        assert_eq!(deserialise_members(&artifacts[0].members), Some(first));
+        assert_eq!(deserialise_members(&artifacts[1].members), Some(second));
     }
 
     /// Overwrite `[from, to)` with zeroes through a second handle, standing in for pages a failed

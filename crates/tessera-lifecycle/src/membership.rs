@@ -32,6 +32,40 @@ use std::collections::BTreeMap;
 use croaring::{Bitmap, Portable};
 use tessera_types::EntityId;
 
+/// One artifact as a caller offers it, before the engine has given it an ordinal or an entity.
+///
+/// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
+/// control plane inverts them once, at the boundary, exactly as `/control/changes` does — so no
+/// blinded identifier reaches durable state, where a key rotation would silently redirect it (I10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncomingArtifact {
+    pub stable_key: Option<String>,
+    pub members: Bitmap,
+}
+
+impl IncomingArtifact {
+    /// Builds one from resolved entities.
+    ///
+    /// **The constructor exists so the bitmap type stays inside this crate.** `tessera-server`
+    /// assembles these from a resolved batch and carries no Roaring dependency — a layering
+    /// `check-layers.sh` holds, and one worth holding: the request plane should be able to name a
+    /// membership without being able to do arithmetic on one.
+    pub fn from_entities(
+        stable_key: Option<String>,
+        members: impl IntoIterator<Item = EntityId>,
+    ) -> Self {
+        let mut bitmap = Bitmap::new();
+        for entity in members {
+            // Entity space is `u32` by I9, so the narrowing is total.
+            bitmap.add(entity.raw() as u32);
+        }
+        IncomingArtifact {
+            stable_key,
+            members: bitmap,
+        }
+    }
+}
+
 /// One artifact's durable state, as the registry holds it.
 #[derive(Debug, Clone)]
 pub struct ArtifactRecord {
@@ -67,6 +101,14 @@ impl ArtifactRecord {
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
     levels: BTreeMap<(String, u32), Vec<Option<ArtifactRecord>>>,
+    /// `(layer, level, stable_key) → ordinal`. **An index, not a second copy of the truth**: it
+    /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
+    /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
+    /// at the sizes this stage publishes.
+    keys: BTreeMap<(String, u32, String), u32>,
+    /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
+    /// past. See [`ArtifactStore::oldest_wal_pos`].
+    oldest_wal_pos: Option<u64>,
 }
 
 impl ArtifactStore {
@@ -77,6 +119,10 @@ impl ArtifactStore {
     /// Insert or replace one artifact. Growing the level's vector to fit is what makes a
     /// publication that arrives out of ordinal order land correctly.
     pub fn put(&mut self, layer: &str, level: u32, ordinal: u32, record: ArtifactRecord) {
+        if let Some(key) = &record.stable_key {
+            self.keys
+                .insert((layer.to_string(), level, key.clone()), ordinal);
+        }
         let slots = self
             .levels
             .entry((layer.to_string(), level))
@@ -86,6 +132,97 @@ impl ArtifactStore {
             slots.resize(idx + 1, None);
         }
         slots[idx] = Some(record);
+    }
+
+    /// The next ordinal a publication into this level would claim.
+    ///
+    /// **Derived from the level's extent, never stored**, so replay reconstructs it exactly rather
+    /// than needing a durable cursor. A hole left by a removal is *not* reused: the entity behind
+    /// it is not reclaimed either (decision 0072 is settled and unbuilt), and handing the ordinal
+    /// back while the entity stays spent is how the two would come to disagree.
+    pub fn next_ordinal(&self, layer: &str, level: u32) -> u32 {
+        self.levels
+            .get(&(layer.to_string(), level))
+            .map(|slots| slots.len() as u32)
+            .unwrap_or(0)
+    }
+
+    /// The ordinal a caller's own key names in this level, if any.
+    pub fn ordinal_of_key(&self, layer: &str, level: u32, key: &str) -> Option<u32> {
+        self.keys
+            .get(&(layer.to_string(), level, key.to_string()))
+            .copied()
+    }
+
+    /// The log position of the oldest surviving publication, or `None` if none survives.
+    ///
+    /// **Rotation may not reclaim past this, and today that pins the log from the first
+    /// publication onwards.** Nothing but the WAL carries a membership: a manifest carries the
+    /// registry, segments carry rows and postings, and neither carries a Roaring bitmap of who
+    /// belongs to a cluster. So reclaiming a member holding an `ArtifactPublish` destroys the only
+    /// copy — a served cluster that comes back from a restart with no members, which the existence
+    /// criterion then renders as *absent* rather than as an error.
+    ///
+    /// ⊘ **This is an open question answered fail-closed, not a design.** Where membership lives on
+    /// disk is the owner's decision and the one layout question decisions 0074–0081 left open;
+    /// until it lands, an unbounded log is the safe direction and a visible one. It is the same
+    /// posture `oldest_wal_pos`'s unknown-position arm takes in the ingest buffer, and for the same
+    /// reason: a sequence that grows is noticed, a record that vanishes is not.
+    pub fn oldest_wal_pos(&self) -> Option<u64> {
+        self.oldest_wal_pos
+    }
+
+    /// Applies a durable publication — the one path by which memberships enter, taken by both the
+    /// live write path and replay.
+    ///
+    /// `position` is where the record sits in the log. **Replay applies the recorded ordinals and
+    /// entities rather than re-deriving them**, on [`crate::LayerRegistry::apply`]'s contract: a
+    /// re-derived ordinal would move an artifact under every suppression naming it.
+    ///
+    /// Records other than a publication are ignored, so a caller can hand the whole replay stream
+    /// to this and to the registry alike.
+    ///
+    /// Returns how many memberships **did not decode** — always zero in any healthy log. The count
+    /// is returned rather than logged because this crate carries no tracing dependency by design
+    /// (see `check-layers.sh`), and a silent skip is the one outcome this must not have: an
+    /// artifact whose members were lost is served as absent, which is indistinguishable from one
+    /// that never cleared its criterion.
+    #[must_use]
+    pub fn apply(&mut self, record: &crate::wal::WalRecord, position: u64) -> usize {
+        let crate::wal::WalRecord::ArtifactPublish {
+            layer,
+            level,
+            artifacts,
+            ..
+        } = record
+        else {
+            return 0;
+        };
+        let mut refused = 0;
+        for published in artifacts {
+            // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
+            // leaves a hole, which answers *absent*; the alternative decodes a corrupt record to a
+            // legitimately emptied artifact and serves it.
+            let Some(members) = deserialise_members(&published.members) else {
+                refused += 1;
+                continue;
+            };
+            self.put(
+                layer,
+                *level,
+                published.ordinal,
+                ArtifactRecord {
+                    entity: published.entity,
+                    stable_key: published.stable_key.clone(),
+                    members,
+                },
+            );
+        }
+        self.oldest_wal_pos = Some(match self.oldest_wal_pos {
+            Some(existing) => existing.min(position),
+            None => position,
+        });
+        refused
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {
@@ -125,8 +262,14 @@ impl ArtifactStore {
     }
 
     /// Drop every artifact of a layer — what a layer drop leaves behind otherwise.
+    ///
+    /// **The log pin is not lowered with them.** A rotation that reclaimed back to where this
+    /// layer's publications sat would also reclaim every *other* layer's records in between, and
+    /// the pin is a single bound rather than a set. Holding it costs a longer log; recomputing it
+    /// wrongly costs a membership.
     pub fn remove_layer(&mut self, layer: &str) {
         self.levels.retain(|(l, _), _| l != layer);
+        self.keys.retain(|(l, _, _), _| l != layer);
     }
 
     /// How many artifacts are held, across every layer. **Operator-facing only**: a per-layer count

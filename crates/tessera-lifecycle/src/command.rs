@@ -155,6 +155,22 @@ pub enum Command {
     },
     /// Drop an annotation layer, tombstoning its name for ever.
     DropLayer { name: String },
+    /// Publish a batch of artifacts into one level of one layer.
+    ///
+    /// **Members are entities already.** The handler inverts the caller's `tessera_id`s once, at
+    /// the boundary, on the same rule [`Command::Change`] follows: a blinded identifier's meaning
+    /// depends on a key, so carrying one into the executor — and from there into the log — would
+    /// let a rotation silently redirect a membership.
+    ///
+    /// Ordinals are **not** carried: they are claimed on the executor from the level's cursor, for
+    /// the reason [`Command::RegisterLayer`] leaves its name check there. Two batches admitted
+    /// concurrently would otherwise be handed the same ordinals and the second would overwrite the
+    /// first's artifacts in place.
+    PublishArtifacts {
+        layer: String,
+        level: u32,
+        artifacts: Vec<crate::membership::IncomingArtifact>,
+    },
 }
 
 impl Command {
@@ -320,6 +336,13 @@ pub enum Ack {
     LayerRegistered { entity: EntityId },
     /// A layer was dropped and its name tombstoned. Nothing to return: the caller named it.
     LayerDropped,
+    /// Artifacts were published, in the caller's submitted order.
+    ///
+    /// **Entities, which the handler turns into `tessera_id`s — never the ordinals.** An ordinal is
+    /// a position in a dense level, so a caller holding two of them learns how many artifacts sit
+    /// between; across two principals it is a corpus-wide count over objects one of them may not
+    /// see, which is C8's row. The `tessera_id` is the only artifact address that crosses the wire.
+    ArtifactsPublished { entities: Vec<EntityId> },
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"

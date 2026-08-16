@@ -337,7 +337,12 @@ pub fn replay<'a>(
             // entity at all. What these records carry beyond that — the declaration and the
             // reserved runs — belongs to the registry the write path reconstructs, in the same
             // second pass as the vocabulary mints and for the same reason.
-            WalRecord::LayerCreate { .. } | WalRecord::LayerDrop { .. } => {}
+            // An artifact's own entity is an ordinary entity here too, on the same argument: its
+            // suppression arrives as a `ChangeByEntity`. The membership the record carries belongs
+            // to the artifact store, rebuilt in that same second pass.
+            WalRecord::LayerCreate { .. }
+            | WalRecord::LayerDrop { .. }
+            | WalRecord::ArtifactPublish { .. } => {}
         }
     }
 

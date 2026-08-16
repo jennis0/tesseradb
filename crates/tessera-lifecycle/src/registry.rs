@@ -35,12 +35,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tessera_types::layer::{
-    DeclarationError, EntityRun, LayerDeclaration, RegisteredLayer, ReservedRuns,
+    DeclarationError, EntityRun, LayerDeclaration, MembershipSource, RegisteredLayer, ReservedRuns,
 };
 use tessera_types::{EntityId, TermId};
 
 use crate::alloc::{AllocError, Allocator};
-use crate::wal::WalRecord;
+use crate::membership::{serialise_members, ArtifactStore, IncomingArtifact};
+use crate::wal::{PublishedArtifact, WalRecord};
 
 /// Why a registry operation was refused.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +54,13 @@ pub enum RegistryError {
     NameTombstoned(String),
     /// No such live layer.
     NoSuchLayer(String),
+    /// The layer holds no such level. Levels are dense from 0, so this is a caller naming one the
+    /// declaration never reserved.
+    NoSuchLevel { layer: String, level: u32 },
+    /// Artifacts were offered to a layer whose membership is evaluated rather than enumerated.
+    NotEnumerated { layer: String },
+    /// This level already holds an artifact under that key, or the batch repeats it.
+    DuplicateKey { layer: String, key: String },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
     /// the first edge, because an edge's target must exist before the edge (`annotation-write-cycle.md`
     /// §5.0.4) and a dangling dependency is that ordering constraint already broken.
@@ -72,6 +80,19 @@ impl std::fmt::Display for RegistryError {
                  suppressions travel by it, so reusing it would silently redirect them"
             ),
             RegistryError::NoSuchLayer(n) => write!(f, "no layer named {n}"),
+            RegistryError::NoSuchLevel { layer, level } => {
+                write!(f, "{layer} declares no level {level}")
+            }
+            RegistryError::NotEnumerated { layer } => write!(
+                f,
+                "{layer} derives its membership from a predicate, so it cannot be published into: \
+                 an enumerated set beside a live predicate diverges from it at the first write"
+            ),
+            RegistryError::DuplicateKey { layer, key } => write!(
+                f,
+                "{layer} already holds an artifact keyed {key}; publication is append-only, and an \
+                 edit is a delete plus a re-publish"
+            ),
             RegistryError::MissingDependency { layer, depends_on } => write!(
                 f,
                 "{layer} declares depends_on {depends_on}, which is not registered — an edge's \
@@ -233,6 +254,117 @@ impl LayerRegistry {
         })
     }
 
+    /// Validates a batch of artifacts against the layer they are offered to, claims ordinals and
+    /// entities for them, and returns the record that makes them durable — on
+    /// [`prepare_create`]'s contract: the caller appends, syncs, and only then applies.
+    ///
+    /// **The whole batch or none of it.** Ordinals are claimed contiguously from the level's
+    /// cursor, so a partial acceptance would leave the level's dense addressing describing
+    /// artifacts that do not exist. Every check therefore runs before the first allocation, and a
+    /// refusal spends nothing.
+    ///
+    /// **Publication is append-only here.** A key already in the level is refused rather than
+    /// treated as an update: an edit is a delete plus a re-ingest (decision 0047), and the delete
+    /// half is the write cycle's edit pass, which is a later stage's work. Silently replacing would
+    /// be the fail-open reading — it would strand the old artifact's entity while callers still
+    /// hold its `tessera_id`, so a suppression against the thing they were shown would land on
+    /// nothing.
+    ///
+    /// [`prepare_create`]: LayerRegistry::prepare_create
+    pub fn prepare_publish(
+        &self,
+        layer_name: &str,
+        level: u32,
+        incoming: &[IncomingArtifact],
+        store: &ArtifactStore,
+        alloc: &mut Allocator,
+    ) -> Result<WalRecord, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+
+        // A spatial or attribute layer's membership is *evaluated*, never enumerated — publishing
+        // one would install a frozen answer beside a live predicate, and the two would diverge at
+        // the first ingest. Refused at the boundary rather than reconciled later.
+        if layer.declaration.membership != MembershipSource::Enumerated {
+            return Err(RegistryError::NotEnumerated {
+                layer: layer_name.to_string(),
+            });
+        }
+        let runs = layer
+            .runs
+            .get(level as usize)
+            .ok_or_else(|| RegistryError::NoSuchLevel {
+                layer: layer_name.to_string(),
+                level,
+            })?;
+
+        // Duplicate keys, against the level and against the rest of the batch. Both, because a
+        // batch that repeats a key internally would otherwise publish two artifacts under one name
+        // and leave the index pointing at whichever landed last.
+        let mut within_batch = BTreeSet::new();
+        for artifact in incoming {
+            let Some(key) = &artifact.stable_key else {
+                continue;
+            };
+            if store.ordinal_of_key(layer_name, level, key).is_some() || !within_batch.insert(key) {
+                return Err(RegistryError::DuplicateKey {
+                    layer: layer_name.to_string(),
+                    key: key.clone(),
+                });
+            }
+        }
+
+        let first_ordinal = store.next_ordinal(layer_name, level) as u64;
+        let needed = first_ordinal + incoming.len() as u64;
+
+        // Extend the level's reservation if the batch outgrows it. The runs are a list from the
+        // start precisely so this is an append rather than a migration — see `ReservedRuns`.
+        let mut extend_runs = Vec::new();
+        let mut capacity = runs.capacity();
+        while capacity < needed {
+            let block = alloc.allocate_rowless(1)?;
+            capacity += block.end - block.start;
+            extend_runs.push(EntityRun {
+                start: block.start,
+                end: block.end,
+            });
+        }
+
+        // Resolve every ordinal against the *extended* runs, so an artifact landing in a block this
+        // batch just claimed gets its entity from it rather than from a level that has not grown
+        // yet.
+        let mut extended = runs.clone();
+        for run in &extend_runs {
+            extended.push(*run);
+        }
+
+        let artifacts = incoming
+            .iter()
+            .enumerate()
+            .map(|(i, artifact)| {
+                let ordinal = first_ordinal + i as u64;
+                let entity = extended
+                    .entity_of(ordinal)
+                    .expect("the reservation was extended to cover every ordinal in the batch");
+                PublishedArtifact {
+                    ordinal: ordinal as u32,
+                    entity: EntityId::new(entity),
+                    stable_key: artifact.stable_key.clone(),
+                    members: serialise_members(&artifact.members),
+                }
+            })
+            .collect();
+
+        Ok(WalRecord::ArtifactPublish {
+            layer: layer_name.to_string(),
+            level,
+            extend_runs,
+            artifacts,
+        })
+    }
+
     /// Validates a drop and returns the record that makes it durable, on [`prepare_create`]'s
     /// contract: the caller appends and syncs before applying.
     ///
@@ -303,6 +435,29 @@ impl LayerRegistry {
                 self.tombstones.insert(name.clone());
                 self.version += 1;
             }
+            // A publication's only effect on the *registry* is the reservation it grew. The
+            // artifacts themselves belong to the store, applied from the same record.
+            //
+            // **The version does not move.** It keys a session's cached reachability, and
+            // publishing artifacts changes who may reach the layer not at all — bumping it would
+            // invalidate every open session's resolution on every batch, which at a clustering's
+            // publication rate is a re-resolve per request.
+            WalRecord::ArtifactPublish {
+                layer, level, extend_runs, ..
+            } => {
+                if extend_runs.is_empty() {
+                    return;
+                }
+                let Some(registered) = self.layers.get_mut(layer) else {
+                    return;
+                };
+                let Some(runs) = registered.runs.get_mut(*level as usize) else {
+                    return;
+                };
+                for run in extend_runs {
+                    runs.push(*run);
+                }
+            }
             _ => {}
         }
     }
@@ -344,6 +499,28 @@ impl LayerRegistry {
         self.layers.iter().map(|(n, l)| (n.as_str(), l.entity))
     }
 
+    /// Which artifact an entity addresses: `(layer, level, ordinal)`.
+    ///
+    /// **Addressing, never authorisation.** This answers where an entity sits and nothing about
+    /// whether the caller may know it sits there — a drill-down resolves the address here and then
+    /// puts it through the one predicate, in that order. Answering the address for an entity the
+    /// caller may not see discloses nothing on its own: they supplied the identifier, and every
+    /// route that acts on the answer gates first.
+    ///
+    /// A layer's *own* entity is deliberately not matched: it sits outside every level's run, which
+    /// is what keeps suppressing a layer from suppressing artifact ordinal zero.
+    ///
+    /// O(layers × levels × runs) — a walk over a handful of ranges, with no per-artifact table in
+    /// either direction, which is the property [`ReservedRuns`] is shaped to keep.
+    pub fn locate(&self, entity: EntityId) -> Option<(&str, u32, u32)> {
+        self.layers.iter().find_map(|(name, layer)| {
+            layer.runs.iter().enumerate().find_map(|(level, runs)| {
+                runs.ordinal_of(entity.raw())
+                    .map(|ordinal| (name.as_str(), level as u32, ordinal as u32))
+            })
+        })
+    }
+
     fn take_layer_entity(&mut self, alloc: &mut Allocator) -> Result<EntityId, AllocError> {
         let cursor = match self.entity_cursor {
             Some(c) if c.next < c.end => c,
@@ -382,7 +559,7 @@ impl LayerRegistry {
 mod tests {
     use super::*;
     use tessera_types::layer::{
-        ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, MembershipSource,
+        ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, MembershipSource, RESERVED_BLOCK,
     };
 
     fn declaration(name: &str) -> LayerDeclaration {
@@ -611,6 +788,281 @@ mod tests {
         assert_eq!(alloc.low_water(), mark);
         assert_eq!(reg.version(), version);
         assert_eq!(reg.len(), 1);
+    }
+
+    fn incoming(key: &str, members: &[u32]) -> IncomingArtifact {
+        IncomingArtifact {
+            stable_key: Some(key.into()),
+            members: croaring::Bitmap::of(members),
+        }
+    }
+
+    /// Publish + apply into both structures, the way the executor does it.
+    fn publish(
+        reg: &mut LayerRegistry,
+        store: &mut ArtifactStore,
+        alloc: &mut Allocator,
+        layer: &str,
+        incoming: &[IncomingArtifact],
+    ) -> Result<WalRecord, RegistryError> {
+        let record = reg.prepare_publish(layer, 0, incoming, store, alloc)?;
+        reg.apply(&record);
+        assert_eq!(store.apply(&record, 0), 0);
+        Ok(record)
+    }
+
+    #[test]
+    fn ordinals_are_dense_across_batches_and_each_addresses_its_own_entity() {
+        // Dense addressing is what makes an ordinal `entity − run.start` arithmetic rather than a
+        // lookup table. Two batches must therefore continue one numbering, not restart it — a
+        // second batch numbering from zero would overwrite the first's artifacts in place.
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c0", &[1, 2]), incoming("c1", &[3])],
+        )
+        .unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c2", &[4])],
+        )
+        .unwrap();
+
+        assert_eq!(store.next_ordinal("clusters/a", 0), 3);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, "c2"), Some(2));
+
+        // Every ordinal resolves back to the entity the level's run gives it, and the layer's own
+        // entity is none of them — suppressing the layer must not suppress an artifact.
+        let layer = reg.get("clusters/a").unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for ordinal in 0..3u32 {
+            let record = store.get("clusters/a", 0, ordinal).unwrap();
+            assert_eq!(layer.runs[0].entity_of(ordinal as u64), Some(record.entity.raw()));
+            assert!(seen.insert(record.entity));
+            assert_ne!(record.entity, layer.entity);
+        }
+    }
+
+    #[test]
+    fn a_batch_that_outgrows_its_level_extends_the_reservation() {
+        // A level holds 65 536 artifacts per block. A clustering larger than that must grow rather
+        // than be refused, and the extension has to land in the record — an ordinal walks the runs
+        // in *allocation* order, so a re-derived extension would renumber everything above it.
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let before = alloc.low_water();
+
+        // Fill the first block, then step over its edge.
+        let full: Vec<IncomingArtifact> = (0..RESERVED_BLOCK)
+            .map(|i| incoming(&format!("c{i}"), &[i as u32]))
+            .collect();
+        let record = publish(&mut reg, &mut store, &mut alloc, "clusters/a", &full).unwrap();
+        let WalRecord::ArtifactPublish { extend_runs, .. } = &record else {
+            unreachable!()
+        };
+        assert!(extend_runs.is_empty(), "the first block was enough");
+        assert_eq!(alloc.low_water(), before);
+
+        let record = publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("over", &[9])],
+        )
+        .unwrap();
+        let WalRecord::ArtifactPublish { extend_runs, .. } = &record else {
+            unreachable!()
+        };
+        assert_eq!(extend_runs.len(), 1, "one more block");
+        assert_eq!(alloc.low_water(), before - RESERVED_BLOCK);
+
+        // The artifact past the edge lands in the new block, which sits *below* the first — the
+        // allocator is monotone downward and hands nobody a reserved gap.
+        let layer = reg.get("clusters/a").unwrap();
+        assert_eq!(layer.runs[0].capacity(), 2 * RESERVED_BLOCK);
+        let over = store.get("clusters/a", 0, RESERVED_BLOCK as u32).unwrap();
+        assert_eq!(over.entity.raw(), extend_runs[0].start);
+        assert!(over.entity.raw() < store.get("clusters/a", 0, 0).unwrap().entity.raw());
+        assert_eq!(
+            layer.runs[0].ordinal_of(over.entity.raw()),
+            Some(RESERVED_BLOCK)
+        );
+    }
+
+    #[test]
+    fn a_key_already_in_the_level_or_repeated_in_the_batch_is_refused() {
+        // Append-only: an edit is a delete plus a re-publish (decision 0047), and silently
+        // replacing would strand the old artifact's entity while callers still hold its
+        // `tessera_id` — so a suppression against what they were shown would land on nothing.
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c0", &[1])],
+        )
+        .unwrap();
+
+        assert_eq!(
+            publish(
+                &mut reg,
+                &mut store,
+                &mut alloc,
+                "clusters/a",
+                &[incoming("c0", &[2])]
+            ),
+            Err(RegistryError::DuplicateKey {
+                layer: "clusters/a".into(),
+                key: "c0".into(),
+            })
+        );
+        assert_eq!(
+            publish(
+                &mut reg,
+                &mut store,
+                &mut alloc,
+                "clusters/a",
+                &[incoming("c1", &[2]), incoming("c1", &[3])]
+            ),
+            Err(RegistryError::DuplicateKey {
+                layer: "clusters/a".into(),
+                key: "c1".into(),
+            })
+        );
+        // Neither refusal moved anything: no ordinal claimed, no id spent.
+        assert_eq!(store.next_ordinal("clusters/a", 0), 1);
+    }
+
+    #[test]
+    fn a_predicate_layer_cannot_be_published_into() {
+        // Its membership is evaluated, so an enumerated set beside it is a frozen answer that
+        // diverges from the predicate at the first ingest.
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        let mut spatial = declaration("regions/uk");
+        spatial.membership = MembershipSource::Spatial;
+        spatial.visible_when = Some(ExistenceCriterion::MinVisible(25));
+        register(&mut reg, &mut alloc, spatial).unwrap();
+
+        assert_eq!(
+            publish(
+                &mut reg,
+                &mut store,
+                &mut alloc,
+                "regions/uk",
+                &[incoming("c0", &[1])]
+            ),
+            Err(RegistryError::NotEnumerated {
+                layer: "regions/uk".into()
+            })
+        );
+        // And a level the layer never declared is a refusal too, not an implicit creation.
+        assert_eq!(
+            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc),
+            Err(RegistryError::NoSuchLayer("clusters/nope".into()))
+        );
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        assert_eq!(
+            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc),
+            Err(RegistryError::NoSuchLevel {
+                layer: "clusters/a".into(),
+                level: 3
+            })
+        );
+    }
+
+    #[test]
+    fn replay_lands_a_publication_where_it_was_acked() {
+        // The durability contract, on `replay_applies_the_recorded_ids_rather_than_reallocating`'s
+        // argument: an artifact must come back on the entity its `tessera_id` was minted from,
+        // whatever the replaying allocator's state.
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        let create = reg
+            .prepare_create(declaration("clusters/a"), &mut alloc)
+            .unwrap();
+        reg.apply(&create);
+        let publication = reg
+            .prepare_publish(
+                "clusters/a",
+                0,
+                &[incoming("c0", &[1, 2, 3]), incoming("c1", &[4])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        reg.apply(&publication);
+        assert_eq!(store.apply(&publication, 900), 0);
+
+        let mut replayed_reg = LayerRegistry::new();
+        let mut replayed_store = ArtifactStore::new();
+        let mut other = Allocator::new(0);
+        other.allocate_rowless(9).unwrap();
+        for record in [&create, &publication] {
+            replayed_reg.apply(record);
+            assert_eq!(replayed_store.apply(record, 900), 0);
+        }
+
+        assert_eq!(
+            replayed_store.get("clusters/a", 0, 0).map(|r| r.entity),
+            store.get("clusters/a", 0, 0).map(|r| r.entity)
+        );
+        assert_eq!(
+            replayed_store.get("clusters/a", 0, 0).map(|r| &r.members),
+            store.get("clusters/a", 0, 0).map(|r| &r.members)
+        );
+        assert_eq!(replayed_store.ordinal_of_key("clusters/a", 0, "c1"), Some(1));
+        // And the pin comes back with it — the log may not be reclaimed past the publication.
+        assert_eq!(replayed_store.oldest_wal_pos(), Some(900));
+    }
+
+    #[test]
+    fn an_extension_lowers_the_replayed_mark_as_far_as_a_registration_does() {
+        // The failure this closes: an extension block that raised no mark would be reissued on the
+        // first restart after a large publication, with every artifact in it already suppressible
+        // by a `tessera_id` a caller holds.
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        let create = reg
+            .prepare_create(declaration("clusters/a"), &mut alloc)
+            .unwrap();
+        reg.apply(&create);
+        let full: Vec<IncomingArtifact> = (0..RESERVED_BLOCK + 1)
+            .map(|i| incoming(&format!("c{i}"), &[i as u32]))
+            .collect();
+        let publication = reg
+            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc)
+            .unwrap();
+        reg.apply(&publication);
+        assert_eq!(store.apply(&publication, 0), 0);
+
+        assert_eq!(
+            crate::alloc::low_water_from(&[create.clone(), publication.clone()]),
+            alloc.low_water()
+        );
+        // Reading the registration alone — the shape this function had before levels could grow —
+        // leaves the extension block above the mark and so free to be reissued.
+        assert!(crate::alloc::low_water_from(&[create]) > alloc.low_water());
     }
 
     #[test]

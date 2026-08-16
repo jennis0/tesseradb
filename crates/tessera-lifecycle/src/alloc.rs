@@ -252,19 +252,28 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             WalRecord::ChangeByEntity { .. } => {}
             // A row-less allocation moves the *other* mark, and moving this one with it would
             // hand every point id below the row-less region away in a single step.
-            WalRecord::LayerCreate { .. } | WalRecord::LayerDrop { .. } => {}
+            WalRecord::LayerCreate { .. }
+            | WalRecord::LayerDrop { .. }
+            | WalRecord::ArtifactPublish { .. } => {}
         }
     }
     hw
 }
 
 /// Computes the row-less low-water mark implied by a set of replayed WAL records: the lowest entity
-/// any [`WalRecord::LayerCreate`] claimed, or [`ROWLESS_CEILING`] if none did.
+/// any registration or level extension claimed, or [`ROWLESS_CEILING`] if none did.
 ///
 /// **[`high_water_from`]'s mirror, and it exists for the failure that motivated the two regions.**
 /// Without it a rotation and restart reseeds the row-less mark at the ceiling and the next layer
 /// registration is handed ids a live layer already holds — two entities sharing a `tessera_id`,
 /// which is the one thing "collision-free by construction" is not allowed to mean sometimes.
+///
+/// **Two records move this mark, not one.** A [`WalRecord::LayerCreate`] takes the layer's entity
+/// and its levels' first blocks; a [`WalRecord::ArtifactPublish`] takes another block whenever a
+/// level outgrows its reservation. Reading only the first was the shape this function had while
+/// levels could not grow, and leaving it that way once they could would reissue an extension block
+/// on the first restart after a large publication — with every artifact in it already suppressible
+/// by a `tessera_id` a caller holds.
 ///
 /// **A drop does not raise it.** The name is tombstoned and the ids are not reclaimed (decision
 /// 0072 is settled and unbuilt), so a dropped layer's run must stay below the mark: raising it
@@ -272,16 +281,23 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
 pub fn low_water_from(records: &[WalRecord]) -> u64 {
     let mut lw = ROWLESS_CEILING;
     for rec in records {
-        if let WalRecord::LayerCreate {
-            layer_entity, runs, ..
-        } = rec
-        {
-            lw = lw.min(layer_entity.raw());
-            for level in runs {
-                for run in level.runs() {
+        match rec {
+            WalRecord::LayerCreate {
+                layer_entity, runs, ..
+            } => {
+                lw = lw.min(layer_entity.raw());
+                for level in runs {
+                    for run in level.runs() {
+                        lw = lw.min(run.start);
+                    }
+                }
+            }
+            WalRecord::ArtifactPublish { extend_runs, .. } => {
+                for run in extend_runs {
                     lw = lw.min(run.start);
                 }
             }
+            _ => {}
         }
     }
     lw

@@ -252,7 +252,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         // write. `PUT` rather than `POST` because the name is the identity and the operation is
         // refused rather than repeated if it is taken; there is no server-minted name to `POST` to.
         .route("/control/layers", axum::routing::put(register_layer))
-        .route("/control/layers/{name}", axum::routing::delete(drop_layer));
+        .route("/control/layers/{name}", axum::routing::delete(drop_layer))
+        .route(
+            "/control/layers/{name}/artifacts",
+            axum::routing::put(publish_artifacts),
+        );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
     // than mounted and refusing, and above the credential layer below like every other route.
     #[cfg(feature = "fault-injection")]
@@ -1752,6 +1756,195 @@ async fn drop_layer(
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the
+/// coordinate the caller's own pipeline holds rather than an offset into a flattening they never
+/// wrote.
+fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
+    let mut remaining = flat;
+    for (artifact, width) in widths.iter().enumerate() {
+        if remaining < *width {
+            return (artifact, remaining);
+        }
+        remaining -= width;
+    }
+    (widths.len(), 0)
+}
+
+/// How a batch addresses its members. **One form per request, not per member**, which is the one
+/// place this deliberately differs from `/control/changes`: a change names a handful of items and
+/// pays a tagged object each; a clustering names its whole corpus, and a per-member tag would be
+/// most of the request body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Addressing {
+    External,
+    Tessera,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishBody {
+    /// Defaults to the layer's only level. A layer that declared none has exactly level 0.
+    #[serde(default)]
+    level: u32,
+    addressing: Addressing,
+    /// Required for `tessera` addressing and refused otherwise — an external id means nothing to a
+    /// key, so accepting an idset beside one would imply a check that never ran.
+    #[serde(default)]
+    idset: Option<u32>,
+    artifacts: Vec<IncomingArtifactBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IncomingArtifactBody {
+    /// **Effectively mandatory for a layer another layer's edges will point into**: an edge names
+    /// its target, and at publish time the caller holds no `tessera_id` for it.
+    #[serde(default)]
+    stable_key: Option<String>,
+    /// Base64 external ids, or base-10 `tessera_id` strings, according to the batch's `addressing`.
+    /// External ids are base64 on the same rule `/control/changes` follows — they are bytes, not
+    /// text — and identifiers are strings because a bare JSON number loses a `u64` past 2⁵³ in
+    /// every JavaScript client, silently.
+    members: Vec<String>,
+}
+
+/// `PUT /control/layers/{name}/artifacts` — publish a batch of artifacts into one level.
+///
+/// **The batch is the commit unit.** Ordinals are claimed contiguously from the level's cursor, so
+/// a partial acceptance would leave the level's dense addressing describing artifacts that do not
+/// exist. Every check therefore runs before anything is allocated, and a refusal spends nothing.
+///
+/// **Members are resolved to entities here, once, at the boundary** — the rule `/control/changes`
+/// follows and for the same reason. A `tessera_id` is a keyed permutation of entity space, so a
+/// membership stored under one would be reinterpreted by the next key rotation and would name a
+/// different set of documents (I10, decision 0025).
+///
+/// **An unresolvable member refuses the batch rather than being dropped.** A silently dropped
+/// member shrinks both the masked count a viewer is shown and the declared size the proportional
+/// criterion divides by — so a typo in a pipeline would quietly move artifacts across their own
+/// existence threshold, in the direction of hiding them, with nothing anywhere saying so.
+///
+/// The response carries a `tessera_id` per artifact and **never an ordinal**: an ordinal is a
+/// position in a dense level, so two of them disclose how many artifacts sit between — a
+/// corpus-wide count over objects the holder may not individually see (C8).
+async fn publish_artifacts(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Json<PublishBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let PublishBody {
+        level,
+        addressing,
+        idset,
+        artifacts,
+    } = body.0;
+
+    if artifacts.is_empty() {
+        return Err(ApiError::Contract(
+            "a publication carries at least one artifact".to_string(),
+        ));
+    }
+
+    // Flattened once, so each address form is resolved in a single batched call whatever the shape
+    // of the batch: the external half opens each bundle extent at most once regardless of N, and
+    // the tessera half takes one generation snapshot for the idset check and every inversion.
+    let widths: Vec<usize> = artifacts.iter().map(|a| a.members.len()).collect();
+    let flat: Vec<&String> = artifacts.iter().flat_map(|a| a.members.iter()).collect();
+
+    let resolved: Vec<Option<tessera_types::EntityId>> = match addressing {
+        Addressing::Tessera => {
+            let idset = idset.ok_or_else(|| {
+                ApiError::Contract(
+                    "tessera-addressed members carry the idset they were minted under, so a list \
+                     gathered before a key rotation is refused rather than reinterpreted"
+                        .to_string(),
+                )
+            })?;
+            let ids = flat
+                .iter()
+                .map(|raw| {
+                    raw.parse::<u64>()
+                        .map(TesseraId::new)
+                        .map_err(|_| ApiError::Contract(format!("'{raw}' is not a tessera_id")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // Refuses with `StaleIdSet` before inverting anything — see `resolve_tessera_ids`.
+            state
+                .engine
+                .resolve_tessera_ids(&ids, idset)
+                .map_err(crate::error::map_engine_error)?
+        }
+        Addressing::External => {
+            if idset.is_some() {
+                return Err(ApiError::Contract(
+                    "idset accompanies tessera_id, never external_id: an external id means \
+                     nothing to a key, so there is nothing for an idset to check"
+                        .to_string(),
+                ));
+            }
+            let keys: Vec<Vec<u8>> = flat
+                .iter()
+                .map(|s| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(s)
+                        .map_err(|e| {
+                            ApiError::Contract(format!("a member external_id is not base64: {e}"))
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            state
+                .engine
+                .resolve_external_ids(&keys)
+                .map_err(map_store_error)?
+        }
+    };
+
+    if let Some(position) = resolved.iter().position(Option::is_none) {
+        // Reported as `(artifact, member)` rather than as a flat offset, which is the coordinate
+        // the caller's own pipeline holds. The identifier itself is not echoed: it is the caller's
+        // data, and `error.rs` keeps caller-supplied bytes out of a response body.
+        let (artifact, member) = position_in_batch(&widths, position);
+        return Err(ApiError::Unknown(format!(
+            "member {member} of artifact {artifact} names nothing this deployment holds; the batch \
+             was refused rather than published without it, because a dropped member moves both the \
+             count a viewer is shown and the size its existence criterion divides by"
+        )));
+    }
+
+    let mut entities = resolved.into_iter().flatten();
+    let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
+        .into_iter()
+        .zip(&widths)
+        .map(|(artifact, width)| {
+            tessera_lifecycle::IncomingArtifact::from_entities(
+                artifact.stable_key,
+                entities.by_ref().take(*width),
+            )
+        })
+        .collect();
+    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.stable_key.clone()).collect();
+
+    // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
+    // and delaying one under ingest load is backpressure working.
+    let ids = tokio::task::spawn_blocking(move || {
+        state.engine.publish_artifacts(name, level, incoming)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+
+    let published: Vec<serde_json::Value> = ids
+        .iter()
+        .zip(keys)
+        .map(|(id, key)| serde_json::json!({ "stable_key": key, "tessera_id": id.raw().to_string() }))
+        .collect();
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "artifacts": published })),
+    ))
 }
 
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;

@@ -70,6 +70,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
+use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
@@ -1385,6 +1386,14 @@ pub(crate) struct LiveState {
     /// append followed by an apply, on the one thread that also holds the allocator — and read by
     /// the request path, which resolves a session's reachable set from it.
     registry: Mutex<LayerRegistry>,
+    /// Every artifact's entity-space membership, on the registry's contract: written only by the
+    /// executor, read by the request path.
+    ///
+    /// **Beside the registry rather than inside it**, because their lifetimes differ: a layer's
+    /// declaration is small, published into every manifest and rebuilt from one; a membership is
+    /// large and — until the packaging question is settled — lives only in the log. Folding them
+    /// into one structure would put the second's durability problem onto the first.
+    artifacts: Mutex<ArtifactStore>,
 }
 
 impl LiveState {
@@ -1438,6 +1447,45 @@ impl LiveState {
 
     fn apply_registry_record(&self, record: &WalRecord) {
         lock_recover(&self.registry).apply(record);
+    }
+
+    /// Runs `f` with the registry, the artifact store and the allocator held, in that lock order.
+    ///
+    /// **One critical section over all three, on `with_registry_and_allocator`'s argument.** A
+    /// publication reads the level's cursor from the store, checks its keys, allocates against the
+    /// registry's runs and writes both — so two batches taking the locks separately would be handed
+    /// the same ordinals, and the second would overwrite the first's artifacts in place.
+    ///
+    /// The order — registry, store, allocator — extends the existing one rather than interleaving
+    /// with it, which is what keeps the two from deadlocking against each other.
+    fn with_publication_state<R>(
+        &self,
+        f: impl FnOnce(&mut LayerRegistry, &mut ArtifactStore, &mut Allocator) -> R,
+    ) -> R {
+        let mut registry = lock_recover(&self.registry);
+        let mut artifacts = lock_recover(&self.artifacts);
+        let mut alloc = lock_recover(&self.allocator);
+        f(&mut registry, &mut artifacts, &mut alloc)
+    }
+
+    /// The bound rotation may not reclaim past, or `None` if no membership is at risk. See
+    /// [`ArtifactStore::oldest_wal_pos`] — this pins the log, deliberately and visibly, until
+    /// membership has a home outside it.
+    fn artifacts_oldest_wal_pos(&self) -> Option<u64> {
+        lock_recover(&self.artifacts).oldest_wal_pos()
+    }
+
+    /// Read the artifact store — the request path's route to a membership.
+    pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
+        f(&lock_recover(&self.artifacts))
+    }
+
+    /// Where an entity sits: `(layer, level, ordinal)`. Addressing only — see
+    /// [`LayerRegistry::locate`].
+    pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
+        lock_recover(&self.registry)
+            .locate(entity)
+            .map(|(name, level, ordinal)| (name.to_string(), level, ordinal))
     }
 
     /// Resolve which layers a principal may know exist. See `LayerRegistry::resolve_for` — one set
@@ -1783,6 +1831,7 @@ pub(crate) struct WritePathState {
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
+    pub(crate) artifacts: ArtifactStore,
 }
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
@@ -1899,6 +1948,28 @@ impl WritePath {
         // of 65 536, and a durable cursor would buy back an id space nothing is short of.
         registry.reseed_entity_cursor();
 
+        // **The artifact store is rebuilt from the log alone**, because the log is the only place a
+        // membership lives (⊘ the packaging question; see `ArtifactStore::oldest_wal_pos`). There
+        // is no manifest half to seed from, so unlike the registry above this is not a union — and
+        // that is exactly why rotation is pinned: reclaim a member and the memberships in it are
+        // gone, with the artifacts still registered and still addressable.
+        //
+        // The positions are parallel to the records, which is what `Wal::replayed_positions`
+        // guarantees; the buffer's own stamping below rests on the same promise.
+        let mut artifacts = ArtifactStore::new();
+        let mut undecodable = 0usize;
+        for (record, position) in records.iter().zip(wal.replayed_positions()) {
+            undecodable += artifacts.apply(record, *position);
+        }
+        if undecodable > 0 {
+            tracing::error!(
+                count = undecodable,
+                "ALARM: artifact memberships in the durable prefix did not decode; those artifacts \
+                 are absent rather than empty, which a viewer cannot tell from a criterion they \
+                 failed to clear"
+            );
+        }
+
         // **The manifests' deny state is the starting point, and replay runs over it.** Ordering,
         // not aesthetics — see `replay`'s own doc: every WAL record postdates any state an
         // honourable manifest carries, and the one op that needs the later record to win is
@@ -1994,6 +2065,7 @@ impl WritePath {
                 resolver_state,
                 accepted_batches,
                 registry,
+                artifacts,
             },
         ))
     }
@@ -2012,6 +2084,7 @@ impl WritePath {
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
+                artifacts: Mutex::new(state.artifacts),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -2344,6 +2417,35 @@ impl WritePath {
         name: &str,
     ) -> Option<tessera_types::layer::RegisteredLayer> {
         self.live.registered_layer(name)
+    }
+
+    /// Publish a batch of artifacts, returning their entities in the caller's submitted order.
+    pub(crate) fn publish_artifacts(
+        &self,
+        layer: String,
+        level: u32,
+        artifacts: Vec<IncomingArtifact>,
+    ) -> Result<Vec<EntityId>, AcceptError> {
+        let receipt = self.handle()?.submit(Command::PublishArtifacts {
+            layer,
+            level,
+            artifacts,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ArtifactsPublished { entities }) => Ok(entities),
+            Ok(other) => {
+                unreachable!("a PublishArtifacts command answers ArtifactsPublished, not {other:?}")
+            }
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
+        self.live.with_artifacts(f)
+    }
+
+    pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
+        self.live.locate_artifact(entity)
     }
 
     pub(crate) fn allocator_low_water(&self) -> u64 {
@@ -7192,7 +7294,84 @@ impl Executor {
                 |_| Ack::LayerDropped,
                 respond,
             ),
+            Command::PublishArtifacts {
+                layer,
+                level,
+                artifacts,
+            } => self.commit_artifacts(layer, level, artifacts, respond),
         }
+    }
+
+    /// Validate, allocate, append, sync, apply — `commit_registry`'s sequence, for the same reason
+    /// and with one addition: the record lands in **two** structures, the registry (for a level
+    /// that grew) and the store (for the memberships themselves), and both are applied under the
+    /// one lock the preparation was made under.
+    ///
+    /// **Nothing is applied before the record is durable.** A membership applied and then lost is
+    /// an artifact whose `tessera_id` a caller already holds and whose members come back empty —
+    /// served as absent, indistinguishable from one that failed its criterion. So the append comes
+    /// first, and a failure means the batch does not exist.
+    fn commit_artifacts(
+        &mut self,
+        layer: String,
+        level: u32,
+        incoming: Vec<IncomingArtifact>,
+        respond: Responder,
+    ) {
+        let prepared = self.live.with_publication_state(|registry, store, alloc| {
+            registry.prepare_publish(&layer, level, &incoming, store, alloc)
+        });
+        let record = match prepared {
+            Ok(record) => record,
+            Err(e) => {
+                respond.fail(ExecError::LayerRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
+
+        // The position the record will occupy — read **before** the append, because that is the
+        // bound rotation must not reclaim past, and after the append it names the next record
+        // instead.
+        let position = self.wal.position();
+
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            // The ordinals and any extension block this preparation spent are not returned, on
+            // `commit_registry`'s argument: a torn append that replays would otherwise land these
+            // artifacts on entities a later batch also holds.
+            tracing::error!(
+                error = %e,
+                "ALARM: an artifact publication could not be made durable; the artifacts do not \
+                 exist and their reserved ids are spent"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+
+        let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
+            unreachable!("prepare_publish returns an ArtifactPublish");
+        };
+        let entities = artifacts.iter().map(|a| a.entity).collect();
+        let undecodable = self.live.with_publication_state(|registry, store, _| {
+            registry.apply(&record);
+            store.apply(&record, position)
+        });
+        if undecodable > 0 {
+            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
+            // — and alarmed rather than asserted because the alternative to noticing is an artifact
+            // that is silently absent.
+            tracing::error!(
+                count = undecodable,
+                "ALARM: an artifact membership did not survive its own round trip"
+            );
+        }
+        let published = Published::registry_applied(&record);
+        // Durable in the log, not yet in a manifest. The registry half of this record reaches
+        // `SEGMENTS-<n>.json` at the next flush on the deny lane's mechanism; the membership half
+        // has nowhere to reach, which is what the rotation pin holds the log for.
+        self.deny_dirty = true;
+        respond.ack(Ack::ArtifactsPublished { entities }, &published);
     }
 
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
@@ -7941,6 +8120,18 @@ impl Executor {
             // A buffered row of unknown position pins the log. Fail-safe and loud by construction:
             // the sequence grows, which is visible, rather than a record vanishing, which is not.
             Some(None) => 0,
+        };
+        // **The oldest artifact publication pins the log too, and today that means from the first
+        // publication onwards.** A membership has no home outside the WAL — segments carry rows and
+        // postings, manifests carry the registry, and neither carries a Roaring bitmap of who
+        // belongs to a cluster — so reclaiming a member holding one destroys the only copy, leaving
+        // the artifact registered, still addressable by a `tessera_id` a caller holds, and served
+        // as absent. ⊘ Where membership lives on disk is the owner's open decision; until it lands
+        // this is the fail-closed direction, and a log that grows is noticed where a membership
+        // that vanishes is not.
+        let reclaim_below = match self.live.artifacts_oldest_wal_pos() {
+            Some(oldest) => reclaim_below.min(oldest),
+            None => reclaim_below,
         };
 
         let snapshot = generation.overlay.snapshot();

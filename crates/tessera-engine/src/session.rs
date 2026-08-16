@@ -2416,6 +2416,59 @@ impl Engine {
         self.write.drop_layer(name)
     }
 
+    /// Publish a batch of artifacts into one level of a layer, returning a `tessera_id` per
+    /// artifact in the caller's submitted order.
+    ///
+    /// **Members must be points, and that is checked here.** An enumerated membership is a set of
+    /// documents; a row-less entity — another layer, another artifact — has no row, so it would
+    /// contribute to no masked count and to no tile, while still counting towards the declared
+    /// size the proportional criterion divides by. An artifact could then be pushed below its own
+    /// criterion by members that can never be visible to anyone. Relations between artifacts are a
+    /// later stage's edges, not a membership.
+    ///
+    /// The check is against the point region's high-water mark, which only rises, so it cannot go
+    /// stale between here and the executor.
+    pub fn publish_artifacts(
+        &self,
+        layer: String,
+        level: u32,
+        artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
+    ) -> std::result::Result<Vec<TesseraId>, crate::write::AcceptError> {
+        // Entity space is `u32` by I9, and both marks sit inside it — the row-less ceiling is
+        // derived from `u32::MAX` — so the narrowing is total rather than merely usually safe.
+        let high_water = self.allocator_high_water() as u32;
+        let rowless: u64 = artifacts
+            .iter()
+            .map(|a| a.members.cardinality() - a.members.range_cardinality(0..high_water))
+            .sum();
+        if rowless > 0 {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "{rowless} member(s) of this batch name no point; a membership is a set of \
+                         documents, and a member with no row would count towards the artifact's \
+                         declared size while being visible to nobody"
+                    ),
+                },
+            ));
+        }
+
+        let entities = self.write.publish_artifacts(layer, level, artifacts)?;
+        let generation = self.generation();
+        let shard = generation.bundle.manifest.identity.shard_id;
+        entities
+            .into_iter()
+            .map(|entity| {
+                self.identity_key.forward(shard, entity).map_err(|_| {
+                    crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                        detail: "an artifact's entity id lies outside the identity space"
+                            .to_string(),
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// Which layers this principal may know exist, and which of those are currently served.
     ///
     /// **Two questions, answered in that order, and the order is the disclosure control.**
@@ -2455,6 +2508,47 @@ impl Engine {
     pub fn allocator_low_water(&self) -> u64 {
         self.write.allocator_low_water()
     }
+
+    /// Where an artifact's entity sits, and what was published there.
+    ///
+    /// **Addressing, and the caller gates afterwards.** This says an entity is artifact *n* of a
+    /// level; it says nothing about whether the asker may know that, and every route acting on the
+    /// answer puts it through the one predicate first. The membership itself is deliberately not
+    /// returned — a caller with a raw member set could count it, and an unmasked count over items a
+    /// principal may not see is C8's row.
+    pub fn locate_artifact(&self, entity: EntityId) -> Option<PublishedArtifactAddress> {
+        let (layer, level, ordinal) = self.write.locate_artifact(entity)?;
+        let stable_key = self
+            .write
+            .with_artifacts(|store| store.get(&layer, level, ordinal).and_then(|r| r.stable_key.clone()));
+        Some(PublishedArtifactAddress {
+            layer,
+            level,
+            ordinal,
+            stable_key,
+        })
+    }
+
+    /// How many artifacts this node holds, across every layer.
+    ///
+    /// **Operator-facing, and there is deliberately no per-layer form.** A per-layer count is a
+    /// corpus-wide count over objects a principal may not individually see, which is C8's row; the
+    /// total answers "is the store populated" for `/control/status` without answering that.
+    pub fn published_artifacts(&self) -> usize {
+        self.write.with_artifacts(|store| store.total())
+    }
+}
+
+/// Where an artifact sits, as [`Engine::locate_artifact`] answers it.
+///
+/// The ordinal is here because the engine's own routes address by it. **It does not cross the
+/// wire** — see `Ack::ArtifactsPublished` for why two ordinals are a count of what lies between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedArtifactAddress {
+    pub layer: String,
+    pub level: u32,
+    pub ordinal: u32,
+    pub stable_key: Option<String>,
 }
 
 /// Steps 5 of compaction §4 for a prefix already committed: open it, and assemble the
