@@ -1129,6 +1129,7 @@ mod tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            membership_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: vec![DictExtent {

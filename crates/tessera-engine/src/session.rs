@@ -937,6 +937,15 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
             .collect();
+        // **The union across partitions, on `manifest_layers`' argument**: an artifact is a
+        // deployment-level object with an entity of its own, so its membership belongs to the
+        // deployment rather than to whichever partition's manifest happens to name the extent.
+        // With one partition this is that partition's list.
+        let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.membership_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -950,6 +959,8 @@ impl Engine {
                 ),
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
+                membership_extents: &manifest_membership_extents,
+                prefix_dir: prefix_dir.clone(),
             },
             &dict,
             &initial_deny,

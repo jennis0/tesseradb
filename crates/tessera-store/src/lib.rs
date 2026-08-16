@@ -8,6 +8,7 @@ pub mod flush;
 pub mod fold;
 mod locator;
 pub mod manifest;
+pub mod membership;
 pub mod manifest_write;
 pub mod merge;
 pub mod pairs;
@@ -27,7 +28,8 @@ pub use error::{Result, StoreError};
 pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use manifest_write::{
-    fsync_written, write_current, write_manifest_json, write_segments_manifest,
+    fsync_dir, fsync_written, write_and_fsync, write_current, write_manifest_json,
+    write_segments_manifest,
 };
 pub use pairs::PairsParquetWriter;
 pub use permutation::{Permutation, RowSpace, SegmentExtent};

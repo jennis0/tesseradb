@@ -1480,6 +1480,33 @@ impl LiveState {
         f(&lock_recover(&self.artifacts))
     }
 
+    /// Everything not yet in a manifest, packed and ready — see [`ArtifactStore::unpublished`].
+    fn unpublished_memberships(
+        &self,
+    ) -> (
+        Vec<tessera_lifecycle::membership::PendingExtent>,
+        Vec<(String, u32)>,
+    ) {
+        lock_recover(&self.artifacts).unpublished()
+    }
+
+    /// Record every level as published to its current extent, and with that release the log.
+    ///
+    /// **Called only once the manifest naming the extents is durable.** The recomputation is over
+    /// what the store holds *now* rather than over what was packed: the executor is the only writer,
+    /// so nothing has been added since the pack, and recomputing is one fewer thing to keep in step
+    /// than threading the packed ranges back through.
+    fn mark_memberships_published(&self) {
+        let mut artifacts = lock_recover(&self.artifacts);
+        let levels: Vec<(String, u32, u32)> = artifacts
+            .levels_and_extents()
+            .map(|(layer, level, len)| (layer.to_string(), level, len))
+            .collect();
+        for (layer, level, len) in levels {
+            artifacts.mark_published(&layer, level, len);
+        }
+    }
+
     /// Where an entity sits: `(layer, level, ordinal)`. Addressing only — see
     /// [`LayerRegistry::locate`].
     pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
@@ -1849,6 +1876,10 @@ pub(crate) struct ManifestSeed<'a> {
     pub low_water: u64,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
+    /// Every published membership extent, across every partition's manifest, with the prefix
+    /// directory their paths are relative to.
+    pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
+    pub prefix_dir: std::path::PathBuf,
 }
 
 impl WritePath {
@@ -1948,16 +1979,53 @@ impl WritePath {
         // of 65 536, and a durable cursor would buy back an id space nothing is short of.
         registry.reseed_entity_cursor();
 
-        // **The artifact store is rebuilt from the log alone**, because the log is the only place a
-        // membership lives (⊘ the packaging question; see `ArtifactStore::oldest_wal_pos`). There
-        // is no manifest half to seed from, so unlike the registry above this is not a union — and
-        // that is exactly why rotation is pinned: reclaim a member and the memberships in it are
-        // gone, with the artifacts still registered and still addressable.
+        // **The manifests' membership extents are the starting point, and replay unions what came
+        // after** — the registry's ordering rule above, for the same reason: every WAL record
+        // postdates any state a manifest carries, so seeding afterwards would overwrite a later
+        // publication with an earlier one.
         //
-        // The positions are parallel to the records, which is what `Wal::replayed_positions`
-        // guarantees; the buffer's own stamping below rests on the same promise.
+        // An extent is addressed by absolute ordinal and an artifact's entity comes from its
+        // layer's reserved runs, which the registry has just finished seeding — so this must run
+        // after it and does.
         let mut artifacts = ArtifactStore::new();
         let mut undecodable = 0usize;
+        for extent in seed.membership_extents {
+            let path = seed.prefix_dir.join(&extent.path);
+            let pack = tessera_store::membership::MembershipPack::open(&path)
+                .map_err(|e| EngineError::Malformed(e.to_string()))?;
+            // The manifest and the file must agree about which artifacts this range names. A
+            // disagreement would serve one cluster's members under another's identity, so it
+            // refuses rather than trusting either.
+            if pack.ordinal_lo() != extent.ordinal_lo || pack.count() != extent.count {
+                return Err(EngineError::Malformed(format!(
+                    "membership extent {} covers [{}, +{}) but the manifest names [{}, +{})",
+                    extent.path,
+                    pack.ordinal_lo(),
+                    pack.count(),
+                    extent.ordinal_lo,
+                    extent.count
+                )));
+            }
+            let Some(runs) = registry
+                .get(&extent.layer)
+                .and_then(|layer| layer.runs.get(extent.level as usize))
+            else {
+                // A dropped layer's extents outlive it until the next fold rewrites the prefix.
+                // Skipping them is correct — the layer is gone — and silent, because a tombstoned
+                // name is not a fault.
+                continue;
+            };
+            for (ordinal, blob) in pack.iter() {
+                let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
+                    undecodable += 1;
+                    continue;
+                };
+                match tessera_lifecycle::membership::decode_record(entity, blob) {
+                    Some(record) => artifacts.seed(&extent.layer, extent.level, ordinal, record),
+                    None => undecodable += 1,
+                }
+            }
+        }
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             undecodable += artifacts.apply(record, *position);
         }
@@ -2149,6 +2217,16 @@ impl WritePath {
 
         let health = Arc::clone(&self.health);
         let live = Arc::clone(&self.live);
+        // Read before the pointer moves into the thread. What the bundle's manifests already carry
+        // is this list's starting point — see the field for why it is held rather than re-cloned
+        // from a (stale) live manifest at each publication.
+        let seeded_membership_extents: Vec<tessera_store::manifest::MembershipExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.membership_extents.iter().cloned())
+            .collect();
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
 
@@ -2204,6 +2282,7 @@ impl WritePath {
                     compaction: flush.compaction,
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
+                    membership_extents: seeded_membership_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
@@ -3399,6 +3478,7 @@ mod vocabulary_extensions_tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            membership_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
@@ -3990,6 +4070,16 @@ struct Executor {
     /// generation may outlive the next fold's snapshot. What it does **not** cover is a process
     /// that exits first: the tree then stands as an orphan until something sweeps it, which is
     /// compaction §7's startup sweep and is not built.
+    /// Every membership extent this node has published, **complete current state** rather than a
+    /// diff.
+    ///
+    /// **Held here because the manifest a publication starts from is stale.** Both publication paths
+    /// clone the *live generation's* manifest, and a side-manifest write does not swap the
+    /// generation — so a second publication that merely extended its clone would drop the first
+    /// publication's entries, and every artifact in them would come back absent at the next open.
+    /// The deny list solves the identical problem by writing complete state from the live overlay;
+    /// this is that posture for a list the overlay does not hold.
+    membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
     pending_reclaim: Vec<PendingReclaim>,
     /// The sender pool tasks are given a clone of.
     ///
@@ -5086,6 +5176,39 @@ impl Executor {
             }
         }
 
+        // ---- step 3a: artifacts, which this fold cannot carry ----------------------------------
+        //
+        // **A fold publishes a new prefix, and membership extent paths are prefix-relative.** So
+        // there are three things this could do with them and two are wrong: carrying the paths
+        // forward names files the new prefix does not contain, and the bundle refuses at the next
+        // open; dropping them loses every membership silently, and the artifacts come back
+        // registered, still addressable, and served as absent.
+        //
+        // The third is to rebuild them — which is `annotation-representation.md` §5.0.3's **fold
+        // artifact pass**, allocated to Stage 4 and explicitly its first measurement rather than its
+        // last. It is not a copy: the fold retires deleted entities, so a carried-forward membership
+        // keeps counting members that no longer exist in the size the proportional criterion divides
+        // by.
+        //
+        // Until it exists this refuses, on step 3's own precedent. **A node that has published
+        // artifacts therefore stops folding**, which is a real cost stated plainly: segment count
+        // and tombstone load grow until Stage 4 lands.
+        if self
+            .membership_extents
+            .iter()
+            .any(|extent| extent.count > 0)
+        {
+            self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                extents = self.membership_extents.len(),
+                "ALARM: this node holds published artifact memberships and the fold's artifact \
+                 pass is not built, so the fold is discarded rather than publishing a prefix whose \
+                 membership extents name nothing. Artifacts and points are both unaffected; what \
+                 is deferred is compaction, until the artifact pass lands"
+            );
+            return;
+        }
+
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
         // Each slice's fold base first and its carried extents after it, because the reader takes
@@ -5134,6 +5257,11 @@ impl Executor {
             entity_id_low_water: live_manifest.entity_id_low_water,
             layers: live_manifest.layers.clone(),
             layer_tombstones: live_manifest.layer_tombstones.clone(),
+            // Carried forward verbatim, and reachable only because the guard in step 3a refused
+            // this publication if the list is non-empty. See that guard: the paths are
+            // prefix-relative and the fold publishes a *new* prefix, so carrying them without
+            // copying the files would name nothing.
+            membership_extents: live_manifest.membership_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
             // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
@@ -7720,12 +7848,49 @@ impl Executor {
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
+            // **The registry travels with this publication too, and not only with a flush.** Until
+            // artifacts existed, a registration could wait for the next flush to reach a manifest —
+            // the WAL held it meanwhile and `publish_flush` says so. An extent breaks that: a
+            // manifest naming memberships for a layer it does not declare is internally
+            // inconsistent, and at open the layer's reserved runs are what turn an ordinal into an
+            // entity, so the extents would be skipped whole and every artifact would come back
+            // absent. The two are written together or the manifest is wrong.
+            //
+            // `min`, not `max`, for the mark — the row-less region grows downward.
+            let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
+            manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
+            manifest.layers = layers;
+            manifest.layer_tombstones = layer_tombstones;
+            // **Membership extents are written before the manifest that names them**, which is the
+            // whole of their durability contract: a manifest naming a missing extent refuses at
+            // open, so the file has to be durable first. A failure here abandons the publication
+            // rather than committing a manifest that omits them — an omission would read as *no
+            // artifact was ever published*, and rotation would then be free to reclaim the log
+            // records holding the only other copy.
+            // Allocated first so the extents can be named after the publication that carries them:
+            // one sequence, not two, and a file whose name says which manifest introduced it.
+            let n = self.allocate_manifest_n();
+            let prefix_dir = self.prefix_dir(&live);
+            let published = match self.write_membership_extents(&prefix_dir, partition, n) {
+                Ok(published) => published,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        partition = %partition,
+                        "ALARM: could not write the artifact membership extents; the memberships \
+                         stay WAL-durable and the log stays pinned, and the write is retried at the \
+                         next tick"
+                    );
+                    return;
+                }
+            };
+            self.membership_extents.extend(published);
+            manifest.membership_extents = self.membership_extents.clone();
             write_vocabulary_extensions(
                 &mut manifest,
                 &live.vocabularies,
                 &live.bundle.manifest.vocabularies,
             );
-            let n = self.allocate_manifest_n();
             // The publication seam, per partition: the dispositions are WAL-durable either way,
             // so a kill parked here loses only the restore path's freshness — which is exactly
             // what a crash test at this seam asserts (correctness-suite §12.3).
@@ -7746,11 +7911,74 @@ impl Executor {
             }
         }
 
+        // **Only now**, with every partition's manifest durable, is the log free of these
+        // memberships. Marking earlier would let rotation reclaim the records behind an extent a
+        // crash could still lose.
+        self.live.mark_memberships_published();
+
         self.deny_dirty = false;
         self.windows_since_publication = 0;
         self.health
             .overlay_publications
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Pack every not-yet-published membership into one extent per level and fsync it, returning
+    /// the manifest entries.
+    ///
+    /// **One file per level per publication.** Publication is append-only, so an extent covers a
+    /// contiguous ordinal range and no earlier extent is disturbed — a reader unions a level's
+    /// extents and the fold rewrites them into one.
+    fn write_membership_extents(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+    ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+        let (ready, skipped) = self.live.unpublished_memberships();
+        for (layer, level) in skipped {
+            // Unreachable while publication is append-only, and alarmed rather than asserted: an
+            // extent addresses a dense ordinal range, so packing around a hole would shift every
+            // later artifact's identity by one.
+            tracing::error!(
+                layer = %layer,
+                level,
+                "ALARM: a level has a hole below its ordinal high-water, so its memberships are \
+                 not published; they stay WAL-durable and the log stays pinned"
+            );
+        }
+        if ready.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+
+        let mut entries = Vec::with_capacity(ready.len());
+        for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+            // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so
+            // a name-derived path would escape the directory or collide after escaping. The
+            // manifest entry carries the name; the file is addressed by the publication that
+            // introduced it and its index within that publication.
+            let name = format!("members-{n:06}-{index:03}.tsmb");
+            let count = blobs.len() as u32;
+            let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
+            tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
+            entries.push(tessera_store::manifest::MembershipExtent {
+                path: format!("partitions/{partition}/members/{name}"),
+                layer,
+                level,
+                ordinal_lo,
+                count,
+            });
+        }
+        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
+        // whose name was never written — the same rule every other publication here follows.
+        tessera_store::fsync_dir(&dir)?;
+        Ok(entries)
     }
 
     /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**

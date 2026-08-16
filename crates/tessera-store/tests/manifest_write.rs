@@ -112,6 +112,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        membership_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: "main".to_string(),
             seg_id: "seg0".to_string(),
@@ -305,6 +306,7 @@ fn manifest_fixture() -> SegmentsManifest {
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        membership_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
         dict_extents: Vec::new(),

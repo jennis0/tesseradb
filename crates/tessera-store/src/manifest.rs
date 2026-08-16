@@ -669,6 +669,44 @@ pub struct RecordExtent {
     pub directory: String,
 }
 
+/// One entry of `membership_extents`: one publication's packed artifact memberships for one level
+/// of one layer (`annotation-representation.md` §2.4, and `membership.rs` for the format).
+///
+/// **The extent is the unit because publication is append-only.** Ordinals are claimed contiguously
+/// from a level's cursor, so a publication covers `[ordinal_lo, ordinal_lo + count)` and no earlier
+/// extent's range is disturbed. A reader unions the extents of a level in any order and gets the
+/// whole; the fold rewrites them into one.
+///
+/// **This is what took membership out of the WAL.** Before it, the log's only route to reclamation
+/// was pinned from the first publication onwards, because nothing else on disk carried a membership
+/// — segments carry rows and postings, and the registry above carries declarations. Reclaiming a
+/// member holding a publication would have destroyed the only copy, leaving the artifact registered,
+/// still addressable, and served as absent.
+///
+/// **One file per publication per level, not one per artifact.** §2.4 sketches
+/// `members/<ordinal>.roaring` and immediately marks it *"a shape, not a layout"*: every bundle file
+/// is a manifest entry, so 10⁷ artifacts would be 10⁷ entries. The bytes were always affordable and
+/// the packaging was the open question.
+///
+/// Not part of the honoured-state machinery, for the reason [`SegmentsManifest::attr_extents`] is
+/// not: that list gates state a reader might not be able to act on, and this field lands with the
+/// code that reads it. A reader carrying the field and ignoring it would serve every published
+/// artifact as absent, which is the failure the extent exists to remove.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipExtent {
+    /// Prefix-relative path of the packed extent.
+    pub path: String,
+    pub layer: String,
+    pub level: u32,
+    /// The first ordinal this extent covers. **Also carried inside the file**, and checked against
+    /// it at open: a manifest and a file that disagree about which artifacts a range names would
+    /// serve one cluster's members under another's identity.
+    pub ordinal_lo: u32,
+    /// How many ordinals this extent covers.
+    pub count: u32,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -738,6 +776,15 @@ pub struct SegmentsManifest {
     /// must not come to mean something else. A tombstone list that forgot would let a recreated
     /// layer silently inherit every stale reference to the old one.
     pub layer_tombstones: Vec<String>,
+    /// Every packed membership extent this partition holds — see [`MembershipExtent`]. Empty in a
+    /// bundle straight out of `tessera build`, which registers no layers and publishes no artifacts.
+    ///
+    /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest omitting it
+    /// is malformed, not artifact-free. The two are indistinguishable under a default and only one of
+    /// them is safe to serve — an absent list reads as *no artifact was ever published*, which is
+    /// exactly what a lost list looks like, and the artifacts are then served as absent with nothing
+    /// anywhere reporting a fault.
+    pub membership_extents: Vec<MembershipExtent>,
     pub segments: Vec<SegmentDescriptor>,
     /// Every live delta postings tier, **by prefix-relative path**, in serving order.
     ///
@@ -1063,6 +1110,7 @@ mod tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            membership_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),

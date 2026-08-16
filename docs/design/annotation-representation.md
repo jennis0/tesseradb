@@ -305,10 +305,16 @@ artifacts/<layer>/
 `members/<ordinal>.roaring` line above is a shape, not a layout** (review 2026-08-15, verified
 against the code). Every bundle file is a manifest entry, digested at write and parsed at open; at
 10⁷ artifacts that is 10⁷ entries. The membership bytes are affordable — 794 MB *measured* (§2) —
-and the packaging is not. Membership needs a packed form behind a bounded number of manifest
-entries; the record blob's block directory is the existing precedent for many small objects behind
-one entry. ⊘ Picking the packaging is the owner's, and it is the one layout question decisions
-0074–0081 did not settle.
+and the packaging is not. ✔ **Ruled 2026-08-16 (owner): a packed extent per level per publication,
+read normally into memory.** One file, addressed by dense ordinal, behind one manifest entry —
+`tessera-store`'s `membership` module owns the addressing and holds each membership as an opaque
+blob, so the bitmap library stays on one side of the boundary. Publication is append-only, so an
+extent covers a contiguous ordinal range and disturbs no earlier one; a reader unions a level's
+extents. The two alternatives were the record blob, whose compressed blocks would foreclose ever
+using a membership in place, and a mapped form read where it lies — declined **for now** rather than
+on the merits: it is the same file read differently, and the measured ~6× it saves is worth having
+only at a cluster count three orders of magnitude beyond anything running
+([the residency probe](../../probes/2026-08-16-membership-residency/README.md), §11.3).
 
 **Supplied content itself is not here: it lives in the record blob — the store points use —
 addressed at the artifact's own entity**

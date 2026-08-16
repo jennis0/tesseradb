@@ -270,6 +270,125 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
     }
 }
 
+/// Delete every member of the WAL sequence.
+///
+/// The log is a **sequence** — `wal-000000.log`, `wal-000001.log`, … beside the configured base
+/// path, which itself is never a file. Removing the base path would silently succeed at deleting
+/// nothing and leave the test asserting that replay works, which it always did.
+fn remove_the_whole_log(fx: &Fixture) {
+    let dir = fx.wal.parent().expect("the log has a directory");
+    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(dir).expect("the log's directory exists").flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
+            std::fs::remove_file(entry.path()).expect("a log member is removable");
+            removed += 1;
+        }
+    }
+    assert!(removed > 0, "no log member was found to delete — the test would prove nothing");
+}
+
+/// Wait for the executor's drain close to publish the memberships, and return the extent files.
+fn published_extents(fx: &Fixture) -> Vec<std::path::PathBuf> {
+    let dir = fx.root.join("v00000").join("partitions").join("default").join("members");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "tsmb"))
+            .collect();
+        if !found.is_empty() {
+            return found;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no membership extent was published within 10s; publication runs at the executor's \
+             drain close, so this is either a publication that refused or one that never ran"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// **The assertion the whole packing exists for: a membership outlives the log.**
+///
+/// Before the extent, the WAL was a membership's only home and rotation was pinned from the first
+/// publication onwards, because reclaiming a member would have destroyed the only copy. This deletes
+/// the log outright — a harsher test than a rotation, and decisive: whatever comes back came from
+/// the manifest.
+#[test]
+fn a_published_membership_survives_the_loss_of_the_whole_log() {
+    let fx = fixture();
+    let ids = {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        let ids = engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![
+                    artifact("c0", fx.members(0..40)),
+                    artifact("c1", fx.members(40..90)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(published_extents(&fx).len(), 1, "one file per level per publication");
+        ids
+    };
+
+    // The log goes entirely. Nothing else on disk carried a membership before this change.
+    remove_the_whole_log(&fx);
+
+    let engine = fx.open();
+    assert_eq!(
+        engine.published_artifacts(),
+        2,
+        "both artifacts came back from the manifest, with no log to replay"
+    );
+    for (i, id) in ids.iter().enumerate() {
+        let at = engine
+            .locate_artifact(artifact_entity(&engine, *id))
+            .expect("the identifier the caller holds still names this artifact");
+        assert_eq!(at.ordinal, i as u32);
+        assert_eq!(
+            at.stable_key.as_deref(),
+            Some(["c0", "c1"][i]),
+            "the caller's key travels in the extent — nothing else durable carries it"
+        );
+    }
+}
+
+/// A second publication appends an extent rather than rewriting the first, and the two union.
+#[test]
+fn a_later_publication_appends_an_extent_and_the_two_union_at_open() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        engine
+            .publish_artifacts("clusters/a".into(), 0, vec![artifact("c0", fx.members(0..40))])
+            .unwrap();
+        assert_eq!(published_extents(&fx).len(), 1);
+
+        engine
+            .publish_artifacts("clusters/a".into(), 0, vec![artifact("c1", fx.members(40..90))])
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while published_extents(&fx).len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "the second extent never appeared");
+            std::thread::yield_now();
+        }
+    }
+
+    remove_the_whole_log(&fx);
+    let engine = fx.open();
+    assert_eq!(engine.published_artifacts(), 2, "both extents were unioned at open");
+}
+
 /// An artifact takes an entity precisely so `/control/changes` works on it unchanged — the same
 /// route, the same two removal rules, no second mechanism.
 #[test]

@@ -110,7 +110,7 @@ pub fn write_current(bundle_root: &Path, prefix: &str, manifest_digest: &str) ->
 
 /// Create `path`, write `bytes`, and `fsync` the file — the data half of durability. Callers
 /// that also need the directory entry durable follow up with [`fsync_dir`].
-fn write_and_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_and_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = File::create(path).map_err(|source| StoreError::Io {
         path: path.to_path_buf(),
         source,
@@ -178,7 +178,7 @@ pub fn fsync_written(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn fsync_dir(path: &Path) -> Result<()> {
+pub fn fsync_dir(path: &Path) -> Result<()> {
     let dir = File::open(path).map_err(|source| StoreError::Io {
         path: path.to_path_buf(),
         source,

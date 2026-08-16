@@ -736,6 +736,8 @@ fn write_manifests(
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        // A build registers no layers, so it publishes no artifacts and no extents.
+        membership_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: args.slice_id.clone(),
             seg_id: SEG_ID.to_string(),

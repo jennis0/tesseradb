@@ -288,12 +288,30 @@ never the cluster's size.
   external id or `tessera_id`, resolves them once at the boundary, and refuses the whole batch on an
   unresolvable one: a dropped member moves both the count a viewer is shown and the size the
   proportional criterion divides by.
-- ⊘ **Membership has no home outside the WAL yet, and rotation is pinned from the first publication
-  onwards.** Nothing else on disk carries one — segments carry rows and postings, manifests carry
-  the registry — so reclaiming a member holding a publication destroys the only copy and leaves the
-  artifact registered, still addressable, and served as absent. The pin is the fail-closed reading
-  of the open packaging question below; a log that grows is noticed where a membership that vanishes
-  is not. **Closing the packaging decision is what lifts it.**
+- ✔ **Membership has a home outside the WAL: the packed extent** (owner-ruled 2026-08-16 — the
+  packed file, read normally, over both the record store and a mapped form). One file per level per
+  publication, addressed by dense ordinal, behind **one** manifest entry — which was the whole of
+  §2.4's open question, the bytes having always been affordable and the packaging not. Written and
+  fsynced before the manifest that names it; the log is released only once that manifest is durable.
+  A truncated extent refuses rather than decoding to a shorter one, because a membership that came
+  back short is an artifact with a low masked count for every viewer, which the criterion renders as
+  *absent* with no error to notice.
+- ⊘ **A node that has published artifacts no longer folds.** The fold publishes a new prefix and
+  extent paths are prefix-relative, so carrying them forward names nothing and dropping them loses
+  every membership silently. Rebuilding them is `annotation-representation.md` §5.0.3's **fold
+  artifact pass** — Stage 4's first measurement, and not a copy, since the fold retires deleted
+  entities that a carried membership would go on counting. Until then the fold refuses loudly and
+  counts a `fold_failures`. The cost is stated rather than hidden: segment count and tombstone load
+  grow on a node serving artifacts.
+- ✔ Found in the doing: **the registry reached a manifest only via a flush.** A deny-lane
+  publication carried the deny state and not the layers, which was harmless while the WAL held them
+  and fatal beside an extent — at open a layer's reserved runs are what turn an ordinal into an
+  entity, so the extents would have been skipped whole and every artifact served as absent. Both
+  publication paths now carry it.
+- ✔ Found in the doing: **both publication paths clone a stale manifest.** A side-manifest write does
+  not swap the generation, so a second publication that extended its clone would drop the first's
+  entries. The extent list is held as complete current state and assigned, which is the posture the
+  deny list already takes for the same reason.
 - ✔ The derived **row-space** operator, built member-wise and never range-wise, cached per
   `(slice, layer, level)` and rebuilt when the prefix, the segments version or the store's own
   version moves. Replace-on-mismatch rather than an LRU: the key names the only generation a

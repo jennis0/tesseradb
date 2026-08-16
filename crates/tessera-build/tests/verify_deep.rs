@@ -213,6 +213,7 @@ fn flushed_bundle(root: &Path) {
         entity_id_low_water: seg0.entity_id_low_water,
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
+        membership_extents: Vec::new(),
         segments,
         deltas: vec![delta_rel],
         dict_extents: seg0.dict_extents.clone(),

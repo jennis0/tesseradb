@@ -32,6 +32,13 @@ use std::collections::BTreeMap;
 use croaring::{Bitmap, Portable};
 use tessera_types::EntityId;
 
+/// One level's not-yet-published artifacts, ready to pack: `(layer, level, ordinal_lo, blobs)`.
+///
+/// A tuple alias rather than a struct because it is a *transfer* between two modules that both
+/// already name these four things — a struct would be a third name for the same tuple, and the
+/// packer takes them apart again immediately.
+pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
+
 /// One artifact as a caller offers it, before the engine has given it an ordinal or an entity.
 ///
 /// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
@@ -109,6 +116,9 @@ pub struct ArtifactStore {
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
     oldest_wal_pos: Option<u64>,
+    /// Per `(layer, level)`, the ordinal high-water already durable in a manifest. Everything at or
+    /// above it lives only in the WAL, which is what the rotation pin holds the log for.
+    published_through: BTreeMap<(String, u32), u32>,
     /// Bumped by every publication and every layer removal. **A derived row-space projection is
     /// valid only for the version it was built from**: a cache that missed a bump would serve a
     /// level with its newest artifacts absent, which a viewer cannot tell from artifacts that
@@ -284,6 +294,90 @@ impl ArtifactStore {
         self.version
     }
 
+    /// Every level's artifacts that are **not yet in a manifest**, as
+    /// `(layer, level, ordinal_lo, blobs)` ready to pack — see [`encode_record`].
+    ///
+    /// **A level with a hole in its unpublished range is skipped whole and reported**, rather than
+    /// packed around: an extent addresses `[ordinal_lo, ordinal_lo + count)` densely, so a hole
+    /// would shift every later artifact's identity by one. A hole here means a publication landed
+    /// out of order, which nothing does today.
+    pub fn unpublished(&self) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
+        let mut ready = Vec::new();
+        let mut skipped = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let from = *self.published_through.get(&(layer.clone(), *level)).unwrap_or(&0) as usize;
+            if from >= slots.len() {
+                continue;
+            }
+            let tail = &slots[from..];
+            if tail.iter().any(Option::is_none) {
+                skipped.push((layer.clone(), *level));
+                continue;
+            }
+            let blobs: Vec<Vec<u8>> = tail
+                .iter()
+                .map(|slot| encode_record(slot.as_ref().expect("checked dense just above")))
+                .collect();
+            ready.push((layer.clone(), *level, from as u32, blobs));
+        }
+        (ready, skipped)
+    }
+
+    /// Every level and how many ordinals it currently spans, holes included — what a publication
+    /// marks as published once its manifest is durable.
+    pub fn levels_and_extents(&self) -> impl Iterator<Item = (&str, u32, u32)> {
+        self.levels
+            .iter()
+            .map(|((layer, level), slots)| (layer.as_str(), *level, slots.len() as u32))
+    }
+
+    /// Record that `[0, through)` of a level is durable in a manifest.
+    ///
+    /// **Called only after the manifest naming the extent is itself durable.** Marking earlier would
+    /// let rotation reclaim the log records behind memberships whose file a crash could still lose —
+    /// which is the one ordering this whole mechanism exists to get right.
+    pub fn mark_published(&mut self, layer: &str, level: u32, through: u32) {
+        let entry = self
+            .published_through
+            .entry((layer.to_string(), level))
+            .or_insert(0);
+        *entry = (*entry).max(through);
+        self.recompute_pin();
+    }
+
+    /// The log position of the oldest publication whose memberships are not yet in a manifest.
+    ///
+    /// **Recomputed from scratch rather than advanced**, because the alternative is an increment
+    /// that has to be right at every call site. A level fully published contributes nothing; a level
+    /// with anything outstanding contributes the position it was applied at.
+    fn recompute_pin(&mut self) {
+        let outstanding = self.levels.iter().any(|((layer, level), slots)| {
+            let through = *self
+                .published_through
+                .get(&(layer.clone(), *level))
+                .unwrap_or(&0) as usize;
+            through < slots.len()
+        });
+        if !outstanding {
+            self.oldest_wal_pos = None;
+        }
+    }
+
+    /// Seed one artifact from a published extent, **before** WAL replay unions what came after.
+    ///
+    /// The ordering is the rule and not a preference, exactly as it is for the registry and the
+    /// overlay: every WAL record postdates any state a manifest carries, so seeding afterwards would
+    /// overwrite a later publication with an earlier one. Seeded artifacts are published by
+    /// definition, so this advances the high-water and never the pin.
+    pub fn seed(&mut self, layer: &str, level: u32, ordinal: u32, record: ArtifactRecord) {
+        self.put(layer, level, ordinal, record);
+        let entry = self
+            .published_through
+            .entry((layer.to_string(), level))
+            .or_insert(0);
+        *entry = (*entry).max(ordinal + 1);
+    }
+
     /// How many artifacts are held, across every layer. **Operator-facing only**: a per-layer count
     /// is a corpus-wide count over objects a principal may not individually see, which is C8's row,
     /// and this deliberately offers no way to ask for one.
@@ -297,6 +391,67 @@ impl ArtifactStore {
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }
+}
+
+/// Encode one artifact for a packed extent: its caller key and its membership, in one blob.
+///
+/// ```text
+/// blob := u16 LE key_len | key bytes (UTF-8) | membership bytes (portable Roaring)
+/// ```
+///
+/// **The key travels with the membership because nothing else durable carries it.** An artifact's
+/// entity is derivable from its layer's reserved runs and its ordinal, so the extent need not carry
+/// it; a caller's stable key is derivable from nothing. Putting it in the manifest instead would put
+/// one JSON string per artifact in a document parsed at every open — the entry-count problem the
+/// packing exists to solve, in another guise.
+///
+/// `tessera-store` holds this as an opaque blob and addresses it by ordinal. **That split is the
+/// layering**: the store owns which bytes belong to which artifact, this crate owns what the bytes
+/// mean, and the bitmap library stays on one side of the boundary.
+pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
+    let key = record.stable_key.as_deref().unwrap_or_default().as_bytes();
+    let members = serialise_members(&record.members);
+    let mut out = Vec::with_capacity(2 + key.len() + members.len());
+    // A key longer than a `u16` cannot round-trip, and truncating one would silently rename an
+    // artifact. The control plane bounds the request body long before this, so the clamp is a
+    // backstop; it refuses at encode rather than writing a key it cannot read back.
+    let key_len = u16::try_from(key.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&key_len.to_le_bytes());
+    if key_len != u16::MAX {
+        out.extend_from_slice(key);
+    }
+    out.extend_from_slice(&members);
+    out
+}
+
+/// The inverse, refusing anything it cannot read back exactly.
+///
+/// **A refusal and never a partial record**, on [`deserialise_members`]'s argument: an artifact whose
+/// key was lost is one no edge can name, and an artifact whose membership decoded short is one with
+/// a low masked count for every viewer — which the existence criterion renders as *absent*, with no
+/// error anywhere to notice. Both must be a decode failure the caller alarms on.
+pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
+    if blob.len() < 2 {
+        return None;
+    }
+    let key_len = u16::from_le_bytes([blob[0], blob[1]]) as usize;
+    if key_len == u16::MAX as usize {
+        return None;
+    }
+    let members_at = 2usize.checked_add(key_len)?;
+    if blob.len() < members_at {
+        return None;
+    }
+    let stable_key = if key_len == 0 {
+        None
+    } else {
+        Some(std::str::from_utf8(&blob[2..members_at]).ok()?.to_string())
+    };
+    Some(ArtifactRecord {
+        entity,
+        stable_key,
+        members: deserialise_members(&blob[members_at..])?,
+    })
 }
 
 /// Serialise a membership for the WAL, in CRoaring's portable form.
