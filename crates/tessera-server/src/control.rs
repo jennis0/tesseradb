@@ -1809,6 +1809,28 @@ struct IncomingArtifactBody {
     /// text — and identifiers are strings because a bare JSON number loses a `u64` past 2⁵³ in
     /// every JavaScript client, silently.
     members: Vec<String>,
+    /// The artifact's supplied content, as **ranked variations**, most specific first. Absent on a
+    /// layer that declares no supplied content; required on one that does, and refused on one that
+    /// does not — the engine decides that, since the declaration is its state and not this
+    /// handler's.
+    #[serde(default)]
+    content: Vec<IncomingVariationBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IncomingVariationBody {
+    /// One value per kind the layer declares, **positionally** — the order of its
+    /// `content.supplied` list.
+    values: Vec<String>,
+    /// The documents this content was generated from: the set a viewer must be able to see
+    /// **entirely** before they are served it. Addressed exactly as `members` is, by the batch's
+    /// one `addressing` form, and resolved in the same pass.
+    ///
+    /// Empty is a declaration and not an omission — it says *this content asserts nothing about
+    /// the corpus* — and it is refused on a layer whose content is corpus-derived.
+    #[serde(default)]
+    generated_from: Vec<String>,
 }
 
 /// `PUT /control/layers/{name}/artifacts` — publish a batch of artifacts into one level.
@@ -1851,8 +1873,23 @@ async fn publish_artifacts(
     // Flattened once, so each address form is resolved in a single batched call whatever the shape
     // of the batch: the external half opens each bundle extent at most once regardless of N, and
     // the tessera half takes one generation snapshot for the idset check and every inversion.
-    let widths: Vec<usize> = artifacts.iter().map(|a| a.members.len()).collect();
-    let flat: Vec<&String> = artifacts.iter().flat_map(|a| a.members.iter()).collect();
+    // **Members first, then each variation's generating set**, per artifact — one flat list, one
+    // resolution pass, whatever the shape. A generating set is resolved by the same route and at
+    // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
+    // would be reinterpreted by the next key rotation, and a containment test over a set that names
+    // different documents than the caller wrote is a disclosure rather than a stale answer.
+    let widths: Vec<usize> = artifacts
+        .iter()
+        .map(|a| a.members.len() + a.content.iter().map(|v| v.generated_from.len()).sum::<usize>())
+        .collect();
+    let flat: Vec<&String> = artifacts
+        .iter()
+        .flat_map(|a| {
+            a.members
+                .iter()
+                .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
+        })
+        .collect();
 
     let resolved: Vec<Option<tessera_types::EntityId>> = match addressing {
         Addressing::Tessera => {
@@ -1908,20 +1945,34 @@ async fn publish_artifacts(
         // data, and `error.rs` keeps caller-supplied bytes out of a response body.
         let (artifact, member) = position_in_batch(&widths, position);
         return Err(ApiError::Unknown(format!(
-            "member {member} of artifact {artifact} names nothing this deployment holds; the batch \
-             was refused rather than published without it, because a dropped member moves both the \
-             count a viewer is shown and the size its existence criterion divides by"
+            "id {member} of artifact {artifact} names nothing this deployment holds — its members \
+             first, then each variation's generating set. The batch was refused rather than \
+             published without it: a dropped member moves both the count a viewer is shown and the \
+             size its existence criterion divides by, and a dropped generating-set entry widens \
+             who may read the content"
         )));
     }
 
+    // Walked back in exactly the order it was flattened: members, then each variation's set.
     let mut entities = resolved.into_iter().flatten();
     let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
         .into_iter()
-        .zip(&widths)
-        .map(|(artifact, width)| {
-            tessera_lifecycle::IncomingArtifact::from_entities(
+        .map(|artifact| {
+            let members: Vec<tessera_types::EntityId> =
+                entities.by_ref().take(artifact.members.len()).collect();
+            let variations: Vec<tessera_lifecycle::membership::IncomingVariation> = artifact
+                .content
+                .into_iter()
+                .map(|v| {
+                    let set: Vec<tessera_types::EntityId> =
+                        entities.by_ref().take(v.generated_from.len()).collect();
+                    tessera_lifecycle::membership::IncomingVariation::new(v.values, set)
+                })
+                .collect();
+            tessera_lifecycle::IncomingArtifact::with_content(
                 artifact.stable_key,
-                entities.by_ref().take(*width),
+                members,
+                variations,
             )
         })
         .collect();

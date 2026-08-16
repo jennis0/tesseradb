@@ -451,11 +451,15 @@ bound it. No code changed.
   at all (decisions 0076, 0078). The three outcomes are a type rather than an `Option`, because
   *this layer declares no content* and *you may not read this content* are different answers and
   collapsing them serves the second case with its description missing.
-- ⊘ **Supplied content reaches no client.** The engine stores it, gates it and reads it back, and
-  then it stops: the kind-5 frame carries no content column, the drill-down response no field, and
-  `PUT /control/layers/{name}/artifacts` accepts no content — so a layer declaring any is refused
-  every publication through the boundary. The containment rule is exercisable from the engine's
-  tests alone. This is the next piece of Stage 3 rather than an open question.
+- ✔ **Supplied content crosses the boundary.** `PUT /control/layers/{name}/artifacts` takes a
+  `content` list per artifact — ranked variations, each with its values and its `generated_from`
+  set — and resolves the generating sets in the *same* pass as the members, by the same addressing:
+  a `tessera_id` in durable state would be reinterpreted by the next key rotation, and a containment
+  test over a set naming other documents than the caller wrote is a disclosure rather than a stale
+  answer. The kind-5 frame carries a `content` list column and the drill-down a `content` field,
+  through all three decoders. **A null is never *withheld*** — an artifact whose content a principal
+  may not read is absent from the viewport and a `404` on the identifier route — so an empty list
+  means *this layer declares none* and nothing else.
 
 **The review of the first three commits, and what it changed** *(2026-08-16, two independent
 lenses — disclosure and invariants; correctness and durability)*. The disclosure lens found the

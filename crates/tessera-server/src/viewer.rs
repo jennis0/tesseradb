@@ -669,6 +669,7 @@ impl ViewportSink for WireSink {
                 centroid: a.derived.centroid,
                 bbox: a.derived.bbox,
                 hull: a.derived.hull.as_deref(),
+                content: &a.content,
             })
             .collect();
         let frame = artifacts_frame(&rows);
@@ -1343,6 +1344,11 @@ struct ArtifactResp {
     r#box: Option<[u32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hull: Option<Vec<[u32; 2]>>,
+    /// The publisher's supplied content — one variation, entire, positional to the layer's declared
+    /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
+    /// this principal may not read is a `404`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    content: Vec<String>,
 }
 
 /// `POST /v1/artifacts/{tessera_id}` — drill down on one artifact.
@@ -1392,6 +1398,7 @@ async fn artifact(
         centroid: served.derived.centroid,
         r#box: served.derived.bbox,
         hull: served.derived.hull,
+        content: served.content,
     }))
 }
 

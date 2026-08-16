@@ -48,6 +48,9 @@ class Artifact(NamedTuple):
     centroid: tuple[float, float] | None
     box: tuple[int, int, int, int] | None
     hull: list[tuple[int, int]] | None
+    #: One variation, entire, positional to the layer's declared kinds. Empty means the layer
+    #: declares no supplied content — never that content was withheld.
+    content: list[str]
 
 
 FRAME_TILES = 1
@@ -186,6 +189,7 @@ def decode_frames(data: bytes):
                         "box_max_y",
                         "hull_x",
                         "hull_y",
+                        "content",
                     )
                 }
                 for row in range(batch.num_rows):
@@ -214,6 +218,7 @@ def decode_frames(data: bytes):
                                 )
                             ),
                             hull=None if hx is None else list(zip(hx, hy)),
+                            content=list(columns["content"][row] or []),
                         )
                     )
             if not artifacts:

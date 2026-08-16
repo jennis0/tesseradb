@@ -38,8 +38,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, ListBuilder, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
-    UInt32Builder, UInt64Array, UInt8Array,
+    Int8Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray, UInt16Array,
+    UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
@@ -262,6 +262,13 @@ pub struct ArtifactRow<'a> {
     /// `[qx_min, qy_min, qx_max, qy_max]`.
     pub bbox: Option<[u32; 4]>,
     pub hull: Option<&'a [[u32; 2]]>,
+    /// The publisher's supplied content — **one variation, entire**, one value per kind the layer
+    /// declares, in declaration order. Empty where the layer declares none.
+    ///
+    /// A viewer receiving this artifact contains that variation's generating set completely; one
+    /// who contains none receives no artifact at all rather than this list empty. So there is no
+    /// *content withheld* state on this wire and no shape to express one.
+    pub content: &'a [String],
 }
 
 /// The kind-5 artifacts frame: one row per served artifact.
@@ -307,6 +314,14 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
             DataType::List(item()),
             true,
         ),
+        // One list per artifact, positional to its layer's declared kinds. A list rather than a
+        // column per kind, because one response carries artifacts from several layers and their
+        // declarations differ; the client reads the kinds from `/v1/meta` and zips.
+        Field::new(
+            "content",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+            false,
+        ),
     ]));
 
     let mut hull_x = ListBuilder::new(UInt32Builder::new()).with_field(item());
@@ -326,6 +341,20 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
                 hull_y.append_null();
             }
         }
+    }
+
+    let mut content = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
+        "item",
+        DataType::Utf8,
+        false,
+    )));
+    for row in rows {
+        for value in row.content {
+            content.values().append_value(value);
+        }
+        // Never null: an artifact with no supplied content has an *empty* list, because its layer
+        // declares none. A null would have to mean something else, and there is nothing else.
+        content.append(true);
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -357,6 +386,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         )),
         Arc::new(hull_x.finish()),
         Arc::new(hull_y.finish()),
+        Arc::new(content.finish()),
     ];
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");

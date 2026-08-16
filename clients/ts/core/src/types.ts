@@ -312,6 +312,17 @@ export type Artifact = {
   box: [number, number, number, number] | null;
   /** Convex hull vertices, counter-clockwise, grid units. */
   hull: [number, number][] | null;
+  /**
+   * The publisher's supplied content — label text, an authored name, a polygon — as **one
+   * variation, entire**, positional to the layer's `suppliedContent` kinds from `/v1/meta`.
+   *
+   * Empty means the layer declares none. It never means *withheld*: a viewer who may not read an
+   * artifact's content is not served the artifact, so there is no state to render as "label
+   * hidden" and nothing to fill it from. Where an artifact carries several ranked descriptions,
+   * this is the one this principal qualifies for — so two principals may legitimately see
+   * different text against the same `tesseraId`.
+   */
+  content: string[];
 };
 
 export type ViewportResult = {

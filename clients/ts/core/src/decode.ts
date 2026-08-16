@@ -286,6 +286,10 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const boxMaxY = t.getChild('box_max_y')!;
     const hullX = t.getChild('hull_x')!;
     const hullY = t.getChild('hull_y')!;
+    // One variation, entire, positional to the layer's declared kinds. Empty means the layer
+    // declares no supplied content — never that content was withheld, because an artifact whose
+    // content this principal may not read does not appear at all.
+    const content = t.getChild('content')!;
     for (let i = 0; i < tesseraId.length; i++) {
       const cx = centroidX.get(i);
       const bx = boxMinX.get(i);
@@ -307,7 +311,8 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
           bx === null
             ? null
             : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
-        hull
+        hull,
+        content: Array.from(content.get(i) ?? [], (v) => String(v))
       });
     }
   }

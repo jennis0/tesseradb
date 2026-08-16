@@ -340,7 +340,7 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
     assert_eq!(status, 404, "{body}");
     let detail = body.to_string();
     assert!(
-        detail.contains("member 1 of artifact 1"),
+        detail.contains("id 1 of artifact 1"),
         "the refusal names the coordinate the caller's pipeline holds: {detail}"
     );
     assert_eq!(
