@@ -1,7 +1,8 @@
-# Stage 3 handover — content and the attachment edge, and the check still owed
+# Stage 3 handover — content, the attachment edge, and what bites
 
-**Status:** Live handover. Delete it when Stage 3 closes; the status record is
-[`artifact-delivery.md`](artifact-delivery.md) and stays.
+**Status:** Live handover. **Stage 3's check is met** (`artifact-delivery.md` §3), so what remains
+here is the traps, for whoever picks up Stage 4 in this machinery. Delete it when the owner closes
+the stage; the status record is [`artifact-delivery.md`](artifact-delivery.md) and stays.
 
 **Where the work is:** branch `artifacts/stage-3`, worktree
 `.claude/worktrees/artifacts-stage-3`, on top of `16ca0e9` (the last Stage 2 commit). The gate is
@@ -43,30 +44,23 @@ attaching layer did not declare in `depends_on` — the declaration is what make
 dangling replacement sound. **Nothing of the edge crosses the wire**: it is a visibility term, and
 traversal is Stage 5's.
 
-## What is owed
+## What is still open
 
-### 1. The stage check, on the real corpus — all that is left
+**One ⊘ inside the stage**, and it is the owner's: *layers and levels must be definable at build
+time, not only online* (2026-08-16). Nothing in what is built forecloses it — a layer's property
+names are positions in its own declaration, and the declaration reaches the manifest identically
+whether a build wrote it or a registration did — but `tessera build` takes no layer file, and that
+route is what a 10⁷-artifact layer needs.
 
-`artifact-delivery.md` §5.2 names the fixtures: `topics/ctfidf-2026-08` and
-`centroids/kmeans-2026-08` over the 2.4M bundle. The result to produce is the design's own worked
-example — **a broad viewer and a narrow viewer failing the *same* full-sample label for the same
-reason, and both satisfying its per-term variant** — plus: suppressing a cluster stops its labels
-serving on a held identifier, not only on traversal.
-
-Stage 2's equivalent is the model to follow: a script that publishes against a live server, a table
-of five principals in `artifact-delivery.md`, and a repro that fails if the numbers stop moving with
-the principal.
-
-### 2. Two recorded loose ends, neither reachable today
+**Two loose ends, neither reachable today**, both Stage 4's fold pass:
 
 - **The content extent is absent from `manifest.files`**, so a torn one is unattributable to a
   digest. Every sibling record extent is digested — the flush's on the pool, the coalesce's at
   `coalesce.rs`'s publication — and this one is named and undigested. Its two addressing files *are*
   fsynced now.
 - **A node with published artifacts still never folds.** Stage 2's refusal (the prefix-relative
-  membership paths) is joined by a second route now that content extents exist: the fold refuses on a
-  corpus with no blob-resident column, naming the wrong cause. Both belong to Stage 4's fold artifact
-  pass, which is that stage's first measurement.
+  membership paths) is joined by a second route now that content extents exist: the fold refuses on
+  a corpus with no blob-resident column, naming the wrong cause.
 
 ## What will bite you
 

@@ -167,6 +167,27 @@ The annotation channel makes its **own** request (`k = 0`, one named layer) rath
 artifacts off the point path's responses: the replica elides tiles it already holds, and an elided
 tile carries no artifacts, so clusters would thin out as the cache warmed.
 
+### Labels attached to those clusters, and who is served which description
+
+```bash
+TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/publish-clusters.mjs \
+  --presets .dev/presets/stage3.json --clusters 24 --layer centroids/kmeans-2026-08 \
+  --labels topics/ctfidf-2026-08 --label-term 46
+TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/check-labels.mjs \
+  --presets .dev/presets/stage3.json
+```
+
+The first publishes a second layer of labels **attached** to those clusters, each carrying two
+ranked descriptions: one generated from the cluster's whole membership, one from the part of it a
+`--label-term` principal can see. The second reads them back and **exits non-zero** if the answers
+stop depending on the principal — a table alone prints just as happily when they do.
+
+What it demonstrates, measured on 2m4: a principal seeing 15,188 items is served the description,
+and one seeing 181,900 is served **none**, because containment is not a coverage fraction — what
+decides is *which* documents the description was generated from. And suppressing a **cluster** stops
+its label serving on the identifier route as well as in the viewport, which is the route that
+traverses no edge and would otherwise go on describing what was just hidden.
+
 ## Testing
 
 ```bash

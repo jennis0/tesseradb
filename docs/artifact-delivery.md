@@ -42,7 +42,7 @@ delete.
 | **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
 | **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
-| **3** Content — derived, supplied, containment | **in progress** (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. Owed: the check on the real corpus |
+| **3** Content — derived, supplied, containment | **check met** 2026-08-16 (`artifacts/stage-3`); one ⊘ open below | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. ⊘ Open inside the stage: layers definable at build time, which is what a 10⁷-artifact layer needs |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
 | **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
@@ -525,6 +525,38 @@ checked against when it was made.
 narrow viewer fail the *same* full-sample label for the same reason, and both satisfy its per-term
 variant. Suppressing a cluster stops its labels serving on search and by held identifier, not only
 on traversal. **Data:** `topics/ctfidf-2026-08` and `centroids/kmeans-2026-08` (§5.2).
+
+**Met on the real corpus, 2026-08-16.** Twenty-four k-means clusters over 158,434 of the 2.4M
+bundle's own points, and twenty-two labels attached to them, each carrying two ranked descriptions:
+one generated from the whole cluster, one from the part of it a single term's principal can see.
+
+| principal | visible items | clusters served | labels served | description served | `l-c-0001` masked count |
+|---|---|---|---|---|---|
+| narrow — term 14 | 243 | 5 of 24 | 0 | none | absent |
+| per-term — term 46 | 15,188 | 22 | 22 | per-term | 9 |
+| broad — term 79 | 181,900 | 21 | **0** | **none** | absent |
+| half — terms 0–60 | 1,256,894 | 24 | 22 | per-term | 6,497 |
+| whole corpus — 176 terms | 2,422,486 | 24 | 22 | whole cluster | 6,797 |
+
+**The third row is the result.** That principal sees 7.5% of the corpus — twelve times more of it
+than the row above — and is served **no label at all**, because what they can see is not what the
+description was generated from. Containment is not a coverage fraction: what decides is *which*
+documents. The rows either side of it are the design's worked example proper — two principals three
+orders of magnitude apart in what they can see, served the *same* description because both hold the
+term it was generated from, and each told a count of their own beside it (9 against 6,497). Only the
+principal who can see the entire corpus is served the whole-cluster description, and no served label
+is ever short: a viewer containing no variation receives no artifact.
+
+**And the label does not outlive its cluster.** Suppressing `c-0001` removes it and `l-c-0001`
+from the viewport, and the **identifier route** — which traverses no edge, and is what a viewer
+holding a label from a moment ago would use — answers `404` for the label as well. Lifting the
+suppression restores both; the label's own entity was never touched.
+
+Reproduced by `clients/ts/scripts/publish-clusters.mjs --labels … --label-term …` followed by
+`clients/ts/scripts/check-labels.mjs`, which **exits non-zero** if any of those claims stops
+holding — a table alone would print just as happily if the answers stopped depending on the
+principal. Fixture note: bench bundles predating a manifest field refuse to open by design, so
+`scripts/bench_build_fixtures.sh --scales 2422486` rebuilds the 2.4M corpus first (ten seconds).
 
 ### Stage 4 — The write cycle
 

@@ -67,6 +67,25 @@ const OUT = args.out ?? join(here, '..', 'viewer', 'public', 'clusters.json');
 const layerName = args.layer ?? `clusters/kmeans-${Date.now().toString(36)}`;
 const minVisible = args['min-visible'] === undefined ? null : Number(args['min-visible']);
 
+/**
+ * With `--labels <name> --label-term <t>`, a second layer of **toponymy labels attached to those
+ * clusters** is published beside them — the shape Stage 3 exists to demonstrate.
+ *
+ * Each label carries two ranked variations of one description: one generated from the cluster's
+ * whole membership, one from the part of it a `--label-term` principal can see. A viewer is served
+ * the first they contain **entirely**, and a viewer containing neither is served **no label at
+ * all** — not a cluster's identity with its description missing.
+ *
+ * Each label is also **attached** to its cluster, which is a visibility term and not a navigation
+ * aid: suppress the cluster and its labels stop serving on every route, the identifier route
+ * included.
+ */
+const labelLayer = args.labels ?? null;
+const labelTerm = args['label-term'] ?? null;
+if (labelLayer && !labelTerm) {
+  throw new Error('--labels needs --label-term: the per-term variation is generated from what that principal can see');
+}
+
 const SIDECAR_NOTE =
   "Development scaffolding: these positions are the publisher's, not the service's. There is no " +
   'artifact geometry on the wire, and the viewer draws a marker only for an artifact the server ' +
@@ -321,6 +340,115 @@ for (const cluster of clusters) {
 }
 await publish();
 console.log(`published ${published} artifacts`);
+
+// ------------------------------------------------------------------- the labels, and their edges
+
+/**
+ * One label per cluster, attached to it, each carrying two ranked variations of one description.
+ *
+ * **The per-term variation is generated from what a `--label-term` principal can see**, taken from
+ * the service rather than assumed: that principal's own sample, intersected with the cluster. So
+ * every viewer holding that term contains the set entirely — visibility of an item is a
+ * disjunction over terms — while a viewer holding other terms, however many, generally does not.
+ * That is containment's whole claim: what decides is *which* documents, never how many.
+ */
+if (labelLayer) {
+  console.log(`sampling as the term-${labelTerm} principal, for the per-term variation`);
+  const termToken = await authorise([labelTerm]);
+  const termSample = await viewport(termToken, {
+    slice,
+    zoom: SAMPLE_DEPTH,
+    bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
+    k: SAMPLE_K,
+    layers: []
+  });
+  const termVisible = new Set();
+  for (const frame of termSample.filter((f) => f.kind === 3)) {
+    for (const id of tableFromIPC(frame.payload).getChild('tessera_id').toArray()) termVisible.add(id);
+  }
+  console.log(`term ${labelTerm} sees ${termVisible.size.toLocaleString()} of the sampled points`);
+
+  const labelDeclaration = {
+    name: labelLayer,
+    title: args['labels-title'] ?? `toponymy over ${layerName}`,
+    slices: [slice],
+    membership: 'enumerated',
+    access: {label: null, artifacts_carry_own: false},
+    visible_when: null,
+    hierarchy: {kind: 'flat', prune_children: false},
+    // Corpus-derived: the text asserts something about documents, so it is served only to a viewer
+    // who can see everything it was generated from.
+    content: {derived: [], supplied: [{kind: 'label_text', corpus_derived: true}]},
+    // The layers this one edges into. An attachment into a layer that is not declared here is
+    // refused at publication — a dependency nobody declared is one no replacement checks.
+    depends_on: [layerName]
+  };
+  const labelResp = await fetch(`${control}/control/layers`, {
+    method: 'PUT',
+    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
+    body: JSON.stringify(labelDeclaration)
+  });
+  if (!labelResp.ok) throw new Error(`register labels: ${labelResp.status} ${await labelResp.text()}`);
+  console.log(`registered ${labelLayer} (tessera_id ${(await labelResp.json()).tessera_id})`);
+
+  const labels = [];
+  for (const cluster of clusters) {
+    const seen = cluster.members.filter((id) => termVisible.has(id));
+    // **A cluster no `--label-term` document falls in gets no per-term variation, and no label.**
+    // An empty generating set is refused for corpus-derived content — a set that is never tested
+    // is a claim the service would carry without meaning — and a label with only the full-sample
+    // variation would serve to nobody, which is a row on the wire that can never be anything else.
+    if (seen.length === 0) continue;
+    labels.push({
+      stableKey: `l-${cluster.stableKey}`,
+      cluster: cluster.stableKey,
+      members: cluster.members,
+      variations: [
+        {values: [`${cluster.stableKey} · whole cluster`], generated_from: cluster.members},
+        {values: [`${cluster.stableKey} · term ${labelTerm}`], generated_from: seen}
+      ]
+    });
+  }
+  console.log(`${labels.length} labels of ${clusters.length} clusters carry a per-term variation`);
+
+  const labelsUrl = `${control}/control/layers/${encodeURIComponent(labelLayer)}/artifacts`;
+  let pending = [];
+  let pendingIds = 0;
+  const publishLabels = async () => {
+    if (pending.length === 0) return;
+    const r = await fetch(labelsUrl, {
+      method: 'PUT',
+      headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
+      body: JSON.stringify({
+        level: 0,
+        addressing: 'tessera',
+        idset: meta.idset,
+        artifacts: pending.map((l) => ({
+          stable_key: l.stableKey,
+          members: l.members.map((id) => id.toString()),
+          content: l.variations.map((v) => ({
+            values: v.values,
+            generated_from: v.generated_from.map((id) => id.toString())
+          })),
+          // The target is named by its own stable key: an ordinal never crosses the boundary, so a
+          // key is the only address a caller holds for it.
+          attached_to: {layer: layerName, level: 0, stable_key: l.cluster}
+        }))
+      })
+    });
+    if (!r.ok) throw new Error(`publish labels: ${r.status} ${await r.text()}`);
+    pending = [];
+    pendingIds = 0;
+  };
+  for (const label of labels) {
+    const size = label.members.length + label.variations.reduce((n, v) => n + v.generated_from.length, 0);
+    if (pendingIds + size > BATCH) await publishLabels();
+    pending.push(label);
+    pendingIds += size;
+  }
+  await publishLabels();
+  console.log(`published ${labels.length} labels into ${labelLayer}`);
+}
 
 // Merged rather than overwritten, and keyed by layer: publication is append-only and a name is
 // never reused, so a second run is a second *layer* — and the demo's point is comparing two of
