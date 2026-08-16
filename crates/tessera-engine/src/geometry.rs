@@ -476,6 +476,9 @@ mod tests {
         tessera_store::manifest::SegmentsManifest {
             watermark,
             entity_id_high_water,
+            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+            layers: Vec::new(),
+            layer_tombstones: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),

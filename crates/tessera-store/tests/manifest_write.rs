@@ -109,6 +109,9 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     let segments_manifest = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
+        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+        layers: Vec::new(),
+        layer_tombstones: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: "main".to_string(),
             seg_id: "seg0".to_string(),
@@ -299,6 +302,9 @@ fn manifest_fixture() -> SegmentsManifest {
     SegmentsManifest {
         watermark: 0,
         entity_id_high_water: 0,
+        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+        layers: Vec::new(),
+        layer_tombstones: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
         dict_extents: Vec::new(),

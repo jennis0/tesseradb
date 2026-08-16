@@ -100,6 +100,9 @@ pub fn build_bundle(root: &Path, n: u64) {
     let segments_manifest = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
+        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+        layers: Vec::new(),
+        layer_tombstones: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: SLICE.to_string(),
             seg_id: "seg0".to_string(),

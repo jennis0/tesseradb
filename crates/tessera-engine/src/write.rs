@@ -68,8 +68,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
-use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
+use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
+use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::overlay::replay;
@@ -1275,6 +1276,19 @@ mod ack {
         pub(super) fn already_in_force(_replay_of: &[tessera_types::EntityId]) -> Self {
             Published(())
         }
+
+        /// A registry record applied. **The registry is not carried by a generation**, which is why
+        /// this is honest without a swap: `/v1/meta` and every reachability check read it from
+        /// `LiveState` behind its own lock, so the effect is in force the instant
+        /// `LayerRegistry::apply` returns. A generation swap would prove something about row space,
+        /// which a layer has none of.
+        ///
+        /// Takes the applied record for the same reason the replay constructor takes its ids: the
+        /// argument is the evidence, so the token cannot be minted at a site that has applied
+        /// nothing.
+        pub(super) fn registry_applied(_applied: &tessera_lifecycle::WalRecord) -> Self {
+            Published(())
+        }
     }
 
     /// Where one submitted `Command`'s [`Receipt`] is delivered.
@@ -1367,6 +1381,10 @@ pub(crate) struct LiveState {
     /// consumer once the evaluate store went and is deleted (decision 0048).
     resolver_state: Mutex<ResolverState>,
     accepted_batches: Mutex<AcceptedBatches>,
+    /// The annotation layer registry. **Written only by the executor** — a registration is a WAL
+    /// append followed by an apply, on the one thread that also holds the allocator — and read by
+    /// the request path, which resolves a session's reachable set from it.
+    registry: Mutex<LayerRegistry>,
 }
 
 impl LiveState {
@@ -1390,6 +1408,62 @@ impl LiveState {
 
     fn allocator_high_water(&self) -> u64 {
         lock_recover(&self.allocator).high_water()
+    }
+
+    fn allocator_low_water(&self) -> u64 {
+        lock_recover(&self.allocator).low_water()
+    }
+
+    /// The registry as a manifest carries it, plus the mark that must be published beside it.
+    ///
+    /// **The three travel together and that is the point of returning them from one lock.** A
+    /// manifest carrying a layer whose reserved run sits above the published mark would, at the
+    /// next restart, hand that run out again — so reading them separately, with a registration in
+    /// between, is a way to publish exactly that inconsistency.
+    /// Runs `f` with both the registry and the allocator held, in that lock order.
+    ///
+    /// **One critical section, because a registration reads one and writes both.** Taking them
+    /// separately would let a second registration allocate between the name check and the run
+    /// allocation, and the pair would then disagree about which ids a layer holds. The order —
+    /// registry then allocator — is the only order taken anywhere, which is what keeps it from
+    /// deadlocking against [`LiveState::registry_for_publication`].
+    fn with_registry_and_allocator<R>(
+        &self,
+        f: impl FnOnce(&mut LayerRegistry, &mut Allocator) -> R,
+    ) -> R {
+        let mut registry = lock_recover(&self.registry);
+        let mut alloc = lock_recover(&self.allocator);
+        f(&mut registry, &mut alloc)
+    }
+
+    fn apply_registry_record(&self, record: &WalRecord) {
+        lock_recover(&self.registry).apply(record);
+    }
+
+    /// Resolve which layers a principal may know exist. See `LayerRegistry::resolve_for` — one set
+    /// probe answers a gate-failed name and a never-registered one alike.
+    pub(crate) fn resolve_layers(
+        &self,
+        is_satisfied: impl Fn(tessera_types::TermId) -> bool,
+        resolve_label: impl Fn(&str) -> Option<tessera_types::TermId>,
+    ) -> tessera_lifecycle::ResolvedLayers {
+        lock_recover(&self.registry).resolve_for(is_satisfied, resolve_label)
+    }
+
+    /// One registered layer, by name. The caller has already established the name is reachable —
+    /// this returns the declaration, never the decision.
+    pub(crate) fn registered_layer(
+        &self,
+        name: &str,
+    ) -> Option<tessera_types::layer::RegisteredLayer> {
+        lock_recover(&self.registry).get(name).cloned()
+    }
+
+    fn registry_for_publication(&self) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
+        let registry = lock_recover(&self.registry);
+        let low_water = lock_recover(&self.allocator).low_water();
+        let (layers, tombstones) = registry.snapshot();
+        (layers, tombstones, low_water)
     }
 
     fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
@@ -1708,6 +1782,24 @@ pub(crate) struct WritePathState {
     established_inverse: FxHashMap<EntityId, Vec<u8>>,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
+    pub(crate) registry: LayerRegistry,
+}
+
+/// The manifest state a reconstruction starts from, before WAL replay unions what was written
+/// since: both entity-space marks and the registry's complete current view.
+///
+/// **A struct rather than four arguments, and the four travel together for a reason.** A layer in
+/// `layers` whose reserved run sits above `low_water` is an inconsistency that reissues ids, so
+/// assembling them at one site — where they are all read from the same manifests — is what keeps
+/// them agreeing. Adding a fifth stays a compile error there rather than a defaulted argument here.
+pub(crate) struct ManifestSeed<'a> {
+    /// `max(build MANIFEST, side manifests)` — the point region's floor.
+    pub high_water: u64,
+    /// `min(ceiling, side manifests)` — the row-less region's ceiling. The build manifest carries
+    /// no term: a build allocates points and nothing else.
+    pub low_water: u64,
+    pub layers: &'a [tessera_types::layer::RegisteredLayer],
+    pub tombstones: &'a [String],
 }
 
 impl WritePath {
@@ -1732,7 +1824,7 @@ impl WritePath {
     /// name only — the manifest opens and every entity it names is served.
     pub(crate) fn reconstruct(
         wal_path: &Path,
-        manifest_high_water: u64,
+        seed: ManifestSeed<'_>,
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
         vocabularies: &mut Vocabularies,
@@ -1770,18 +1862,42 @@ impl WritePath {
             }
         }
 
-        let high_water = manifest_high_water.max(high_water_from(&records));
-        // `try_new`, not `new`: the seed comes from durable state this process did not write in
-        // this run, so a corrupt or hand-edited value at or above `u32::MAX` must be refused
-        // **here**, before any ingest, rather than surfacing later as an opaque exhaustion error.
-        let allocator = Allocator::try_new(high_water).map_err(|e| {
+        let high_water = seed.high_water.max(high_water_from(&records));
+        // **The row-less mark takes the minimum where the point mark takes the maximum**, because
+        // the two regions grow towards each other and "furthest along" is downward here. Both homes
+        // are consulted for the same reason: rotation reclaims the WAL records `low_water_from`
+        // derives from, and a manifest is only as current as its last publication.
+        let low_water = seed.low_water.min(low_water_from(&records));
+        // `try_with_marks`, not `with_marks`: the seeds come from durable state this process did
+        // not write in this run, so a corrupt or hand-edited pair that already meets must be
+        // refused **here**, before any allocation, rather than surfacing later as an opaque
+        // exhaustion error.
+        let allocator = Allocator::try_with_marks(high_water, low_water).map_err(|e| {
             EngineError::Malformed(format!(
                 "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
-                 high-water {}): {e}",
-                manifest_high_water,
+                 high-water {}; MANIFEST low-water {}, WAL low-water {}): {e}",
+                seed.high_water,
                 high_water_from(&records),
+                seed.low_water,
+                low_water_from(&records),
             ))
         })?;
+
+        // **The manifests' registry is the starting point and replay runs over it**, on the same
+        // ordering rule the deny state below follows: every WAL record postdates any state a
+        // manifest carries. Seeding afterwards would resurrect a layer that was dropped since the
+        // last publication, gate and all.
+        let mut registry = LayerRegistry::new();
+        registry.seed(seed.layers, seed.tombstones);
+        for record in &records {
+            registry.apply(record);
+        }
+        // **The layer-entity cursor cannot be inferred from the records and is not durable.** A
+        // `LayerCreate` says which entity a layer took, not which block it came from nor how much
+        // of that block was left; resuming from `max(entity) + 1` would be wrong the moment a drop
+        // retired the highest-numbered layer. Reseeding costs at most one block per restart, out
+        // of 65 536, and a durable cursor would buy back an id space nothing is short of.
+        registry.reseed_entity_cursor();
 
         // **The manifests' deny state is the starting point, and replay runs over it.** Ordering,
         // not aesthetics — see `replay`'s own doc: every WAL record postdates any state an
@@ -1877,6 +1993,7 @@ impl WritePath {
                 established_inverse,
                 resolver_state,
                 accepted_batches,
+                registry,
             },
         ))
     }
@@ -1894,6 +2011,7 @@ impl WritePath {
                 established_inverse: Mutex::new(state.established_inverse),
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
+                registry: Mutex::new(state.registry),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -2165,7 +2283,7 @@ impl WritePath {
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
             Ok(Ack::Ingested { entity_ids }) => Ok(entity_ids),
-            Ok(Ack::Changed) => unreachable!("an Ingest command answers with Ack::Ingested"),
+            Ok(other) => unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -2180,6 +2298,58 @@ impl WritePath {
     /// **This is the one-item shape.** A caller with a whole request's worth of changes wants
     /// [`WritePath::submit_change`], because waiting here between items is what reduces the deny
     /// lane's group commit to one entry per window.
+    /// Register an annotation layer and wait for its receipt.
+    ///
+    /// Returns the layer's own entity, which the caller turns into a `tessera_id` — the only
+    /// address by which the layer can later be suppressed, since an entity id never crosses the
+    /// boundary (**I10**).
+    ///
+    /// **A failure means the layer does not exist**, which is the opposite of a deny's posture and
+    /// deliberately so: see `Executor::commit_registry`.
+    pub(crate) fn register_layer(
+        &self,
+        declaration: tessera_types::layer::LayerDeclaration,
+    ) -> Result<EntityId, AcceptError> {
+        let receipt = self
+            .handle()?
+            .submit(Command::RegisterLayer { declaration })?;
+        match receipt.outcome {
+            Ok(Ack::LayerRegistered { entity }) => Ok(entity),
+            Ok(other) => unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Drop a layer, tombstoning its name for ever.
+    pub(crate) fn drop_layer(&self, name: String) -> Result<(), AcceptError> {
+        let receipt = self.handle()?.submit(Command::DropLayer { name })?;
+        match receipt.outcome {
+            Ok(Ack::LayerDropped) => Ok(()),
+            Ok(other) => unreachable!("a DropLayer command answers LayerDropped, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Which layers a principal may know exist, resolved once per session.
+    pub(crate) fn resolve_layers(
+        &self,
+        is_satisfied: impl Fn(tessera_types::TermId) -> bool,
+        resolve_label: impl Fn(&str) -> Option<tessera_types::TermId>,
+    ) -> tessera_lifecycle::ResolvedLayers {
+        self.live.resolve_layers(is_satisfied, resolve_label)
+    }
+
+    pub(crate) fn registered_layer(
+        &self,
+        name: &str,
+    ) -> Option<tessera_types::layer::RegisteredLayer> {
+        self.live.registered_layer(name)
+    }
+
+    pub(crate) fn allocator_low_water(&self) -> u64 {
+        self.live.allocator_low_water()
+    }
+
     pub(crate) fn accept_change(&self, entity: EntityId, op: ChangeOp) -> Result<(), AcceptError> {
         self.submit_change(entity, op)?.wait()
     }
@@ -3124,6 +3294,9 @@ mod vocabulary_extensions_tests {
         SegmentsManifest {
             watermark: 0,
             entity_id_high_water: 0,
+            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+            layers: Vec::new(),
+            layer_tombstones: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
@@ -4849,6 +5022,16 @@ impl Executor {
             // having to.
             watermark: live_manifest.watermark,
             entity_id_high_water: live_manifest.entity_id_high_water,
+            // **Live, and for a sharper reason than the watermark's.** The fold rewrites the point
+            // region and touches the row-less one not at all — no layer is folded, because a layer
+            // has no rows to renumber. Deriving this from the fold's inputs would raise the mark
+            // back towards the ceiling and hand the next registration ids a live layer already
+            // holds. And the registry has to travel with it: rotation reclaims the WAL records the
+            // mark is otherwise recovered from, so a fold that published an empty list would lose
+            // every gate at the next restart while the layers themselves kept being referenced.
+            entity_id_low_water: live_manifest.entity_id_low_water,
+            layers: live_manifest.layers.clone(),
+            layer_tombstones: live_manifest.layer_tombstones.clone(),
             segments,
             deltas: carried_tiers.clone(),
             // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
@@ -6994,7 +7177,76 @@ impl Executor {
                 op,
                 respond,
             }]),
+            Command::RegisterLayer { declaration } => self.commit_registry(
+                |registry, alloc| registry.prepare_create(declaration, alloc),
+                |record| match record {
+                    WalRecord::LayerCreate { layer_entity, .. } => Ack::LayerRegistered {
+                        entity: *layer_entity,
+                    },
+                    _ => unreachable!("prepare_create returns a LayerCreate"),
+                },
+                respond,
+            ),
+            Command::DropLayer { name } => self.commit_registry(
+                |registry, _| registry.prepare_drop(&name),
+                |_| Ack::LayerDropped,
+                respond,
+            ),
         }
+    }
+
+    /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
+    /// registry's durability contract.
+    ///
+    /// **Nothing is applied before the record is durable, and this is the opposite posture from a
+    /// deny.** A suppression is applied to the live overlay even when its append fails, because
+    /// leaving an accepted deny unapplied is a fail-open and "in force but not durable" is the
+    /// safer of two bad states. A registration has no such asymmetry: a layer that exists in memory
+    /// and not in the log comes back from a restart as a name that is free again, having already
+    /// handed a caller a `tessera_id` for its entity. So the append comes first and a failure means
+    /// the layer does not exist — which is what the caller is told.
+    fn commit_registry(
+        &mut self,
+        prepare: impl FnOnce(
+            &mut LayerRegistry,
+            &mut Allocator,
+        ) -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
+        ack_of: impl FnOnce(&WalRecord) -> Ack,
+        respond: Responder,
+    ) {
+        let prepared = self.live.with_registry_and_allocator(prepare);
+        let record = match prepared {
+            Ok(record) => record,
+            Err(e) => {
+                respond.fail(ExecError::LayerRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
+
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            // The ids the preparation spent are **not** returned. The allocator is monotone with no
+            // free list, and re-issuing a run whose `LayerCreate` may or may not have reached the
+            // disk is the one outcome worse than losing 65 536 ids out of four billion: a torn
+            // append that replays would land a layer on entities a later registration also holds.
+            tracing::error!(
+                error = %e,
+                "ALARM: a layer registration could not be made durable; the layer does not exist \
+                 and its reserved ids are spent"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+
+        let ack = ack_of(&record);
+        self.live.apply_registry_record(&record);
+        let published = Published::registry_applied(&record);
+        // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
+        // log. Marking the manifest dirty is what gets it published at the next flush, on the same
+        // mechanism a deny uses to reach `SEGMENTS-<n>.json`.
+        self.deny_dirty = true;
+        respond.ack(ack, &published);
     }
 
     /// Clone the buffer **once**, insert every entry in the window, publish **once**.
@@ -7454,6 +7706,15 @@ impl Executor {
         manifest.entity_id_high_water = manifest
             .entity_id_high_water
             .max(completed.entity_id_high_water);
+        // **The row-less half of the same obligation.** A flush is the routine publication, so it
+        // is where a registration made since the last one stops depending on the WAL surviving:
+        // rotation reclaims `LayerCreate`, and without this the mark and the registry go with it.
+        // `min`, not `max` — this region grows downward — and taken from the live allocator rather
+        // than from the flush, which knows only about points.
+        let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
+        manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
+        manifest.layers = layers;
+        manifest.layer_tombstones = layer_tombstones;
         manifest.segments.push(completed.descriptor);
         manifest.deltas.push(completed.tier_path);
         manifest.external_id_runs.push(completed.external_id_run);

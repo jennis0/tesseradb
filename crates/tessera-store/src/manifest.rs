@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use tessera_spatial::tiler::ScalarType;
+use tessera_types::layer::RegisteredLayer;
 use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
@@ -711,6 +712,32 @@ pub struct LocatorExtent {
 pub struct SegmentsManifest {
     pub watermark: u64,
     pub entity_id_high_water: u64,
+    /// The row-less region's mark: one past the lowest entity any layer registration has claimed,
+    /// or `ROWLESS_CEILING` when none has.
+    ///
+    /// **Required, and this is the field decision 0074 calls the part to get right.** The WAL
+    /// carries the same mark in its `LayerCreate` records, and rotation reclaims those — so a mark
+    /// that lived only there is lost at the first rotation, and the next registration is handed ids
+    /// a live layer already holds: two entities, one `tessera_id`. This is the home that survives,
+    /// exactly as `entity_id_high_water` is for the point region.
+    ///
+    /// **No `serde(default)`, and the reason is sharper here than elsewhere.** A default would make
+    /// an absent mark and a *lost* mark the same value, which is the fail-open the field exists to
+    /// close — and the safe-looking default is the ceiling, which is precisely the value that
+    /// reissues everything. A manifest omitting it is malformed, not layer-free.
+    pub entity_id_low_water: u64,
+    /// The annotation layer registry as of this publication, complete current state rather than a
+    /// diff — the posture contracts §2.3 already fixes for `deny` and `tombstones`.
+    ///
+    /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
+    /// omits it is malformed, not layer-free. The distinction matters because the two are
+    /// indistinguishable under a default and only one of them is safe to serve.
+    pub layers: Vec<RegisteredLayer>,
+    /// Every layer name that has ever been dropped. **Carried for ever and never pruned**:
+    /// bookmarks, edges and suppressions all travel by name, so a name that once meant something
+    /// must not come to mean something else. A tombstone list that forgot would let a recreated
+    /// layer silently inherit every stale reference to the old one.
+    pub layer_tombstones: Vec<String>,
     pub segments: Vec<SegmentDescriptor>,
     /// Every live delta postings tier, **by prefix-relative path**, in serving order.
     ///
@@ -796,7 +823,18 @@ pub struct SegmentsManifest {
 /// correctness. Note the deliberate asymmetry with this module's `#[derive(Deserialize)]`
 /// without `deny_unknown_fields`: an unknown *JSON* field is ignored so a newer writer can add
 /// one, but a **known** field carrying state this reader cannot act on is not.
-pub const HONOURED_STATE: &[&str] = &["deltas", "deny", "tombstones", "vocabulary_extensions"];
+pub const HONOURED_STATE: &[&str] = &[
+    "deltas",
+    "deny",
+    "tombstones",
+    "vocabulary_extensions",
+    // Both arrived with the code that reads them (`WritePath::reconstruct` seeds the registry from
+    // the manifest and replays the WAL on top). A reader carrying a layer list and ignoring it
+    // would serve a bundle as though no layer had ever been registered — every gate absent, every
+    // reserved run available for reissue — which is the fail-open this list exists to close.
+    "layers",
+    "layer_tombstones",
+];
 
 /// The subset of state fields a manifest carries **because a deny was accepted** (contracts
 /// §2.3's publication rule: "any accepted deny-disposition change (delete, suppress) triggers
@@ -883,6 +921,8 @@ impl SegmentsManifest {
                 "vocabulary_extensions",
                 !self.vocabulary_extensions.is_empty(),
             ),
+            ("layers", !self.layers.is_empty()),
+            ("layer_tombstones", !self.layer_tombstones.is_empty()),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
@@ -1020,6 +1060,9 @@ mod tests {
         SegmentsManifest {
             watermark: 0,
             entity_id_high_water: 0,
+            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+            layers: Vec::new(),
+            layer_tombstones: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
@@ -1126,12 +1169,24 @@ mod tests {
     fn every_honoured_field_names_code_that_acts_on_it() {
         assert_eq!(
             HONOURED_STATE,
-            ["deltas", "deny", "tombstones", "vocabulary_extensions"],
+            [
+                "deltas",
+                "deny",
+                "tombstones",
+                "vocabulary_extensions",
+                "layers",
+                "layer_tombstones",
+            ],
             "deltas: `build_fragment_with_deltas` unions every live tier into a fragment. \
              deny/tombstones: the loader seeds the initial overlay from them and WAL replay \
              unions on top. vocabulary_extensions: the loader seeds the live \
              `vocabulary::Vocabularies` from them before replay, which is what makes a minted \
-             code survive a restart and what keeps it out of the next draw"
+             code survive a restart and what keeps it out of the next draw. \
+             layers/layer_tombstones: `WritePath::reconstruct` seeds the `LayerRegistry` from them \
+             before replaying the WAL over the top, which is what makes a registration survive the \
+             rotation that reclaims its `LayerCreate` record — a reader carrying them and ignoring \
+             them would open a bundle as though no layer had ever been registered, every gate \
+             absent and every reserved run free for reissue"
         );
     }
 

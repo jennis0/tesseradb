@@ -9,7 +9,7 @@ rayon = "1"
 libc = "0.2"
 # Entity-indexed build scratch lives in a mapped file rather than the heap — see `spill::MappedU32`.
 memmap2 = { workspace = true }
-tessera-types = { path = "../tessera-types" }
+tessera-types = { path = "../tessera-types", features = ["serde"] }
 tessera-plugin = { path = "../tessera-plugin" }
 tessera-spatial = { path = "../tessera-spatial" }
 # The text family's analysers, resolved at schema parse so a name this build does not carry is

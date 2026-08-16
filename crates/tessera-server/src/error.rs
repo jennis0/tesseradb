@@ -542,6 +542,13 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::VocabularyRefused { detail }) => {
             ApiError::Contract(detail.clone())
         }
+        // **And here, for the third time and the same reason.** A refused layer declaration names
+        // the caller's own declaration measured against the deployment's published rules — a name
+        // already taken, a name tombstoned, a tree that declared levels — never a filesystem path
+        // and never another layer's terms. It is refused before the first allocation and before the
+        // WAL append, so the answer is a clean 422 with no effect, and a 422 the caller cannot read
+        // is one they cannot fix.
+        AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail.clone()),
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
         e @ (AcceptError::OutsideExtent { .. } | AcceptError::ScalarArity { .. }) => {
@@ -722,6 +729,10 @@ fn exec_failure_may_be_in_force(
         ExecError::BatchConflict { .. }
         | ExecError::DuplicateExternalId { .. }
         | ExecError::VocabularyRefused { .. } => false,
+        // Not reachable from a `/control/changes` item — a layer verb is a different endpoint —
+        // and false is the honest answer anyway: a registry refusal happens before the append, so
+        // nothing is in force.
+        ExecError::LayerRefused { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }

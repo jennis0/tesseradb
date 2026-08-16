@@ -908,12 +908,44 @@ impl Engine {
             .values()
             .map(|partition| partition.manifest.entity_id_high_water)
             .collect();
+        // **The row-less mark's homes are the side manifests only.** `MANIFEST.json` is written by
+        // the build, which allocates points and nothing else, so it carries no opinion about a
+        // region no build has ever touched — where the point mark's build value is a real floor.
+        // Folding the ceiling in as the bundle term is what says "nothing row-less yet" without
+        // inventing a field the build would have to write.
+        let side_manifest_low_waters: Vec<u64> = bundle
+            .partitions
+            .values()
+            .map(|partition| partition.manifest.entity_id_low_water)
+            .collect();
+        // One partition today, so this concatenation is the whole registry; at more than one it is
+        // the union, and a layer registered against one partition is a layer of the deployment
+        // (⊘ **I13b's obligation lands here at the first second partition** — the registry itself
+        // is partition-independent, but nothing yet checks that two partitions agree about a name).
+        let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.layers.iter().cloned())
+            .collect();
+        let manifest_layer_tombstones: Vec<String> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
-            tessera_lifecycle::alloc::allocator_floor(
-                bundle.manifest.entity_id_high_water,
-                &side_manifest_high_waters,
-            ),
+            crate::write::ManifestSeed {
+                high_water: tessera_lifecycle::alloc::allocator_floor(
+                    bundle.manifest.entity_id_high_water,
+                    &side_manifest_high_waters,
+                ),
+                low_water: tessera_lifecycle::alloc::allocator_ceiling(
+                    tessera_types::layer::ROWLESS_CEILING,
+                    &side_manifest_low_waters,
+                ),
+                layers: &manifest_layers,
+                tombstones: &manifest_layer_tombstones,
+            },
             &dict,
             &initial_deny,
             &mut vocabularies,
@@ -1945,10 +1977,18 @@ impl Engine {
     ///
     /// **`None` for an identifier that names nothing**, per position, so a caller learns which.
     /// The permutation is total — every `u64` inverts to *something* — so the range check is the
-    /// whole of the misdirection guard: a shard that is not this one, or an entity at or above the
-    /// allocator's high-water, cannot name an item this deployment ever issued. Both are facts
-    /// about the identifier space rather than about any item's visibility, and this is the admin
-    /// plane (R5), so refusing precisely discloses nothing a caller could not compute.
+    /// whole of the misdirection guard: a shard that is not this one, or an entity in a range the
+    /// allocator has never issued from, cannot name an item this deployment ever issued. Both are
+    /// facts about the identifier space rather than about any item's visibility, and this is the
+    /// admin plane (R5), so refusing precisely discloses nothing a caller could not compute.
+    ///
+    /// **The issued range is two ranges, and reading it as one is how layer suppression breaks.**
+    /// Points are below the high-water mark; row-less entities — a layer's own, so that a
+    /// suppression against it is an ordinary `/control/changes` entry — are at or above the
+    /// row-less mark. A single `entity < high_water` test refuses every layer identifier this
+    /// deployment has ever handed out, and the symptom is not an error anyone would connect to
+    /// this line: it is that suppressing a layer answers *no such thing*. What names nothing is the
+    /// **gap between the marks**, which is exactly the unissued space.
     ///
     /// Ordered as the caller supplied, like [`Self::resolve_external_ids`], so a refusal can name
     /// the offending position.
@@ -1963,11 +2003,13 @@ impl Engine {
         }
         let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
+        let low_water = self.allocator_low_water();
         Ok(ids
             .iter()
             .map(|id| {
                 let (id_shard, entity) = self.identity_key.invert(*id);
-                (id_shard == shard && entity.raw() < high_water).then_some(entity)
+                let issued = entity.raw() < high_water || entity.raw() >= low_water;
+                (id_shard == shard && issued).then_some(entity)
             })
             .collect())
     }
@@ -2346,6 +2388,72 @@ impl Engine {
         op: ChangeOp,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
         self.write.submit_change(entity, op)
+    }
+
+    /// Register an annotation layer, returning its `tessera_id`.
+    ///
+    /// That identifier is the only address by which the layer can later be suppressed — entity ids
+    /// never cross the boundary (**I10**) — which is the whole reason a layer takes an entity.
+    pub fn register_layer(
+        &self,
+        declaration: tessera_types::layer::LayerDeclaration,
+    ) -> std::result::Result<TesseraId, crate::write::AcceptError> {
+        let entity = self.write.register_layer(declaration)?;
+        // The blinding is total over the space the allocator will issue — `try_with_marks` refuses
+        // a seed at or above the ceiling, so a row-less entity is always inside it — which is why
+        // this conversion cannot fail in practice and is unwrapped to a fail-closed refusal rather
+        // than a new error shape.
+        let generation = self.generation();
+        self.identity_key
+            .forward(generation.bundle.manifest.identity.shard_id, entity)
+            .map_err(|_| crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                detail: "the layer's entity id lies outside the identity space".to_string(),
+            }))
+    }
+
+    /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
+    pub fn drop_layer(&self, name: String) -> std::result::Result<(), crate::write::AcceptError> {
+        self.write.drop_layer(name)
+    }
+
+    /// Which layers this principal may know exist, and which of those are currently served.
+    ///
+    /// **Two questions, answered in that order, and the order is the disclosure control.**
+    /// Reachability is resolved from the registry — one set probe, identical for a gate-failed name
+    /// and a never-registered one. What that resolution must *not* carry is the verdict: a
+    /// suppression against a layer's own entity takes effect at the ack, so the overlay is asked
+    /// live, per call, for every name the resolution admitted. A cache may bake in reachability;
+    /// it may never bake in whether a layer is currently served.
+    ///
+    /// A suppressed layer therefore leaves the resolved set the way a gate-failed one never
+    /// entered it — same answer, and by the same route the request path already takes for a point.
+    pub fn visible_layers(&self, session: &Session) -> Vec<tessera_types::layer::RegisteredLayer> {
+        let generation = self.generation();
+        let resolved = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        resolved
+            .names()
+            .filter_map(|name| self.write.registered_layer(name))
+            .filter(|layer| {
+                // **The live half, and it is asked per call.** A layer's own entity carries its
+                // suppression, so this is the same deleted-beats-suppressed composition a point
+                // goes through, against the current overlay rather than against whatever was true
+                // when the reachable set was resolved. `None` — no opinion — is *not* visible here:
+                // a layer has no row and no fragment to fall through to, so the only honest reading
+                // of "nothing says yes" is no.
+                !generation.overlay.is_deleted(layer.entity)
+                    && !generation.overlay.is_suppressed(layer.entity)
+            })
+            .collect()
+    }
+
+    /// One past the lowest row-less entity ever allocated. Operator-facing, beside the point
+    /// region's high-water mark on `/control/status`: the two together are how much of the entity
+    /// space is left, which neither answers alone.
+    pub fn allocator_low_water(&self) -> u64 {
+        self.write.allocator_low_water()
     }
 }
 

@@ -256,6 +256,9 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
     let manifest = tessera_store::manifest::SegmentsManifest {
         watermark: 0,
         entity_id_high_water: 0,
+        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+        layers: Vec::new(),
+        layer_tombstones: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
         dict_extents: Vec::new(),

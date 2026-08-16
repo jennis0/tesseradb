@@ -34,26 +34,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tessera_types::layer::{DeclarationError, EntityRun, LayerDeclaration, ReservedRuns};
+use tessera_types::layer::{
+    DeclarationError, EntityRun, LayerDeclaration, RegisteredLayer, ReservedRuns,
+};
 use tessera_types::{EntityId, TermId};
 
 use crate::alloc::{AllocError, Allocator};
 use crate::wal::WalRecord;
-
-/// A layer as the registry holds it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RegisteredLayer {
-    pub declaration: LayerDeclaration,
-    /// The layer's own entity. Its only job is to give layer suppression somewhere to land, so
-    /// `/control/changes` and the deny lane work on a layer exactly as they work on a point.
-    pub entity: EntityId,
-    /// One entry per level, in level order; a layer declaring no levels has exactly one, its
-    /// level 0.
-    pub runs: Vec<ReservedRuns>,
-    /// Bumped by any edit that changes who may reach this layer, so a session's cached resolution
-    /// is invalidated rather than outliving the gate it was computed from.
-    pub version: u64,
-}
 
 /// Why a registry operation was refused.
 #[derive(Debug, Clone, PartialEq)]
@@ -259,6 +246,33 @@ impl LayerRegistry {
         })
     }
 
+    /// Seeds from a manifest's complete current view, **before** WAL replay unions the records
+    /// written since.
+    ///
+    /// The order is the rule, not a preference: every WAL record postdates any state a manifest
+    /// carries, so seeding afterwards resurrects a layer that was dropped since the last
+    /// publication — gate and all, reachable again by whoever the old declaration admitted. It is
+    /// the same seed-before-replay ordering the overlay follows, and for the same reason.
+    ///
+    /// The version is set past every seeded layer's, so a subsequent registration cannot mint a
+    /// version a session has already cached a resolution against.
+    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String]) {
+        for layer in layers {
+            self.version = self.version.max(layer.version);
+            self.layers
+                .insert(layer.declaration.name.clone(), layer.clone());
+        }
+        self.tombstones.extend(tombstones.iter().cloned());
+    }
+
+    /// This registry as a manifest carries it: every live layer, and every name ever dropped.
+    pub fn snapshot(&self) -> (Vec<RegisteredLayer>, Vec<String>) {
+        (
+            self.layers.values().cloned().collect(),
+            self.tombstones.iter().cloned().collect(),
+        )
+    }
+
     /// Applies a durable registry record — the one path by which this state ever changes, taken by
     /// both the live write path and replay.
     ///
@@ -306,7 +320,7 @@ impl LayerRegistry {
     /// was caught in review.
     pub fn resolve_for(
         &self,
-        satisfied: &[TermId],
+        is_satisfied: impl Fn(TermId) -> bool,
         resolve_label: impl Fn(&str) -> Option<TermId>,
     ) -> ResolvedLayers {
         let names = self
@@ -314,8 +328,7 @@ impl LayerRegistry {
             .iter()
             .filter(|(_, layer)| match &layer.declaration.access.label {
                 None => true,
-                Some(label) => resolve_label(label)
-                    .is_some_and(|term| satisfied.binary_search(&term).is_ok()),
+                Some(label) => resolve_label(label).is_some_and(&is_satisfied),
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -440,7 +453,7 @@ mod tests {
         register(&mut reg, &mut alloc, gated("clusters/secret", "clearance:ts")).unwrap();
         register(&mut reg, &mut alloc, declaration("clusters/open")).unwrap();
 
-        let resolved = reg.resolve_for(&[TermId::new(7)], |label| match label {
+        let resolved = reg.resolve_for(|t| t == TermId::new(7), |label| match label {
             "clearance:ts" => Some(TermId::new(99)),
             _ => None,
         });
@@ -452,7 +465,7 @@ mod tests {
         assert_eq!(resolved.names().collect::<Vec<_>>(), vec!["clusters/open"]);
 
         // And with the term: the same layer resolves.
-        let cleared = reg.resolve_for(&[TermId::new(7), TermId::new(99)], |label| match label {
+        let cleared = reg.resolve_for(|t| t == TermId::new(7) || t == TermId::new(99), |label| match label {
             "clearance:ts" => Some(TermId::new(99)),
             _ => None,
         });
@@ -467,7 +480,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, gated("clusters/x", "team:nobody")).unwrap();
 
-        let resolved = reg.resolve_for(&[TermId::new(1), TermId::new(2)], |_| None);
+        let resolved = reg.resolve_for(|_| true, |_| None);
         assert!(!resolved.contains("clusters/x"));
         assert_eq!(resolved.names().count(), 0);
     }
@@ -479,7 +492,7 @@ mod tests {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
-        let resolved = reg.resolve_for(&[], |_| None);
+        let resolved = reg.resolve_for(|_| false, |_| None);
         assert!(resolved.is_current_for(reg.version()));
 
         register(&mut reg, &mut alloc, declaration("clusters/b")).unwrap();

@@ -729,6 +729,13 @@ fn write_manifests(
     let segments = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
+        // A build allocates points and nothing else, so the row-less region is untouched. Layers
+        // are registered on the control plane against a running node — there is no build-time
+        // route to one — which is why these three are the empty state rather than something
+        // carried forward from an input.
+        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+        layers: Vec::new(),
+        layer_tombstones: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: args.slice_id.clone(),
             seg_id: SEG_ID.to_string(),

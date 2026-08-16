@@ -246,6 +246,18 @@ pub struct LayerDeclaration {
 /// pays for a partial container at each end, on every operation, for ever.
 pub const RESERVED_BLOCK: u64 = 1 << 16;
 
+/// Where the row-less region starts counting **down** from: the highest [`RESERVED_BLOCK`] boundary
+/// at or below the entity-id ceiling (`u32::MAX`, contracts §2.6).
+///
+/// **The 65 535 ids above it are deliberately unusable.** Row-less allocation hands out whole
+/// aligned blocks so that a level's membership sits inside whole Roaring containers; starting at
+/// `u32::MAX` would make the *first* block the one that straddles a boundary, which is the case
+/// alignment exists to remove. One block out of 65 536 is the price.
+///
+/// It lives here rather than with the allocator because it is a fact about how entity space is
+/// divided, which several crates need and only one of them allocates.
+pub const ROWLESS_CEILING: u64 = (u32::MAX as u64) & !(RESERVED_BLOCK - 1);
+
 /// A contiguous, ascending run of reserved row-less entity ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntityRun {
@@ -342,6 +354,25 @@ impl ReservedRuns {
         debug_assert_eq!(run.len() % RESERVED_BLOCK, 0, "reserved runs are whole blocks");
         self.runs.push(run);
     }
+}
+
+/// A registered layer, as it is held in memory and written to a manifest.
+///
+/// **The ids are stored, never re-derived.** A registration must land on the entities it was acked
+/// on, whatever the allocator's state at replay: bookmarks, edges and suppressions all name them,
+/// and recomputing would move a layer under every one of them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegisteredLayer {
+    pub declaration: LayerDeclaration,
+    /// The layer's own entity. Its only job is to give layer suppression somewhere to land, so
+    /// `/control/changes` and the deny lane work on a layer exactly as they work on a point.
+    pub entity: crate::EntityId,
+    /// One entry per level, in level order; a layer declaring no levels has exactly one, its
+    /// level 0.
+    pub runs: Vec<ReservedRuns>,
+    /// Bumped by any edit that changes who may reach this layer, so a session's cached resolution
+    /// is invalidated rather than outliving the gate it was computed from.
+    pub version: u64,
 }
 
 /// Why a declaration was refused. Every one of these is a fail-closed refusal at registration: the

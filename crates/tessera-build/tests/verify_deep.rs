@@ -210,6 +210,9 @@ fn flushed_bundle(root: &Path) {
     let manifest_1 = SegmentsManifest {
         watermark: flush.watermark,
         entity_id_high_water: flush.entity_id_high_water,
+        entity_id_low_water: seg0.entity_id_low_water,
+        layers: seg0.layers.clone(),
+        layer_tombstones: seg0.layer_tombstones.clone(),
         segments,
         deltas: vec![delta_rel],
         dict_extents: seg0.dict_extents.clone(),

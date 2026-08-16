@@ -143,6 +143,18 @@ pub enum Command {
     /// a key (`WalRecord::ChangeByEntity`). An item ingested without an external id is addressable
     /// only this way, which is the hole addressing by entity closes.
     Change { entity: EntityId, op: ChangeOp },
+    /// Register an annotation layer.
+    ///
+    /// **The declaration travels unvalidated and unallocated**, in the same shape and for the same
+    /// reason as [`Command::Ingest`]'s rows: the checks that decide a name is free, and the
+    /// allocations that follow them, both read state only the executor may write. A handler that
+    /// validated first could be overtaken by a registration of the same name between its check and
+    /// the enqueue, and would then have acked two layers onto one name.
+    RegisterLayer {
+        declaration: tessera_types::layer::LayerDeclaration,
+    },
+    /// Drop an annotation layer, tombstoning its name for ever.
+    DropLayer { name: String },
 }
 
 impl Command {
@@ -302,6 +314,12 @@ pub enum Ack {
     Ingested { entity_ids: Vec<EntityId> },
     /// A disposition change applied. Nothing to return: the caller named the item.
     Changed,
+    /// A layer was registered. The entity is returned so the handler can hand back its
+    /// `tessera_id` — the only address by which a caller can later suppress the layer, since an
+    /// entity id never crosses the boundary (**I10**).
+    LayerRegistered { entity: EntityId },
+    /// A layer was dropped and its name tombstoned. Nothing to return: the caller named it.
+    LayerDropped,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"
@@ -371,6 +389,15 @@ pub enum ExecError {
     /// caller-supplied data `tessera-server`'s `error.rs` keeps out of one. The handler's own check
     /// is the one that names them, to the caller who supplied them.
     DuplicateExternalId { count: usize },
+    /// A layer registration or drop was refused → HTTP 422, no effect. Every check runs before the
+    /// first allocation and before the WAL append, so a refusal leaves no ids spent, no record in
+    /// the log and no half-registered layer.
+    ///
+    /// **A rendered string, and it may reach the caller.** What it names is the caller's own
+    /// declaration measured against the deployment's published rules — a name already taken, a
+    /// name tombstoned, a tree declaring levels — which is exactly the class of detail a caller can
+    /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
+    LayerRefused { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -388,6 +415,7 @@ impl std::fmt::Display for ExecError {
                  no effect"
             ),
             ExecError::VocabularyRefused { detail } => write!(f, "{detail}"),
+            ExecError::LayerRefused { detail } => write!(f, "{detail}"),
         }
     }
 }

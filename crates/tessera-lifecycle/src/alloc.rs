@@ -52,16 +52,10 @@ use crate::wal::WalRecord;
 /// happening to stay small, and nothing enforced it.
 const ENTITY_ID_CEILING: u64 = u32::MAX as u64;
 
-/// Where the row-less region starts counting down from: the highest [`RESERVED_BLOCK`] boundary at
-/// or below [`ENTITY_ID_CEILING`].
-///
-/// **The 65 535 ids above it are deliberately unusable.** Row-less allocation hands out whole
-/// aligned blocks so a level's membership sits inside whole Roaring containers — bitmap operations
-/// cost O(containers touched), so a level straddling a boundary pays for a partial container at
-/// each end on every operation, for ever. Starting at `u32::MAX` would make the *first* block the
-/// one that straddles, which is the case alignment exists to remove. One block's worth of address
-/// space is the price, out of 65 536 blocks.
-pub const ROWLESS_CEILING: u64 = ENTITY_ID_CEILING & !(RESERVED_BLOCK - 1);
+/// Re-exported so this module's callers need only this module. The definition lives beside
+/// [`RESERVED_BLOCK`] in `tessera_types::layer`, because how entity space is divided is a fact
+/// several crates read and only this one allocates against.
+pub use tessera_types::layer::ROWLESS_CEILING;
 
 /// Allocator errors. The batch has no effect when this is returned — neither [`Allocator::allocate`]
 /// nor [`Allocator::allocate_rowless`] moves its mark on the error path.
