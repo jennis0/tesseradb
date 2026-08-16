@@ -34,7 +34,7 @@ What `publish_fold` does at step 3a: rewrites every level whole into the prefix 
 one extent per level, dropping the fold's **executed deletions** from each membership and nothing
 else — a suppressed member keeps its bit (Rule S) and no generating set is touched. The content
 extents are carried by hard link beside them, and the row forms are rebuilt inline after the swap
-rather than left to whoever arrives first. Eleven tests in `artifact_fold.rs`.
+rather than left to whoever arrives first. Fifteen tests in `artifact_fold.rs`.
 
 **Two stale-manifest defects were found in the doing, both of the class below.** The fold took its
 layer registry from the live manifest, which a side-manifest write does not refresh — so it
@@ -71,10 +71,12 @@ decades, and the pass measured +3.5 GB where 90 B × 4×10⁷ containers predict
   online publication and the build. Generating sets ride the packed membership extent beside the
   membership. `G` is entity-space and immutable, so the fold has nothing to re-base — its role is to
   execute the layer's strict/permissive declaration and to produce the report.
-- **The report sweep is one `and_cardinality(G, D₀)` per `G`-bearing artifact**, against the plan's
-  tombstone clone the fold already holds. No inverted index, no traversal coupling. It is
-  control-plane, behind the operator credential, and it is what discharges the rule that a deletion
-  is not retired before the notification obligation is.
+- ✔ **The report sweep is built**: one `and_cardinality` per artifact against the deletions this
+  fold *executes* — not every tombstone it holds, since a carried-forward deletion has not retired
+  and its notice is not yet owed. It is written before the flip and **outside** the prefix
+  (`reports/fold-<prefix>.json` in the bundle root), because a fold reclaims the prefix it
+  supersedes; a report that cannot be written discards the fold. Control-plane, unmasked counts,
+  ⊘ no HTTP route yet — `Engine::last_fold_report` and the file are the surface.
 - **The build plane** (`--layers`, `--artifacts`, `--artifact-members`) publishes at volume through
   the same registry, allocator and publication the control plane uses. Anything the fold learns to
   rewrite must handle extents written by *either*, and the file names come from different counters —

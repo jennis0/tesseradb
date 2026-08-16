@@ -331,6 +331,15 @@ pub struct ExecutorHealth {
     /// actionable. A `Mutex` rather than a fifth atomic because it is written once per fold, hours
     /// apart, and read only by `/control/status`.
     pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
+    /// The last fold's degradation report — which artifacts its deletions took members from, and
+    /// which supplied content lost a source (write cycle §4.2).
+    ///
+    /// **The durable copy is the file in `reports/`**; this is the same content held for the
+    /// operator route, so a caller polling an endpoint does not have to read the bundle root. Empty
+    /// before the first fold and after one that degraded nothing — which the file distinguishes and
+    /// this does not, deliberately: an operator asking *what did the last fold degrade* wants the
+    /// list, and an operator asking *did it report* wants the directory.
+    pub(crate) last_fold_report: Mutex<Vec<tessera_lifecycle::membership::Degradation>>,
     /// A fold has finished its passes and is **holding** at the test hook
     /// (`Engine::set_fold_paused_for_test`). Always `false` in a shipped build, where nothing ever
     /// sets the flag it waits on; it exists so a test can wait on the hold as a condition rather
@@ -826,6 +835,7 @@ impl ExecutorHealth {
             last_fold_attr_read: AtomicU64::new(0),
             last_fold_attr_written: AtomicU64::new(0),
             last_fold_passes: Mutex::new(Vec::new()),
+            last_fold_report: Mutex::new(Vec::new()),
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),
@@ -905,6 +915,11 @@ impl ExecutorHealth {
     /// allocation for a figure only the operator plane wants, hours apart.
     pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {
         lock_recover(&self.last_fold_passes).clone()
+    }
+
+    /// The last fold's degradation report — see [`Self::last_fold_report`].
+    pub fn last_fold_report(&self) -> Vec<tessera_lifecycle::membership::Degradation> {
+        lock_recover(&self.last_fold_report).clone()
     }
 
     pub fn stats(&self) -> ExecutorStats {
@@ -5279,6 +5294,27 @@ impl Executor {
             }
         };
 
+        // ---- step 3b: the report, before anything retires ---------------------------------------
+        //
+        // **A deletion is not retired before the caller has been told what it degraded**
+        // (write-path §5.8). This fold is about to retire the overlay entries for `executed`, so the
+        // report of what those deletions took away from the artifacts that held them is written
+        // first — and a report that cannot be written **discards the fold**, which is the whole
+        // content of "retirement and report in one publication" (write cycle §7). Nothing is lost by
+        // discarding: the deletions are already in force, and the next fold reports them.
+        //
+        // The sweep is one `and_cardinality` per artifact against the set the fold already holds.
+        let degraded = self
+            .live
+            .with_artifacts(|store| store.degradations(&executed));
+        if let Err(e) = self.write_fold_report(&completed.prefix, &degraded) {
+            discard(&format!(
+                "its degradation report would not be written ({e}), and a deletion may not retire \
+                 before the caller has been told what it degraded"
+            ));
+            return;
+        }
+
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
         // Each slice's fold base first and its carried extents after it, because the reader takes
@@ -8189,6 +8225,54 @@ impl Executor {
         }
         tessera_store::fsync_dir(&dir)?;
         Ok(Some(extent))
+    }
+
+    /// Write the fold's degradation report, and keep the last one for the operator route.
+    ///
+    /// **Outside the prefix, and that is the point.** A fold reclaims the prefix it superseded, so a
+    /// report written into the *new* prefix would be deleted by the next fold — two nights later,
+    /// the notice a caller had not read yet is gone. `reports/` sits in the bundle root beside the
+    /// prefixes, which nothing reclaims, and the startup sweep only knows about `v#####` directories.
+    ///
+    /// **A report with nothing in it is still written.** An operator polling the directory must be
+    /// able to tell "this fold degraded nothing" from "this fold never reported", and an absent file
+    /// says the second.
+    fn write_fold_report(
+        &mut self,
+        prefix: &str,
+        degraded: &[tessera_lifecycle::membership::Degradation],
+    ) -> std::io::Result<()> {
+        let dir = self.bundle_root.join("reports");
+        std::fs::create_dir_all(&dir)?;
+        let rows: Vec<serde_json::Value> = degraded
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "layer": d.layer,
+                    "level": d.level,
+                    "ordinal": d.ordinal,
+                    "stable_key": d.stable_key,
+                    "members_lost": d.members_lost,
+                    "declared_members": d.declared_members,
+                    "variations_lost": d
+                        .variations_lost
+                        .iter()
+                        .map(|(index, lost)| serde_json::json!({"variation": index, "lost": lost}))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "prefix": prefix,
+            "degraded": rows,
+        });
+        let bytes = serde_json::to_vec_pretty(&body)?;
+        let path = dir.join(format!("fold-{prefix}.json"));
+        tessera_store::write_and_fsync(&path, &bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        tessera_store::fsync_dir(&dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+        *lock_recover(&self.health.last_fold_report) = degraded.to_vec();
+        Ok(())
     }
 
     /// The fold's artifact pass: write **every** level whole into the prefix being published, with

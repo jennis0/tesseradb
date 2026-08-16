@@ -2275,6 +2275,21 @@ impl Engine {
         self.write.health().last_fold_passes()
     }
 
+    /// What the last fold's deletions degraded: the artifacts that lost members, and the supplied
+    /// content that lost a source (`annotation-write-cycle.md` §4.2).
+    ///
+    /// **Operator plane, and the counts here are unmasked** — this is the notice a *publisher* is
+    /// owed about their own sets, outside the leak register's viewer scope
+    /// ([decision 0024](../../../docs/decisions/0024-operator-credential-is-out-of-scope.md)). No
+    /// viewer-facing route may carry these numbers.
+    ///
+    /// The durable copy is `reports/fold-<prefix>.json` in the bundle root, written before the
+    /// fold retires anything and kept when the prefix it reports on is reclaimed. ⊘ No HTTP route
+    /// serves this yet.
+    pub fn last_fold_report(&self) -> Vec<tessera_lifecycle::membership::Degradation> {
+        self.write.health().last_fold_report()
+    }
+
     /// Items in the ingest buffer as of the executor's last apply — what `/control/ingest`'s
     /// occupancy bound is checked against (§1.3).
     ///

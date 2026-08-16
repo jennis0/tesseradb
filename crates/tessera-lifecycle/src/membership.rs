@@ -153,6 +153,29 @@ impl IncomingArtifact {
     }
 }
 
+/// What one fold's deletions took from one artifact — a row of the fold's report.
+///
+/// **Addressed by the caller's own key where they supplied one**, because that is the name they can
+/// act on: a `tessera_id` is what a *viewer* holds, and the ordinal is an internal address that no
+/// response carries. A caller who published without a key gets the address and can still find the
+/// artifact by it on the control plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Degradation {
+    pub layer: String,
+    pub level: u32,
+    pub ordinal: u32,
+    pub stable_key: Option<String>,
+    /// How many of this artifact's members the fold retired. Zero where only its content lost
+    /// sources — the two losses are independent.
+    pub members_lost: u64,
+    /// What the membership held before this fold, so a caller can see the proportion rather than
+    /// having to hold the previous number themselves.
+    pub declared_members: u64,
+    /// `(variation index, members of that generating set the fold retired)`, for the variations
+    /// that lost any. Empty on a layer that declares no supplied content.
+    pub variations_lost: Vec<(u32, u64)>,
+}
+
 /// One artifact's durable state, as the registry holds it.
 #[derive(Debug, Clone)]
 pub struct ArtifactRecord {
@@ -490,6 +513,66 @@ impl ArtifactStore {
             ready.push((layer.clone(), *level, from as u32, blobs));
         }
         (ready, skipped)
+    }
+
+    /// What this fold's deletions took away from every artifact that held one — the sweep behind
+    /// the fold's report (`annotation-write-cycle.md` §4.2).
+    ///
+    /// **One `and_cardinality` per artifact, against a set the fold already holds.** No inverted
+    /// index and no traversal: a superseded draft found the affected sets as a by-product of a pass
+    /// that had to visit every (artifact, member) pair, which is the coupling this replaces.
+    ///
+    /// Two kinds of loss, and they are not the same event:
+    ///
+    /// - a **generating set** that lost a member describes content generated from a document that
+    ///   no longer exists. Under the layer's strict declaration the content and its set are dropped
+    ///   at this fold; under permissive the member leaves the set and it serves again. Either way
+    ///   the caller is owed the notice, because only they can decide whether the text still says
+    ///   something true.
+    /// - a **membership** that lost members is smaller than the caller declared it. Nothing is
+    ///   wrong with it — every count was already correct at the ack — but a caller planning a
+    ///   refresh wants to know which of their sets have drifted.
+    ///
+    /// **Unmasked counts, deliberately.** This is control-plane output behind the operator
+    /// credential and outside the leak register's viewer scope
+    /// ([decision 0024](../../../docs/decisions/0024-operator-credential-is-out-of-scope.md)); a
+    /// viewer-facing route carrying these numbers would be C8.
+    pub fn degradations(&self, retired: &Bitmap) -> Vec<Degradation> {
+        let mut out = Vec::new();
+        if retired.is_empty() {
+            return out;
+        }
+        for ((layer, level), slots) in &self.levels {
+            for (ordinal, slot) in slots.iter().enumerate() {
+                let Some(record) = slot else { continue };
+                // An artifact this fold retires outright is not *degraded* — it is gone, and its
+                // own deletion is what the caller already knows about.
+                if retired.contains(record.entity.raw() as u32) {
+                    continue;
+                }
+                let members_lost = record.members.and_cardinality(retired);
+                let mut variations_lost = Vec::new();
+                for (index, variation) in record.variations.iter().enumerate() {
+                    let lost = variation.generated_from.and_cardinality(retired);
+                    if lost > 0 {
+                        variations_lost.push((index as u32, lost));
+                    }
+                }
+                if members_lost == 0 && variations_lost.is_empty() {
+                    continue;
+                }
+                out.push(Degradation {
+                    layer: layer.clone(),
+                    level: *level,
+                    ordinal: ordinal as u32,
+                    stable_key: record.stable_key.clone(),
+                    members_lost,
+                    declared_members: record.declared_size(),
+                    variations_lost,
+                });
+            }
+        }
+        out
     }
 
     /// How many Roaring **containers** every membership holds, summed across every level.

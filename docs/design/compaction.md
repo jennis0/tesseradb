@@ -1174,7 +1174,7 @@ it.
 | **Rule S** | `suppressed` copied forward whole from live state; the fold gives a suppression no retirement route |
 | **C4** | unchanged — drill-down resolves in entity space before any row lookup, and a folded item's *unknown* equals an absent identifier's |
 | **C15** | the flip moves the staleness stamp for everyone, as any publication does; accepted under the 2026-08-02 ruling |
-| **I8 / I3** | ⊘ labels are Phase 3. A deletion's label-invalidation notification is owed *before* its tombstone retires (write-path §5.8); the fold inherits that obligation and cannot discharge it until the feed exists |
+| **I8 / I3** | **discharged, and by the fold itself.** A deletion's label-invalidation notification is owed *before* its tombstone retires (write-path §5.8). The fold sweeps every artifact against the deletions it is executing — one `and_cardinality` each — and writes the report **before** the flip, into `reports/` in the bundle root rather than into a prefix the next fold would reclaim; a report that cannot be written discards the fold, so nothing retires unreported ([`annotation-write-cycle.md`](annotation-write-cycle.md) §4.2). ⊘ The feed itself is still absent: the notice is a file and an operator-plane accessor, not a subscription |
 
 ## 12. What must be proven
 

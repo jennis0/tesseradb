@@ -403,10 +403,25 @@ space, so *which supplied content lost a member* is one small `and_cardinality(G
 construction, which needed the artifact pass to visit every pair). The report — artifact stable key
 or address, per lost-member content — is written as part of the fold's own publication, which is
 what discharges write-path §5.8's rule that a deletion is not retired before the notification
-obligation is; it is the first concrete content of §2.5's label-invalidation feed (⊘ neither the
-feed nor any of this is built). The report is control-plane, behind the operator credential, and
-out of the leak register's viewer scope (decision 0024). The same sweep annotates enumerated
-*membership* losses for the caller's refresh planning.
+obligation is; it is the first concrete content of §2.5's label-invalidation feed (⊘ the feed
+itself is not built — the report is a file and an operator-plane accessor, not a subscription). The
+report is control-plane, behind the operator credential, and out of the leak register's viewer scope
+(decision 0024). The same sweep annotates enumerated *membership* losses for the caller's refresh
+planning.
+
+Two things the sweep's placement decides, both of which read as detail and are not:
+
+- **The set swept against is what this fold *executes*, not every tombstone it holds.** A deletion
+  whose entity is carried forward has not retired, so its notice is not yet owed; reporting it here
+  would tell a caller their content was degraded by a deletion the fold left in force, and the next
+  fold would tell them again.
+- **The report is written before the flip, and a report that cannot be written discards the fold.**
+  That is the whole content of "retirement and report in one publication" (§7): the alternative
+  orderings either retire an unreported deletion or report one that did not retire. Nothing is lost
+  by discarding — the deletions are in force from their own ack, and the next fold reports them.
+  It lands **outside** the prefix, because a fold reclaims the prefix it supersedes and a notice
+  written inside one would be deleted by the fold after next, taking with it exactly the notice a
+  caller had not yet read.
 
 ### 4.3 Containment composes the verdict, and caches nothing
 

@@ -489,6 +489,170 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     );
 }
 
+// ---- the fold's report -------------------------------------------------------------------------
+
+/// The report the fold wrote for the prefix it published, as the operator would read it off disk.
+fn report_on_disk(fx: &Fixture, prefix: &str) -> serde_json::Value {
+    let path = fx
+        .root
+        .join("reports")
+        .join(format!("fold-{prefix}.json"));
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("the fold must have written {}: {e}", path.display()));
+    serde_json::from_slice(&bytes).expect("the report is JSON")
+}
+
+/// **What discharges the obligation**: a deletion may not retire before the caller has been told
+/// what it degraded, so the fold that retires it writes the notice naming the artifact, how much of
+/// its membership went, and which supplied content lost a source.
+#[test]
+fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them() {
+    let fx = fixture();
+    let engine = fx.open();
+    let mut layer = declaration("clusters/a");
+    layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        kind: "label_text".into(),
+        corpus_derived: true,
+    }];
+    engine.register_layer(layer).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("c0".into()),
+                fx.members(0..300),
+                // Generated from a sample of the membership, so a deletion inside the sample is a
+                // content loss as well as a membership one — the two are separate rows of the
+                // report and a single number could not carry both.
+                vec![IncomingVariation::new(
+                    vec!["shipping and logistics".into()],
+                    fx.members(0..30),
+                )],
+            )],
+        )
+        .unwrap();
+    wait_for_publication(&fx, &engine, 1);
+
+    // One member inside the generating sample, one outside it.
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    engine
+        .accept_change(fx.member(200), ChangeOp::Delete)
+        .expect("the delete is accepted");
+
+    fold(&engine);
+
+    let held = engine.last_fold_report();
+    assert_eq!(held.len(), 1, "one artifact was degraded");
+    assert_eq!(held[0].stable_key.as_deref(), Some("c0"));
+    assert_eq!(held[0].members_lost, 2, "both deletions were members");
+    assert_eq!(
+        held[0].declared_members, 300,
+        "against what the caller published, so the notice carries the proportion"
+    );
+    assert_eq!(
+        held[0].variations_lost,
+        vec![(0, 1)],
+        "and exactly one of them was a source of the description"
+    );
+
+    let on_disk = report_on_disk(&fx, &engine.generation().prefix);
+    assert_eq!(on_disk["degraded"][0]["stable_key"], "c0");
+    assert_eq!(on_disk["degraded"][0]["members_lost"], 2);
+}
+
+/// **A fold that degraded nothing still reports**, because an operator polling the directory must be
+/// able to tell that from a fold that never reported — and the second is the state the obligation is
+/// about.
+#[test]
+fn a_fold_that_degraded_nothing_writes_an_empty_report_rather_than_none() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+
+    fold(&engine);
+
+    assert!(engine.last_fold_report().is_empty());
+    let on_disk = report_on_disk(&fx, &engine.generation().prefix);
+    assert_eq!(
+        on_disk["degraded"].as_array().map(Vec::len),
+        Some(0),
+        "the file exists and says nothing was degraded"
+    );
+}
+
+/// **The report outlives the prefix it reports on.** A fold reclaims the prefix it superseded, so a
+/// notice written inside the new prefix would be deleted by the fold after next — taking with it
+/// the one a caller had not read yet.
+#[test]
+fn a_later_fold_does_not_reclaim_an_earlier_folds_report() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+    let first = engine.generation().prefix.clone();
+    assert_eq!(report_on_disk(&fx, &first)["degraded"][0]["members_lost"], 1);
+
+    fold(&engine);
+
+    assert_ne!(engine.generation().prefix, first, "a second prefix");
+    assert_eq!(
+        report_on_disk(&fx, &first)["degraded"][0]["members_lost"],
+        1,
+        "the first fold's notice is still there after the prefix it named was reclaimed"
+    );
+    assert!(
+        engine.last_fold_report().is_empty(),
+        "and the held copy is the latest fold's, which degraded nothing"
+    );
+}
+
+/// **A report that cannot be written stops the retirement**, which is the whole of "retirement and
+/// report in one publication". Nothing is lost by refusing: the deletions are already in force at
+/// their ack, and the next fold reports them.
+#[test]
+fn a_fold_whose_report_cannot_be_written_is_discarded_and_retires_nothing() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    assert_eq!(engine.overlay_depth(), 1);
+
+    // `reports/` as a *file*, so creating the directory fails — the cheapest way to make the write
+    // fail that does not depend on running as an unprivileged user.
+    std::fs::write(fx.root.join("reports"), b"not a directory").unwrap();
+
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(now.folds, before.folds, "the fold must not have published");
+        if now.fold_failures > before.fold_failures {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold neither published nor was discarded"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        engine.overlay_depth(),
+        1,
+        "the deletion did not retire, so the notice is still owed"
+    );
+    assert_eq!(count(&engine), 299, "and it is still in force");
+}
+
 // ---- Rule F's artifact arm ---------------------------------------------------------------------
 
 /// The cluster layer a label hangs from, and the label layer itself. Both ungated, so every
