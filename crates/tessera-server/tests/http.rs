@@ -1928,6 +1928,29 @@ async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup(
 /// buffers "streams" to a stopped reader without the producer ever parking, and the test would
 /// pass without touching the shed path at all (measured: the 300k fixture's ~5 MB response did
 /// exactly that on first run).
+///
+/// ## ⊘ This test is environment-sensitive, and the sensitivity is unresolved
+///
+/// **The premise is that a reader which stops reading creates backpressure.** Where it does not,
+/// the producer never parks, the stream completes, and the final assertion here fires with *"a
+/// shed stream must never read as a complete response"* — the whole body arriving with its
+/// trailer intact.
+///
+/// Observed 2026-08-16 on a WSL2 host with 48 GB: reproducible failure, having passed repeatedly
+/// on the same machine and the **same binary** earlier the same day. What was ruled out:
+///
+/// - **Not a code regression.** Bisected to `06c7542`, which predates the artifacts frame, and it
+///   fails there identically.
+/// - **Not kernel socket buffers.** `net.ipv4.tcp_rmem` maxes at 33 554 432 here — not the "~10 MB
+///   combined" above, so the stated margin was already zero. Widening the response to ~78 MB
+///   (zoom 7, which serves every item rather than `tiles × k` of them) did not change the outcome,
+///   which is what rules the kernel out: 2.4× the bytes against a fixed ceiling would have.
+///
+/// What that leaves is buffering above the socket — the HTTP client draining the body into its own
+/// memory while nothing polls it — which no response size defeats. **Fixing it means giving the
+/// test a reader that genuinely refuses to consume**, not a larger response and not more patience.
+/// Until then this is a known-red test on hosts where it reproduces, and it is a real gap: the
+/// stall-shed path it covers is otherwise untested.
 #[tokio::test]
 async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero() {
     const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
