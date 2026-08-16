@@ -330,6 +330,14 @@ pub fn replay<'a>(
             // lives. The rows here already carry their codes, so the buffer needs no binding to
             // read one.
             WalRecord::VocabularyMint { .. } => {}
+            // **The registry is rebuilt by the caller, and only the deny lane is this function's
+            // business.** A layer's own entity is an ordinary entity as far as the overlay is
+            // concerned: a suppression against it arrives as a `ChangeByEntity` and is applied by
+            // the arm above, with no special case, which is the whole reason a layer takes an
+            // entity at all. What these records carry beyond that — the declaration and the
+            // reserved runs — belongs to the registry the write path reconstructs, in the same
+            // second pass as the vocabulary mints and for the same reason.
+            WalRecord::LayerCreate { .. } | WalRecord::LayerDrop { .. } => {}
         }
     }
 

@@ -15,6 +15,10 @@ serde_json = { workspace = true }
 trybuild = { workspace = true }
 
 [features]
-# Off by default: only tessera-lifecycle (the WAL) needs ID newtypes to serialise. Every other
-# crate keeps tessera-types dependency-free of serde.
+# Off by default: the crates that need it are the ones with an on-disk or on-the-wire form —
+# tessera-lifecycle (the WAL), tessera-store (the manifest) and tessera-server (`/v1/meta`), each of
+# which depends on serde anyway. Every other crate keeps tessera-types dependency-free of it.
+#
+# It also gates `layer`, which is a whole module rather than a set of derives: a layer declaration
+# exists only to be written down, so a build without serde has no use for the type at all.
 serde = ["dep:serde"]

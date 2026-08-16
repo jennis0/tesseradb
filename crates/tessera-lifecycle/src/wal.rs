@@ -93,6 +93,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use tessera_types::layer::{LayerDeclaration, ReservedRuns};
 use tessera_types::EntityId;
 
 /// One declared-scalar value carried by a WAL row.
@@ -287,6 +288,37 @@ pub enum WalRecord {
     /// stopped resolving external ids at all: the resolution now happens once, in the handler, at
     /// admission.
     ChangeByEntity { entity_id: EntityId, op: ChangeOp },
+    /// An accepted annotation-layer registration.
+    ///
+    /// **This record is what makes the row-less mark durable**, and that is not incidental to it.
+    /// `alloc::high_water_from` derives the restart seed from `IngestBatch` rows and
+    /// `OverlaySnapshot` entries and from nothing else, so a layer allocation that raised no mark
+    /// would survive a rotation and restart only until the next allocation reissued its ids — two
+    /// entities, one `tessera_id`. [`crate::alloc::low_water_from`] reads this record and this
+    /// record alone, which is why the ids are carried here explicitly rather than being recomputed
+    /// from the declaration: a replay must apply what was decided, not re-derive it.
+    ///
+    /// **The whole declaration travels with it.** A layer's gate, criterion and structure are what
+    /// decide whether it is reachable and what may be served from it, so a registration that
+    /// recorded only the name would come back from replay reachable by everyone.
+    LayerCreate {
+        declaration: LayerDeclaration,
+        /// The layer's own entity, so layer suppression rides `/control/changes` and the deny lane
+        /// unchanged rather than needing a second mechanism.
+        layer_entity: EntityId,
+        /// The reserved runs backing each level, in level order. A layer declaring no levels has
+        /// exactly one entry — its level 0.
+        runs: Vec<ReservedRuns>,
+    },
+    /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
+    /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
+    /// meant something must not come to mean something else.
+    ///
+    /// The ids do not come back either — the allocator is monotone with no free list
+    /// ([decision 0072](../../../docs/decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
+    /// is settled and unbuilt). Reclaiming them is that decision's work, and its condition is that
+    /// the membership-reconciliation clause ships with it.
+    LayerDrop { name: String },
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
@@ -371,7 +403,11 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// adds [`WalScalar::Null`], so the ingest plane can say "this item carries no value for that
 /// column" — appended after `Utf8` because that is where `ScalarValue::Null` sits in the enum this
 /// one mirrors, so no existing discriminant moves and the two still agree variant for variant.
-const WAL_VERSION: u16 = 9;
+/// Version 10 adds [`WalRecord::LayerCreate`] and [`WalRecord::LayerDrop`], appended so no existing
+/// discriminant moves — and the bump is still required, because a version-9 reader meeting a
+/// version-10 log would decode the new variants' bytes as whatever it thinks that index means. A
+/// layer registration decoded as an ingest batch is not a degraded read, it is a corrupt one.
+const WAL_VERSION: u16 = 10;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1567,6 +1603,83 @@ mod tests {
             vec![mint, batch],
             "the mint replays before the batch, and both survive verbatim"
         );
+    }
+
+    #[test]
+    fn a_layer_registration_round_trips_with_its_declaration_and_its_ids() {
+        // The whole declaration has to survive, not just the name: a registration that replayed
+        // carrying only its identity would come back reachable by everyone, since the gate, the
+        // criterion and the own-terms flag are what decide who may see it and what may be served.
+        use tessera_types::layer::{
+            ContentDeclaration, EntityRun, ExistenceCriterion, Hierarchy, HierarchyKind,
+            LayerAccess, LevelDeclaration, MembershipSource, SuppliedContent,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+
+        let create = WalRecord::LayerCreate {
+            declaration: LayerDeclaration {
+                name: "boundaries/uk-2026".into(),
+                title: "UK administrative boundaries".into(),
+                slices: vec!["geographic".into()],
+                membership: MembershipSource::Spatial,
+                access: LayerAccess {
+                    label: Some("public".into()),
+                    artifacts_carry_own: true,
+                },
+                visible_when: Some(ExistenceCriterion::MinVisible(25)),
+                hierarchy: Hierarchy {
+                    kind: HierarchyKind::Stacked,
+                    prune_children: true,
+                },
+                content: ContentDeclaration {
+                    derived: vec!["centroid".into()],
+                    supplied: vec![SuppliedContent {
+                        kind: "polygon".into(),
+                        corpus_derived: false,
+                    }],
+                    on_member_deletion: Default::default(),
+                },
+                depends_on: vec!["clusters/hdbscan-2026-08".into()],
+                levels: vec![
+                    LevelDeclaration {
+                        level: 0,
+                        title: "LSOA".into(),
+                        zoom: Some((12, 16)),
+                    },
+                    LevelDeclaration {
+                        level: 1,
+                        title: "LAD".into(),
+                        zoom: None,
+                    },
+                ],
+            },
+            layer_entity: EntityId::new(4_294_901_759),
+            runs: vec![
+                ReservedRuns::from_runs(vec![EntityRun {
+                    start: 4_294_836_224,
+                    end: 4_294_901_760,
+                }]),
+                ReservedRuns::from_runs(vec![EntityRun {
+                    start: 4_294_770_688,
+                    end: 4_294_836_224,
+                }]),
+            ],
+        };
+        let dropped = WalRecord::LayerDrop {
+            name: "clusters/old".into(),
+        };
+
+        let (mut wal, replayed) = Wal::open(&path).unwrap();
+        assert!(replayed.is_empty());
+        wal.append(&create).unwrap();
+        wal.append(&dropped).unwrap();
+        wal.fsync().unwrap();
+        drop(wal);
+
+        let (_wal, replayed) = Wal::open(&path).unwrap();
+        assert_eq!(replayed, vec![create, dropped]);
     }
 
     /// Overwrite `[from, to)` with zeroes through a second handle, standing in for pages a failed

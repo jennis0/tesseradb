@@ -1,6 +1,15 @@
 mod identity;
 pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
+/// The annotation layer declaration, shared by the WAL record that makes a registration durable,
+/// the manifest section that carries it, and the gate-filtered `/v1/meta` view.
+///
+/// Behind the `serde` feature because it exists only to be serialised — a declaration nobody can
+/// write down is not a declaration. That is a different reason from the ID newtypes', which are
+/// useful without it, and it is why this module is gated as a whole rather than per-derive.
+#[cfg(feature = "serde")]
+pub mod layer;
+
 /// Macro for creating ID newtypes with no cross-space conversions (invariant I4).
 /// Each type gets new(raw) and raw(self) methods, with derives Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug.
 /// Under the (off-by-default) `serde` feature, also derives `Serialize`/`Deserialize`

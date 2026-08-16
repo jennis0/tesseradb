@@ -10,16 +10,26 @@
 //! [`command`] is the write-executor vocabulary and [`window`] the commit window it is gathered
 //! into. The executor thread that consumes both lives in `tessera-engine`, not here: only that
 //! crate can see both a `Wal` and a `Generation`.
+//!
+//! [`registry`] is the annotation layer registry — what layers exist, what they declared, and who
+//! may know it. It lives here rather than in the engine because a layer's identity is durable state
+//! recovered by replay, which is exactly what this crate is: its records sit in the same log, its
+//! entities come from the same allocator, and its suppressions ride the same overlay.
 
 pub mod alloc;
 pub mod buffer;
 pub mod command;
 pub mod faults;
 pub mod overlay;
+pub mod registry;
 pub mod wal;
 pub mod window;
 
-pub use alloc::{assign_sorted, high_water_from, Allocator, PendingItem};
+pub use alloc::{
+    allocator_ceiling, allocator_floor, assign_sorted, high_water_from, low_water_from, Allocator,
+    PendingItem,
+};
+pub use registry::{LayerRegistry, RegisteredLayer, RegistryError, ResolvedLayers};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 pub use faults::WalMeter;
