@@ -126,14 +126,17 @@ impl Arm {
 /// **Built through `Bitmap` exactly as the shipped path does**, including `run_optimize` on the
 /// contiguous arm — the write path's serialisation runs it, so a probe that skipped it would
 /// measure a representation nothing stores.
-fn membership(arm: Arm, members: u32, rng: &mut Rng) -> Bitmap {
+fn membership(arm: Arm, members: u32, runs: u32, rng: &mut Rng) -> Bitmap {
     let mut bitmap = Bitmap::new();
     match arm {
         Arm::Runs => {
-            // Four runs, so the shape is contiguous without being one degenerate interval.
-            const RUNS: u32 = 4;
-            let per_run = (members / RUNS).max(1);
-            for _ in 0..RUNS {
+            // `runs` contiguous stretches. **This is the parameter the whole cost turns on**, and
+            // it is what the id space decides: a spatially coherent cluster is a handful of runs in
+            // Morton-ranked row space, and one run per *signature group* it touches in
+            // signature-ranked entity space (rep §2.1). Sweeping it is how a caller reads off the
+            // cost of either form.
+            let per_run = (members / runs.max(1)).max(1);
+            for _ in 0..runs.max(1) {
                 let start = rng.below(ROW_SPACE - per_run as u64);
                 bitmap.add_range(start as u32..(start as u32).saturating_add(per_run));
             }
@@ -149,12 +152,12 @@ fn membership(arm: Arm, members: u32, rng: &mut Rng) -> Bitmap {
 }
 
 /// Measure one `(arm, n)` and print its row. **One configuration per process** — see [`main`].
-fn measure_one(arm: Arm, n: u64, members: u32) {
+fn measure_one(arm: Arm, n: u64, members: u32, runs: u32) {
     let baseline = resident_bytes();
     let mut population: Vec<Bitmap> = Vec::with_capacity(n as usize);
     let mut rng = Rng(0x5EED);
     for _ in 0..n {
-        population.push(membership(arm, members, &mut rng));
+        population.push(membership(arm, members, runs, &mut rng));
     }
     let resident = resident_bytes().saturating_sub(baseline);
 
@@ -170,8 +173,9 @@ fn measure_one(arm: Arm, n: u64, members: u32) {
 
     let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     println!(
-        "{:<10} {:>12} {:>14.1} {:>14.1} {:>8.2} {:>14} {:>10.1}",
+        "{:<10} {:>6} {:>12} {:>14.1} {:>14.1} {:>8.2} {:>14} {:>10.1}",
         arm.name(),
+        if arm == Arm::Runs { runs.to_string() } else { "—".to_string() },
         n,
         mb(serialised),
         mb(resident),
@@ -202,7 +206,12 @@ fn main() {
             Some("scattered") => Arm::Scattered,
             other => panic!("--arm takes runs|scattered, got {other:?}"),
         };
-        measure_one(arm, flag("--artifacts", 10_000), members);
+        measure_one(
+            arm,
+            flag("--artifacts", 10_000),
+            members,
+            flag("--runs", 4) as u32,
+        );
         return;
     }
 
@@ -219,8 +228,8 @@ fn main() {
     );
     println!();
     println!(
-        "{:<10} {:>12} {:>14} {:>14} {:>8} {:>14} {:>10}",
-        "arm", "artifacts", "serialised MB", "resident MB", "ratio", "containers", "B/cont"
+        "{:<10} {:>6} {:>12} {:>14} {:>14} {:>8} {:>14} {:>10}",
+        "arm", "runs", "artifacts", "serialised MB", "resident MB", "ratio", "containers", "B/cont"
     );
 
     // **One configuration per process, and this is a correction rather than tidiness.** A first
@@ -230,6 +239,7 @@ fn main() {
     // an allocator that has not already been handed the space, which a fresh process is the only
     // cheap way to guarantee.
     let exe = std::env::current_exe().expect("this probe re-runs itself per configuration");
+    let runs = flag("--runs", 4) as u32;
     for arm in ["runs", "scattered"] {
         let mut n = 10_000u64;
         while n <= max_artifacts {
@@ -241,6 +251,8 @@ fn main() {
                     &n.to_string(),
                     "--members",
                     &members.to_string(),
+                    "--runs",
+                    &runs.to_string(),
                 ])
                 .status()
                 .expect("child measurement");
@@ -248,9 +260,9 @@ fn main() {
                 // A child that dies is almost always the OOM killer at the top of a sweep, which is
                 // itself a result: say so rather than printing a row that is not a measurement.
                 println!(
-                    "{:<10} {:>12}   — child exited {status}; at this scale the population does \
-                     not fit in this machine's memory",
-                    arm, n
+                    "{:<10} {:>6} {:>12}   — child exited {status}; at this scale the population \
+                     does not fit in this machine's memory",
+                    arm, runs, n
                 );
                 break;
             }

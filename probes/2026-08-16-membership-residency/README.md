@@ -30,6 +30,47 @@ membership is contiguous, 7.8× where it is scattered.
 **The pessimistic arm does not fit at that scale at all**: extrapolating the flat 7.79× gives ~75 GB
 against 41 GB available, and the process is killed rather than merely slow.
 
+## The cost is linear in runs per artifact, and that is the whole lever
+
+One million artifacts, one hundred members each, every row — only contiguity changes:
+
+| runs/artifact | serialised MB | resident MB | B/container |
+|---:|---:|---:|---:|
+| 1 | 14.3 | 129.8 | 135.9 |
+| 2 | 23.9 | 190.9 | 100.0 |
+| 4 | 58.2 | 358.7 | 94.0 |
+| 8 | 111.6 | 694.2 | 91.0 |
+| 16 | 219.3 | 1 350.0 | 88.5 |
+| 32 | 434.6 | 2 660.6 | 87.3 |
+| 64 | 617.0 | 5 274.0 | 86.6 |
+| 100 | 958.8 | 7 464.8 | 78.5 |
+
+**Same artifacts, same members, 57× the memory.** So the working model is
+
+```text
+resident ≈ 90 B × artifacts × runs per artifact
+```
+
+and the only term anyone can move is the last. At 100 members in 100 runs the row converges on the
+`scattered` arm to within 0.1 MB, which is the check that the two arms are one model.
+
+### Which makes the *entity* form the expensive copy, not the row form
+
+The engine holds both: the durable entity-space store and the derived row-space projection. §2.1
+measures the two id spaces on the real corpus and the shipped `(signature, morton)` allocation puts
+entity-space membership at **2.181 MB against row space's 0.185 MB — 11.8×**. Bytes track runs in
+the table above, so that is ~12× the runs and therefore **~12× the memory**.
+
+⊘ **Derived, not measured.** The 90 B/run rule and the 57× spread are measured here; the 11.8× is
+measured by the storage campaign; that the product is ~12× resident is an inference from the two.
+Measuring the entity form directly — real corpus, real signatures, real clustering, container counts
+from both forms — is what would settle it, and it is worth doing before spending on a mapped reader.
+
+**The consequence for packaging.** Mapping the durable form removes the larger copy, not the smaller
+one: roughly 92% of the memory rather than the ~50% a two-equal-copies reading suggests. Conversely,
+persisting the *row* form — having the fold emit it so startup maps rather than computes it — buys a
+saving on the cheap copy and pays for it on the fold, which is the wrong trade on these numbers.
+
 ## What the per-container constant means
 
 A run container holding 25 members and an array container holding one cost the same ~80–94 bytes

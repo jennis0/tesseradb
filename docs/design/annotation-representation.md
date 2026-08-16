@@ -1230,6 +1230,12 @@ and needs nothing.)
   replace. `slices-and-multi-table.md` §3 exists to price per-slice multipliers and does not carry
   this one. **The row-space choice earns its keep twice over**: §2 justifies it on storage, and the
   same contiguity pays again in RAM at a constant the storage argument did not predict.
+  The working model is `resident ≈ 90 B × artifacts × runs per artifact`, linear over 1–100 runs
+  and 57× end to end, so **runs per artifact is the only term anyone can move**. ⊘ **Which makes the
+  entity form the expensive resident copy, and it is not directly measured**: §2.1's 11.8× between
+  the id spaces implies ~12× the runs and so ~12× the memory of the row form the engine derives
+  beside it. That inference decides whether a mapped durable form is worth building, and it should
+  be measured on the real corpus before it is.
 - **Reach's size** (§3), which the deleted assignment-column framing had made look free.
 - **Predicate evaluation needs a per-request bound** (§2.0).
 - **Projecting a whole level** rather than a mask.
