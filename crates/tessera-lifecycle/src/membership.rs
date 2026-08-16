@@ -492,6 +492,77 @@ impl ArtifactStore {
         (ready, skipped)
     }
 
+    /// Every level's artifacts **whole**, with `retired` dropped from each membership — what the
+    /// fold repacks into the prefix it is publishing.
+    ///
+    /// **Not [`Self::unpublished`] with a wider range.** A fold publishes a new prefix and extent
+    /// paths are prefix-relative, so every artifact has to be written again whether or not it was
+    /// already durable somewhere else; the high-water this rewrite leaves behind is the level's own
+    /// length. It is also not a copy: a fold retires entities, and a membership carried forward
+    /// unchanged goes on counting members that no longer exist — in the very size the proportional
+    /// existence criterion divides by.
+    ///
+    /// **`retired` is the fold's executed deletions and nothing else.** A *suppressed* member stays
+    /// in the set: a suppression retires only on unsuppress and never touches a stored structure
+    /// (Rule S), so dropping its bit here would give it a second retirement route, which is
+    /// fail-open. And a variation's generating set is untouched in both cases — `G` is immutable
+    /// (`annotation-write-cycle.md` §3.2), and what a deleted member does to supplied content is the
+    /// layer's strict/permissive declaration to decide, not this repack's.
+    ///
+    /// A level with a hole is reported rather than packed around, exactly as in
+    /// [`Self::unpublished`] — but the consequence differs and the caller must not treat it as a
+    /// skip: an extent this rewrite omits is a level the new prefix does not carry at all, whose
+    /// artifacts come back registered, addressable and served as absent.
+    pub fn repack_all(&self, retired: &Bitmap) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
+        let mut ready = Vec::new();
+        let mut holed = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            if slots.is_empty() {
+                continue;
+            }
+            if slots.iter().any(Option::is_none) {
+                holed.push((layer.clone(), *level));
+                continue;
+            }
+            let blobs: Vec<Vec<u8>> = slots
+                .iter()
+                .map(|slot| {
+                    let record = slot.as_ref().expect("checked dense just above");
+                    if retired.is_empty() {
+                        return encode_record(record);
+                    }
+                    let mut record = record.clone();
+                    record.members.andnot_inplace(retired);
+                    encode_record(&record)
+                })
+                .collect();
+            ready.push((layer.clone(), *level, 0, blobs));
+        }
+        (ready, holed)
+    }
+
+    /// Drop `retired` from every membership in place, so the resident copy says what the prefix the
+    /// fold just published says.
+    ///
+    /// Called **after** the flip, for the reason [`Self::mark_published`] is: until the manifest
+    /// naming the rewritten extents is durable, the old prefix is still what a restart would open.
+    /// The two copies disagreeing in the interim is fail-closed either way — a retired entity is
+    /// denied, so it contributes to no masked count from either — but the *declared* size the
+    /// proportional criterion divides by is read from this copy, and it should be the published one.
+    pub fn retire_members(&mut self, retired: &Bitmap) {
+        if retired.is_empty() {
+            return;
+        }
+        for slots in self.levels.values_mut() {
+            for slot in slots.iter_mut().flatten() {
+                slot.members.andnot_inplace(retired);
+            }
+        }
+        // A membership that changed shape invalidates every row-space projection built from it, and
+        // a projection is only ever keyed by this version.
+        self.version += 1;
+    }
+
     /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
     ///
     /// **Tags are `variation × kinds + kind`, positions in the artifact's own layer declaration** —

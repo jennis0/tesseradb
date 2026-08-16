@@ -1513,6 +1513,12 @@ impl LiveState {
         }
     }
 
+    /// Drop the fold's executed deletions from every resident membership — the second half of the
+    /// artifact pass, applied once the prefix carrying the rewritten extents is live.
+    fn retire_artifact_members(&self, retired: &croaring::Bitmap) {
+        lock_recover(&self.artifacts).retire_members(retired);
+    }
+
     /// Where an entity sits: `(layer, level, ordinal)`. Addressing only — see
     /// [`LayerRegistry::locate`].
     pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
@@ -2263,6 +2269,7 @@ impl WritePath {
                     live,
                     generation,
                     row_projection_cache,
+                    artifact_projections: flush.artifact_projections,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -3138,6 +3145,12 @@ pub(crate) struct MaintenanceDeps {
     pub(crate) refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy — see [`crate::merge`].
     pub(crate) merge: MergePolicy,
+    /// The artifact row forms, shared for the one thing this thread does with them: rebuilding
+    /// every level's projection **inside** the fold that invalidated it
+    /// (`annotation-representation.md` §5.0.3). A level is a deployment-wide artefact rather than a
+    /// per-session value, so leaving it to the first request after the flip is a stall of tens of
+    /// seconds for whoever arrives first.
+    pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
@@ -3932,6 +3945,9 @@ struct Executor {
     /// projections of generations now older than the retention depth. Runs at the swap — see
     /// `RowProjectionCache::prune_generations_below`.
     row_projection_cache: Arc<RowProjectionCache>,
+    /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
+    /// [`MaintenanceDeps::artifact_projections`].
+    artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -5189,6 +5205,9 @@ impl Executor {
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
         let retired_count = executed.cardinality();
+        // Allocated here rather than beside the manifest write, so the artifact pass below can name
+        // its files after the publication that introduces them — one sequence, not two.
+        let manifest_n = self.allocate_manifest_n();
 
         // ---- step 3: the merge-size relation, against the fold's own output --------------------
         //
@@ -5212,7 +5231,7 @@ impl Executor {
             }
         }
 
-        // ---- step 3a: artifacts, which this fold cannot carry ----------------------------------
+        // ---- step 3a: the artifact pass --------------------------------------------------------
         //
         // **A fold publishes a new prefix, and membership extent paths are prefix-relative.** So
         // there are three things this could do with them and two are wrong: carrying the paths
@@ -5220,30 +5239,30 @@ impl Executor {
         // open; dropping them loses every membership silently, and the artifacts come back
         // registered, still addressable, and served as absent.
         //
-        // The third is to rebuild them — which is `annotation-representation.md` §5.0.3's **fold
-        // artifact pass**, allocated to Stage 4 and explicitly its first measurement rather than its
-        // last. It is not a copy: the fold retires deleted entities, so a carried-forward membership
-        // keeps counting members that no longer exist in the size the proportional criterion divides
-        // by.
+        // The third — and this is `annotation-representation.md` §5.0.3's artifact pass — is to
+        // write them again, into the prefix being published, from the resident entity-space store.
+        // **Entity space is what makes that a rewrite rather than a translation**: entity ids do not
+        // move at a fold, only rows do, so the durable form needs no remapping and the derived row
+        // form is rebuilt from it afterwards.
         //
-        // Until it exists this refuses, on step 3's own precedent. **A node that has published
-        // artifacts therefore stops folding**, which is a real cost stated plainly: segment count
-        // and tombstone load grow until Stage 4 lands.
-        if self
-            .membership_extents
-            .iter()
-            .any(|extent| extent.count > 0)
-        {
-            self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                extents = self.membership_extents.len(),
-                "ALARM: this node holds published artifact memberships and the fold's artifact \
-                 pass is not built, so the fold is discarded rather than publishing a prefix whose \
-                 membership extents name nothing. Artifacts and points are both unaffected; what \
-                 is deferred is compaction, until the artifact pass lands"
-            );
-            return;
-        }
+        // It is still not a copy. The fold retires entities, and a membership carried forward
+        // unchanged goes on counting members that no longer exist — in the size the proportional
+        // existence criterion divides by. `repack_all` drops exactly the executed deletions and
+        // nothing else: a suppressed member keeps its bit (Rule S), and no generating set is
+        // touched at all.
+        let to_prefix_dir = self.bundle_root.join(&completed.prefix);
+        let repacked = match self.rewrite_membership_extents(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &executed,
+        ) {
+            Ok(repacked) => repacked,
+            Err(e) => {
+                discard(&format!("its artifact memberships would not be rewritten ({e})"));
+                return;
+            }
+        };
 
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
@@ -5270,6 +5289,16 @@ impl Executor {
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
 
+        // **The registry comes from the registry, not from the manifest beside it.** A layer
+        // registration and an artifact publication write a *side* manifest and do not swap the
+        // generation, so the manifest this fold is holding can be several publications behind —
+        // and a fold that copied its (empty) layer list would publish a prefix whose membership
+        // extents name layers it does not declare. Every one of them is then skipped at open as a
+        // dropped layer's leftovers, and every artifact comes back absent with no error anywhere.
+        // The online publication path takes the same posture for the same reason.
+        let (registered_layers, registered_tombstones, registry_low_water) =
+            self.live.registry_for_publication();
+
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
             // index. A flush publishing during the fold indexed entities the new base does not
@@ -5290,15 +5319,15 @@ impl Executor {
             // holds. And the registry has to travel with it: rotation reclaims the WAL records the
             // mark is otherwise recovered from, so a fold that published an empty list would lose
             // every gate at the next restart while the layers themselves kept being referenced.
-            entity_id_low_water: live_manifest.entity_id_low_water,
-            layers: live_manifest.layers.clone(),
-            layer_tombstones: live_manifest.layer_tombstones.clone(),
-            // Carried forward verbatim, and reachable only because the guard in step 3a refused
-            // this publication if the list is non-empty. See that guard: the paths are
-            // prefix-relative and the fold publishes a *new* prefix, so carrying them without
-            // copying the files would name nothing.
-            membership_extents: live_manifest.membership_extents.clone(),
-            artifact_record_extents: Vec::new(),
+            entity_id_low_water: live_manifest.entity_id_low_water.min(registry_low_water),
+            layers: registered_layers,
+            layer_tombstones: registered_tombstones,
+            // **The pass's own output, not the live list.** The paths are prefix-relative and the
+            // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
+            // files this prefix contains. The content extents beside it are carried by link, their
+            // bytes being the same inodes under a second name.
+            membership_extents: repacked.clone(),
+            artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
             // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
@@ -5455,8 +5484,23 @@ impl Executor {
 
         // ---- step 4: link, write, write, flip --------------------------------------------------
         let from_prefix_dir = self.prefix_dir(&live);
-        let to_prefix_dir = self.bundle_root.join(&completed.prefix);
-        let carried_rels: Vec<String> = carried_rels.into_iter().collect();
+        let mut carried_rels: Vec<String> = carried_rels.into_iter().collect();
+        // **The artifacts' content extents are linked and not digested**, which is the one place
+        // this set is not uniform. They carry no entry in either manifest's `files` — nothing
+        // digests them at their own publication — so putting them through the loop above would
+        // discard every fold on a node that has ever published supplied content. They are linked
+        // here, after it, and the digest question is theirs to answer wherever it is answered for
+        // the online route. An artifact whose content the new prefix does not carry is not served
+        // without its description: it is **withheld** (decision 0076), so losing these is losing the
+        // artifacts.
+        // **From the held list, not from the manifest beside it** — the same stale-generation trap
+        // the registry above falls into: a side-manifest write does not swap the generation, so the
+        // manifest this fold holds names only the content extents that existed at the last one.
+        for extent in &self.artifact_record_extents {
+            carried_rels.push(extent.blocks.clone());
+            carried_rels.push(extent.hasrow.clone());
+            carried_rels.push(extent.directory.clone());
+        }
         if let Err(e) =
             tessera_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
         {
@@ -5496,7 +5540,6 @@ impl Executor {
                     return;
                 }
             };
-        let manifest_n = self.allocate_manifest_n();
         if let Err(e) = self.commit_side_manifest(
             live_manifest,
             &to_prefix_dir,
@@ -5525,6 +5568,10 @@ impl Executor {
         }
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
+        //
+        // Cloned because the rotation consumes it, and the artifact pass's second half — dropping
+        // the same entities from the resident memberships — runs after the swap below.
+        let retired = executed.clone();
         let rotation = crate::session::open_rotation(
             &self.bundle_root,
             &completed.prefix,
@@ -5598,6 +5645,32 @@ impl Executor {
             );
             return;
         }
+
+        // **The row forms, rebuilt here rather than by whoever arrives first.** Row space renumbers
+        // globally at a fold, so every projection built over the old one is invalid at the flip —
+        // and a level is a deployment-wide artefact rather than a per-session value, so the
+        // first-toucher rebuild a session mask can absorb would be a stall of tens of seconds on
+        // whichever request arrived next (`annotation-representation.md` §5.0.3). It is the same
+        // construction the request path runs, on the permutation this fold has just written:
+        // measured at 32.8 s threaded for 10⁷ artifacts over 10⁹ rows
+        // (`probes/2026-08-16-fold-artifact-pass/`).
+        //
+        // **After the swap, and that ordering is what makes it a warm rather than a race.** The
+        // projections are keyed by prefix, segments version and store version; building them before
+        // the generation is live would key them to a generation no reader can ask for, and every
+        // one would be rebuilt on first use anyway.
+        self.warm_artifact_projections();
+
+        // **The artifact pass's second half, and it is deliberately after the swap.** The prefix
+        // naming the rewritten extents is live, so the resident memberships may now be brought to
+        // what it says: the executed deletions leave them, every level counts as durable to its
+        // full extent, and the held list is replaced rather than extended — the next online
+        // publication assigns from it, and one that still carried the superseded prefix's paths
+        // would name files nothing contains. The interim is fail-closed in both copies: a retired
+        // entity is denied, so it was already outside every masked count.
+        self.live.retire_artifact_members(&retired);
+        self.live.mark_memberships_published();
+        self.membership_extents = repacked;
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -8101,6 +8174,113 @@ impl Executor {
         }
         tessera_store::fsync_dir(&dir)?;
         Ok(Some(extent))
+    }
+
+    /// The fold's artifact pass: write **every** level whole into the prefix being published, with
+    /// the fold's executed deletions dropped from each membership.
+    ///
+    /// The returned list replaces the manifest's, rather than extending it: one extent per level,
+    /// covering `[0, len)`, so the accumulated extents of every earlier publication collapse into
+    /// one file each and the prefix names nothing it does not contain.
+    ///
+    /// **A level with a hole refuses the whole fold**, where the append-only path merely skips it.
+    /// The asymmetry is the consequence: a skipped publication leaves the level's earlier extents
+    /// standing and retries at the next tick, while a level this rewrite omits is one the new prefix
+    /// has no extent for at all — its artifacts come back registered, addressable, and served as
+    /// absent. Nothing produces a hole today; this is what happens if something starts to.
+    fn rewrite_membership_extents(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        retired: &croaring::Bitmap,
+    ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+        let (ready, holed) = self.live.with_artifacts(|store| store.repack_all(retired));
+        if let Some((layer, level)) = holed.first() {
+            return Err(tessera_store::StoreError::MalformedBundle {
+                detail: format!(
+                    "{layer} level {level} has a hole in its ordinals, so the fold cannot rewrite \
+                     its memberships — an extent addresses a dense range, and a level this pass \
+                     omits comes back served as absent"
+                ),
+            });
+        }
+        if ready.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        let mut entries = Vec::with_capacity(ready.len());
+        for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+            // The same naming rule the online route follows: the layer name is path-shaped and
+            // never reaches a filename; the publication that introduced the file does.
+            let name = format!("members-{n:06}-{index:03}.tsmb");
+            let count = blobs.len() as u32;
+            let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
+            tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
+            entries.push(tessera_store::manifest::MembershipExtent {
+                path: format!("partitions/{partition}/members/{name}"),
+                layer,
+                level,
+                ordinal_lo,
+                count,
+            });
+        }
+        tessera_store::fsync_dir(&dir)?;
+        Ok(entries)
+    }
+
+    /// Rebuild every level's row-space membership against the live generation.
+    ///
+    /// Called at the fold's own publication, on this thread, for the reason §5.0.3 gives: the
+    /// alternative is not a cache miss but a stall, and it lands on a request rather than on
+    /// maintenance. Cheap everywhere else — a deployment with no artifacts iterates nothing.
+    ///
+    /// **Errors are impossible to have here and absences are not**: a slice the generation does not
+    /// carry is simply not warmed, and its first request builds what it needs, which is the same
+    /// outcome this method exists to avoid but not a wrong one.
+    fn warm_artifact_projections(&self) {
+        let generation = self.generation.load_full();
+        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
+            store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .collect()
+        });
+        if levels.is_empty() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let store_version = self.live.with_artifacts(|store| store.version());
+        let mut built = 0usize;
+        for partition in generation.bundle.partitions.values() {
+            for (slice, slice_data) in &partition.slices {
+                for (layer, level) in &levels {
+                    self.live.with_artifacts(|store| {
+                        self.artifact_projections.get_or_build(
+                            &generation.prefix,
+                            generation.segments_version,
+                            slice,
+                            layer,
+                            *level,
+                            store,
+                            store_version,
+                            &slice_data.row_space,
+                        )
+                    });
+                    built += 1;
+                }
+            }
+        }
+        tracing::info!(
+            projections = built,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "the fold's artifact pass rebuilt every level's row form"
+        );
     }
 
     /// Pack every not-yet-published membership into one extent per level and fsync it, returning

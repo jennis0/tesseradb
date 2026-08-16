@@ -43,7 +43,7 @@ delete.
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
 | **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
 | **3** Content — derived, supplied, containment | **done** 2026-08-16 (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. Layers, levels and bulk publication are definable at build time as well as online |
-| **4** The write cycle | not started; [handed over](artifact-stage-4-handover.md) | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — . **Its first job is the fold's artifact pass**, not its last: a bundle carrying artifacts does not fold at all, and since Stage 3 that includes every bundle built with them |
+| **4** The write cycle | in progress (`artifacts/stage-4`); [handed over](artifact-stage-4-handover.md) | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | **the fold's artifact pass is measured and built** — a node holding artifacts folds, its memberships are rewritten into the new prefix minus what the fold retired, its content is carried, and the row forms are rebuilt inside the fold ([the probe](../probes/2026-08-16-fold-artifact-pass/README.md); five tests). Two stale-manifest defects found in the doing, both of the class that has bitten twice. Everything else in the stage is open — Rule F's artifact arm, the three row-operator arms, the report sweep, the declaration, `plan_fold`'s budget |
 | **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
@@ -461,14 +461,11 @@ retired.
     - The one refusal that has no build-plane meaning is publish-time validation against the deny
       lane: a bundle straight out of `tessera build` has no overlay, so no declared member can be
       deleted yet.
-    - ⊘ **A bundle built with artifacts never folds, from its first open** — and this is the build
-      plane's sharpest cost, found by review 2026-08-16. The fold's refusal on published artifact
-      memberships (Stage 2's, still open) keys on the memberships being *there*, not on their
-      having arrived online, so a built bundle enters that state having taken no control-plane
-      call. The bundles this route exists for — 10⁷ artifacts — are therefore exactly the ones
-      that will never compact until Stage 4's fold artifact pass lands. An operator sees segment
-      count and tombstone load grow, `fold_failures` climb, and an alarm naming published artifact
-      memberships on a node nobody published into.
+    - ✔ **A bundle built with artifacts folds** — it did not, from its first open, which was the
+      build plane's sharpest cost when review 2026-08-16 found it: the fold's refusal keyed on
+      published memberships being *there* rather than on their having arrived online, so the
+      bundles this route exists for were exactly the ones that could never compact. Stage 4's
+      artifact pass rewrites them instead, and it does not care which route wrote them.
   - Found in the doing: **a generating set can lose members on the way into row space.** The set is
     entity-space and permanent; row space holds only what this slice has folded in, so a member
     awaiting a fold projects to nothing and drops silently out of the test — leaving a viewer
@@ -707,10 +704,12 @@ things are true of that state, and conflating them is how a fail-open ships:
 - **Ingest is safe and stale.** A member ingested since the last fold has no bit in the row form, so
   every count **understates** — fail-closed, and the same posture as a buffered point being
   invisible until its flush.
-- **A fold is unsound.** Row space renumbers globally, so every resident membership form is
-  meaningless at the flip. Until Stage 4's pass exists, `plan_fold` **refuses** when any layer is
-  present, and says why. A loud refusal is the only acceptable placeholder; stale-serve is not one
-  here, and `compaction.md` §6.2 already says so for this class of artefact.
+- **A fold was unsound and is not any more.** Row space renumbers globally, so every resident
+  membership form is meaningless at the flip — which is why the fold refused outright while the
+  pass was missing, rather than serving stale (`compaction.md` §6.2 says so for this class of
+  artefact). Stage 4's pass replaced the refusal: the durable form is rewritten into the new prefix
+  from entity space, and the row forms are rebuilt inside the fold. What the pass does not yet do is
+  tell `plan_fold` what it costs.
 
 ## 5. The test data
 

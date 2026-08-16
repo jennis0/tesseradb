@@ -2158,6 +2158,7 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
+                artifact_projections: Arc::clone(&self.artifact_projections),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2213,6 +2214,7 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
+                artifact_projections: Arc::clone(&self.artifact_projections),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.

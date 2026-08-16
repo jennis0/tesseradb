@@ -16,35 +16,38 @@ re-base generating sets into row space, which returned the withheld label at the
 set that no longer named what its text was derived from. That is the fail-open the write cycle was
 commissioned to close, and it is the shape to keep testing for.
 
-## Start here: the fold's artifact pass
+## Done: the fold's artifact pass
 
-**A node holding published artifact memberships does not fold at all today** — `publish_fold` step
-3a discards the fold and alarms, because a fold publishes a new prefix and membership extent paths
-are prefix-relative. Three things could be done with them and two are wrong: carrying the paths
-forward names files the new prefix does not contain and the bundle refuses at its next open;
-dropping them loses every membership silently, and the artifacts come back registered, addressable
-and served as absent.
+**A node holding artifacts folds now**, which it did not before — and since Stage 3 that state was
+every bundle built with `tessera build --artifacts`, so the 10⁷-artifact bundles the build plane
+exists for were exactly the ones that could never compact.
 
-**Stage 3 widened this from a state a deployment entered deliberately to one every bundle built with
-artifacts is in at its first open.** The build plane writes membership extents directly
-(`tessera build --artifacts`), and the fold keys on the extents being present, not on how they
-arrived — so the bundles the build plane exists for, the 10⁷-artifact ones, are exactly the ones
-that will never compact. Segment count and tombstone load grow, `fold_failures` climbs, and the
-alarm names published artifact memberships on a node nobody published into. **That is why this pass
-is the stage's first job and not its last.**
+**The measurement it owed is run** ([the probe](../probes/2026-08-16-fold-artifact-pass/README.md))
+and settled the construction: project each artifact's entity-space membership through the new
+`permutation.bin`. Half the posed comparison dissolved first — there is no `old_row → new_row` table
+to scatter-build, because membership is entity-canonical and old rows never enter the pass. Against
+riding pass 1 it costs +3.5 GB rather than +9.2 GB, in page cache rather than anonymous memory, and
+it threads where riding cannot: 32.8 s on eight threads against 101.3 s at 10⁹ rows and 10⁷
+artifacts, linear in rows across three decades.
 
-It is not a copy: the fold retires deleted entities, so a carried-forward membership goes on
-counting members that no longer exist in the size the proportional criterion divides by.
+What `publish_fold` does at step 3a: rewrites every level whole into the prefix it is publishing,
+one extent per level, dropping the fold's **executed deletions** from each membership and nothing
+else — a suppressed member keeps its bit (Rule S) and no generating set is touched. The content
+extents are carried by hard link beside them, and the row forms are rebuilt inline after the swap
+rather than left to whoever arrives first. Five tests in `artifact_fold.rs`.
 
-**The measurement it owed is run** ([the probe](../probes/2026-08-16-fold-artifact-pass/README.md),
-2026-08-16), and it settles the construction: **project each artifact's entity-space membership
-through the new `permutation.bin`** — `ArtifactRows::build`'s own construction, run inside the fold.
-Half the posed comparison dissolved first: there is no `old_row → new_row` table to scatter-build,
-because membership is entity-canonical and old rows never enter the pass. Against riding pass 1 it
-costs +3.5 GB rather than +9.2 GB, in page cache rather than anonymous memory, and it threads where
-riding cannot — 32.8 s on eight threads against 101.3 s at 10⁹ rows and 10⁷ artifacts, linear in
-rows. `plan_fold` must still learn about the pass: **a pass it does not budget for is one it cannot
-refuse.**
+**Two stale-manifest defects were found in the doing, both of the class below.** The fold took its
+layer registry from the live manifest, which a side-manifest write does not refresh — so it
+published a prefix whose membership extents named layers it did not declare, every extent was
+skipped at open as a dropped layer's leftovers, and **every artifact came back absent with no error
+anywhere**. The content extents had the same shape one field over. Both now read the executor's held
+state, which is the posture the online route already takes.
+
+**Still owed here:** `plan_fold` must learn what the pass costs — **a pass it does not budget for is
+one it cannot refuse**. The measured input is the residency model: ~90 B per Roaring container, so
++3.5 GB for 10⁷ artifacts of four runs each. What the planner cannot see is the container count, and
+inventing a constant for it would be worse than the gap; the honest options are to count containers
+from the resident store at plan time or to charge per declared member.
 
 ## What Stages 1–3 leave you
 
@@ -74,7 +77,8 @@ refuse.**
 
 ## What will bite you
 
-**The stale manifest, which has bitten twice.** Both publication paths clone the *live generation's*
+**The stale manifest, which has now bitten four times** — twice in Stage 3's content work and twice
+in the fold's artifact pass, where it cost the layer registry and the content extent list. Both publication paths clone the *live generation's*
 manifest, and a side-manifest write does not swap the generation — so a list that is *extended* on
 the clone loses every earlier publication's entries. `membership_extents` and
 `artifact_record_extents` are therefore held complete on the executor and **assigned**, never
