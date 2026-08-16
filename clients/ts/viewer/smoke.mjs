@@ -32,13 +32,49 @@ page.on('console', (m) => {
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 page.on('response', (r) => {
   const u = new URL(r.url());
-  if (u.pathname.startsWith('/v1/') || u.pathname.startsWith('/session/')) {
-    requests.push({path: u.pathname, status: r.status()});
+  if (!u.pathname.startsWith('/v1/') && !u.pathname.startsWith('/session/')) return;
+  // **Which channel asked**, because the viewer has two that both post to `/v1/viewport`: the
+  // point path, and the annotation channel that asks for artifacts alone (`k = 0`, a named layer).
+  // Counting them together made a layer's own request read as a colour change refetching marks.
+  let artifacts = false;
+  try {
+    const body = JSON.parse(r.request().postData() ?? '{}');
+    artifacts = Array.isArray(body.layers) && body.layers.length > 0;
+  } catch {
+    // A GET, or a body that is not JSON. Neither is the artifact channel.
   }
+  requests.push({path: u.pathname, status: r.status(), artifacts});
 });
 
 await page.goto(url, {waitUntil: 'load'});
 await page.waitForTimeout(settleMs);
+
+/**
+ * Wait until the picture stops changing, rather than for a fixed interval.
+ *
+ * **Every figure this script compares is only meaningful once the load has settled.** A broad
+ * principal on a large bundle streams bands for tens of seconds, so a fixed wait samples a mark
+ * count that is still climbing — and the colour check then reads a load in progress as "the
+ * encoding changed the selection", which is a false report of the one property it exists to
+ * protect. `__tesseraProbe.marks` is published for exactly this.
+ */
+const settled = async (limitMs = 45_000) => {
+  const started = Date.now();
+  let last = -1;
+  let stable = 0;
+  while (Date.now() - started < limitMs) {
+    await page.waitForTimeout(500);
+    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    if (marks === last) {
+      if (++stable >= 4) return true;
+    } else {
+      stable = 0;
+      last = marks;
+    }
+  }
+  return false;
+};
+await settled();
 
 /** Pixels on the canvas that are not the page background — "did it draw anything". */
 const litPixels = () =>
@@ -60,7 +96,7 @@ const litPixels = () =>
 
 const counts = () =>
   page.evaluate(() => {
-    const text = document.querySelector('#panels')?.textContent ?? '';
+    const text = document.querySelector('#stats')?.textContent ?? '';
     const m = /([\d,]+) of ([\d,]+) shown/.exec(text);
     return m ? {served: m[1], visible: m[2]} : null;
   });
@@ -71,7 +107,7 @@ const principals = [];
 const options = await page.locator('#principal option').count().catch(() => 0);
 for (let i = 0; i < options; i++) {
   await page.selectOption('#principal', String(i));
-  await page.waitForTimeout(2500);
+  await settled();
   principals.push({
     label: (await page.locator('#principal option').nth(i).innerText()).trim(),
     counts: await counts(),
@@ -83,12 +119,12 @@ for (let i = 0; i < options; i++) {
 const zoomSeries = [];
 if (options > 0) {
   await page.selectOption('#principal', String(options - 1));
-  await page.waitForTimeout(2500);
+  await settled();
   for (const step of [0, 1, 2, 3]) {
     if (step > 0) {
       await page.mouse.move(640, 400);
       await page.mouse.wheel(0, -400);
-      await page.waitForTimeout(2500);
+      await settled();
     }
     zoomSeries.push({step, counts: await counts(), lit: await litPixels()});
   }
@@ -98,19 +134,28 @@ if (options > 0) {
 // must NOT change the mark count — and must issue no `/v1/viewport` at all, since every declared
 // column is already in the held response. The count is the I7 property, observable from outside;
 // the request count is what proves the switch is a layer rebuild rather than a refetch.
+// **Look-ahead off for this section, and only this one.** The ring issues its requests while the
+// view is *still*, which is exactly when a colour switch is measured — so with it on, a request
+// nobody made lands inside the window and reads as the encoding refetching. The knob is the same
+// A/B the cache measurements use; the principal and zoom sections above ran with it on.
+await page.goto(`${url}?prefetch=0`, {waitUntil: 'load'});
+await page.waitForTimeout(settleMs);
+await settled();
+
 const colourSeries = [];
 const colourOptions = await page.locator('#colour-by option').count().catch(() => 0);
 for (let i = 0; i < colourOptions; i++) {
   const value = await page.locator('#colour-by option').nth(i).getAttribute('value');
-  const viewportsBefore = requests.filter((r) => r.path === '/v1/viewport').length;
+  const viewportsBefore = requests.filter((r) => r.path === '/v1/viewport' && !r.artifacts).length;
   await page.selectOption('#colour-by', value);
-  await page.waitForTimeout(2000);
+  await settled();
   colourSeries.push({
     column: value === '' ? '(uniform)' : value,
     counts: await counts(),
     lit: await litPixels(),
-    viewportRequests: requests.filter((r) => r.path === '/v1/viewport').length - viewportsBefore,
-    legend: (await page.locator('#panels').innerText())
+    viewportRequests:
+      requests.filter((r) => r.path === '/v1/viewport' && !r.artifacts).length - viewportsBefore,
+    legend: (await page.locator('#controls').innerText())
       .split('\n')
       .filter((l) => l.trim())
       .slice(-3)
@@ -122,10 +167,18 @@ for (let i = 0; i < colourOptions; i++) {
 const categoryOption = colourSeries.find((c) => c.column === 'primary_category');
 if (categoryOption) {
   await page.selectOption('#colour-by', 'primary_category');
-  await page.waitForTimeout(2500);
+  await settled();
 }
 
-const panelText = await page.locator('#panels').innerText().catch(() => '(no panels)');
+// Both columns: what you change is on the left, what came back is on the right, and a report
+// that read only one of them would omit half of what the run did.
+const panelText = await page
+  .evaluate(() =>
+    [document.getElementById('controls')?.innerText, document.getElementById('stats')?.innerText]
+      .filter(Boolean)
+      .join('\n')
+  )
+  .catch(() => '(no panels)');
 const canvasPixels = await page.evaluate(() => {
   const canvas = document.querySelector('canvas');
   if (!canvas) return {found: false};
@@ -143,11 +196,13 @@ const canvasPixels = await page.evaluate(() => {
   return {found: true, width: off.width, height: off.height, lit, total: data.length / 4};
 });
 
-await page.screenshot({path: shot});
+// A minute, not the default thirty seconds: a screenshot waits for a frame, and this page draws
+// ~10^6 marks under a software rasteriser in CI-like conditions.
+await page.screenshot({path: shot, timeout: 60_000});
 await browser.close();
 
 const byPath = requests.reduce((acc, r) => {
-  const key = `${r.path} ${r.status}`;
+  const key = `${r.path}${r.artifacts ? ' (artifacts)' : ''} ${r.status}`;
   acc[key] = (acc[key] ?? 0) + 1;
   return acc;
 }, {});

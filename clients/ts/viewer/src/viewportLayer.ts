@@ -1,6 +1,7 @@
 import {OrthographicView, type BinaryAttribute as DeckBinaryAttribute, type Layer} from '@deck.gl/core';
-import {ScatterplotLayer} from '@deck.gl/layers';
-import {MAX_DEPTH, WORLD_SIZE} from '@tessera/client';
+import {ScatterplotLayer, TextLayer} from '@deck.gl/layers';
+import {CELLS_PER_WORLD_UNIT, MAX_DEPTH, WORLD_SIZE} from '@tessera/client';
+import {placedArtifacts, type ArtifactPlaces} from './artifacts.js';
 import {assertAssemblyMatchesServed, type Assembled} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
 import {readConfig} from './config.js';
@@ -421,8 +422,92 @@ export function buildViewportLayers(store: Store, slab: MarkSlab): Layer[] {
     );
   }
 
+  layers.push(...artifactLayers(store));
   layers.push(...selectionLayers(selectedWorldXY));
   return layers;
+}
+
+/**
+ * The clusters the current view is served: a ring per artifact, with its masked count beside it.
+ *
+ * **Drawn from what the server served, joined to where the publisher said it was.** The two halves
+ * come from different places and only one of them is authoritative: the identity and the count are
+ * the service's, the position is the publish script's sidecar (`artifacts.ts`, `ArtifactPlaces`).
+ * The join is one-directional on purpose — an artifact the response did not carry is not drawn,
+ * whatever the sidecar holds — so the scaffolding can never put a cluster on screen that this
+ * principal was not served.
+ *
+ * **The radius encodes the masked count, and the count is written beside it.** By square root, so
+ * area is proportional to the count rather than radius: a ring four times the width of another
+ * would otherwise read as four times the members while covering sixteen times the area. It is
+ * still a comparison between *this principal's* counts — nothing on screen is a fraction of a
+ * cluster's size, which is not a number this client is ever given.
+ */
+function artifactLayers(store: Store): Layer[] {
+  const {artifacts, artifactPlaces, artifactLayer} = store.state;
+  if (!artifactLayer || artifacts.length === 0) return [];
+  // No sidecar for this layer means no position for any of its artifacts. They are still listed
+  // with their counts in the panel — the count came from the service, and only the position did
+  // not.
+  const places = artifactPlaces.get(artifactLayer);
+  if (!places) return [];
+  const placed = placedArtifacts(artifacts, places);
+  if (placed.length === 0) return [];
+
+  const data = placed.map((p) => ({
+    id: p.artifact.tesseraId,
+    count: Number(p.artifact.maskedCount),
+    label: p.artifact.stableKey ?? `#${p.artifact.tesseraId}`,
+    position: [p.x / CELLS_PER_WORLD_UNIT, p.y / CELLS_PER_WORLD_UNIT] as [number, number]
+  }));
+  // Against the largest count *in this view for this principal*, so the smallest cluster is still
+  // visible when every count is small. It rescales as the mask changes, which is honest: the rings
+  // compare counts to each other and never to an absolute the viewer has not been given.
+  const largest = data.reduce((m, d) => Math.max(m, d.count), 1);
+
+  return [
+    new ScatterplotLayer({
+      id: 'artifact-rings',
+      data,
+      getPosition: (d: (typeof data)[number]) => d.position,
+      getRadius: (d: (typeof data)[number]) => 10 + 34 * Math.sqrt(d.count / largest),
+      radiusUnits: 'pixels' as const,
+      // Filled, but barely: the disc is what deck.gl hit-tests, so an unfilled ring would be
+      // clickable only on its own outline. Twelve of 255 is enough to pick and not enough to grey
+      // the marks underneath — which are the data, and must not be dimmed by an annotation.
+      filled: true,
+      getFillColor: [255, 214, 102, 12],
+      stroked: true,
+      getLineColor: [255, 214, 102, 235],
+      lineWidthUnits: 'pixels' as const,
+      getLineWidth: 2,
+      pickable: true,
+      // Read by the click handler exactly as `tesseraIds` is for a mark — a different array under a
+      // different name, because the two identify different kinds of thing and open different
+      // routes. One endpoint answering both would let a caller learn which kind an identifier
+      // names from the shape of the reply.
+      artifactIds: data.map((d) => d.id),
+      parameters: {depthCompare: 'always' as const},
+      updateTriggers: {getRadius: largest}
+    }),
+    new TextLayer({
+      id: 'artifact-counts',
+      data,
+      getPosition: (d: (typeof data)[number]) => d.position,
+      getText: (d: (typeof data)[number]) => d.count.toLocaleString('en-GB'),
+      getSize: 12,
+      sizeUnits: 'pixels' as const,
+      getColor: [255, 240, 200, 255],
+      getPixelOffset: [0, -2],
+      outlineWidth: 3,
+      outlineColor: [12, 14, 18, 255],
+      fontSettings: {sdf: true},
+      // Not pickable: the ring beneath it answers the click, and a label that swallowed picks
+      // would make a cluster openable only around its edges.
+      pickable: false,
+      parameters: {depthCompare: 'always' as const}
+    })
+  ];
 }
 
 /**

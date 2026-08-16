@@ -155,12 +155,15 @@ export class DriverBinding {
       if (frame) {
         s.lastPlan = {omitted: frame.plan.wanted - frame.plan.novel, fetched: frame.plan.novel};
       }
+      // What the budget chose for this frame. Without it the depth panel reads `—` for every
+      // figure it has, which is worse than absent: the panel is there to show the prediction
+      // against what actually arrived.
+      s.view = {...plan.choice, requestedAt: Date.now()};
       s.replicaBytes = this.replica.bytes;
       s.replicaPoints = this.replica.points;
       s.replicaBands = this.replica.bandCount;
       s.inFlight = 0;
     });
-    void plan;
   }
 
   private status(status: string, detail?: unknown): void {

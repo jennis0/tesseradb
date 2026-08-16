@@ -30,10 +30,19 @@ describe('splitFramedStreams', () => {
 
   it('has no artifacts frame when the response served none', () => {
     // Absent, not empty: the server omits the frame rather than sending a zero-row one, so a
-    // deployment with no annotation layers pays nothing for the channel. The goldens were
-    // captured against exactly such a bundle.
+    // deployment with no annotation layers pays nothing for the channel. These two are captured
+    // with `layers: []` for exactly this — a request that asks for no layer, against a server
+    // that has them.
     expect(splitFramedStreams(fixture('viewport-plain.bin')).artifacts).toBeNull();
     expect(splitFramedStreams(fixture('viewport-underlay.bin')).artifacts).toBeNull();
+  });
+
+  it('takes the frame where the response served some, between the tiles and the points', () => {
+    // Captured from a server carrying a published layer (`scripts/capture-golden.mjs`), so this is
+    // the server's own framing rather than this test's idea of it.
+    const parts = splitFramedStreams(fixture('viewport-artifacts.bin'));
+    expect(parts.artifacts).not.toBeNull();
+    expect(parts.artifacts!.byteLength).toBeGreaterThan(0);
   });
 
   it('takes an artifacts frame, and refuses a second or a misplaced one', () => {

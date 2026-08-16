@@ -1,7 +1,22 @@
 # Handover — putting Stage 2's artifacts on the map
 
-**Date:** 2026-08-16 · **Status:** Working handover, not normative · **For:** the agent integrating
-annotation artifacts into `clients/ts/`
+**Date:** 2026-08-16 · **Status:** **Discharged 2026-08-16.** Working handover, never normative ·
+**For:** the agent integrating annotation artifacts into `clients/ts/`
+
+**The work briefed below is done**, and the stage's status lives in
+[`artifact-delivery.md`](artifact-delivery.md) §3 rather than here. What was built: `/v1/meta`'s
+layer list, the `layers` and `artifact_budget` request fields and the drill-down verb in
+`@tessera/client`; a layer control, cluster marks carrying their masked counts, and a click-through
+in the viewer; `scripts/publish-clusters.mjs` to put a clustering on a running server; and
+`viewer/smoke-artifacts.mjs`, which reproduces the two-principal comparison headlessly. Two things
+were learnt in the doing and are recorded where they belong rather than here — the annotation
+channel must issue its **own** request, because the replica elides held tiles and an elided tile
+carries no artifacts (`clients/ts/viewer/src/artifacts.ts`); and a zero masked count is served by
+the drill-down where the viewport withholds it, on a layer declaring no criterion (the ⊘ in
+`artifact-delivery.md` §3).
+
+The rest of this document is the brief as written, kept because its account of the endpoints and of
+what must never reach a screen is the reasoning behind the client that now exists.
 
 The engine and the server can now register an annotation layer, take a clustering, and serve each
 cluster with the masked count that viewer's own visible set generates. Nothing draws it. Your job is

@@ -89,15 +89,25 @@ describe('decodeViewport', () => {
     expect([...underlay.ids]).toEqual([...plain.ids]);
   });
 
-  it('decodes every declared scalar the manifest names, at its declared type', () => {
-    // The golden is captured against the wide fixture, whose nineteen columns exist to cover the
-    // whole type set — so this asserts against `meta.json` rather than a hand-written list, and a
-    // column added to the schema is covered without touching the test.
+  it('decodes every rendered scalar the manifest names, at its declared type, and no other', () => {
+    // Asserted against `meta.json` rather than a hand-written list, so a column added to the
+    // schema is covered without touching the test.
+    //
+    // **`render` is the whole of what decides this**, and both directions matter. A rendered
+    // column occupies a slot in every row of the hot column and therefore arrives here; a column
+    // with `render: false` lives in entity space or in the record blob, is filterable, is returned
+    // at drill-down, and appears in **no** viewport response. A client that offered every declared
+    // column to its colour control would be offering columns whose values never arrive.
     const r = decodeViewport(fixture('viewport-plain.bin'));
-    const declared = meta.declared_scalars as {name: string; arrow_type: string}[];
+    const declared = meta.declared_scalars as {name: string; arrow_type: string; render: boolean}[];
     expect(declared.length).toBeGreaterThan(0);
-    for (const {name, arrow_type} of declared) {
+    expect(declared.some((c) => c.render)).toBe(true);
+    for (const {name, arrow_type, render} of declared) {
       const column = r.scalars[name];
+      if (!render) {
+        expect(column, `column ${name} is not rendered and must not arrive`).toBeUndefined();
+        continue;
+      }
       expect(column, `column ${name} is missing`).toBeDefined();
       expect(column!.arrowType, `column ${name}`).toBe(arrow_type);
       expect(column!.values.length, `column ${name}`).toBe(r.ids.length);

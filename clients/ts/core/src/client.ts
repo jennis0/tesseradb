@@ -1,9 +1,11 @@
 import {createDecoder, type Decoder} from './decoder.js';
 import type {
   ArrowType,
+  ArtifactDetail,
   CategoryValue,
   FilterOperandSet,
   ItemDetail,
+  Layer,
   Meta,
   Session,
   ViewportRequest,
@@ -147,6 +149,20 @@ export class TesseraClient {
         column: f.column,
         family: f.family,
         operands: f.operands
+      })),
+      // Gate-filtered by the server, so this list *is* what this principal may know about — and
+      // the empty list is the honest rendering of both "no layers here" and "none you may reach".
+      layers: (m.layers ?? []).map((l) => ({
+        name: l.name,
+        title: l.title,
+        slices: l.slices,
+        membership: l.membership,
+        hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
+        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
+        derivedContent: l.derived_content,
+        suppliedContent: l.supplied_content,
+        depsOn: l.depends_on,
+        version: l.version
       }))
     };
   }
@@ -175,6 +191,12 @@ export class TesseraClient {
     // from the one a caller who never mentioned filters sends — and a cache keyed on the body would
     // then hold two entries for one question.
     if (req.filters) body.filters = req.filters;
+    // Sent whenever the caller named a selection, **including the empty one**, which is the one
+    // case where omitting and sending differ in meaning: `[]` is "no layers, charge me nothing"
+    // and absent is "every layer I reach". A point-fetching client that meant the first and sent
+    // neither pays the artifact pass on every tile request it makes.
+    if (req.layers) body.layers = req.layers;
+    if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
     // an opaque string on this side so a client never has to know its shape.
     if (req.stamp) body.pin = JSON.parse(req.stamp);
@@ -295,6 +317,48 @@ export class TesseraClient {
     };
     return {fields: body.fields ?? {}, externalId: body.external_id ?? null};
   }
+
+  /**
+   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key and masked count.
+   *
+   * **`slice` is required here and optional on {@link item}**, and the asymmetry is real: a point's
+   * record is the same wherever it is read from, but a masked count is an intersection in row
+   * space and row space is per slice.
+   *
+   * **`404` is the only failure shape, and it distinguishes nothing.** An identifier naming
+   * nothing, one naming a point, one whose layer this principal cannot reach, one suppressed, and
+   * one below its layer's existence criterion are the same answer byte for byte. A caller must not
+   * build a surface that tells them apart; there is nothing to tell them apart by. It throws
+   * {@link TesseraError} like every other refusal.
+   */
+  async artifact(
+    token: string,
+    tesseraId: bigint,
+    opts: {slice: string; idset?: number}
+  ): Promise<ArtifactDetail> {
+    const body: Record<string, unknown> = {slice: opts.slice};
+    if (opts.idset !== undefined) body.idset = opts.idset;
+    const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) await fail(response);
+    const served = (await response.json()) as {
+      layer: string;
+      stable_key?: string;
+      masked_count: number;
+    };
+    return {
+      layer: served.layer,
+      // Absent rather than null when the publisher supplied none.
+      stableKey: served.stable_key ?? null,
+      // JSON carries it as a number, and a count is not an identifier: it is bounded by the
+      // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
+      // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.
+      maskedCount: BigInt(served.masked_count)
+    };
+  }
 }
 
 /** `GET /v1/meta`'s snake_case wire shape, mapped to {@link Meta} above. */
@@ -311,6 +375,19 @@ type RawMeta = {
     index: boolean;
   }[];
   filter_operands?: {column: string; family: FilterOperandSet['family']; operands: string[]}[];
+  /** Absent on a deployment whose server predates layers; empty when this principal reaches none. */
+  layers?: {
+    name: string;
+    title: string;
+    slices: string[];
+    membership: Layer['membership'];
+    hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
+    levels: {level: number; title: string; zoom: [number, number] | null}[];
+    derived_content: string[];
+    supplied_content: string[];
+    depends_on: string[];
+    version: number;
+  }[];
   selection: {
     k_min: number;
     k_max_marks: number;

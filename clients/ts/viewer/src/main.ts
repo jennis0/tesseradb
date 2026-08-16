@@ -9,6 +9,8 @@ import {renderFilters} from './panels/filters.js';
 import {renderLegend} from './panels/legend.js';
 import {renderStats, toggleStatsDrawer} from './panels/stats.js';
 import {renderCounts, renderDepth} from './panels/view.js';
+import {renderArtifactDetail, renderArtifacts, renderLayerControl} from './panels/layers.js';
+import {ArtifactChannel, loadArtifactPlaces} from './artifacts.js';
 import {foldBandColumn} from './assemble.js';
 import {countCodes, countCodesCached, extendRanks, widenDomain} from './colour.js';
 import {
@@ -53,6 +55,14 @@ let requestCount = 0;
 let client: TesseraClient | null = null;
 let replica: Replica | null = null;
 let controller: DriverBinding | null = null;
+/**
+ * The annotation channel, which issues its own requests rather than reading the point path's.
+ *
+ * Beside the replica rather than inside it, for the reason `artifacts.ts` opens with: the replica
+ * elides tiles it holds, and an elided tile carries no artifacts — so clusters would thin out as
+ * the cache warmed.
+ */
+let artifactChannel: ArtifactChannel | null = null;
 let datasets: Dataset[] = [];
 /** The presets of the dataset currently active — per bundle, since a term id is per dictionary. */
 let presets: Dataset['presets'] = [];
@@ -110,7 +120,15 @@ const store = createStore({
   categories: {},
   categoryErrors: {},
   ranks: {},
-  domains: {}
+  domains: {},
+  artifactLayer: null,
+  artifacts: [],
+  artifactVersion: 0,
+  artifactPlaces: new Map(),
+  artifactStatus: 'idle',
+  artifactError: null,
+  selectedArtifact: null,
+  artifactDetailError: null
 });
 
 const mapEl = document.getElementById('map') as HTMLDivElement;
@@ -159,6 +177,7 @@ const deck = new Deck({
     const v = viewState as {target: number[]; zoom: number};
     currentView = {target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
     controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+    artifactChannel?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
     return viewState;
   },
   onClick: (info) => {
@@ -171,6 +190,18 @@ const deck = new Deck({
      * mark at all — measured as a hit on index 112,633 with no identities behind it.
      */
     const layer = info.sourceLayer ?? info.layer;
+    /**
+     * A cluster ring answered the pick, so this is a **different question** — a grouping and one
+     * number, not a document and its record — and it goes to its own route. Routing both through
+     * one endpoint would let a caller learn which kind an identifier names from the shape of the
+     * answer, which is why the server keeps them apart; the client has no business joining them
+     * back together.
+     */
+    const artifactIds = (layer?.props as {artifactIds?: bigint[]} | undefined)?.artifactIds;
+    if (artifactIds && info.index >= 0 && info.index < artifactIds.length) {
+      openArtifact(artifactIds[info.index]!);
+      return;
+    }
     const ids = (layer?.props as {tesseraIds?: BigUint64Array} | undefined)?.tesseraIds;
     const id = ids && info.index >= 0 && info.index < ids.length ? ids[info.index] : undefined;
     const session = store.state.session;
@@ -225,6 +256,42 @@ const deck = new Deck({
       });
   }
 });
+
+/**
+ * Open one cluster by identifier — `POST /v1/artifacts/{tessera_id}`.
+ *
+ * The count it returns is the one the map is already showing, from the same predicate on the
+ * server: an artifact openable but not drawable, or the reverse, would be that rule transcribed
+ * twice. So this is a round trip that confirms rather than reveals, which is the point — the
+ * detail panel has nothing behind the count to show, and there is deliberately nothing to fetch.
+ */
+function openArtifact(id: bigint) {
+  const {session, slice} = store.state;
+  if (!session || !client) return;
+  client
+    .artifact(session.token, id, {slice})
+    .then((detail) => {
+      store.update((s) => {
+        s.selectedArtifact = {...detail, id};
+        s.artifactDetailError = null;
+        // A cluster and a document are different selections, and showing both at once would invite
+        // reading the one as the other's context.
+        s.selected = null;
+        s.selectedWorldXY = null;
+        s.itemError = null;
+      });
+    })
+    .catch((error) => {
+      const e = error as {code?: string; detail?: string; message?: string};
+      store.update((s) => {
+        s.selectedArtifact = null;
+        s.artifactDetailError = {
+          code: e.code ?? 'fetch-failed',
+          detail: e.detail ?? e.message ?? String(error)
+        };
+      });
+    });
+}
 
 function recordFailure(store: Store, what: string, error: unknown) {
   const e = error as {code?: string; detail?: string; message?: string};
@@ -406,6 +473,7 @@ function scheduleFilters(immediate = false) {
 function renderControls(): string {
   return (
     renderSource(store.state, datasets, presets) +
+    renderLayerControl(store.state) +
     renderFilters(store.state) +
     renderLegend(store.state)
   );
@@ -415,6 +483,10 @@ function renderControls(): string {
 function renderReadouts(): string {
   return (
     renderCounts(store.state) +
+    renderArtifacts(store.state) +
+    (store.state.selectedArtifact || store.state.artifactDetailError
+      ? renderArtifactDetail(store.state)
+      : '') +
     renderStats(store.state, {drawn: markSlab.drawn, departed: markSlab.departed}) +
     renderDepth(store.state) +
     (store.state.itemError
@@ -457,7 +529,9 @@ function controlsSignature(): string {
     Object.keys(s.ranks[colour] ?? {}).length,
     s.categoryErrors[colour]?.code ?? '',
     s.domains[colour] ? `${s.domains[colour]!.min}..${s.domains[colour]!.max}` : '',
-    s.budget
+    s.budget,
+    s.artifactLayer ?? '',
+    s.meta?.layers.length ?? -1
   ].join('|');
 }
 
@@ -541,6 +615,10 @@ function bindControls() {
     // A different principal is a different mask: abort anything in flight for the old token, and
     // drop the calibration, which was measured against a different visible set.
     controller?.cancel();
+    // The same argument, and a sharper one: the same cluster has a different count under a
+    // different mask, and some clusters cease to exist entirely. Held artifacts belong to the old
+    // token and must not be drawn for a moment longer.
+    artifactChannel?.reset();
     client
       .authorise(preset.terms)
       .then((session) => {
@@ -574,9 +652,28 @@ function bindControls() {
           s.filterValues = {};
           s.filterValueErrors = {};
         });
+        // The artifact channel is *not* scheduled here: there is no drawn frame at this moment, so
+        // it would have no depth to ask at. It asks on the first frame the new token produces —
+        // see the subscriber below `activate`.
         controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
       })
       .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));
+  });
+
+  const artifactLayer = document.getElementById('artifact-layer') as HTMLSelectElement | null;
+  artifactLayer?.addEventListener('change', () => {
+    const chosen = artifactLayer.value === '' ? null : artifactLayer.value;
+    trace.event('layer', {name: chosen ?? 'none'});
+    store.update((s) => {
+      s.artifactLayer = chosen;
+      // A different layer is a different set of artifacts and a different criterion, so the opened
+      // one goes with it: keeping it would leave a count from one layer under another's name.
+      s.selectedArtifact = null;
+      s.artifactDetailError = null;
+    });
+    // Immediately rather than on the settle timer: the view has not changed, so nothing else will
+    // ask, and the user is waiting on this one.
+    artifactChannel?.refresh(currentView, mapEl.clientWidth, mapEl.clientHeight);
   });
 
   bindFilterControls();
@@ -767,7 +864,7 @@ store.subscribe(
       view.assembled?.depth ?? -1
     }|${markSlab.drawn}|${view.assembled?.provisional ?? 0}|${encodingSignature(store)}|${
       view.selectedWorldXY?.join(',') ?? ''
-    }`;
+    }|${view.artifactVersion}|${view.artifactLayer ?? ''}`;
     if (drawing === painted) return;
     painted = drawing;
 
@@ -873,11 +970,13 @@ store.subscribe(() => {
  */
 async function activate(dataset: Dataset) {
   controller?.cancel();
+  artifactChannel?.cancel();
   client?.close();
   replica?.reset();
   markSlab.clear();
   controller = null;
   replica = null;
+  artifactChannel = null;
   presets = dataset.presets;
 
   client = new TesseraClient({
@@ -924,6 +1023,13 @@ async function activate(dataset: Dataset) {
     s.filters = {};
     s.filterValues = {};
     s.filterValueErrors = {};
+    s.artifactLayer = null;
+    s.artifacts = [];
+    s.artifactVersion += 1;
+    s.artifactStatus = 'idle';
+    s.artifactError = null;
+    s.selectedArtifact = null;
+    s.artifactDetailError = null;
   });
 
   const session = await client.authorise(store.state.terms);
@@ -942,6 +1048,9 @@ async function activate(dataset: Dataset) {
     s.colourBy = rendered.some((c) => c.name === DEFAULT_COLOUR_BY)
       ? DEFAULT_COLOUR_BY
       : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
+    // Opens on the first layer this principal reaches, and on nothing at all where it reaches
+    // none — which is the ordinary case and costs a request nobody made.
+    s.artifactLayer = meta.layers[0]?.name ?? null;
     s.switching = false;
   });
 
@@ -959,7 +1068,18 @@ async function activate(dataset: Dataset) {
         // moment of asking, so a request in flight when a control changes carries the filter it was
         // issued under, and `applyFilters` — not this closure — is what makes the held answers to
         // the old one go away.
-        {...req, slice: store.state.slice, filters: composeFilters(store.state.filters)},
+        //
+        // **`layers: []` and no selection are different requests**, and this is the one that means
+        // "charge me nothing for annotations": these are the point path's requests, and the
+        // artifacts they would carry could not be used anyway — a tile the replica already holds is
+        // omitted, so the artifacts intersecting it would go missing exactly as the cache warmed.
+        // The artifact channel asks for itself; see `artifacts.ts`.
+        {
+          ...req,
+          slice: store.state.slice,
+          filters: composeFilters(store.state.filters),
+          layers: []
+        },
         signal,
         background
       );
@@ -979,6 +1099,15 @@ async function activate(dataset: Dataset) {
   // wants, and the switch an operator watching aggregate select CPU would reach for.
   const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
   controller = new DriverBinding(store, replica, prefetch);
+  artifactChannel = new ArtifactChannel(client, store, meta.quantisation);
+  // Unawaited: the sidecar decides where a cluster is drawn, not whether it is served, so the map
+  // and the counts panel do not wait on it.
+  void loadArtifactPlaces().then((places) => {
+    store.update((s) => {
+      s.artifactPlaces = places;
+      s.artifactVersion += 1;
+    });
+  });
   trace.event('session', {
     dataset: dataset.id,
     prefetch: prefetch ? 1 : 0,
@@ -995,6 +1124,24 @@ async function activate(dataset: Dataset) {
 
   controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
+
+/**
+ * The artifact channel needs a depth, and the depth is the driver's answer to the first view — so
+ * it asks on the first frame the driver produces rather than at startup, where there is none.
+ */
+let askedFor: {channel: ArtifactChannel; token: string} | null = null;
+store.subscribe(() => {
+  const {assembled, session} = store.state;
+  if (!assembled || !session || !artifactChannel) return;
+  // **Keyed on the session as well as the channel**, which is what makes a principal switch work:
+  // it clears the drawn frame, so at the moment the new token arrives there is no depth to ask at
+  // and the switch's own call does nothing. The first frame under the new mask is the moment the
+  // question can be asked, and it is a different question — same clusters, different counts, and
+  // some of them gone.
+  if (askedFor?.channel === artifactChannel && askedFor.token === session.token) return;
+  askedFor = {channel: artifactChannel, token: session.token};
+  artifactChannel.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+});
 
 async function start() {
   datasets = await loadDatasets();

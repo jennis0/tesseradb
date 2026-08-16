@@ -115,6 +115,45 @@ export type FilterOperator =
   | {phrase: string}
   | {range: {gte?: number; gt?: number; lte?: number; lt?: number}};
 
+/**
+ * One annotation layer, as `/v1/meta` publishes it to **this** principal.
+ *
+ * The list is gate-filtered: a layer this principal cannot reach is absent, by exactly the route a
+ * never-registered one takes. So a client draws its layer controls from this and nothing else —
+ * there is no other document naming a layer, and no request that reveals one.
+ *
+ * **It never says how many artifacts a layer holds.** That is a corpus-wide count over objects the
+ * principal may not individually see, and its absence here is deliberate rather than an oversight:
+ * how much of a layer a principal reaches is only ever answered artifact by artifact, by the
+ * viewport. Nor is the gate label published — a caller who reaches the layer has already satisfied
+ * it, and one who has not never sees the entry.
+ */
+export type Layer = {
+  /** The layer's identity, and what a viewport request names to select it. */
+  name: string;
+  title: string;
+  /** Which slices the layer appears in. A layer is not answerable in a slice it does not name. */
+  slices: string[];
+  membership: 'enumerated' | 'spatial' | 'attribute';
+  /**
+   * Where the layer's lineage lives, and the **default** cut depth — not its only setting, since a
+   * request may ask for more detail (`artifactBudget`).
+   */
+  hierarchy: {kind: 'flat' | 'nested' | 'stacked'; pruneChildren: boolean};
+  /**
+   * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
+   * lineage is in its edges, and a level number would say nothing about position in it.
+   */
+  levels: {level: number; title: string; zoom: [number, number] | null}[];
+  /** The derived vocabulary a client must know to draw anything the layer's artifacts carry. */
+  derivedContent: string[];
+  /** The kinds of supplied content its artifacts carry. */
+  suppliedContent: string[];
+  depsOn: string[];
+  /** Echoed to notice a gate edit, in the same shape as every other version coordinate. */
+  version: number;
+};
+
 export type Meta = {
   apiVersion: number;
   idset: number;
@@ -122,6 +161,11 @@ export type Meta = {
   quantisation: Quantisation;
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
+  /**
+   * The annotation layers this principal reaches — see {@link Layer}. Empty when it reaches none,
+   * which is also what a deployment with no layers at all looks like.
+   */
+  layers: Layer[];
   selection: {
     kMin: number;
     kMaxMarks: number;
@@ -196,6 +240,25 @@ export type ViewportRequest = {
    * server cannot tell it to.
    */
   filters?: FilterExpr | null;
+  /**
+   * Which annotation layers to answer for. Omitted means every layer this principal reaches; `[]`
+   * means none, and costs the server nothing.
+   *
+   * **It narrows and never widens.** Naming a layer this principal cannot reach is not a way to
+   * learn it exists — the response is what it would have been without the name. A client fetching
+   * points it will not draw artifacts against should send `[]` rather than omitting this, so a
+   * deployment with layers does not pay for them on every tile request.
+   */
+  layers?: string[];
+  /**
+   * How many artifacts the client wants back at most, in the same shape as `k` beside it.
+   *
+   * **Inert on a flat layer, and never a sample.** Artifacts are not dropped to meet a budget: the
+   * only reduction the representation allows is structural — serving an ancestor in place of its
+   * descendants — so a flat layer, having no ancestors to cut to, ignores this. Half the clusters
+   * would be a wrong map rather than half a map.
+   */
+  artifactBudget?: number;
 };
 
 /**
@@ -369,3 +432,13 @@ export type ViewportResponse = {
  * for is absent from `fields` rather than present as null.
  */
 export type ItemDetail = {fields: Record<string, unknown>; externalId: string | null};
+
+/**
+ * One artifact opened by identifier — see {@link TesseraClient.artifact}.
+ *
+ * The same three facts the viewport carried, from the same predicate: an artifact openable but not
+ * drawable, or the reverse, would be that rule transcribed twice. Notably **no membership and no
+ * declared size**: what a drill-down adds over the wire's own row is a name for the layer, not a
+ * way behind the count.
+ */
+export type ArtifactDetail = {layer: string; stableKey: string | null; maskedCount: bigint};

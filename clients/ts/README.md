@@ -106,18 +106,86 @@ worse than no test.
 TESSERA_SESSION_CRED=… node scripts/capture-golden.mjs --terms 0
 ```
 
+Capture against the **wide** fixture (`data/scaled/attrs/schema-wide.toml`, nineteen columns and
+twelve Arrow types), not against a demo bundle: `decode.test.ts` walks the captured `meta.json` and
+checks every declared column decodes at its declared type, so a six-column capture keeps the test
+passing while quietly dropping two thirds of the types it covers. `viewport-artifacts.bin` is
+captured too when the server carries a layer, and the other two are captured with `layers: []` so
+they keep pinning the no-artifacts-frame case whatever the server holds.
+
+## Annotation layers, and the number beside a cluster
+
+The viewer draws whatever annotation layers `/v1/meta` says this principal reaches. There are none
+until something publishes one:
+
+```bash
+TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/publish-clusters.mjs \
+  --presets .dev/presets/2m4.json --clusters 24 --layer clusters/kmeans-v1
+# and again, for the same clusters under an existence criterion:
+… --layer clusters/kmeans-v1-min1000 --min-visible 1000
+```
+
+That registers a layer and publishes a k-means clustering of the corpus's own points into it. The
+clustering is deliberately unremarkable — **what it exists to show is the masking**. Pick the layer
+in the left column, then switch principal and watch the *Clusters in view* panel:
+
+| principal | visible items | clusters served | `c-0013` |
+|---|---|---|---|
+| narrow — term 14 | 243 | 5 of 24 | 4 |
+| sparse — 1.9% | 35,138 | 17 of 24 | 485 |
+| medium — 19% | 360,239 | 24 of 24 | 1,962 |
+| heavy — 50% | 929,811 | 24 of 24 | 4,138 |
+| full — top 4096 terms | 1,856,276 | 24 of 24 | 8,380 |
+
+*(2m4, `clusters/kmeans-v2`, measured 2026-08-16. The cluster holds 11,008 members; no principal is
+told that, and the broadest one here sees 8,380 of them.)*
+
+Three things about that panel are worth knowing before reading a number off it:
+
+- **The count does not change as you pan.** It is over the whole cluster, not the viewport — a
+  per-viewport count would let two boxes be differenced for the members between them. Only *whether*
+  a cluster appears depends on where you are looking.
+- **A cluster that is absent gives no reason.** Below its layer's criterion, in a layer this
+  principal cannot reach, suppressed, never published — one answer, indistinguishable. Under
+  `--min-visible 1000` the same clustering serves 0, 0, 8, 20 and 24 clusters to the five principals
+  above.
+- **The rings are placed by the publisher, not by the service.** There is no artifact geometry on
+  the wire — a bounding box over full membership would disclose a cluster's extent by panning — so
+  `publish-clusters.mjs` writes centroids to `viewer/public/clusters.json` and the viewer joins them
+  by stable key. Only artifacts the server actually served are drawn; the sidecar supplies position
+  and nothing else. Real geometry arrives as derived content at Stage 3, gated by containment.
+
+The annotation channel makes its **own** request (`k = 0`, one named layer) rather than reading the
+artifacts off the point path's responses: the replica elides tiles it already holds, and an elided
+tile carries no artifacts, so clusters would thin out as the cache warmed.
+
 ## Testing
 
 ```bash
 npm test                       # spike + core: tile arithmetic, framing, decode, coords
 cd core && TESSERA_LIVE=1 TESSERA_SESSION_CRED=… npx vitest run test/client.live.test.ts
-cd viewer && node smoke.mjs    # drives the page in headless chromium
+cd viewer && node smoke.mjs             # drives the page in headless chromium
+cd viewer && node smoke-artifacts.mjs   # the same clustering under every principal
 ```
 
 `smoke.mjs` reports what the page actually did — requests and their statuses, the counts each
 principal reported, whether marks accumulate on zoom, lit canvas pixels, console errors — and
 writes a screenshot. It is **not** the assertion. The owner looking at the map is; the smoke test
 exists so "it builds" can be upgraded to "it ran" without a human in the loop.
+
+`smoke-artifacts.mjs` does the same for the annotation layer, and writes the pair of screenshots
+worth putting side by side: one clustering, two principals, different counts on the same clusters
+and some of them absent.
+
+Both wait for the mark count to stop moving rather than for a fixed interval — a broad principal on
+a large bundle streams bands for tens of seconds, and sampling mid-load reads a still-climbing count
+as though the control under test had changed it. `smoke.mjs` turns look-ahead off for its colour
+section for the same reason: the anticipation ring issues requests whenever the view is still, which
+is exactly when a colour switch is measured.
+
+**Clicking is not exercised headless.** deck.gl's `onClick` does not fire under headless chromium,
+so neither drill-down — a mark's record or a cluster's count — can be driven from these scripts.
+The routes behind them are covered in `core/test/client.live.test.ts` instead.
 
 Headless chromium needs `npx playwright install chromium-headless-shell` once.
 

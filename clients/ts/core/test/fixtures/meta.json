@@ -1,121 +1,365 @@
 {
   "api_version": 1,
-  "bundle_format": 1,
+  "bundle_format": 2,
   "declared_scalars": [
     {
+      "analyser": null,
       "arrow_type": "u8",
       "category": {
         "kind": "declared",
         "listing": "public",
         "vocabulary": "archive"
       },
-      "name": "archive"
+      "index": false,
+      "name": "archive",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u16",
       "category": {
         "kind": "declared",
         "listing": "public",
         "vocabulary": "primary_category"
       },
-      "name": "primary_category"
+      "index": false,
+      "name": "primary_category",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u16",
       "category": {
         "kind": "declared",
         "listing": "public",
         "vocabulary": "primary_category"
       },
-      "name": "secondary_category"
+      "index": false,
+      "name": "secondary_category",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u16",
       "category": {
         "kind": "discovered",
         "listing": "per_viewer",
         "vocabulary": "category_suffix"
       },
-      "name": "category_suffix"
+      "index": false,
+      "name": "category_suffix",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "bool",
       "category": null,
-      "name": "is_cross_listed"
+      "index": false,
+      "name": "is_cross_listed",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "bool",
       "category": null,
-      "name": "is_single_author"
+      "index": false,
+      "name": "is_single_author",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u8",
       "category": null,
-      "name": "author_count"
+      "index": false,
+      "name": "author_count",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u8",
       "category": null,
-      "name": "category_count"
+      "index": false,
+      "name": "category_count",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u8",
       "category": null,
-      "name": "submitted_month"
+      "index": false,
+      "name": "submitted_month",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u16",
       "category": null,
-      "name": "submitted_year"
+      "index": false,
+      "name": "submitted_year",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u32",
       "category": null,
-      "name": "entity_rank"
+      "index": false,
+      "name": "entity_rank",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "u64",
       "category": null,
-      "name": "id_hash"
+      "index": false,
+      "name": "id_hash",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "i8",
       "category": null,
-      "name": "decade_offset"
+      "index": false,
+      "name": "decade_offset",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "i16",
       "category": null,
-      "name": "years_from_median"
+      "index": false,
+      "name": "years_from_median",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "i32",
       "category": null,
-      "name": "days_from_median"
+      "index": false,
+      "name": "days_from_median",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "i64",
       "category": null,
-      "name": "submitted_offset_us"
+      "index": false,
+      "name": "submitted_offset_us",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "timestamp_us",
       "category": null,
-      "name": "submitted_at"
+      "index": false,
+      "name": "submitted_at",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "f32",
       "category": null,
-      "name": "recency"
+      "index": false,
+      "name": "recency",
+      "render": true
     },
     {
+      "analyser": null,
       "arrow_type": "f64",
       "category": null,
-      "name": "exact_offset_days"
+      "index": false,
+      "name": "exact_offset_days",
+      "render": true
     }
   ],
-  "filter_operands": [],
+  "filter_operands": [
+    {
+      "column": "archive",
+      "family": "category",
+      "operands": [
+        "eq",
+        "in"
+      ]
+    },
+    {
+      "column": "primary_category",
+      "family": "category",
+      "operands": [
+        "eq",
+        "in"
+      ]
+    },
+    {
+      "column": "secondary_category",
+      "family": "category",
+      "operands": [
+        "eq",
+        "in"
+      ]
+    },
+    {
+      "column": "category_suffix",
+      "family": "category",
+      "operands": [
+        "eq",
+        "in"
+      ]
+    },
+    {
+      "column": "is_cross_listed",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "is_single_author",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "author_count",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "category_count",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "submitted_month",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "submitted_year",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "entity_rank",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "id_hash",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "decade_offset",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "years_from_median",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "days_from_median",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "submitted_offset_us",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "submitted_at",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "recency",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    },
+    {
+      "column": "exact_offset_days",
+      "family": "numeric",
+      "operands": [
+        "eq",
+        "in",
+        "range"
+      ]
+    }
+  ],
   "idset": 1,
+  "layers": [
+    {
+      "depends_on": [],
+      "derived_content": [],
+      "hierarchy": {
+        "kind": "flat",
+        "prune_children": false
+      },
+      "levels": [],
+      "membership": "enumerated",
+      "name": "clusters/golden",
+      "slices": [
+        "s0"
+      ],
+      "supplied_content": [],
+      "title": "k-means over 48 sampled points",
+      "version": 1
+    }
+  ],
   "quantisation": {
     "x_max": 65536,
     "x_min": 0,

@@ -1,4 +1,13 @@
-import type {CategoryValue, DepthChoice, Meta, Session, Timings} from '@tessera/client';
+import type {
+  Artifact,
+  ArtifactDetail,
+  CategoryValue,
+  DepthChoice,
+  Meta,
+  Session,
+  Timings
+} from '@tessera/client';
+import type {ArtifactPlaces} from './artifacts.js';
 import type {Assembled} from './assemble.js';
 import type {Domain, Ranks} from './colour.js';
 import type {FilterDraft} from './filters.js';
@@ -115,6 +124,43 @@ export type AppState = {
    */
   lastPick: {index: number; layer: string | null; hasIds: boolean; idCount: number} | null;
 
+  /**
+   * Which annotation layer the map is drawing, or `null` for none.
+   *
+   * One at a time, and the request names it: a viewport that omits the selection answers for every
+   * layer this principal reaches, so a client showing one layer would pay for all of them. Naming
+   * a layer never widens what comes back — it is not a way to learn that an unreachable one exists.
+   */
+  artifactLayer: string | null;
+  /**
+   * The artifacts the current view is served — see `artifacts.ts`.
+   *
+   * **Replaced wholesale, never merged**, and empty is the only "none here" state. A cluster
+   * withheld from this principal is indistinguishable from one that was never published, so there
+   * is no hidden state to model and nothing to count as suppressed.
+   */
+  artifacts: Artifact[];
+  /**
+   * Bumped whenever {@link AppState.artifacts} is replaced — the paint key's artifact half.
+   *
+   * A count of what is held would miss the case that matters: panning from one set of clusters to
+   * a different set of the same size, which is most pans.
+   */
+  artifactVersion: number;
+  /** Where the publisher said each cluster is, per layer — see `artifacts.ts`. */
+  artifactPlaces: Map<string, ArtifactPlaces>;
+  artifactStatus: DisplayStatus;
+  /** A refused artifact request. Distinct from an empty answer, which is an actual zero. */
+  artifactError: {code: string; detail: string} | null;
+  /**
+   * The opened artifact, from `POST /v1/artifacts/{tessera_id}`.
+   *
+   * Its count is the same number the viewport frame carried, from the same predicate — an artifact
+   * openable but not drawable would be that rule transcribed twice.
+   */
+  selectedArtifact: (ArtifactDetail & {id: bigint}) | null;
+  /** A refused drill-down: the one `404` that covers every withheld case and names none of them. */
+  artifactDetailError: {code: string; detail: string} | null;
   /**
    * The declared column marks are coloured by, or `null` for the uniform colour.
    *

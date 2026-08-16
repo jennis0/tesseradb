@@ -31,13 +31,17 @@ campaign every sizing figure below comes from). Ordering precedent:
 
 ## Where it stands
 
-Nothing is built. There are no artifacts, no layers, no membership structure and no frontier.
+A flat clustering is live end to end: layers register, artifacts publish, and a viewer sees each
+cluster with the count its own visible set generates — on the engine, on all three frame decoders,
+and on the map. What does not exist yet is everything above one flat level: no content on an
+artifact, no edges, no levels and no frontier, and no write cycle keeping any of it true across a
+delete.
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
 | **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
-| **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | — |
+| **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
 | **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
@@ -145,6 +149,16 @@ restart. **Data:** none new.
 **Where the registry got to** (2026-08-16, `artifacts/stage-1`). All five bullets are built and the
 gate is green: `cargo test --workspace` at 134 binaries, clippy at `-D warnings`, `check-layers` and
 `check-doc-links` clean.
+
+⊘ **One test does not survive the branch.**
+`a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero` (server `http` suite)
+fails on **both** artifact branches (three runs on `stage-2`, one on `stage-1`) and passes on
+`text/owed-work` — so it arrived with this stage rather than with the client work above it. What breaks is the
+assertion that a stalled reader's held response must not read as complete; the gauge half of the
+test passes, so the shed itself still happens. **Why is not established**: the assertion needs the
+body to be large enough to fill the socket and channel buffers before the stall deadline, and the
+tiebreak reorders what that fixture's request gathers, but nothing here measures the two response
+sizes. It wants whoever owns the streaming test.
 
 **The entity space grows from both ends now, and the reason is not identifier supply.** A flush's row
 table, a merge's window and the fold's pre-flight all size themselves over entity *ranges*, so a
@@ -307,8 +321,15 @@ never the cluster's size.
   `artifacts` is a compared surface in the conformance canonical form, so a determinism break in
   the artifact channel cannot pass every comparison in the suite. ✔ Drill-down is routed at
   `POST /v1/artifacts/{tessera_id}`, one `404` for every withheld case.
-- What remains before the stage can be *seen* is the client integration itself, briefed in
-  [the client handover](artifact-client-handover.md).
+- ✔ **The client integration**, briefed in [the client handover](artifact-client-handover.md) and
+  landed: `/v1/meta`'s layer list, the `layers` and `artifact_budget` request fields and the
+  drill-down verb in `@tessera/client`; a layer control, cluster marks carrying their masked counts
+  and a click-through in the viewer. The annotation channel issues its **own** request (`k = 0`,
+  one named layer) rather than reading artifacts off the point path's responses, because the
+  replica elides tiles it already holds and an elided tile carries no artifacts — clusters would
+  have thinned out as the cache warmed. `scripts/publish-clusters.mjs` registers a layer and
+  publishes a k-means clustering of the corpus's own points; there is no artifact geometry on the
+  wire, so it writes centroids to a sidecar the viewer joins **by served artifact only**.
 
 **The check:** on the real 2.4M clustering, a broad principal and a one-term principal receive
 different counts for the same cluster, neither equal to its declared size; clusters below the criterion
@@ -316,6 +337,36 @@ are **absent**, not refused, and the response cannot distinguish them from clust
 existed. The conformance oracle recomputes every count from the same membership and the same mask
 independently. **Data:** `clusters/hdbscan-2026-08` at 2.4M (§5.2), the seeded generator's artifact
 arm at 10⁴ (§5.1).
+
+**Met on the map, 2026-08-16**, on the 2.4M demo bundle with a 24-cluster k-means published over
+156,828 of its own points. One cluster (`c-0013`, 11,008 members declared) across the five measured
+principals:
+
+| principal | visible items | clusters served | `c-0013` |
+|---|---|---|---|
+| narrow — term 14 | 243 | 5 of 24 | 4 |
+| sparse — 1.9% | 35,138 | 17 of 24 | 485 |
+| medium — 19% | 360,239 | 24 of 24 | 1,962 |
+| heavy — 50% | 929,811 | 24 of 24 | 4,138 |
+| full — top 4096 terms | 1,856,276 | 24 of 24 | 8,380 |
+
+No principal's count equals the declared size, because the clustering was published from a
+principal broader than any the viewer offers — the top 16,384 ranked terms. Under
+`visible_when = {min_visible: 1000}` over the *same* membership the five are served 0, 0, 8, 20 and
+24 clusters: presence itself moving with the mask, and the response saying nothing about why.
+Reproduced by `clients/ts/viewer/smoke-artifacts.mjs`, which fails if the counts stop moving with
+the principal.
+
+⊘ **A zero masked count is served by the drill-down where the viewport withholds it**, on a layer
+that declares no criterion. The viewport rule is *any member visible to this principal falls inside
+the requested tiles*, so a cluster this principal can see none of never appears on the map; the
+identifier route applies the existence predicate alone, which an artifact with a zero count passes
+when `visible_when` is `null`. Both are the ruled behaviour (decision 0075: the criterion is what
+decides existence, and *no criterion* is a declaration), and identifiers are stable across
+principals by C17 — so a principal handed an identifier learns that the cluster exists and that it
+sees none of it. Declaring a criterion closes it, which is what the field is for. Left for the
+owner rather than repaired: it is a question about what an undeclared criterion should mean, not
+about the implementation.
 
 ### Stage 3 — Content: derived, supplied, and the containment test
 
