@@ -1,0 +1,478 @@
+//! Whether an artifact is served, and what number sits beside it.
+//!
+//! **One predicate, evaluated on every route.** The viewport, drill-down, filters, search, edge
+//! traversal and metadata all call [`ArtifactView::verdict`] and nothing else. Where a route cannot
+//! afford it, the route does not exist — that is what keeps the leak register exhaustive by
+//! construction rather than by audit.
+//!
+//! The order of the conjuncts is not cosmetic:
+//!
+//! 1. **The overlay, first and unconditional.** A suppression applies to every request the moment
+//!    it is accepted, whatever else is true, so an artifact reaches the same `deleted > suppressed`
+//!    composition a point does, by the same route.
+//! 2. **The layer's gate.** Whether this viewer may know the layer exists at all.
+//! 3. **The artifact's own terms, if its layer declared that its artifacts carry them.**
+//! 4. **The existence criterion, if declared** — the masked count against a declared bar.
+//!
+//! Two of those were once one thing, and separating them is
+//! [decision 0079](../../../docs/decisions/0079-the-gate-is-one-flag-not-three-modes.md): the three
+//! gate modes it replaced were a two-by-two in three names, and *substitutive* switched the
+//! criterion off, so a corpus-derived clustering mis-declared served the existence and count of
+//! every cluster down to a single member. Under a flag beside an independent criterion, one schema
+//! word can no longer disable a disclosure control.
+//!
+//! ## The count is masked, and the criterion never touches it
+//!
+//! `and_cardinality(rows(artifact), mask_rows)` — both operands already row-space, the session's
+//! mask having been projected once. That number is what a viewer is told, unmodified. The criterion
+//! reads the same number and decides whether the artifact is **served at all**
+//! ([decision 0075](../../../docs/decisions/0075-the-masked-count-is-an-existence-criterion.md));
+//! it never rounds, floors or suppresses a value. An implementation that "applied the threshold to
+//! the count" would be a different design with a different disclosure.
+//!
+//! **A below-criterion artifact is absent, not refused.** It does not appear, and the response
+//! carries nothing that distinguishes it from an artifact that was never published — which is the
+//! same indistinguishability the layer registry gives a gate-failed name.
+
+use croaring::Bitmap;
+use rustc_hash::FxHashSet;
+
+use tessera_lifecycle::membership::ArtifactRecord;
+use tessera_lifecycle::Overlay;
+use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
+use tessera_types::{EntityId, TermId};
+
+use tessera_store::permutation::RowSpace;
+
+/// One layer's membership in the row space of one slice, built at open and rebuilt when the
+/// generation moves.
+///
+/// **Built member-wise, and this is a disclosure rule.** Projecting an entity *range* to a row
+/// range would admit whatever documents happen to sit between two members in Morton order — and one
+/// extra member can lift an artifact over its existence criterion. The write cycle forbids
+/// range-wise translation for that reason; the same rule reaches the build of this form.
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactRows {
+    /// Parallel to a level's ordinals; `None` is a hole, not an empty membership.
+    rows: Vec<Option<Bitmap>>,
+}
+
+impl ArtifactRows {
+    /// Project a level's memberships into `space`.
+    ///
+    /// Costly by design and not on any per-request path: `RowSpace::project` decodes the whole
+    /// membership. It is paid at open and at a generation move, which is the same cadence the
+    /// session's own mask projection is paid at.
+    pub fn build<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) -> Self {
+        let mut rows: Vec<Option<Bitmap>> = Vec::new();
+        for (ordinal, record) in artifacts {
+            let idx = ordinal as usize;
+            if rows.len() <= idx {
+                rows.resize_with(idx + 1, || None);
+            }
+            rows[idx] = Some(space.project(&record.members));
+        }
+        ArtifactRows { rows }
+    }
+
+    pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
+        self.rows.get(ordinal as usize).and_then(Option::as_ref)
+    }
+
+    /// The masked count: how many of this artifact's members this viewer can see.
+    ///
+    /// **This is the number served**, unmodified, and it is also the number the criterion reads.
+    /// One quantity, computed once, used for both — because a design where the served count and the
+    /// tested count could differ is one where they eventually do.
+    pub fn masked_count(&self, ordinal: u32, mask_rows: &Bitmap) -> u64 {
+        self.get(ordinal)
+            .map(|rows| rows.and_cardinality(mask_rows))
+            .unwrap_or(0)
+    }
+
+    /// Whether this artifact has any visible member inside `tile_rows` — candidacy, answered as a
+    /// **masked** question.
+    ///
+    /// The alternative a first draft of the design took was a build-time bounding box over full
+    /// membership, served wherever the box intersected the viewport. That discloses the unmasked
+    /// extent by panning: a viewer sees a shape's edge in a region holding nothing they may see.
+    /// There is no box, so no code here can express the fault.
+    pub fn intersects(&self, ordinal: u32, tile_rows: &Bitmap, mask_rows: &Bitmap) -> bool {
+        let Some(rows) = self.get(ordinal) else {
+            return false;
+        };
+        let mut visible = rows.and(mask_rows);
+        visible.and_inplace(tile_rows);
+        !visible.is_empty()
+    }
+}
+
+/// Why an artifact is not served. **Every variant produces the same outcome for a caller** —
+/// absence — and the distinction exists for logs, tests and the conformance oracle, never for a
+/// response body. A route that reported which of these applied would be a disclosure oracle over
+/// exactly the facts the predicate exists to withhold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withheld {
+    /// The artifact's own entity is deleted or suppressed.
+    Verdict,
+    /// The viewer may not know the layer exists.
+    LayerGate,
+    /// The layer declares that its artifacts carry their own terms, and this viewer holds none of
+    /// this artifact's.
+    OwnTerms,
+    /// The masked count does not clear the declared criterion.
+    Criterion,
+}
+
+/// The outcome of the one predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactVerdict {
+    /// Served, with this masked count beside it.
+    Serve { masked_count: u64 },
+    /// Absent. See [`Withheld`] on why the reason never reaches a caller.
+    Absent(Withheld),
+}
+
+impl ArtifactVerdict {
+    pub fn is_served(&self) -> bool {
+        matches!(self, ArtifactVerdict::Serve { .. })
+    }
+
+    pub fn masked_count(&self) -> Option<u64> {
+        match self {
+            ArtifactVerdict::Serve { masked_count } => Some(*masked_count),
+            ArtifactVerdict::Absent(_) => None,
+        }
+    }
+}
+
+/// Everything the predicate needs about one viewer and one layer, gathered once so the test itself
+/// is a straight line.
+pub struct ArtifactView<'a> {
+    pub declaration: &'a LayerDeclaration,
+    pub overlay: &'a Overlay,
+    /// The viewer's satisfied terms — the same set the item-visibility predicate uses. Satisfaction
+    /// is **intersection** with this set, never a conservative label join: a join yields an empty
+    /// required set for a disjunctive gate and admits every principal, which is an error this
+    /// codebase has made once already, in the slice gate.
+    pub satisfied: &'a FxHashSet<TermId>,
+    /// Whether the viewer reaches the layer at all. Resolved once per session by the registry, and
+    /// passed in rather than recomputed — but see [`ArtifactView::verdict`]: the *overlay* half is
+    /// never cached, only this.
+    pub layer_reachable: bool,
+    /// This slice's row form of the layer's membership.
+    pub rows: &'a ArtifactRows,
+    /// The viewer's mask, already in row space.
+    pub mask_rows: &'a Bitmap,
+}
+
+impl ArtifactView<'_> {
+    /// The one predicate.
+    ///
+    /// `own_terms` is the artifact's own access label resolved to a term, or `None` if it carries
+    /// none. **A layer that declares `artifacts_carry_own` and an artifact that carries no term is
+    /// withheld**, not admitted: the flag says the artifact's existence is gated on its own label,
+    /// and an artifact with no label has nothing for a viewer to satisfy. Admitting it would make a
+    /// missing declaration a grant to everyone, which is the direction a mistake must never take.
+    pub fn verdict(
+        &self,
+        artifact_entity: EntityId,
+        ordinal: u32,
+        own_terms: Option<TermId>,
+    ) -> ArtifactVerdict {
+        // 1. The overlay, first and unconditional — the same composition a point goes through.
+        //    Asked live on every call, never cached beside the reachability above it: a suppression
+        //    takes effect at the ack, and a cache that baked in this answer would keep serving a
+        //    hidden artifact for the life of a session.
+        if self.overlay.is_deleted(artifact_entity) || self.overlay.is_suppressed(artifact_entity) {
+            return ArtifactVerdict::Absent(Withheld::Verdict);
+        }
+
+        // 2. The layer's gate.
+        if !self.layer_reachable {
+            return ArtifactVerdict::Absent(Withheld::LayerGate);
+        }
+
+        // 3. The artifact's own terms, if its layer says it carries them.
+        if self.declaration.access.artifacts_carry_own {
+            match own_terms {
+                Some(term) if self.satisfied.contains(&term) => {}
+                _ => return ArtifactVerdict::Absent(Withheld::OwnTerms),
+            }
+        }
+
+        // 4. The existence criterion, against the **live** masked count. The same number is
+        //    returned to the caller, so the tested quantity and the served quantity cannot drift.
+        let masked_count = self.rows.masked_count(ordinal, self.mask_rows);
+        if let Some(criterion) = self.declaration.visible_when {
+            let clears = match criterion {
+                ExistenceCriterion::MinVisible(n) => masked_count >= n,
+                // The declared, unmasked size is the denominator — a predicate input the build
+                // computes and the test consumes, with no field and no wire shape carrying it (C8).
+                // A zero denominator cannot clear a positive fraction, and saying so explicitly
+                // avoids a division nobody wants to reason about.
+                ExistenceCriterion::MinFraction(p) => {
+                    let declared = self.declared_size(ordinal);
+                    declared > 0 && (masked_count as f64) >= p * (declared as f64)
+                }
+            };
+            if !clears {
+                return ArtifactVerdict::Absent(Withheld::Criterion);
+            }
+        }
+
+        ArtifactVerdict::Serve { masked_count }
+    }
+
+    /// The artifact's full membership size, in **row** terms.
+    ///
+    /// The proportional criterion's denominator, and the one place it is read. Taken from the row
+    /// form rather than the entity form so that numerator and denominator come from the same
+    /// projection: a member whose row still sits in an unfolded flush extent contributes to
+    /// neither, which understates the ratio — fail-closed, and the same posture the write cycle
+    /// takes for an unrebuilt member.
+    fn declared_size(&self, ordinal: u32) -> u64 {
+        self.rows.get(ordinal).map(Bitmap::cardinality).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_lifecycle::wal::ChangeOp;
+    use tessera_types::layer::{
+        ContentDeclaration, Hierarchy, HierarchyKind, LayerAccess, MembershipSource,
+    };
+
+    fn declaration(carry_own: bool, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
+        LayerDeclaration {
+            name: "clusters/a".into(),
+            title: "A".into(),
+            slices: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            access: LayerAccess {
+                label: None,
+                artifacts_carry_own: carry_own,
+            },
+            visible_when: criterion,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Flat,
+                prune_children: false,
+            },
+            content: ContentDeclaration::default(),
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+        }
+    }
+
+    /// Row-space memberships without a `RowSpace` to project through — these tests are about the
+    /// predicate, and building a permutation would test the projection instead.
+    fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
+        ArtifactRows {
+            rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
+        }
+    }
+
+    struct Fixture {
+        overlay: Overlay,
+        satisfied: FxHashSet<TermId>,
+        rows: ArtifactRows,
+        mask: Bitmap,
+    }
+
+    impl Fixture {
+        fn new(members: &[&[u32]], mask: &[u32]) -> Self {
+            Fixture {
+                overlay: Overlay::new(),
+                satisfied: FxHashSet::default(),
+                rows: rows_of(members),
+                mask: Bitmap::of(mask),
+            }
+        }
+
+        fn view<'a>(&'a self, declaration: &'a LayerDeclaration, reachable: bool) -> ArtifactView<'a> {
+            ArtifactView {
+                declaration,
+                overlay: &self.overlay,
+                satisfied: &self.satisfied,
+                layer_reachable: reachable,
+                rows: &self.rows,
+                mask_rows: &self.mask,
+            }
+        }
+    }
+
+    /// **The stage's headline.** Two principals, one artifact, two different counts — and neither
+    /// is the artifact's size. A count equal to the membership would mean the mask was never
+    /// applied, which is the failure that looks most like success.
+    #[test]
+    fn the_count_is_the_viewers_own_and_never_the_artifacts_size() {
+        let d = declaration(false, None);
+        let members: &[&[u32]] = &[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]];
+
+        let broad = Fixture::new(members, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let narrow = Fixture::new(members, &[9, 10, 11, 12]);
+
+        let broad_count = broad
+            .view(&d, true)
+            .verdict(EntityId::new(999), 0, None)
+            .masked_count()
+            .unwrap();
+        let narrow_count = narrow
+            .view(&d, true)
+            .verdict(EntityId::new(999), 0, None)
+            .masked_count()
+            .unwrap();
+
+        assert_eq!(broad_count, 8);
+        assert_eq!(narrow_count, 2);
+        assert_ne!(broad_count, 10, "the declared size must never be served");
+        assert_ne!(narrow_count, 10);
+    }
+
+    /// The criterion decides existence and never modifies a number: an artifact that clears it is
+    /// served with the *same* count that was tested.
+    #[test]
+    fn the_criterion_decides_existence_and_leaves_the_count_alone() {
+        let d = declaration(false, Some(ExistenceCriterion::MinVisible(5)));
+        let fx = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            fx.view(&d, true).verdict(EntityId::new(999), 0, None),
+            ArtifactVerdict::Serve { masked_count: 6 }
+        );
+
+        // One fewer visible member and the artifact is absent — not served with a rounded count,
+        // not refused, absent.
+        let below = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4]);
+        assert_eq!(
+            below.view(&d, true).verdict(EntityId::new(999), 0, None),
+            ArtifactVerdict::Absent(Withheld::Criterion)
+        );
+    }
+
+    /// The proportional form divides by the declared size, so the same masked count can pass on a
+    /// small artifact and fail on a large one. That is the whole reason it exists — a fixed bar of
+    /// fifty protects a cluster of a hundred and does nothing for a cluster of ten thousand.
+    #[test]
+    fn the_proportional_criterion_scales_where_the_absolute_one_does_not() {
+        let d = declaration(false, Some(ExistenceCriterion::MinFraction(0.5)));
+
+        let small: Vec<u32> = (0..10).collect();
+        let large: Vec<u32> = (0..1000).collect();
+        let mask: Vec<u32> = (0..6).collect();
+
+        let fx = Fixture::new(&[&small, &large], &mask);
+        let view = fx.view(&d, true);
+        // 6 of 10 visible: clears 50%.
+        assert!(view.verdict(EntityId::new(999), 0, None).is_served());
+        // 6 of 1000 visible: does not.
+        assert_eq!(
+            view.verdict(EntityId::new(998), 1, None),
+            ArtifactVerdict::Absent(Withheld::Criterion)
+        );
+    }
+
+    /// The overlay is first and unconditional. A suppressed artifact is absent even when every
+    /// other conjunct passes — and it is asked live, so no cached reachability can outlive it.
+    #[test]
+    fn a_suppression_beats_every_other_conjunct() {
+        let d = declaration(false, None);
+        let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
+        let entity = EntityId::new(999);
+        assert!(fx.view(&d, true).verdict(entity, 0, None).is_served());
+
+        fx.overlay.apply(entity, ChangeOp::Suppress);
+        assert_eq!(
+            fx.view(&d, true).verdict(entity, 0, None),
+            ArtifactVerdict::Absent(Withheld::Verdict)
+        );
+
+        // And a deletion, which is the irreversible one.
+        let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
+        fx.overlay.apply(entity, ChangeOp::Delete);
+        assert_eq!(
+            fx.view(&d, true).verdict(entity, 0, None),
+            ArtifactVerdict::Absent(Withheld::Verdict)
+        );
+    }
+
+    /// The own-terms flag and the criterion are **independent** declarations composed by
+    /// conjunction. This is decision 0079's whole point: under the three modes it replaced,
+    /// declaring a layer *substitutive* switched the criterion off.
+    #[test]
+    fn the_own_terms_flag_does_not_disable_the_criterion() {
+        let d = declaration(true, Some(ExistenceCriterion::MinVisible(5)));
+        let mut fx = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4]);
+        fx.satisfied.insert(TermId::new(7));
+
+        // Terms satisfied, criterion not: still absent. Under the old gate modes this artifact
+        // would have been served, with an exact masked count of 4.
+        assert_eq!(
+            fx.view(&d, true).verdict(EntityId::new(999), 0, Some(TermId::new(7))),
+            ArtifactVerdict::Absent(Withheld::Criterion)
+        );
+    }
+
+    /// A layer declaring that its artifacts carry their own terms, and an artifact carrying none,
+    /// is withheld. Admitting it would make a missing declaration a grant to everyone.
+    #[test]
+    fn an_artifact_with_no_terms_on_a_carry_own_layer_is_withheld() {
+        let d = declaration(true, None);
+        let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
+        fx.satisfied.insert(TermId::new(7));
+        let view = fx.view(&d, true);
+
+        assert_eq!(
+            view.verdict(EntityId::new(999), 0, None),
+            ArtifactVerdict::Absent(Withheld::OwnTerms)
+        );
+        assert_eq!(
+            view.verdict(EntityId::new(999), 0, Some(TermId::new(8))),
+            ArtifactVerdict::Absent(Withheld::OwnTerms),
+            "a term the viewer does not hold is no better than none"
+        );
+        assert!(view
+            .verdict(EntityId::new(999), 0, Some(TermId::new(7)))
+            .is_served());
+
+        // And on a layer that does *not* declare the flag, a carried term is simply not consulted:
+        // the artifact's existence derives from its members' visibility instead.
+        let derived = declaration(false, None);
+        assert!(fx
+            .view(&derived, true)
+            .verdict(EntityId::new(999), 0, Some(TermId::new(8)))
+            .is_served());
+    }
+
+    /// An unreachable layer withholds every artifact in it, before any membership is touched.
+    #[test]
+    fn an_unreachable_layer_withholds_its_artifacts() {
+        let d = declaration(false, None);
+        let fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
+        assert_eq!(
+            fx.view(&d, false).verdict(EntityId::new(999), 0, None),
+            ArtifactVerdict::Absent(Withheld::LayerGate)
+        );
+    }
+
+    /// Candidacy is a masked question. An artifact whose members are all in the tile but none in
+    /// the viewer's mask is not a candidate — which is what the deleted bounding box got wrong.
+    #[test]
+    fn candidacy_is_masked_and_not_a_box() {
+        let fx = Fixture::new(&[&[10, 11, 12]], &[1, 2, 3]);
+        let tile = Bitmap::of(&[8, 9, 10, 11, 12, 13]);
+        assert!(
+            !fx.rows.intersects(0, &tile, &fx.mask),
+            "every member is inside the tile and none is visible; a box would have served it"
+        );
+
+        let visible = Fixture::new(&[&[10, 11, 12]], &[11]);
+        assert!(visible.rows.intersects(0, &tile, &visible.mask));
+
+        // A hole is not a candidate either, and must not panic.
+        assert!(!fx.rows.intersects(7, &tile, &fx.mask));
+    }
+}
