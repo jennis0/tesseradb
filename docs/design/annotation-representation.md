@@ -705,33 +705,32 @@ per-session cache miss at a *measured* 1 277 ms; a 10⁷-artifact level cannot, 
 was a first-toucher stall of tens of seconds per level, or blank annotation levels for minutes after
 every nightly fold.
 
-**So the fold gains an artifact pass, and what it costs turns on which of two constructions it uses.**
-Both need the same fact — each member's new row — and the fold already knows it. They differ only in
-where the relation is kept while the pass runs.
+**So the fold gains an artifact pass, and it projects each artifact's membership through the new
+permutation.** Old rows never enter it: the durable membership form is entity space (§2.4) and the
+row form is derived from it, so what the pass performs is `ArtifactRows::build` against the
+`permutation.bin` pass 1 has just written — the same construction the open path runs, on the same
+mapped file, member-wise as §3.1's rule requires.
 
-*Riding pass 1.* Pass 1 streams `(entity, new_row)` in new-row order to scatter `permutation.bin`, so
-an artifact arm can append to every builder as the rows go past, and each level's bitmaps emerge
-already sorted. The cost is that it must hold the **inverted** relation resident for the whole pass —
-entity to the artifacts holding it — which is of order 4 GB at 10⁹ and is *not* one ordinal per level:
-artifacts within a level may overlap (§2.0), so it is a multimap. It also holds every builder in a
-level open at once, ~1 GB where a level covers the corpus.
+An earlier revision posed this as a choice between that and **riding pass 1** — appending to every
+builder as `(entity, new_row)` goes past, which needs the **inverted** relation resident for the
+whole pass (entity to the artifacts holding it, a multimap because artifacts within a level overlap)
+plus every builder in the level open at once. It also posed the per-artifact arm as a translation
+through a scatter-built `old_row → new_row` table, which is work that does not arise once membership
+is entity-canonical. **[The measurement](../../probes/2026-08-16-fold-artifact-pass/README.md)
+settles both**, at 10⁹ rows and 10⁷ artifacts:
 
-*Per artifact.* Translate one artifact's bitmap through an `old_row → new_row` table, write it,
-close it. ⊘ **Corrected in review (2026-08-15): the table is built by scatter, not sequential
-append.** As first written this construction claimed the table *"needs no scatter"* because the fold
-*"streams old rows with their entity"* — the fold emits no such stream. Pass 1 emits
-`(entity, new_row)` in **new-row** order, as the previous paragraph says, so building the table is a
-second 4 GB scatter beside `permutation.bin`'s, or a sort. What stands: the read-back locality — a
-cluster's members are Morton-contiguous in old row space, so a translation walks a neighbourhood of
-pages — and a resident cost of the largest artifact's member list plus output buffers.
+- Riding pass 1 costs **+9.2 GB of anonymous memory** — roughly doubling `plan_fold`'s ~9–10 GB peak
+  (`compaction.md` §3) — where projecting adds only the output row forms, ~3.5 GB, which both
+  constructions must hold. Its mapped reads are page cache the fold already budgets for.
+- Riding pass 1 is **inherently sequential**: one stream, one consumer. Projecting is 10⁷ independent
+  reads of a read-only mapping, so it threads — **32.8 s on eight threads against the ride arm's
+  101.3 s**, and 198.8 s single-threaded.
+- Cost is **linear in rows** across 10⁶–10⁹, so `plan_fold` can budget the pass from the corpus size
+  and the artifact population. It must: a pass it does not budget for is one it cannot refuse.
 
-**Neither construction is the obvious winner, and the comparison is the measurement §11.3 carries —
-priced against the stream the fold actually emits.** The per-artifact table is a mapped file rather
-than an anonymous resident allocation, so the fold's ~9–10 GB un-reclaimable peak (`compaction.md`
-§3) may not move — but the table is scatter-built, and it adds a second 4 GB mapping beside
-`permutation.bin`'s on a box whose serving load already holds most of RAM. Either way `plan_fold`
-must learn about artifacts: a pass it does not budget for is one it cannot refuse. Bitmap
-construction is the probe's 13–25 s per 10⁷-artifact level in both constructions. ⊘ **Unmeasured.**
+The 13–25 s per 10⁷-artifact level this section once quoted is bitmap construction alone; the
+projection's reads are the larger term, and the pass costs minutes single-threaded at the design
+point. ⊘ **Measured, not built.**
 
 **Rule F needs an artifact arm too, and currently has nothing to execute.** The fold's passes drop
 rows and postings; a deleted artifact has neither. Retirement must additionally drop its membership
@@ -1228,13 +1227,15 @@ and needs nothing.)
 
 **Still unsettled:**
 
-- **The fold's artifact pass is written (§5.0.3) and unmeasured**, and the measurement is a comparison
-  rather than a figure: ride pass 1 with the inverted multimap resident, against per-artifact
-  translation through a scatter-built mapped `old_row → new_row`. The sequential-write construction
-  first priced here assumed an old-row-ordered stream the fold does not emit (§5.0.3), so the
-  comparison must be re-posed before it is run. What decides it is whether the second's page-cache
-  pressure leaves `plan_fold`'s anonymous peak where it is, and how much locality a Morton-contiguous
-  cluster actually gets on the translation read. It is the largest unpriced item left.
+- ✔ **The fold's artifact pass is measured, and it projects per artifact**
+  ([probe](../../probes/2026-08-16-fold-artifact-pass/README.md), 2026-08-16). The comparison this
+  entry called for was re-posed first, because half of it dissolved: there is no `old_row → new_row`
+  table and no second scatter, membership being entity-canonical, so the arm is
+  `Permutation::project` through the permutation pass 1 writes anyway. Against riding pass 1 it costs
+  **+3.5 GB rather than +9.2 GB**, keeps those bytes in page cache rather than anonymous memory, and
+  **threads where riding cannot** — 32.8 s on eight threads against 101.3 s, at 10⁹ rows and 10⁷
+  artifacts, linear in rows across three decades. What remains unmeasured is the pass under a
+  concurrent serving load.
 - ✔ **Residency is measured: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts**
   ([probe](../../probes/2026-08-16-membership-residency/README.md), 2026-08-16). Per *container* —
   not per artifact and not per member — so a run container holding 25 members costs what an array

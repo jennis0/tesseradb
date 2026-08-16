@@ -857,7 +857,7 @@ allocated here rather than left as a list:
 | Owed | Stage | Why it could refute something |
 |---|---|---|
 | ✔ **Residency** — **measured 2026-08-16**: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts, so **6.16×** serialised on contiguous membership and **7.79×** on the synthetic arm. 794 MB is ~4.9–6.2 GB resident; the pessimistic arm at 10⁷ artifacts does not fit in 47 GB. [The probe](../probes/2026-08-16-membership-residency/README.md) | 2 ✔, re-measured at 8 | the slice budget still has no line for the multipliers, which stand on top of this |
-| **The fold's artifact pass**, as a comparison: riding pass 1 with the inverted multimap resident against per-artifact translation through a scatter-built mapped table (rep §5.0.3's corrected posing) | 4 | the largest unpriced item left; decides whether `plan_fold`'s ~9–10 GB anonymous peak moves |
+| ✔ **The fold's artifact pass** — **measured 2026-08-16**: projecting per artifact through the new permutation beats riding pass 1 on memory (**+3.5 GB against +9.2 GB**, page cache against anonymous), and threads where riding cannot (**32.8 s on eight threads against 101.3 s** at 10⁹ rows / 10⁷ artifacts, linear in rows). Half the comparison dissolved on re-posing: membership is entity-canonical, so no `old_row → new_row` table exists to build. [The probe](../probes/2026-08-16-fold-artifact-pass/README.md) | 4 | `plan_fold`'s ~9–10 GB anonymous peak **stays where it is** — the pass adds the output row forms and page cache |
 | **The three arms** — flush-union, merge-rebase, fold-rebuild | 4 | the merge arm's bound is proportional to the merged span, not to the artifact population |
 | **Σ\|G\| and containment per request** | 3 | ~4 B/member *assumed*; refuted if a real deployment's Σ\|G\| approaches membership's order |
 | **Reach**, if it is materialised at all | 5 | the deleted assignment-column framing made it look free; it is a second membership structure |
@@ -888,9 +888,13 @@ argument for the frozen-format option, and it is now measured rather than aesthe
 engine also holds two resident copies today — the entity-space store and the row-space projection —
 so the design's point is 3.6 GB *per copy* before any multiplier. Re-measured at Stage 8.
 
-**The fold.** If the artifact pass cannot be fitted inside `plan_fold`'s budget, the choice becomes
-a first-toucher stall of tens of seconds per level or blank annotation levels after every nightly
-fold, and neither is acceptable. This is the item to measure first inside Stage 4, not last.
+**The fold — answered, and it does not refute the shape.** The artifact pass fits: projecting each
+membership through the new permutation adds the output row forms (~3.5 GB at 10⁷ artifacts) and page
+cache, leaving `plan_fold`'s anonymous peak where it is, and it threads to **32.8 s** at 10⁹ rows
+([the probe](../probes/2026-08-16-fold-artifact-pass/README.md)). Riding pass 1 — the alternative —
+costs +9.2 GB anonymous and cannot be threaded at all. So neither the first-toucher stall nor the
+blank level after a nightly fold is forced. What is still open is the pass **under a concurrent
+serving load**, which the probe measured on an idle box.
 
 **The drill-down conflict.** The resolved visibility set restores the structural closure a
 per-identifier count would break, and the live-count rule says a cache may bake in counts but

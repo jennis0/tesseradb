@@ -36,12 +36,15 @@ is the stage's first job and not its last.**
 It is not a copy: the fold retires deleted entities, so a carried-forward membership goes on
 counting members that no longer exist in the size the proportional criterion divides by.
 
-**It owes a measurement before it owes code** (§6): riding pass 1 with the inverted
-entity→artifacts multimap resident — of order 4 GB at 10⁹, and a multimap rather than one ordinal
-per level because artifacts within a level overlap — against per-artifact translation through a
-scatter-built mapped `old_row → new_row` table. Neither is the obvious winner, both cost 13–25 s per
-10⁷-artifact level in bitmap construction alone, and `plan_fold` must learn about the pass either
-way: **a pass it does not budget for is one it cannot refuse.**
+**The measurement it owed is run** ([the probe](../probes/2026-08-16-fold-artifact-pass/README.md),
+2026-08-16), and it settles the construction: **project each artifact's entity-space membership
+through the new `permutation.bin`** — `ArtifactRows::build`'s own construction, run inside the fold.
+Half the posed comparison dissolved first: there is no `old_row → new_row` table to scatter-build,
+because membership is entity-canonical and old rows never enter the pass. Against riding pass 1 it
+costs +3.5 GB rather than +9.2 GB, in page cache rather than anonymous memory, and it threads where
+riding cannot — 32.8 s on eight threads against 101.3 s at 10⁹ rows and 10⁷ artifacts, linear in
+rows. `plan_fold` must still learn about the pass: **a pass it does not budget for is one it cannot
+refuse.**
 
 ## What Stages 1–3 leave you
 
