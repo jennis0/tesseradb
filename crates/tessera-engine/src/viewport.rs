@@ -3117,7 +3117,15 @@ impl Engine {
         };
         // Same resolution as the viewport's, by the same call — an identifier route that served a
         // different variation would be a second ranking nobody wrote.
-        let Some(content) = self.supplied_content(&name, level, ordinal, variation) else {
+        let Some(content) = self.supplied_content(
+            &generation,
+            &name,
+            level,
+            ordinal,
+            entity,
+            layer.declaration.content.supplied.len(),
+            variation,
+        ) else {
             return Ok(None);
         };
         // The same computation the viewport does, from the same composed mask — one route's
@@ -3177,22 +3185,58 @@ impl Engine {
     /// `Some(vec![])` and `None` are different answers and the difference is the whole point:
     /// the first is *this layer declares no supplied content*, which is most layers; the second is
     /// *this artifact should carry content and it is not here*, which withholds the artifact.
+    #[allow(clippy::too_many_arguments)]
     fn supplied_content(
         &self,
+        generation: &crate::Generation,
         layer: &str,
         level: u32,
         ordinal: u32,
+        entity: EntityId,
+        kinds: usize,
         variation: Option<u32>,
     ) -> Option<Vec<String>> {
         let Some(variation) = variation else {
             return Some(Vec::new());
         };
-        self.write.with_artifacts(|store| {
+        // The publication's own copy, while it is still in memory — the log is the only home the
+        // content has between the publish and the manifest that carries it.
+        let held = self.write.with_artifacts(|store| {
             store
                 .get(layer, level, ordinal)
                 .and_then(|record| record.variations.get(variation as usize))
                 .and_then(|set| set.values.clone())
-        })
+        });
+        if let Some(values) = held {
+            return Some(values);
+        }
+
+        // Otherwise the record blob, at this artifact's own entity: one block read, the same one a
+        // point's blob-resident fields cost. Tags are `variation × kinds + kind` against the
+        // layer's declaration — see `ArtifactStore::unpublished_content`.
+        if kinds == 0 {
+            return Some(Vec::new());
+        }
+        let base = (variation as usize).checked_mul(kinds)?;
+        let fields = generation
+            .filter_columns
+            .records()
+            .fields_of(u32::try_from(entity.raw()).ok()?)
+            .ok()??;
+        let mut values = Vec::with_capacity(kinds);
+        for k in 0..kinds {
+            let tag = u16::try_from(base + k).ok()?;
+            // **Every declared kind or none.** A row missing one is content that did not survive
+            // its write, and serving the rest would hand a client an artifact short of what its
+            // layer says it carries — which is indistinguishable, from the client's side, from
+            // content withheld.
+            let field = fields.iter().find(|f| f.tag == tag)?;
+            match &field.value {
+                tessera_filter::RecordValue::Utf8(text) => values.push(text.clone()),
+                _ => return None,
+            }
+        }
+        Some(values)
     }
 
     // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
@@ -3331,8 +3375,15 @@ impl Engine {
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than
                     // served with its description missing.
-                    let Some(content) = self.supplied_content(&name, level, ordinal, variation)
-                    else {
+                    let Some(content) = self.supplied_content(
+                        generation,
+                        &name,
+                        level,
+                        ordinal,
+                        entity,
+                        layer.declaration.content.supplied.len(),
+                        variation,
+                    ) else {
                         continue;
                     };
                     // The blinding is total over the space the allocator issues, so this cannot

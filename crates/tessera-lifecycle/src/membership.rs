@@ -426,6 +426,50 @@ impl ArtifactStore {
         (ready, skipped)
     }
 
+    /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
+    ///
+    /// **Tags are `variation × kinds + kind`, positions in the artifact's own layer declaration** —
+    /// the same idiom a point row's tags follow, where a tag is a position in the manifest's
+    /// declared scalars. Artifact rows and point rows therefore share one store and one reader
+    /// while each reads its tags against its own declaration, which is safe because the two never
+    /// share an entity: the allocator issues artifact ids downward from the ceiling and point ids
+    /// upward from zero, so which declaration governs a row is a range check on its entity.
+    ///
+    /// Every variation of one artifact carries a value for every declared kind — refused at
+    /// publication otherwise — so the stride is the same for all of them and is recoverable from
+    /// the layer's declaration alone.
+    pub fn unpublished_content(&self) -> Vec<(EntityId, Vec<(u16, String)>)> {
+        let mut out = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let from = *self.published_through.get(&(layer.clone(), *level)).unwrap_or(&0) as usize;
+            if from >= slots.len() {
+                continue;
+            }
+            for slot in &slots[from..] {
+                let Some(record) = slot else { continue };
+                let mut fields = Vec::new();
+                for (v, variation) in record.variations.iter().enumerate() {
+                    let Some(values) = &variation.values else {
+                        continue;
+                    };
+                    for (k, value) in values.iter().enumerate() {
+                        let tag = v * values.len() + k;
+                        // A layer whose kinds and variations multiply past the tag space cannot be
+                        // written back, and a truncated tag would put one kind's text under
+                        // another's name. Refused by dropping the row, which withholds the artifact
+                        // — the same answer as content that never arrived.
+                        let Ok(tag) = u16::try_from(tag) else { continue };
+                        fields.push((tag, value.clone()));
+                    }
+                }
+                if !fields.is_empty() {
+                    out.push((record.entity, fields));
+                }
+            }
+        }
+        out
+    }
+
     /// Every level and how many ordinals it currently spans, holes included — what a publication
     /// marks as published once its manifest is durable.
     pub fn levels_and_extents(&self) -> impl Iterator<Item = (&str, u32, u32)> {

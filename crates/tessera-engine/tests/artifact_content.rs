@@ -13,6 +13,7 @@ mod common;
 use common::*;
 use tessera_engine::derived::DerivedContent;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_lifecycle::membership::IncomingVariation;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_spatial::morton::fixed32;
 use tessera_types::layer::{
@@ -327,10 +328,190 @@ fn a_layer_declaring_a_property_the_engine_does_not_compute_is_refused() {
         .visible_layers(&session)
         .iter()
         .all(|l| l.declaration.name != "clusters/a"));
-
     // The declaration itself refuses before any engine state is touched.
     assert!(matches!(
         declaration("clusters/a", &["hulls"]).validate(),
         Err(DeclarationError::UnknownDerived(name)) if name == "hulls"
     ));
+}
+
+// ---- supplied content, and the test that decides who may read it ----------------------------
+
+fn label_layer(name: &str, corpus_derived: bool) -> LayerDeclaration {
+    let mut d = declaration(name, &[]);
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        kind: "label_text".into(),
+        corpus_derived,
+    }];
+    d
+}
+
+fn variation(
+    text: &str,
+    fx: &Fixture,
+    generated_from: impl Iterator<Item = u64>,
+) -> IncomingVariation {
+    IncomingVariation::new(vec![text.to_string()], fx.members(generated_from))
+}
+
+/// **The stage's headline.** A label is served only to a viewer who can see every document it was
+/// generated from — and the viewer who fails here sees a great deal of the corpus, because what
+/// decides is which documents and never how many.
+#[test]
+fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_layer("topics/a", true)).unwrap();
+
+    // Generated from a sample holding documents the narrow principal cannot see: the fixture gives
+    // term 1 to every third source id, so 0..30 holds twenty it cannot.
+    engine
+        .publish_artifacts(
+            "topics/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t0".into()),
+                fx.members(0..300),
+                vec![variation("a label from the whole sample", &fx, 0..30)],
+            )],
+        )
+        .unwrap();
+
+    let broad = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(broad.len(), 1);
+    assert_eq!(broad[0].content, vec!["a label from the whole sample"]);
+
+    let narrow = artifacts_of(&engine, &subset_credential());
+    assert!(
+        narrow.is_empty(),
+        "the narrow principal sees a third of the generating set, so they receive no artifact — \
+         not the artifact with its label missing: {narrow:?}"
+    );
+}
+
+/// Ranked variations: both principals fail the same full-sample label, and both are served the
+/// narrower one. The design's own worked example.
+#[test]
+fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_layer("topics/a", true)).unwrap();
+
+    let narrow_sample: Vec<u64> = (0..30)
+        .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
+        .collect();
+    engine
+        .publish_artifacts(
+            "topics/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t0".into()),
+                fx.members(0..300),
+                vec![
+                    variation("the whole sample", &fx, 0..300),
+                    variation("one term's worth", &fx, narrow_sample.iter().copied()),
+                ],
+            )],
+        )
+        .unwrap();
+
+    let narrow = artifacts_of(&engine, &subset_credential());
+    assert_eq!(narrow.len(), 1);
+    assert_eq!(
+        narrow[0].content,
+        vec!["one term's worth"],
+        "the first variation this principal contains entirely — never the ranked-first one they \
+         do not"
+    );
+    // A principal holding nothing at all is served neither, and no artifact.
+    assert!(artifacts_of(&engine, &zero_credential()).is_empty());
+}
+
+/// Corpus-independent content — an authored name — has an empty generating set, so containment is
+/// vacuous and everyone who reaches the layer reads it.
+#[test]
+fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(label_layer("programmes/a", false))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "programmes/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("p0".into()),
+                fx.members(0..300),
+                vec![IncomingVariation::new(vec!["An authored name".into()], [])],
+            )],
+        )
+        .unwrap();
+
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let served = artifacts_of(&engine, &credential);
+        assert_eq!(served.len(), 1);
+        assert_eq!(served[0].content, vec!["An authored name"]);
+    }
+}
+
+/// The four ways a batch can disagree with what its layer declared, each refused at publication.
+#[test]
+fn content_that_disagrees_with_the_declaration_is_refused() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(declaration("clusters/plain", &[]))
+        .unwrap();
+
+    let publish = |layer: &str, artifact: IncomingArtifact| {
+        engine.publish_artifacts(layer.into(), 0, vec![artifact])
+    };
+
+    // Content on a layer that declares none.
+    assert!(publish(
+        "clusters/plain",
+        IncomingArtifact::with_content(
+            Some("c0".into()),
+            fx.members(0..10),
+            vec![variation("a label", &fx, 0..10)],
+        ),
+    )
+    .is_err());
+
+    // No content on a layer that declares some.
+    assert!(publish(
+        "topics/a",
+        IncomingArtifact::from_entities(Some("t1".into()), fx.members(0..10)),
+    )
+    .is_err());
+
+    // A variation supplying the wrong number of values.
+    assert!(publish(
+        "topics/a",
+        IncomingArtifact::with_content(
+            Some("t2".into()),
+            fx.members(0..10),
+            vec![IncomingVariation::new(
+                vec!["a".into(), "b".into()],
+                fx.members(0..10)
+            )],
+        ),
+    )
+    .is_err());
+
+    // No generating set on corpus-derived content — the one that would otherwise serve to everyone.
+    assert!(publish(
+        "topics/a",
+        IncomingArtifact::with_content(
+            Some("t3".into()),
+            fx.members(0..10),
+            vec![IncomingVariation::new(vec!["a label".into()], [])],
+        ),
+    )
+    .is_err());
+
+    // Every batch was refused whole, so nothing landed under any of those keys.
+    assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
 }

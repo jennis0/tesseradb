@@ -421,11 +421,36 @@ bound it. No code changed.
     arrival together — the two terms that make the composed mask differ from the projection at all.
   - The **wire shape reached `contracts.md`** in the same pass: the kind-5 frame had shipped at
     Stage 2 without a contracts entry, so §3.2 listed four frame kinds and the server emitted five.
-- Supplied content in the record blob; **`G` as an immutable sorted entity-space array**, mmapped on
-  touch; containment `and_cardinality(G, M_auth) == |G|` against the **composed** mask, cached
-  nowhere, and costing the same on the pass and fail paths.
-- Ranked variations: one artifact, one identity, the first satisfied served entire — or no artifact
-  at all (decisions 0076, 0078).
+- ✔ Supplied content in the record blob; containment `|G ∩ M_auth| == |G|` against the **composed**
+  mask, cached nowhere, and costing the same on the pass and fail paths — one count over the whole
+  set, no early exit, because a short-circuiting subset test returns sooner the *less* of the set a
+  viewer holds and makes response time a function of how close they came. `G` is a Roaring set
+  projected into row space beside the membership rather than the design's sorted entity array: the
+  numerator and the denominator then come from one projection, and the array is an optimisation to
+  take at a scale nothing here reaches.
+  - **Artifact properties are ordinary entity-keyed properties** *(owner, 2026-08-16)*. Same store,
+    same format, same reader as a document's blob-resident fields, in extents of their own on the
+    same list — so the filter and search surfaces reach them by the route they already reach a
+    document's when those land, rather than through a parallel stack. What does **not** transfer is
+    the access rule, and that is the distinction `annotations.md` §7's withdrawal turns on: its
+    *storage* half survived review, its *visibility* half was the fail-open. Sharing is safe because
+    the two never share an entity — artifact ids descend from the ceiling, point ids ascend from
+    zero — so which rule governs a row is a range check on its id.
+  - ⊘ **Layers and levels must be definable at build time, not only online** *(owner, 2026-08-16)*.
+    Nothing in the shape above forecloses it: a layer's property names are positions in its own
+    declaration, and the declaration reaches the manifest identically whether a build wrote it or a
+    registration did. The build-plane route itself is unbuilt — `tessera build` takes no layer file
+    — and it is what a 10⁷-artifact layer needs, publication at that volume being a build job for
+    the same reason `--attach-slice` is.
+  - Found in the doing: **a generating set can lose members on the way into row space.** The set is
+    entity-space and permanent; row space holds only what this slice has folded in, so a member
+    awaiting a fold projects to nothing and drops silently out of the test — leaving a viewer
+    contained in a *smaller* set than the caller wrote. The projected set now travels with the size
+    it should have had, and one that lost members contains nobody.
+- ✔ Ranked variations: one artifact, one identity, the first satisfied served entire — or no artifact
+  at all (decisions 0076, 0078). The three outcomes are a type rather than an `Option`, because
+  *this layer declares no content* and *you may not read this content* are different answers and
+  collapsing them serves the second case with its description missing.
 - The attachment edge, and the term that is fail-open if omitted: an attached artifact is tested on
   its target's `verdict` **and** its target's gate, on every route, including the ones that never
   traverse the edge.

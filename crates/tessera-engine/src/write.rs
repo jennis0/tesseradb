@@ -1490,6 +1490,12 @@ impl LiveState {
         lock_recover(&self.artifacts).unpublished()
     }
 
+    /// The supplied content of every artifact not yet in a manifest — see
+    /// [`tessera_lifecycle::membership::ArtifactStore::unpublished_content`].
+    fn unpublished_content(&self) -> Vec<(tessera_types::EntityId, Vec<(u16, String)>)> {
+        lock_recover(&self.artifacts).unpublished_content()
+    }
+
     /// Record every level as published to its current extent, and with that release the log.
     ///
     /// **Called only once the manifest naming the extents is durable.** The recomputation is over
@@ -7886,6 +7892,25 @@ impl Executor {
             };
             self.membership_extents.extend(published);
             manifest.membership_extents = self.membership_extents.clone();
+            // **Supplied content goes into the record blob**, the store points already use
+            // ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md)),
+            // in extents of its own but on the same list and behind the same reader. Artifact and
+            // point entities are disjoint by construction — two regions, growing towards each other
+            // — so the rows never collide and each side reads its tags against its own declaration.
+            match self.write_content_extent(&prefix_dir, partition, n) {
+                Ok(Some(extent)) => manifest.record_extents.push(extent),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        partition = %partition,
+                        "ALARM: could not write the artifact content extent; the content stays \
+                         WAL-durable and the log stays pinned, and the write is retried at the next \
+                         tick"
+                    );
+                    return;
+                }
+            }
             write_vocabulary_extensions(
                 &mut manifest,
                 &live.vocabularies,
@@ -7921,6 +7946,83 @@ impl Executor {
         self.health
             .overlay_publications
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Write every not-yet-published artifact's supplied content as one record-blob extent.
+    ///
+    /// **The same store, the same format and the same reader as a point's blob-resident fields** —
+    /// which is the point of putting it here rather than in a structure of its own: one set of
+    /// format invariants, one fail-closed reader, and the filter and search surfaces reach artifact
+    /// properties by the route they already reach a document's when those land.
+    ///
+    /// What does **not** come with the store is the access rule. A document's field is visible to
+    /// whoever may see the document; an artifact's content is visible to whoever contains its
+    /// generating set entirely. The two never converge, and the reason sharing a store is safe
+    /// anyway is that they never share an entity: which rule governs a row is a range check on its
+    /// id (`annotations.md` §7's withdrawal is exactly this distinction — the *storage* half of the
+    /// reuse claim survived review, the *visibility* half was the fail-open).
+    fn write_content_extent(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+    ) -> tessera_store::Result<Option<tessera_store::manifest::RecordExtent>> {
+        let rows = self.live.unpublished_content();
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let extents_rel = format!("partitions/{partition}/attrs/record/extents");
+        let dir = prefix_dir.join(&extents_rel);
+        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        let extent = tessera_store::manifest::RecordExtent {
+            blocks: format!("{extents_rel}/artifacts-{n:06}.blocks.bin"),
+            hasrow: format!("{extents_rel}/artifacts-{n:06}.hasrow.roaring"),
+            directory: format!("{extents_rel}/artifacts-{n:06}.directory.arrow"),
+        };
+        let io = |path: &std::path::Path| {
+            let path = path.to_path_buf();
+            move |source| tessera_store::StoreError::Io { path: path.clone(), source }
+        };
+        let blocks = prefix_dir.join(&extent.blocks);
+        let hasrow = prefix_dir.join(&extent.hasrow);
+        let directory = prefix_dir.join(&extent.directory);
+        let mut writer = tessera_filter_write::RecordBlobWriter::create(
+            &blocks,
+            &hasrow,
+            &directory,
+            tessera_filter::RECORD_BLOCK_TARGET,
+        )
+        .map_err(io(&blocks))?;
+        // **Ascending by entity**, which the blob's block directory requires. Artifact ids descend
+        // as they are allocated — the row-less region grows downward — so publication order is
+        // exactly the wrong order here, and sorting is not an optimisation.
+        let mut rows = rows;
+        rows.sort_by_key(|(entity, _)| entity.raw());
+        for (entity, fields) in rows {
+            let entity = u32::try_from(entity.raw()).map_err(|_| {
+                tessera_store::StoreError::MalformedBundle {
+                    detail: format!(
+                        "artifact entity {} does not fit the u32 entity space (I9's ceiling)",
+                        entity.raw()
+                    ),
+                }
+            })?;
+            let fields: Vec<tessera_filter::RecordField> = fields
+                .into_iter()
+                .map(|(tag, value)| tessera_filter::RecordField {
+                    tag,
+                    value: tessera_filter::RecordValue::Utf8(value),
+                })
+                .collect();
+            writer.push_row(entity, &fields).map_err(io(&blocks))?;
+        }
+        writer.finish().map_err(io(&blocks))?;
+        tessera_store::fsync_dir(&dir)?;
+        Ok(Some(extent))
     }
 
     /// Pack every not-yet-published membership into one extent per level and fsync it, returning
