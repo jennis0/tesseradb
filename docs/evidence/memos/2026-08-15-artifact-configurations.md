@@ -67,23 +67,26 @@ title      = "Topic clusters, August"
 slices     = ["embedding-2026-08"]
 membership = "enumerated"
 access       = { artifacts_carry_own = false }   # a cluster exists because the data does
-visible_when = { min_fraction = 0.05 }
+visible_when = { min_visible = 50 }              # absolute: monotone down the tree, so rollup works
 hierarchy    = { kind = "nested", prune_children = true }
 content      = { derived = ["centroid", "hull"] }
 # no levels: a nested layer's hierarchy is its edges (decision 0082)
 ```
 
 ```json
-{
-  "layer": "clusters/hdbscan-2026-08",
-  "level": 0,
-  "stable_key": "c-vaccine-trials",
-  "membership": { "external_ids": ["2401.00123", "2401.00456", "…31 000 of them"] },
-  "edges": [
-    { "layer": "clusters/hdbscan-2026-08", "level": 0, "stable_key": "c-immunology" }
-  ]
-}
+{ "layer": "clusters/hdbscan-2026-08", "level": 0, "stable_key": "c-immunology",
+  "membership": { "external_ids": ["…184 000 of them"] } }
 ```
+```json
+{ "layer": "clusters/hdbscan-2026-08", "level": 0, "stable_key": "c-vaccine-trials",
+  "membership": { "external_ids": ["2401.00123", "…31 000 of them"] },
+  "edges": [{ "layer": "clusters/hdbscan-2026-08", "level": 0,
+              "stable_key": "c-immunology" }] }
+```
+
+**Root and branch are the same kind of thing**, distinguished only by an edge. Publish order matters:
+the parent must exist before an edge into it, which is the ordering constraint the write cycle
+already names.
 
 **Almost the simplest artifact there is: an identity, a set, and one edge.** No content, no access
 label, no variations. Its count, centroid and hull are recomputed per viewer from that membership and
@@ -103,9 +106,19 @@ Those two are different claims, and merging them is the mistake an earlier draft
 put into [decision 0080](../../decisions/0080-the-frontier-is-a-per-artifact-test.md) before the owner
 caught it.
 
-⊘ **Note the tension with `min_fraction` above.** Subset membership makes *absolute* criteria monotone
-down the tree, so rollup falls out for free; a proportional one does not, so this layer may show a
-fine cluster with nothing coarser above it. Both are safe; only one gives rollup.
+⊘ **Note the tension with the criterion's form.** Subset membership makes an *absolute* criterion
+monotone down the tree, so rollup falls out for free; `min_fraction` does not, so a layer declaring it
+may show a fine cluster with nothing coarser above it. Both are safe; only one rolls up — which is
+why this example takes `min_visible` where §1's generic layer takes the proportional form.
+
+**What bounds the response is the cut, not a level**
+([decision 0083](../../decisions/0083-the-frontier-is-a-request-time-budget.md)). A viewport
+intersects this root *and* every passing descendant, so a request carries an artifact budget as it
+already carries a mark budget, and the server meets it by serving ancestors instead of their
+children. `prune_children = true` is the default that produces; a request may ask for more detail
+than it. Cutting shallower serves strictly less and cutting deeper serves only artifacts that already
+passed their own test, so the depth is free — unlike the frontier depth it replaces, which was itself
+the disclosure control.
 
 **The stacked case is a different layer, not this one.** Three *independent* runs at three
 `min_cluster_size` settings — which is what the measurement campaign produced — genuinely have no
@@ -114,8 +127,7 @@ is a real configuration and it declares `kind = "stacked"`, no edges, and levels
 analyses rather than three depths.
 
 **No zoom ranges, deliberately.** An embedding projection has no units, so no level corresponds to a
-zoom; level choice is the client's. **`min_fraction`** because a fixed bar of fifty protects a
-cluster of a hundred and does nothing for one of ten thousand.
+zoom; the client asks for the detail it can draw and gets a cut through the tree.
 
 ## 3. Its labels — `topics/ctfidf-2026-08`
 

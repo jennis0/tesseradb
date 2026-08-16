@@ -517,6 +517,22 @@ it is what §6.2's pruning policy names. It carries no disclosure argument in ei
 serving the frontier serves strictly less than serving every passer, and serving every passer reveals
 nothing beyond what each artifact's own presence already does.
 
+**And it is where the response gets its bound, which levels had been supplying quietly**
+([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)). A viewport intersects
+a root and every passing descendant of it, so the depth of the cut is a **request parameter** in the
+shape of the mark budget a viewport already carries, and the layer declares only the default.
+Artifacts cannot be sampled (`annotation-representation.md` §6.1), so a budget is met by **serving
+ancestors instead of descendants** — reduction by the layer's own structure, which is what rollup is
+*for* now that it is no longer needed as a disclosure behaviour.
+
+**Depth is free where §8.4's depth was not**, and the two must not be confused for sitting in the
+same place in a request. §8.4 fixed maximum depth against `M_auth` and never `M_sel` because there
+the depth *was* the control; here the control is the criterion, evaluated per artifact against
+`M_auth`, and every artifact a deeper cut reveals has already passed it. ⊘ **A budget resolving to
+different depths in different branches is the honest general case and is unspecified** — one depth
+for the whole tree is what a first implementation does, and it is visibly wrong on an unbalanced
+tree, which is every real clustering.
+
 **The descent is what should bend, not the data.** An earlier draft of this document defined a
 node's *reach* as its own members unioned with its descendants', restoring monotonicity by
 construction. That is recorded here as a **rejected** approach, because it is the obvious repair and

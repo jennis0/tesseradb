@@ -100,3 +100,4 @@ prevent.
 | [0080](0080-the-frontier-is-a-per-artifact-test.md) | 2026-08-15 | The frontier is a per-artifact test, not a tree walk |
 | [0081](0081-a-replacement-mints-identities-an-edit-keeps-them.md) | 2026-08-15 | A replacement mints identities, an edit keeps them, and nothing carries across a replacement |
 | [0082](0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md) | 2026-08-16 | A hierarchy lives in its edges; levels are resolutions, not depths |
+| [0083](0083-the-frontier-is-a-request-time-budget.md) | 2026-08-16 | The frontier is a request-time budget, not a declared depth |
