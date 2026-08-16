@@ -303,6 +303,9 @@ never the cluster's size.
   nothing on either route. Fail-closed and deliberate: the per-artifact label arrives with content
   at Stage 3, and admitting an unlabelled artifact would make a missing declaration a grant to
   everyone.
+- Owed before the stage can be *seen*: the TypeScript and Python frame decoders do not know kind 5
+  and refuse it, and drill-down has no HTTP route. Both are named, with everything else the
+  integration needs, in [the client handover](artifact-client-handover.md).
 
 **The check:** on the real 2.4M clustering, a broad principal and a one-term principal receive
 different counts for the same cluster, neither equal to its declared size; clusters below the criterion
