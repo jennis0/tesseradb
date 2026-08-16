@@ -109,6 +109,11 @@ pub struct ArtifactStore {
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
     oldest_wal_pos: Option<u64>,
+    /// Bumped by every publication and every layer removal. **A derived row-space projection is
+    /// valid only for the version it was built from**: a cache that missed a bump would serve a
+    /// level with its newest artifacts absent, which a viewer cannot tell from artifacts that
+    /// failed their existence criterion.
+    version: u64,
 }
 
 impl ArtifactStore {
@@ -222,6 +227,7 @@ impl ArtifactStore {
             Some(existing) => existing.min(position),
             None => position,
         });
+        self.version += 1;
         refused
     }
 
@@ -270,6 +276,12 @@ impl ArtifactStore {
     pub fn remove_layer(&mut self, layer: &str) {
         self.levels.retain(|(l, _), _| l != layer);
         self.keys.retain(|(l, _, _), _| l != layer);
+        self.version += 1;
+    }
+
+    /// See the field: what a derived projection's validity is keyed on.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// How many artifacts are held, across every layer. **Operator-facing only**: a per-layer count

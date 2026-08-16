@@ -556,6 +556,10 @@ pub struct DecodedViewport {
     pub points: Vec<PointRow>,
     /// `(cell, count)` — `None` when no kind-2 frame was present (underlay unrequested).
     pub sub_cells: Option<Vec<(u64, u64)>>,
+    /// The kind-5 artifacts frame. `None` only if the response carried no artifacts channel at
+    /// all — a served response always carries one, empty or not, so `Some(vec![])` and `None` are
+    /// different facts and a test may assert on either.
+    pub artifacts: Option<Vec<ArtifactRow>>,
     /// The kind-4 trailer, parsed. Its key set is asserted here — the one server-authored JSON
     /// region of the body must not quietly acquire a field the comparator never sees
     /// (`streamed-serving.md` §7).
@@ -566,6 +570,28 @@ pub struct DecodedViewport {
     /// The body minus the trailer frame: the deterministic region, what byte-equality
     /// assertions compare (`streamed-serving.md` §7).
     pub deterministic_bytes: Vec<u8>,
+}
+
+/// One row of the kind-5 artifacts frame, as a test reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRow {
+    pub layer: String,
+    pub tessera_id: u64,
+    pub stable_key: Option<String>,
+    /// **How many members this principal can see** — never how many the artifact has.
+    pub masked_count: u64,
+}
+
+fn str_col(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+) -> arrow::array::StringArray {
+    batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .clone()
 }
 
 fn u64_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> UInt64Array {
@@ -599,6 +625,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let mut served = Vec::new();
     let mut points = Vec::new();
     let mut sub_cells: Option<Vec<(u64, u64)>> = None;
+    let mut artifacts: Option<Vec<ArtifactRow>> = None;
     let mut trailer: Option<serde_json::Value> = None;
     let mut point_frames = 0usize;
     let mut deterministic_end = 0usize;
@@ -634,6 +661,29 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     let count = u64_col(&batch, 1);
                     for i in 0..batch.num_rows() {
                         cells.push((cell.value(i), count.value(i)));
+                    }
+                }
+                deterministic_end = at + frame_len;
+            }
+            tessera_wire::FRAME_ARTIFACTS => {
+                assert!(artifacts.is_none(), "exactly one artifacts frame");
+                let rows = artifacts.get_or_insert_with(Vec::new);
+                let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let layer = str_col(&batch, 0);
+                    let tessera_id = u64_col(&batch, 1);
+                    let stable_key = str_col(&batch, 2);
+                    let masked_count = u64_col(&batch, 3);
+                    for i in 0..batch.num_rows() {
+                        rows.push(ArtifactRow {
+                            layer: layer.value(i).to_string(),
+                            tessera_id: tessera_id.value(i),
+                            stable_key: stable_key
+                                .is_valid(i)
+                                .then(|| stable_key.value(i).to_string()),
+                            masked_count: masked_count.value(i),
+                        });
                     }
                 }
                 deterministic_end = at + frame_len;
@@ -696,6 +746,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
         served,
         points,
         sub_cells,
+        artifacts,
         trailer,
         point_frames,
         deterministic_bytes: bytes[..deterministic_end].to_vec(),

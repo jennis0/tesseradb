@@ -289,6 +289,79 @@ pub struct EffectiveMask {
     filter: Option<FilterRows>,
 }
 
+/// The two questions an artifact's membership asks of a viewer's mask.
+///
+/// **A trait so that the one production implementor is [`EffectiveMask`] and nothing else.** An
+/// artifact's masked count must be taken against the *composed* mask — base minus the overlay's
+/// denials plus the buffer's — and the pre-overlay projection strictly contains it after any
+/// accepted delete or suppression. A predicate that could be handed a raw bitmap would serve counts
+/// over items already denied, and would do it silently. The `Bitmap` implementor below is
+/// test-only, and its absence from a release build is what makes that a compile error rather than a
+/// review finding.
+pub trait MaskedSet {
+    /// `|set ∩ mask|` — an artifact's **masked count**.
+    ///
+    /// O(containers touched), never O(cardinality), which is what lets the count be taken over a
+    /// whole membership rather than tile by tile.
+    ///
+    /// **Deliberately blind to any attribute filter**, exactly as [`EffectiveMask::visible_total`]
+    /// is. The count beside an artifact is what the *principal* may see, not what their current
+    /// search box admits; a filtered count there would make the artifact's existence criterion a
+    /// function of the filter, so an artifact would appear and disappear as a viewer typed — a
+    /// filter moving the frontier down, which **I12** forbids. Whether an artifact should *also*
+    /// carry a filtered figure beside the masked one is ⊘ the open filter axis (architecture §8.4),
+    /// and adding one here without ruling it would settle it by accident.
+    fn count_intersection(&self, set: &Bitmap) -> u64;
+
+    /// Whether `set` holds any visible row — candidacy, answered as a **masked** question.
+    ///
+    /// The alternative an early draft of the artifact design took was a build-time bounding box
+    /// over full membership, served wherever the box intersected the viewport. That discloses the
+    /// unmasked extent by panning: a viewer sees a shape's edge in a region holding nothing they
+    /// may see. Asking the mask instead makes the fault unexpressible.
+    fn intersects_set(&self, set: &Bitmap) -> bool;
+}
+
+impl MaskedSet for EffectiveMask {
+    /// **The same term-by-term arithmetic as [`EffectiveMask::count_range`]**, and exact for the
+    /// same reason: `minus ⊆ base` and `plus ∩ base = ∅` are the structural invariants [`compose`]
+    /// asserts, so nothing is subtracted twice and nothing is added that was already there.
+    fn count_intersection(&self, set: &Bitmap) -> u64 {
+        let base_count = self.base.bitmap().and_cardinality(set);
+        let minus_count = self.minus.and_cardinality(set);
+        let plus_count = self.plus.and_cardinality(set);
+        base_count - minus_count + plus_count
+    }
+
+    fn intersects_set(&self, set: &Bitmap) -> bool {
+        // `plus` first: it is tiny, and a hit there settles the question without touching `base`.
+        if self.plus.intersect(set) {
+            return true;
+        }
+        if !self.base.bitmap().intersect(set) {
+            return false;
+        }
+        // `base` hits, so the only remaining question is whether every hit was denied. Materialised
+        // only on this path, and only over `set` — an artifact's membership, not the row space.
+        let mut visible = self.base.bitmap().and(set);
+        visible.andnot_inplace(&self.minus);
+        !visible.is_empty()
+    }
+}
+
+/// A mask with no denials — **test-only**, so that no release build can put an uncomposed set where
+/// a composed one belongs. See [`MaskedSet`].
+#[cfg(test)]
+impl MaskedSet for Bitmap {
+    fn count_intersection(&self, set: &Bitmap) -> u64 {
+        self.and_cardinality(set)
+    }
+
+    fn intersects_set(&self, set: &Bitmap) -> bool {
+        self.intersect(set)
+    }
+}
+
 impl EffectiveMask {
     /// Narrow this mask by an attribute filter's row-space set.
     ///
@@ -411,6 +484,8 @@ impl EffectiveMask {
         result
     }
 
+    /// See [`MaskedSet::count_intersection`], which this implements and documents.
+    ///
     pub fn contains_row(&self, row: u32) -> bool {
         self.debug_assert_in_domain(&(row..row + 1));
         if self.filter.as_ref().is_some_and(|f| !f.rows().contains(row)) {

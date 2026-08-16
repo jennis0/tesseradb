@@ -23,8 +23,11 @@
 //!
 //! ## The count is masked, and the criterion never touches it
 //!
-//! `and_cardinality(rows(artifact), mask_rows)` — both operands already row-space, the session's
-//! mask having been projected once. That number is what a viewer is told, unmodified. The criterion
+//! `|rows(artifact) ∩ M|` where `M` is the session's **composed** mask — its projection with the
+//! overlay's denials taken out and the buffer's additions put in, both operands already row-space.
+//! The type enforces that: [`MaskedSet`] has exactly one implementor outside a test build, so a
+//! count cannot be taken against the pre-overlay projection, which strictly contains `M_auth` after
+//! any accepted delete. That number is what a viewer is told, unmodified. The criterion
 //! reads the same number and decides whether the artifact is **served at all**
 //! ([decision 0075](../../../docs/decisions/0075-the-masked-count-is-an-existence-criterion.md));
 //! it never rounds, floors or suppresses a value. An implementation that "applied the threshold to
@@ -34,15 +37,20 @@
 //! carries nothing that distinguishes it from an artifact that was never published — which is the
 //! same indistinguishability the layer registry gives a gate-failed name.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
-use tessera_lifecycle::membership::ArtifactRecord;
+use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore};
 use tessera_lifecycle::Overlay;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
 use tessera_types::{EntityId, TermId};
 
 use tessera_store::permutation::RowSpace;
+
+use crate::compose::MaskedSet;
 
 /// One layer's membership in the row space of one slice, built at open and rebuilt when the
 /// generation moves.
@@ -82,31 +90,121 @@ impl ArtifactRows {
         self.rows.get(ordinal as usize).and_then(Option::as_ref)
     }
 
+    /// How many ordinals this level covers, holes included.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     /// The masked count: how many of this artifact's members this viewer can see.
     ///
     /// **This is the number served**, unmodified, and it is also the number the criterion reads.
     /// One quantity, computed once, used for both — because a design where the served count and the
     /// tested count could differ is one where they eventually do.
-    pub fn masked_count(&self, ordinal: u32, mask_rows: &Bitmap) -> u64 {
+    pub fn masked_count(&self, ordinal: u32, mask: &impl MaskedSet) -> u64 {
         self.get(ordinal)
-            .map(|rows| rows.and_cardinality(mask_rows))
+            .map(|rows| mask.count_intersection(rows))
             .unwrap_or(0)
     }
 
     /// Whether this artifact has any visible member inside `tile_rows` — candidacy, answered as a
-    /// **masked** question.
-    ///
-    /// The alternative a first draft of the design took was a build-time bounding box over full
-    /// membership, served wherever the box intersected the viewport. That discloses the unmasked
-    /// extent by panning: a viewer sees a shape's edge in a region holding nothing they may see.
-    /// There is no box, so no code here can express the fault.
-    pub fn intersects(&self, ordinal: u32, tile_rows: &Bitmap, mask_rows: &Bitmap) -> bool {
+    /// **masked** question. See [`MaskedSet::intersects_set`] for the bounding box this replaces.
+    pub fn intersects(&self, ordinal: u32, tile_rows: &Bitmap, mask: &impl MaskedSet) -> bool {
         let Some(rows) = self.get(ordinal) else {
             return false;
         };
-        let mut visible = rows.and(mask_rows);
-        visible.and_inplace(tile_rows);
-        !visible.is_empty()
+        // Narrowed to the viewport **first**: a tile set is a handful of contiguous runs, so this
+        // is the cheap term, and it keeps the mask question — the expensive one — off every
+        // artifact the viewer is not looking at.
+        let in_tiles = rows.and(tile_rows);
+        !in_tiles.is_empty() && mask.intersects_set(&in_tiles)
+    }
+}
+
+/// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
+/// wrong**, and a mismatch on any of them rebuilds:
+///
+/// - the **prefix** and **segments version**, because a flush or a fold renumbers row space
+///   wholesale, so a projection built over the old one names other people's documents;
+/// - the **slice**, because row space is per slice;
+/// - the **store version**, because a publication adds memberships the projection has never seen —
+///   and a cached projection that silently omitted them would serve a level with its newest
+///   clusters absent, indistinguishable from clusters that failed their criterion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionKey {
+    prefix: String,
+    segments_version: u64,
+    slice: String,
+    store_version: u64,
+}
+
+/// One row-space projection per `(slice, layer, level)`, rebuilt when its [`ProjectionKey`] moves.
+///
+/// **Costly to build and therefore never built on a request that can reuse one.**
+/// `RowSpace::project` decodes a whole membership; at corpus scale that is the "seconds, not
+/// milliseconds" cost `RowProjection` carries the same warning about. This is paid at the first
+/// request after a generation move or a publication, and by nothing else.
+///
+/// **Replace-on-mismatch, not an LRU.** The key names the only generation a projection is valid
+/// for, so a stale entry has no value to retain — keeping one would be keeping a wrong answer
+/// warm. The map is therefore bounded by the number of live `(slice, layer, level)` triples rather
+/// than by a capacity anyone has to tune.
+/// `(slice, layer, level)` — what one cached projection is *for*, as against the
+/// [`ProjectionKey`] that says when it stops being valid.
+type LevelAddress = (String, String, u32);
+
+#[derive(Debug, Default)]
+pub struct ArtifactProjections {
+    cached: Mutex<BTreeMap<LevelAddress, (ProjectionKey, Arc<ArtifactRows>)>>,
+}
+
+impl ArtifactProjections {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This level's row form for the given generation, building it if what is held is stale.
+    ///
+    /// **The build runs outside the lock**, so a slow projection does not block every other layer's
+    /// requests behind it. Two threads racing the same key both build and the last one wins; they
+    /// build from the same store version over the same row space, so the two results are equal and
+    /// the waste is one projection, not a wrong answer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_or_build(
+        &self,
+        prefix: &str,
+        segments_version: u64,
+        slice: &str,
+        layer: &str,
+        level: u32,
+        store: &ArtifactStore,
+        store_version: u64,
+        space: &RowSpace,
+    ) -> Arc<ArtifactRows> {
+        let key = ProjectionKey {
+            prefix: prefix.to_string(),
+            segments_version,
+            slice: slice.to_string(),
+            store_version,
+        };
+        let map_key = (slice.to_string(), layer.to_string(), level);
+
+        if let Some((held, rows)) = self.cached.lock().unwrap_or_else(|e| e.into_inner()).get(&map_key)
+        {
+            if *held == key {
+                return Arc::clone(rows);
+            }
+        }
+
+        let rows = Arc::new(ArtifactRows::build(store.level(layer, level), space));
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(map_key, (key, Arc::clone(&rows)));
+        rows
     }
 }
 
@@ -151,7 +249,7 @@ impl ArtifactVerdict {
 
 /// Everything the predicate needs about one viewer and one layer, gathered once so the test itself
 /// is a straight line.
-pub struct ArtifactView<'a> {
+pub struct ArtifactView<'a, M: MaskedSet> {
     pub declaration: &'a LayerDeclaration,
     pub overlay: &'a Overlay,
     /// The viewer's satisfied terms — the same set the item-visibility predicate uses. Satisfaction
@@ -165,11 +263,11 @@ pub struct ArtifactView<'a> {
     pub layer_reachable: bool,
     /// This slice's row form of the layer's membership.
     pub rows: &'a ArtifactRows,
-    /// The viewer's mask, already in row space.
-    pub mask_rows: &'a Bitmap,
+    /// The viewer's **composed** mask — see [`MaskedSet`] for why the type forbids anything else.
+    pub mask: &'a M,
 }
 
-impl ArtifactView<'_> {
+impl<M: MaskedSet> ArtifactView<'_, M> {
     /// The one predicate.
     ///
     /// `own_terms` is the artifact's own access label resolved to a term, or `None` if it carries
@@ -206,7 +304,7 @@ impl ArtifactView<'_> {
 
         // 4. The existence criterion, against the **live** masked count. The same number is
         //    returned to the caller, so the tested quantity and the served quantity cannot drift.
-        let masked_count = self.rows.masked_count(ordinal, self.mask_rows);
+        let masked_count = self.rows.masked_count(ordinal, self.mask);
         if let Some(criterion) = self.declaration.visible_when {
             let clears = match criterion {
                 ExistenceCriterion::MinVisible(n) => masked_count >= n,
@@ -293,14 +391,18 @@ mod tests {
             }
         }
 
-        fn view<'a>(&'a self, declaration: &'a LayerDeclaration, reachable: bool) -> ArtifactView<'a> {
+        fn view<'a>(
+            &'a self,
+            declaration: &'a LayerDeclaration,
+            reachable: bool,
+        ) -> ArtifactView<'a, Bitmap> {
             ArtifactView {
                 declaration,
                 overlay: &self.overlay,
                 satisfied: &self.satisfied,
                 layer_reachable: reachable,
                 rows: &self.rows,
-                mask_rows: &self.mask,
+                mask: &self.mask,
             }
         }
     }

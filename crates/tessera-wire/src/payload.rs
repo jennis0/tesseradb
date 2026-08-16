@@ -51,6 +51,7 @@ pub const FRAME_TILES: u8 = 1;
 pub const FRAME_SUB_CELLS: u8 = 2;
 pub const FRAME_POINTS: u8 = 3;
 pub const FRAME_TRAILER: u8 = 4;
+pub const FRAME_ARTIFACTS: u8 = 5;
 
 /// Bytes of frame header preceding every payload: the kind byte and the `u32 LE` length.
 pub const FRAME_HEADER_BYTES: usize = 5;
@@ -238,6 +239,63 @@ pub fn sub_cells_frame(cells: &[u64], counts: &[u64]) -> Vec<u8> {
     out
 }
 
+/// The kind-5 artifacts frame: one row per served artifact — `(layer, tessera_id, stable_key,
+/// masked_count)`.
+///
+/// **What is not here is the design.** No ordinal: a position in a dense level, so two of them
+/// count what lies between (C8). No declared membership size: a corpus-wide count over items this
+/// principal may not see, and the denominator the proportional criterion divides by — a predicate
+/// input, never a field. No membership. And no reason an artifact is absent, because one that
+/// failed its criterion must be indistinguishable from one that was never published.
+///
+/// `masked_count` is `UInt64` and `tessera_id` is `UInt64`, matching the points frame's `tessera_id`
+/// column so a client's decoder has one identifier type across the response.
+///
+/// # Panics
+///
+/// Panics on a length mismatch between the four columns, or on Arrow construction failure.
+pub fn artifacts_frame(
+    layer: &[&str],
+    tessera_id: &[u64],
+    stable_key: &[Option<&str>],
+    masked_count: &[u64],
+) -> Vec<u8> {
+    let rows = layer.len();
+    assert_eq!(rows, tessera_id.len(), "layer/tessera_id length mismatch");
+    assert_eq!(rows, stable_key.len(), "layer/stable_key length mismatch");
+    assert_eq!(
+        rows,
+        masked_count.len(),
+        "layer/masked_count length mismatch"
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("tessera_id", DataType::UInt64, false),
+        // The only nullable column here: a publisher need not supply a key.
+        Field::new("stable_key", DataType::Utf8, true),
+        Field::new("masked_count", DataType::UInt64, false),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(layer.iter().copied())),
+        Arc::new(UInt64Array::from_iter_values(
+            tessera_id.iter().copied(),
+        )),
+        Arc::new(StringArray::from_iter(stable_key.iter().copied())),
+        Arc::new(UInt64Array::from_iter_values(
+            masked_count.iter().copied(),
+        )),
+    ];
+    let batch =
+        RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");
+
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows * 48 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_ARTIFACTS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
 /// The kind-3 points frame: one `tessera_id` and one 64-bit position `code` per point, plus the
 /// declared scalars in schema order.
 ///
@@ -321,7 +379,7 @@ pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
         let kind = body[at];
         if !matches!(
             kind,
-            FRAME_TILES | FRAME_SUB_CELLS | FRAME_POINTS | FRAME_TRAILER
+            FRAME_TILES | FRAME_SUB_CELLS | FRAME_POINTS | FRAME_TRAILER | FRAME_ARTIFACTS
         ) {
             return Err(FrameError::UnknownKind { kind, at });
         }

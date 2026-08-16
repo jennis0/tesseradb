@@ -17,6 +17,7 @@ pub mod payload;
 
 pub use handles::HandleTable;
 pub use payload::{
-    points_frame, split_frames, sub_cells_frame, tiles_frame, trailer_frame, FrameError,
-    ScalarColumn, FRAME_HEADER_BYTES, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
+    artifacts_frame, points_frame, split_frames, sub_cells_frame, tiles_frame, trailer_frame,
+    FrameError, ScalarColumn, FRAME_ARTIFACTS, FRAME_HEADER_BYTES, FRAME_POINTS, FRAME_SUB_CELLS,
+    FRAME_TILES, FRAME_TRAILER,
 };

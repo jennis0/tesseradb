@@ -64,7 +64,7 @@ pub use single_flight::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLI
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SinkClosed, SinkResult,
+    ArtifactOut, ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SinkClosed, SinkResult,
     SubCellCount, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportRequest,
     ViewportSink,
 };

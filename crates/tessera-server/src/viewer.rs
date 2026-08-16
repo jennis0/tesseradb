@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use tessera_types::{GenerationStamp, TesseraId};
-use tessera_wire::{points_frame, sub_cells_frame, tiles_frame, trailer_frame, ScalarColumn};
+use tessera_wire::{
+    artifacts_frame, points_frame, sub_cells_frame, tiles_frame, trailer_frame, ScalarColumn,
+};
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{CancelToken, SinkClosed, SinkResult, ViewportHead, ViewportSink};
@@ -488,6 +490,23 @@ struct ViewportReq {
     /// must not be conflated.
     #[serde(default)]
     filters: Option<serde_json::Value>,
+    /// Which annotation layers to answer for. Absent answers for every layer this principal
+    /// reaches; an empty list answers for none and costs nothing.
+    ///
+    /// **It narrows and never widens.** A name this principal does not reach is absent from the
+    /// answer whether or not it was asked for, by the same route a name nobody registered is — so
+    /// naming a layer is not a way to learn whether it exists.
+    #[serde(default)]
+    layers: Option<Vec<String>>,
+    /// How many artifacts the client wants back at most, in the same shape as `k` beside it.
+    ///
+    /// **Honoured structurally, never by sampling** ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)):
+    /// a budget that cannot be met by serving everything is met by serving ancestors instead of
+    /// their descendants. A flat layer has no ancestors, so today this is accepted and inert — the
+    /// field is defined now because it is a wire shape, and adding a request field to a shipped
+    /// frame later is the change this ordering exists to avoid.
+    #[serde(default)]
+    artifact_budget: Option<u32>,
 }
 
 /// The streamed viewport's channel capacity, in frames. Two: one in flight to hyper, one built
@@ -630,6 +649,24 @@ impl ViewportSink for WireSink {
             .map_err(|_| SinkClosed)
     }
 
+    /// Never called with an empty slice — the engine skips it, on the points frame's rule.
+    ///
+    /// Sent as an ordinary body frame rather than folded into the first flush: the first flush is
+    /// already gone by the time this runs (the counts callback sends it), and moving the artifact
+    /// sweep ahead of the counts would delay the number channel behind it — which
+    /// `streamed-serving.md` §2 puts first deliberately.
+    fn artifacts(&mut self, artifacts: &[tessera_engine::ArtifactOut]) -> SinkResult {
+        let serialise_start = Instant::now();
+        let layer: Vec<&str> = artifacts.iter().map(|a| a.layer.as_str()).collect();
+        let tessera_id: Vec<u64> = artifacts.iter().map(|a| a.tessera_id.raw()).collect();
+        let stable_key: Vec<Option<&str>> =
+            artifacts.iter().map(|a| a.stable_key.as_deref()).collect();
+        let masked_count: Vec<u64> = artifacts.iter().map(|a| a.masked_count).collect();
+        let frame = artifacts_frame(&layer, &tessera_id, &stable_key, &masked_count);
+        self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
+        self.send(frame)
+    }
+
     fn points(&mut self, chunk: tessera_engine::PointColumns) -> SinkResult {
         let head = self.head.as_ref().expect("head precedes points");
         let serialise_start = Instant::now();
@@ -735,10 +772,17 @@ fn run_viewport_stream(
         }
     };
 
+    // Borrowed as `&[&str]` for the engine's request, which holds the list rather than owning it.
+    let layer_names: Option<Vec<&str>> = req
+        .layers
+        .as_ref()
+        .map(|names| names.iter().map(String::as_str).collect());
     let mut request = ViewportRequest::new(&req.slice, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
+        .layers(layer_names.as_deref())
+        .artifact_budget(req.artifact_budget)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
         request = request.filter(filter);

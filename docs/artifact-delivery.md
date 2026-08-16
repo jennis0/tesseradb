@@ -280,18 +280,29 @@ never the cluster's size.
   artifact registered, still addressable, and served as absent. The pin is the fail-closed reading
   of the open packaging question below; a log that grows is noticed where a membership that vanishes
   is not. **Closing the packaging decision is what lifts it.**
-- ✔ The derived **row-space** operator, built member-wise and never range-wise. Building it at open
-  and rebuilding it on a generation move is the projection cache, still owed.
+- ✔ The derived **row-space** operator, built member-wise and never range-wise, cached per
+  `(slice, layer, level)` and rebuilt when the prefix, the segments version or the store's own
+  version moves. Replace-on-mismatch rather than an LRU: the key names the only generation a
+  projection is valid for, so a stale entry has no value to keep warm.
 - ✔ The visibility predicate in one place, overlay first: `verdict` → layer gate → own terms ∧
-  existence criterion (decision 0079).
-- The existence criterion (decision 0075), enforced on the **live** count; the session's resolved
-  visibility set as candidacy only, keyed on `(layer, version, generation)`.
-- Viewport carries the artifacts whose rows intersect the tile ranges, with masked counts.
-  Drill-down by `tessera_id` resolves through the resolved set. Ordinals never cross the wire.
-- Contracts work: the viewport frame and `/v1/items` shapes for an artifact — including the
-  **artifact budget** request field, which a flat layer ignores. It is defined here rather than at
-  Stage 5 because it is a wire shape, and adding a request field to a shipped frame later is the
-  change this ordering exists to avoid ([decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md)).
+  existence criterion (decision 0079), enforced on the **live** count.
+- ✔ The count is taken against the **composed** mask, and the type enforces it: the trait the
+  predicate reads has exactly one implementor outside a test build, so a count cannot be taken
+  against the pre-overlay projection — which strictly contains `M_auth` after any accepted delete.
+- ✔ Viewport carries the artifacts whose rows intersect the tile ranges, with masked counts, as a
+  frame of its own (kind 5) after the counts and before any point. Drill-down by `tessera_id`
+  calls the same predicate — an artifact reachable by identifier but not by viewport would be two
+  transcriptions of one rule. Ordinals never cross the wire, and neither does an unmasked size.
+- ✔ Contracts work: the artifacts frame, the **artifact budget** request field (accepted, and inert
+  on a flat layer — the only reduction the representation allows is structural, and a flat layer
+  has no ancestors to cut to), and a **layer selector** beside it, which narrows and never widens.
+  The budget is defined here rather than at Stage 5 because it is a wire shape, and adding a
+  request field to a shipped frame later is the change this ordering exists to avoid
+  ([decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md)).
+- ⊘ **No artifact carries its own terms yet**, so a layer declaring `artifacts_carry_own` serves
+  nothing on either route. Fail-closed and deliberate: the per-artifact label arrives with content
+  at Stage 3, and admitting an unlabelled artifact would make a missing declaration a grant to
+  everyone.
 
 **The check:** on the real 2.4M clustering, a broad principal and a one-term principal receive
 different counts for the same cluster, neither equal to its declared size; clusters below the criterion

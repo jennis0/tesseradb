@@ -389,6 +389,147 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
     assert_eq!(status, 422);
 }
 
+async fn viewport_artifacts(
+    server: &TestServer,
+    terms: &[&str],
+    extra: serde_json::Value,
+) -> Option<Vec<ArtifactRow>> {
+    let auth = authorise(server, terms).await;
+    let token = auth["token"].as_str().unwrap();
+    let mut body = json!({ "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200 });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    decode_viewport_frames(&resp.bytes().await.unwrap()).artifacts
+}
+
+/// **The wire's headline, and the field it must not carry.** Two principals, one cluster, two
+/// counts — and no ordinal, no membership and no declared size anywhere in the frame.
+#[tokio::test]
+async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut d = declaration("clusters/a", None);
+    d["visible_when"] = serde_json::Value::Null;
+    assert_eq!(register(&server, d).await.0, 201);
+
+    // 300 documents; the fixture gives term 1 to every third source id.
+    let members: Vec<String> = (0..300u64).map(member).collect();
+    let expected_narrow = (0..300u64).filter(|s| terms_of(*s).contains(&1)).count() as u64;
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "stable_key": "c0", "members": members }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let broad = viewport_artifacts(&server, &["0"], json!({}))
+        .await
+        .expect("a served cluster carries the frame");
+    let narrow = viewport_artifacts(&server, &["1"], json!({}))
+        .await
+        .expect("and so does the narrow principal's");
+    assert_eq!(broad.len(), 1);
+    assert_eq!(narrow.len(), 1);
+
+    assert_eq!(broad[0].masked_count, 300);
+    assert_eq!(
+        narrow[0].masked_count, expected_narrow,
+        "the narrow principal is told how many members *they* can see"
+    );
+    assert_ne!(
+        narrow[0].masked_count, 300,
+        "a count equal to the membership would mean the mask was never applied"
+    );
+    // The identifier is stable across principals by construction (C17); only the number moves.
+    assert_eq!(broad[0].tessera_id, narrow[0].tessera_id);
+    assert_eq!(broad[0].stable_key.as_deref(), Some("c0"));
+    assert_eq!(broad[0].layer, "clusters/a");
+}
+
+/// A response with nothing to say about artifacts carries **no artifacts frame at all** — a
+/// deployment with no layers pays nothing for the channel.
+#[tokio::test]
+async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    assert!(viewport_artifacts(&server, &["0"], json!({})).await.is_none());
+
+    let mut d = declaration("clusters/a", None);
+    d["visible_when"] = serde_json::Value::Null;
+    register(&server, d).await;
+    publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "stable_key": "c0", "members": [member(0), member(1)] }]
+        }),
+    )
+    .await;
+    assert!(viewport_artifacts(&server, &["0"], json!({})).await.is_some());
+
+    // A request naming no layer asks nothing and is answered with nothing — and costs no frame.
+    assert!(viewport_artifacts(&server, &["0"], json!({ "layers": [] }))
+        .await
+        .is_none());
+    // A gated layer this principal cannot reach is the same answer as a layer nobody registered.
+    assert!(
+        viewport_artifacts(&server, &["0"], json!({ "layers": ["clusters/never"] }))
+            .await
+            .is_none()
+    );
+}
+
+/// The artifact budget is accepted and, on a flat layer, inert — because the only reduction the
+/// representation allows is structural, and a flat layer has no structure to reduce by. Meeting it
+/// by sampling would give a wrong map rather than a smaller one.
+#[tokio::test]
+async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut d = declaration("clusters/a", None);
+    d["visible_when"] = serde_json::Value::Null;
+    register(&server, d).await;
+    publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [
+                { "stable_key": "c0", "members": [member(0), member(3)] },
+                { "stable_key": "c1", "members": [member(6), member(9)] },
+                { "stable_key": "c2", "members": [member(12), member(15)] },
+            ]
+        }),
+    )
+    .await;
+
+    let unbudgeted = viewport_artifacts(&server, &["0"], json!({})).await.unwrap();
+    assert_eq!(unbudgeted.len(), 3);
+    let budgeted = viewport_artifacts(&server, &["0"], json!({ "artifact_budget": 1 }))
+        .await
+        .unwrap();
+    assert_eq!(
+        budgeted, unbudgeted,
+        "a flat layer has no ancestors to cut to, so the budget is inert — dropping two of three \
+         clusters would be a wrong map, not a smaller one"
+    );
+}
+
 /// An idset guards a keyed identifier and means nothing beside an external id, so accepting one
 /// there would imply a check that never ran.
 #[tokio::test]

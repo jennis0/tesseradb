@@ -429,6 +429,37 @@ pub struct ViewportRequest<'a> {
     /// which marks are *drawn*; it never moves the selection threshold, which stays anchored on the
     /// unfiltered composed total (**I12**: a filter may move the frontier up, never down).
     pub filter: Option<crate::filter::FilterExpr>,
+    /// Which annotation layers to answer for. `None` answers for every layer this principal
+    /// reaches; an empty slice answers for none.
+    ///
+    /// **The same eliding this request's `tiles` list does, one axis over.** A client rendering one
+    /// layer should not pay for the others' candidacy sweeps, and a client rendering none should
+    /// pay nothing — a naming here does no candidacy work at all for a layer it omits.
+    ///
+    /// **It narrows and never widens.** A name this principal does not reach is simply absent from
+    /// the answer, by the same route a name nobody registered is: the request is intersected with
+    /// the session's resolved set, so asking for a layer is not a way to learn whether it exists.
+    pub layers: Option<&'a [&'a str]>,
+    /// The client's artifact budget — how many artifacts it wants back at most, in the same shape
+    /// as the `k` mark budget beside it ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)).
+    ///
+    /// **Honoured structurally, never by sampling.** Artifacts cannot be sampled: dropping half the
+    /// boundaries gives a wrong map rather than half a map, and no ordering over artifacts makes
+    /// the retained half stand for the discarded half. A budget that cannot be met by serving
+    /// everything is met by serving ancestors *instead of* their descendants — reduction by the
+    /// layer's own structure.
+    ///
+    /// **A flat layer therefore ignores it**, and the whole of Stage 2 is flat layers: with no
+    /// lineage there are no ancestors to cut to, so the only two answers are serve them all and
+    /// refuse, and every artifact here passed its own existence test independently. The field is
+    /// defined now rather than when the cut is built because it is a wire shape, and adding a
+    /// request field to a shipped frame later is the change this ordering exists to avoid.
+    ///
+    /// **A budget is not a disclosure control**, and it sits where one used to: §8.4's maximum
+    /// depth was a control, and confusing the two is the mistake this comment exists to prevent.
+    /// Both directions are safe here — cutting shallower serves strictly less, cutting deeper
+    /// serves more artifacts that each passed against `M_auth`.
+    pub artifact_budget: Option<u32>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -444,7 +475,21 @@ impl<'a> ViewportRequest<'a> {
             underlay_offset: None,
             cancel: None,
             filter: None,
+            layers: None,
+            artifact_budget: None,
         }
+    }
+
+    /// Answer for exactly these layers rather than for every one this principal reaches.
+    pub fn layers(mut self, layers: Option<&'a [&'a str]>) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    /// See [`ViewportRequest::artifact_budget`].
+    pub fn artifact_budget(mut self, budget: Option<u32>) -> Self {
+        self.artifact_budget = budget;
+        self
     }
 
     /// Attach a filter expression. See [`ViewportRequest::filter`].
@@ -499,6 +544,29 @@ pub struct ViewCoordinates {
     pub content_key: [u8; 16],
 }
 
+/// One artifact, as a viewport serves it.
+///
+/// **Four fields, and the absences are the design.** There is no ordinal — a position in a dense
+/// level, so two of them count what lies between (C8). There is no declared size — a corpus-wide
+/// count over items this principal may not see, and the denominator the proportional criterion
+/// divides by, which is a predicate input and never a field. There is no membership. And there is
+/// no reason-for-absence anywhere in the response, because an artifact that failed its criterion
+/// must be indistinguishable from one that was never published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactOut {
+    /// The layer it belongs to. A name the principal reaches, always — the serving pass intersects
+    /// with the session's resolved set before it looks at any membership.
+    pub layer: String,
+    /// Its opaque identifier — the only artifact address that crosses the trust boundary (**I10**),
+    /// and what a drill-down or a suppression later names.
+    pub tessera_id: TesseraId,
+    /// The publisher's own key, if they supplied one. Operator-chosen text, not corpus data.
+    pub stable_key: Option<String>,
+    /// **How many of this artifact's members this principal can see** — never how many it has. The
+    /// same number the existence criterion was tested against, computed once and used for both.
+    pub masked_count: u64,
+}
+
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
 #[derive(Debug, Clone)]
 pub struct ViewportOut {
@@ -521,6 +589,12 @@ pub struct ViewportOut {
     /// whose view did not change), not a security one.
     pub stale: bool,
     pub tiles: Vec<TileCount>,
+    /// The annotation artifacts intersecting the request's tiles, each with the count *this*
+    /// principal's visible set generates — see [`ArtifactOut`]. Empty when the principal reaches no
+    /// layer, when the request named none, when nothing published intersects the viewport, and when
+    /// everything that does failed its existence criterion; those four are one answer and are meant
+    /// to be.
+    pub artifacts: Vec<ArtifactOut>,
     /// The served points, column-major — see [`PointColumns`].
     pub points: PointColumns,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
@@ -609,6 +683,17 @@ pub trait ViewportSink {
     /// (possibly of an empty slice) when it did — the wire's frame-presence rule needs the
     /// distinction, and an empty slice cannot carry it.
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult;
+    /// The artifacts intersecting the request's tiles. At most once, after `counts` and before any
+    /// points, and **never with an empty slice** — the points callback's rule, for the same reason:
+    /// a deployment with no layers, or a viewport over a region holding none, would otherwise pay a
+    /// frame on every request to say nothing. A client learns which layers it reaches from
+    /// `/v1/meta`, so an absent frame and an empty one carry the same information and only one of
+    /// them costs bytes.
+    ///
+    /// **Required rather than defaulted, deliberately.** A default that dropped the frame would let
+    /// a consumer compile against a response it never renders — a map with its clusters silently
+    /// missing, which looks exactly like a principal who may not see them.
+    fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult;
     /// One flush chunk: whole tiles' worth of points, in response order, ascending by
     /// `tessera_id` within each tile. Never called with an empty chunk.
     fn points(&mut self, chunk: PointColumns) -> SinkResult;
@@ -621,6 +706,7 @@ struct CollectSink {
     head: Option<ViewportHead>,
     tiles: Vec<TileCount>,
     sub_cells: Vec<SubCellCount>,
+    artifacts: Vec<ArtifactOut>,
     points: Option<PointColumns>,
 }
 
@@ -633,6 +719,11 @@ impl ViewportSink for CollectSink {
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult {
         self.tiles = tiles.to_vec();
         self.sub_cells = sub_cells.unwrap_or_default().to_vec();
+        Ok(())
+    }
+
+    fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult {
+        self.artifacts = artifacts.to_vec();
         Ok(())
     }
 
@@ -1281,6 +1372,7 @@ impl Engine {
             stamp: head.stamp,
             stale: head.stale,
             tiles: sink.tiles,
+            artifacts: sink.artifacts,
             points,
             sub_cells: sink.sub_cells,
             scalar_names: head
@@ -1329,6 +1421,8 @@ impl Engine {
             stamp,
             underlay_offset,
             cancel,
+            layers: req_layers,
+            artifact_budget,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -1872,6 +1966,24 @@ impl Engine {
         // was not requested: the wire's frame-presence rule needs the distinction.
         sink.counts(&tile_counts, underlay_offset.map(|_| sub_cells.as_slice()))
             .map_err(|SinkClosed| EngineError::Cancelled)?;
+        probe.skip();
+
+        // The artifacts frame, after the counts and before any point. It is an aggregate channel,
+        // not a point one — a cluster's masked count belongs beside a tile's, not beside a mark.
+        let artifacts = self.serve_artifacts(
+            session,
+            &generation,
+            slice,
+            slice_data,
+            &ranges,
+            &mask,
+            req_layers,
+            artifact_budget,
+        )?;
+        if !artifacts.is_empty() {
+            sink.artifacts(&artifacts)
+                .map_err(|SinkClosed| EngineError::Cancelled)?;
+        }
         probe.skip();
 
         // The emit pass: gather and hand off, serial, in response order (this module's doc says
@@ -2859,6 +2971,295 @@ fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Ve
         }
     }
     merged
+}
+
+impl Engine {
+    /// Drill down on one artifact by the identifier a response handed out.
+    ///
+    /// **The same predicate the viewport calls, and that is the whole design of this method.** An
+    /// artifact reachable by identifier but not by viewport — or the reverse — is two
+    /// transcriptions of one rule, which is the failure mode this codebase has written down more
+    /// than once. So this resolves the address, resolves the layer, and then calls
+    /// [`crate::artifacts::ArtifactView::verdict`], exactly as `serve_artifacts` does. The only
+    /// difference is that there is no tile candidacy: the caller named the artifact.
+    ///
+    /// **`None` is the only failure shape.** An identifier naming nothing, one naming a point
+    /// rather than an artifact, one whose layer this principal does not reach, one whose artifact
+    /// is suppressed, and one below its layer's existence criterion are one answer. That last route
+    /// reads as new and is not — Appendix C's C17 annotation: the criterion tests the **masked**
+    /// count, so it can only cross the bar when this principal's own visible membership changes.
+    ///
+    /// **On the cost channel.** In the steady state every route here is cheap and comparable: the
+    /// session's geometry is resolved from the per-session cache a viewport already filled, and the
+    /// membership's row form from the per-deployment cache. The one expensive path — building a
+    /// projection — is deployment-wide state keyed on what was published, not on who is asking, so
+    /// its timing carries nothing about a principal.
+    pub fn artifact(
+        &self,
+        session: &Session,
+        id: TesseraId,
+        idset: Option<u32>,
+        slice: &str,
+    ) -> Result<Option<ArtifactOut>> {
+        let generation = self.generation.load_full();
+        if let Some(e) = idset {
+            if e != generation.bundle.manifest.identity.idset {
+                return Err(EngineError::StaleIdSet);
+            }
+        }
+        let (shard, entity) = self.identity_key.invert(id);
+        if shard != generation.bundle.manifest.identity.shard_id {
+            return Ok(None);
+        }
+
+        // Addressing, before authorisation and cheaply: which artifact, if any, this entity is.
+        let Some((name, level, ordinal)) = self.write.locate_artifact(entity) else {
+            return Ok(None);
+        };
+        let Some(layer) = self.write.registered_layer(&name) else {
+            return Ok(None);
+        };
+        if !layer.declaration.slices.iter().any(|s| s == slice) {
+            return Ok(None);
+        }
+        // Reachability, then the live suppression of the layer itself — the same two steps in the
+        // same order `Engine::visible_layers` and `serve_artifacts` take.
+        let reachable = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        if !reachable.contains(&name)
+            || generation.overlay.is_deleted(layer.entity)
+            || generation.overlay.is_suppressed(layer.entity)
+        {
+            return Ok(None);
+        }
+
+        let carriers = generation
+            .bundle
+            .partitions
+            .values()
+            .filter(|partition| partition.slices.contains_key(slice))
+            .count();
+        if carriers > 1 {
+            return Err(EngineError::MultiPartitionSlice(slice.to_string()));
+        }
+        let slice_data = generation
+            .bundle
+            .partitions
+            .values()
+            .find_map(|partition| partition.slices.get(slice))
+            .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
+
+        let mut probe = Probe::new();
+        let geometry =
+            self.session_geometry(session, &generation, slice, slice_data, &None, &mut probe)?;
+        let denied = generation
+            .denied
+            .get(slice)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
+                slice: slice.to_string(),
+            })?;
+        let mask = compose(
+            &session.satisfied,
+            &generation.overlay,
+            &generation.buffer,
+            Arc::clone(&geometry.projection),
+            &slice_data.row_space,
+            denied,
+        );
+
+        let store_version = self.write.with_artifacts(|store| store.version());
+        let rows = self.write.with_artifacts(|store| {
+            self.artifact_projections.get_or_build(
+                &generation.prefix,
+                generation.segments_version,
+                slice,
+                &name,
+                level,
+                store,
+                store_version,
+                &slice_data.row_space,
+            )
+        });
+        let view = crate::artifacts::ArtifactView {
+            declaration: &layer.declaration,
+            overlay: &generation.overlay,
+            satisfied: &session.satisfied,
+            layer_reachable: true,
+            rows: &rows,
+            mask: &mask,
+        };
+        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
+        // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
+        // fail-closed answer reached by the same call.
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count } =
+            view.verdict(entity, ordinal, None)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ArtifactOut {
+            layer: name.clone(),
+            tessera_id: id,
+            stable_key: self.write.with_artifacts(|store| {
+                store
+                    .get(&name, level, ordinal)
+                    .and_then(|r| r.stable_key.clone())
+            }),
+            masked_count,
+        }))
+    }
+
+    /// The artifacts of this viewport: every one the request asked for, that this principal
+    /// reaches, that has a visible member inside the requested tiles, and that passes the one
+    /// predicate.
+    ///
+    /// **Four narrowings, in that order, and the order is the disclosure control.** Reachability
+    /// first, because it costs one set probe and a name the principal cannot reach must not have
+    /// its membership touched at all. Candidacy second, because it is the cheap masked question and
+    /// it keeps the count off every artifact outside the viewport. The predicate last, because it
+    /// is the one that decides, and it is [`crate::artifacts::ArtifactView::verdict`] — the same
+    /// function drill-down and every later route calls.
+    ///
+    /// **The count is over the whole membership, not over the tiles.** A viewer is told how many of
+    /// a cluster's documents they can see, which does not change as they pan; a per-viewport count
+    /// would move with the box and let a viewer difference two boxes for the members in between.
+    /// Candidacy is the only per-tile question here.
+    #[allow(clippy::too_many_arguments)]
+    fn serve_artifacts(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        slice: &str,
+        slice_data: &tessera_store::SliceData,
+        ranges: &[Vec<(usize, Range<u32>)>],
+        mask: &crate::compose::EffectiveMask,
+        requested: Option<&[&str]>,
+        _artifact_budget: Option<u32>,
+    ) -> Result<Vec<ArtifactOut>> {
+        // Which layers this principal may know exist — one set probe for a gate-failed name and a
+        // never-registered one alike (`LayerRegistry::resolve_for`).
+        let reachable = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        // **Intersected with the request, never unioned.** A name the principal does not reach is
+        // absent whether or not they asked for it, so asking is not a way to learn what exists.
+        let names: Vec<String> = match requested {
+            Some(list) => list
+                .iter()
+                .filter(|name| reachable.contains(name))
+                .map(|name| name.to_string())
+                .collect(),
+            None => reachable.names().map(str::to_string).collect(),
+        };
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // The viewport as one row-space set, built once for every layer: the merged global spans of
+        // every tile this request resolved. `crossing_domain` already merges and globalises them
+        // for the filter's crossing, and reusing it is what keeps the two from disagreeing about
+        // which rows a request covers.
+        let row_bases: Vec<u32> = segments_with_row_bases(slice, slice_data)?
+            .iter()
+            .map(|&(_, base)| base)
+            .collect();
+        let mut tile_rows = croaring::Bitmap::new();
+        for span in crossing_domain(ranges, &row_bases) {
+            tile_rows.add_range(span);
+        }
+        if tile_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (store_version, shard) = (
+            self.write.with_artifacts(|store| store.version()),
+            generation.bundle.manifest.identity.shard_id,
+        );
+
+        let mut out = Vec::new();
+        for name in names {
+            let Some(layer) = self.write.registered_layer(&name) else {
+                // Dropped between the resolution and here. Absent is the right answer and the same
+                // one a gate failure gives.
+                continue;
+            };
+            // A layer declares which slices it lives in; one it did not declare has no membership
+            // in this row space to project.
+            if !layer.declaration.slices.iter().any(|s| s == slice) {
+                continue;
+            }
+            // **The live half, asked per request.** A layer's own entity carries its suppression,
+            // and a resolution may cache reachability but never the verdict — see
+            // `Engine::visible_layers`, which takes the same two steps in the same order.
+            if generation.overlay.is_deleted(layer.entity)
+                || generation.overlay.is_suppressed(layer.entity)
+            {
+                continue;
+            }
+
+            for (level, runs) in layer.runs.iter().enumerate() {
+                let level = level as u32;
+                let rows = self.write.with_artifacts(|store| {
+                    self.artifact_projections.get_or_build(
+                        &generation.prefix,
+                        generation.segments_version,
+                        slice,
+                        &name,
+                        level,
+                        store,
+                        store_version,
+                        &slice_data.row_space,
+                    )
+                });
+                let view = crate::artifacts::ArtifactView {
+                    declaration: &layer.declaration,
+                    overlay: &generation.overlay,
+                    satisfied: &session.satisfied,
+                    layer_reachable: true,
+                    rows: &rows,
+                    mask,
+                };
+                for ordinal in 0..rows.len() as u32 {
+                    if !rows.intersects(ordinal, &tile_rows, mask) {
+                        continue;
+                    }
+                    let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
+                        continue;
+                    };
+                    // ⊘ **No artifact carries its own terms yet**, so a layer declaring
+                    // `artifacts_carry_own` serves nothing here — fail-closed, and visibly so. The
+                    // per-artifact label arrives with content (Stage 3); until then the flag has
+                    // nothing to satisfy, and admitting the artifact instead would make a missing
+                    // declaration a grant to everyone.
+                    let crate::artifacts::ArtifactVerdict::Serve { masked_count } =
+                        view.verdict(entity, ordinal, None)
+                    else {
+                        continue;
+                    };
+                    // The blinding is total over the space the allocator issues, so this cannot
+                    // fail for an entity that came out of the runs above; a failure would mean the
+                    // manifest and the allocator disagree, and dropping the artifact is the
+                    // fail-closed reading of that.
+                    let Ok(tessera_id) = self.identity_key.forward(shard, entity) else {
+                        continue;
+                    };
+                    out.push(ArtifactOut {
+                        layer: name.clone(),
+                        tessera_id,
+                        stable_key: self.write.with_artifacts(|store| {
+                            store
+                                .get(&name, level, ordinal)
+                                .and_then(|r| r.stable_key.clone())
+                        }),
+                        masked_count,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Test every row of `domain` against `entities`, giving the rows that matched.

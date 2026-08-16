@@ -606,6 +606,11 @@ pub struct Engine {
     pub(crate) plugin: Arc<dyn Plugin>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
+    /// Artifact memberships in row space, one entry per `(slice, layer, level)` — see
+    /// [`ArtifactProjections`]. Distinct from the cache above and deliberately so: that one is
+    /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
+    /// published), and they move on different events.
+    pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -1079,6 +1084,7 @@ impl Engine {
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
+            artifact_projections: Arc::new(crate::artifacts::ArtifactProjections::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
             config,
