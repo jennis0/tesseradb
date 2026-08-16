@@ -649,7 +649,7 @@ allocated here rather than left as a list:
 
 | Owed | Stage | Why it could refute something |
 |---|---|---|
-| **Residency** — 10⁷ separately allocated bitmaps carry per-object overhead the campaign never measured; 794 MB is *serialised* bytes, and it multiplies by slice, by level, and by two during a replace | 2, re-measured at 8 | the slice budget has no line for it |
+| ✔ **Residency** — **measured 2026-08-16**: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts, so **6.16×** serialised on contiguous membership and **7.79×** on the synthetic arm. 794 MB is ~4.9–6.2 GB resident; the pessimistic arm at 10⁷ artifacts does not fit in 47 GB. [The probe](../probes/2026-08-16-membership-residency/README.md) | 2 ✔, re-measured at 8 | the slice budget still has no line for the multipliers, which stand on top of this |
 | **The fold's artifact pass**, as a comparison: riding pass 1 with the inverted multimap resident against per-artifact translation through a scatter-built mapped table (rep §5.0.3's corrected posing) | 4 | the largest unpriced item left; decides whether `plan_fold`'s ~9–10 GB anonymous peak moves |
 | **The three arms** — flush-union, merge-rebase, fold-rebuild | 4 | the merge arm's bound is proportional to the merged span, not to the artifact population |
 | **Σ\|G\| and containment per request** | 3 | ~4 B/member *assumed*; refuted if a real deployment's Σ\|G\| approaches membership's order |
@@ -664,10 +664,22 @@ close before Stage 1 commits to the tiebreak.
 
 ## 7. What could still refute the shape
 
-**Residency, not storage.** Every sizing number in the design is serialised bytes. If 10⁷ resident
-bitmaps cost materially more than their serialised form, the fine-level case stops being servable
-and the assignment column — documented, deleted, and recoverable in rep §2.7 — comes back for that
-regime.
+**Residency, not storage — answered, and it does not refute the shape.** Every sizing number in the
+design is serialised bytes; the question was whether 10⁷ resident bitmaps cost materially more.
+They cost **6.16× on contiguous membership and 7.79× on the pessimistic arm**, flat across three
+decades, because the cost is ~80–94 B per Roaring *container* rather than per artifact or per member
+([the probe](../probes/2026-08-16-membership-residency/README.md)). The design's own point is 3.6 GB
+resident against 582 MB serialised — large, bounded, and servable. **The assignment column stays
+deleted.**
+
+What the number does change is the packaging question below it. Serialised is 15.2 B/container
+against 94.0 resident, so a form usable *in place* — mapped rather than deserialised — costs roughly
+its disk size and moves the cost from anonymous memory to reclaimable page cache. That is a ~6×
+argument for the frozen-format option, and it is now measured rather than aesthetic.
+
+**What is not answered** is the multipliers: by slice, by level, and by two during a replace. The
+engine also holds two resident copies today — the entity-space store and the row-space projection —
+so the design's point is 3.6 GB *per copy* before any multiplier. Re-measured at Stage 8.
 
 **The fold.** If the artifact pass cannot be fitted inside `plan_fold`'s budget, the choice becomes
 a first-toucher stall of tens of seconds per level or blank annotation levels after every nightly

@@ -44,6 +44,11 @@ Eight questions decide the representation. They are answered in order, and §2 d
 | Partial-presence column | 7.54 MB | — |
 | Entity-space bitmaps | 8.35 MB | — |
 
+**Every figure in this table is serialised bytes.** Resident cost is a separate measured quantity —
+~80–94 B per Roaring container, so **6.16× these numbers on contiguous membership and 7.79× on the
+synthetic arm** (§11.3, and the [probe](../../probes/2026-08-16-membership-residency/README.md)).
+The 794 MB above is therefore ~4.9–6.2 GB in memory, before the per-slice and per-level multipliers.
+
 **Size per member, not per artifact.** An earlier revision read three scale points as *"~80 bytes per
 artifact, flat"* and built the formula `(rows × width)/(80 × artifacts)` on it. All three held
 `rows/artifacts = 100`; off that ray the rule collapses — 631 B/artifact at 10⁸/10⁵, 4 775 at 10⁹/10⁵ —
@@ -1213,10 +1218,18 @@ and needs nothing.)
   comparison must be re-posed before it is run. What decides it is whether the second's page-cache
   pressure leaves `plan_fold`'s anonymous peak where it is, and how much locality a Morton-contiguous
   cluster actually gets on the translation read. It is the largest unpriced item left.
-- **Residency is unmeasured and unpriced in the slice budget.** 794 MB is *serialised* bytes; 10⁷
-  separately allocated bitmaps carry per-object overhead the campaign never measured, and the figure
-  multiplies by slices, by levels, and by two during a replace.
-  `slices-and-multi-table.md` §3 exists to price per-slice multipliers and does not carry this one.
+- ✔ **Residency is measured: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts**
+  ([probe](../../probes/2026-08-16-membership-residency/README.md), 2026-08-16). Per *container* —
+  not per artifact and not per member — so a run container holding 25 members costs what an array
+  container holding one costs, and resident cost tracks how scattered a membership is in row space.
+  Against serialised bytes that is **6.16× on contiguous membership and 7.79× on the pessimistic
+  synthetic arm**, both flat. **794 MB therefore costs ~4.9–6.2 GB resident**, and the measured
+  point closest to the design's — 10⁷ artifacts of four runs each — is 3.6 GB against 582 MB
+  serialised. The pessimistic arm at 10⁷ does not fit in 47 GB at all and is OOM-killed.
+  The multipliers stand unmeasured on top of that figure: by slice, by level, and by two during a
+  replace. `slices-and-multi-table.md` §3 exists to price per-slice multipliers and does not carry
+  this one. **The row-space choice earns its keep twice over**: §2 justifies it on storage, and the
+  same contiguity pays again in RAM at a constant the storage argument did not predict.
 - **Reach's size** (§3), which the deleted assignment-column framing had made look free.
 - **Predicate evaluation needs a per-request bound** (§2.0).
 - **Projecting a whole level** rather than a mask.
