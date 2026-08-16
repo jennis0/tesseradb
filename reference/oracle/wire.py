@@ -6,6 +6,8 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
     kind 4  trailer    JSON                                   exactly one, last
+    kind 5  artifacts  (layer, tessera_id, stable_key,        at most one, after tiles and before
+                        masked_count)                          any points; absent when none served
 
 Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
@@ -31,8 +33,15 @@ FRAME_TILES = 1
 FRAME_SUB_CELLS = 2
 FRAME_POINTS = 3
 FRAME_TRAILER = 4
+FRAME_ARTIFACTS = 5
 
-_KNOWN_KINDS = {FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER}
+_KNOWN_KINDS = {
+    FRAME_TILES,
+    FRAME_SUB_CELLS,
+    FRAME_POINTS,
+    FRAME_TRAILER,
+    FRAME_ARTIFACTS,
+}
 
 #: The trailer's closed key set (contracts §3.2 r26). ``stage_ns`` is the one optional key,
 #: double-gated behind the server's timing feature and configuration.
@@ -89,6 +98,7 @@ def decode_frames(data: bytes):
     tiles: list[tuple[int, int, int, int]] = []
     points: list[tuple[int, int]] = []
     sub_cells: list[tuple[int, int]] | None = None
+    artifacts: list[tuple[str, int, str | None, int]] | None = None
     trailer: dict | None = None
 
     for index, (kind, payload) in enumerate(frames):
@@ -119,6 +129,33 @@ def decode_frames(data: bytes):
                         batch.column("cell").to_pylist(),
                         batch.column("count").to_pylist(),
                     )
+                )
+        elif kind == FRAME_ARTIFACTS:
+            # At most one, and it sits between the counts and the points. A second would silently
+            # concatenate into the artifact surface, which is the same laxity the tiles rule above
+            # refuses.
+            if artifacts is not None:
+                raise ValueError("more than one artifacts frame")
+            if any(k == FRAME_POINTS for k, _ in frames[:index]):
+                raise ValueError("the artifacts frame precedes every points frame")
+            artifacts = []
+            for batch in _batches(payload):
+                # `masked_count` is what the *asking principal* can see, never the artifact's
+                # membership size. The oracle must not treat it as a cardinality of anything it
+                # can enumerate independently: no unmasked quantity reaches this wire at all, by
+                # design, so there is nothing here to reconcile against a corpus-wide figure.
+                artifacts.extend(
+                    zip(
+                        batch.column("layer").to_pylist(),
+                        batch.column("tessera_id").to_pylist(),
+                        batch.column("stable_key").to_pylist(),
+                        batch.column("masked_count").to_pylist(),
+                    )
+                )
+            if not artifacts:
+                raise ValueError(
+                    "an empty artifacts frame: the server omits the frame when nothing is served, "
+                    "so a present-but-empty one means the emitter and this reader disagree"
                 )
         elif kind == FRAME_POINTS:
             for batch in _batches(payload):
@@ -154,12 +191,12 @@ def decode_frames(data: bytes):
         raise ValueError(
             f"sum of served ({served_total}) != number of points ({len(points)})"
         )
-    return tiles, points, sub_cells, trailer
+    return tiles, points, sub_cells, artifacts, trailer
 
 
 def decode_viewport(data: bytes):
     """`(tiles, points)`; tile rows are 4-tuples `(tile, visible, matched, served)`."""
-    tiles, points, _sub_cells, _trailer = decode_frames(data)
+    tiles, points, _sub_cells, _artifacts, _trailer = decode_frames(data)
     return tiles, points
 
 
@@ -200,5 +237,22 @@ def decode_viewport_with_subcells(data: bytes):
     contract with its existing callers; `decode_frames` is the layer that distinguishes
     unrequested (`None`) from present-but-empty (`[]`).
     """
-    tiles, points, sub_cells, _trailer = decode_frames(data)
+    tiles, points, sub_cells, _artifacts, _trailer = decode_frames(data)
     return tiles, points, sub_cells if sub_cells is not None else []
+
+
+def decode_viewport_artifacts(data: bytes):
+    """The artifacts a response served, as `(layer, tessera_id, stable_key, masked_count)` rows.
+
+    `[]` when the response carried no artifacts frame — and that is not a loss of information: the
+    server omits the frame precisely when nothing is served, and *why* nothing is served (no layer
+    reachable, none intersecting the viewport, none clearing its existence criterion) is
+    deliberately not on the wire. A caller wanting to distinguish those has asked a question the
+    response is designed not to answer.
+
+    **`masked_count` is the asking principal's own count**, so two principals legitimately disagree
+    about the same `tessera_id`, and neither figure is the artifact's membership size. A comparator
+    that asserted agreement across principals would be asserting the bug.
+    """
+    _tiles, _points, _sub_cells, artifacts, _trailer = decode_frames(data)
+    return artifacts if artifacts is not None else []

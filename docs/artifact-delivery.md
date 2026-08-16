@@ -303,9 +303,12 @@ never the cluster's size.
   nothing on either route. Fail-closed and deliberate: the per-artifact label arrives with content
   at Stage 3, and admitting an unlabelled artifact would make a missing declaration a grant to
   everyone.
-- Owed before the stage can be *seen*: the TypeScript and Python frame decoders do not know kind 5
-  and refuse it, and drill-down has no HTTP route. Both are named, with everything else the
-  integration needs, in [the client handover](artifact-client-handover.md).
+- ✔ All three frame decoders — Rust, TypeScript, the Python oracle — know the artifacts frame, and
+  `artifacts` is a compared surface in the conformance canonical form, so a determinism break in
+  the artifact channel cannot pass every comparison in the suite. ✔ Drill-down is routed at
+  `POST /v1/artifacts/{tessera_id}`, one `404` for every withheld case.
+- What remains before the stage can be *seen* is the client integration itself, briefed in
+  [the client handover](artifact-client-handover.md).
 
 **The check:** on the real 2.4M clustering, a broad principal and a one-term principal receive
 different counts for the same cluster, neither equal to its declared size; clusters below the criterion

@@ -2,6 +2,9 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {
+  FRAME_ARTIFACTS,
+  FRAME_POINTS,
+  FRAME_TILES,
   FRAME_TRAILER,
   splitFramedStreams
 } from '../src/frame.js';
@@ -23,6 +26,69 @@ describe('splitFramedStreams', () => {
     const parts = splitFramedStreams(fixture('viewport-underlay.bin'));
     expect(parts.subCells).not.toBeNull();
     expect(parts.subCells!.byteLength).toBeGreaterThan(0);
+  });
+
+  it('has no artifacts frame when the response served none', () => {
+    // Absent, not empty: the server omits the frame rather than sending a zero-row one, so a
+    // deployment with no annotation layers pays nothing for the channel. The goldens were
+    // captured against exactly such a bundle.
+    expect(splitFramedStreams(fixture('viewport-plain.bin')).artifacts).toBeNull();
+    expect(splitFramedStreams(fixture('viewport-underlay.bin')).artifacts).toBeNull();
+  });
+
+  it('takes an artifacts frame, and refuses a second or a misplaced one', () => {
+    const frame = (kind: number, payload: Uint8Array) => {
+      const out = new Uint8Array(5 + payload.byteLength);
+      out[0] = kind;
+      new DataView(out.buffer).setUint32(1, payload.byteLength, true);
+      out.set(payload, 5);
+      return out;
+    };
+    const cat = (...parts: Uint8Array[]) => {
+      const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+      let at = 0;
+      for (const p of parts) {
+        out.set(p, at);
+        at += p.byteLength;
+      }
+      return out;
+    };
+    const body = new Uint8Array([1, 2, 3]);
+
+    const ok = splitFramedStreams(
+      cat(
+        frame(FRAME_TILES, body),
+        frame(FRAME_ARTIFACTS, body),
+        frame(FRAME_POINTS, body),
+        frame(FRAME_TRAILER, body)
+      )
+    );
+    expect(ok.artifacts).not.toBeNull();
+
+    // A second frame would silently concatenate into the artifact surface — the same laxity the
+    // tiles rule refuses, and it would show a cluster twice on the map.
+    expect(() =>
+      splitFramedStreams(
+        cat(
+          frame(FRAME_TILES, body),
+          frame(FRAME_ARTIFACTS, body),
+          frame(FRAME_ARTIFACTS, body),
+          frame(FRAME_TRAILER, body)
+        )
+      )
+    ).toThrow(/more than one artifacts frame/);
+
+    // After the points it would arrive too late for a reader that draws as it decodes.
+    expect(() =>
+      splitFramedStreams(
+        cat(
+          frame(FRAME_TILES, body),
+          frame(FRAME_POINTS, body),
+          frame(FRAME_ARTIFACTS, body),
+          frame(FRAME_TRAILER, body)
+        )
+      )
+    ).toThrow(/must precede every points frame/);
   });
 
   it('consumes the whole payload exactly — every frame is length-prefixed', () => {

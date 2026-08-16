@@ -100,7 +100,15 @@ def _canon(
     trailer = json.dumps(
         {"flushes": 1, "points": len(rows)}, sort_keys=True, separators=(",", ":")
     ).encode()
-    return Streamed(tiles=tiles_bytes, points=points, underlay=underlay, trailer=trailer)
+    # No artifacts: this builder synthesises a points-and-counts response, which is what the
+    # entitlement surfaces are about. An empty artifacts surface is the ordinary state.
+    return Streamed(
+        tiles=tiles_bytes,
+        points=points,
+        underlay=underlay,
+        artifacts=b"",
+        trailer=trailer,
+    )
 
 
 def _rows(*items: tuple[int, int], tile: int) -> list[tuple[int, int, int]]:

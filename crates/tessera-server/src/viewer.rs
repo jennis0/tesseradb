@@ -1,6 +1,6 @@
 //! The viewer plane (R5): `GET /v1/meta`, `POST /v1/viewport`, `POST /v1/items/{tessera_id}`,
-//! plus `/healthz`/`/readyz`. Bearer auth is a session token (`Session::token`), minted by the
-//! session plane's `/session/authorise`.
+//! `POST /v1/artifacts/{tessera_id}`, plus `/healthz`/`/readyz`. Bearer auth is a session token
+//! (`Session::token`), minted by the session plane's `/session/authorise`.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -40,6 +40,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/categories/{column}", get(categories))
         .route("/v1/viewport", post(viewport))
         .route("/v1/items/{tessera_id}", post(item))
+        .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .with_state(state);
@@ -1302,6 +1303,76 @@ fn run_item(
         fields,
         external_id,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactReq {
+    /// Which slice's row space the count is taken in. **Required, unlike `/v1/items`'s absence of
+    /// one**: a point's record is the same wherever it is read from, but a masked count is an
+    /// intersection in row space, and row space is per slice.
+    slice: String,
+    /// Optional, on [`ItemReq::idset`]'s argument.
+    #[serde(default)]
+    idset: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactResp {
+    layer: String,
+    /// The publisher's own key, if they supplied one. Absent rather than `null` when they did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stable_key: Option<String>,
+    /// **How many of this artifact's members the asking principal can see** — never how many it
+    /// has. There is deliberately no ordinal, no membership and no declared size here; see
+    /// `tessera_engine::ArtifactOut`.
+    masked_count: u64,
+}
+
+/// `POST /v1/artifacts/{tessera_id}` — drill down on one artifact.
+///
+/// **A separate route from `/v1/items`, because they answer about different things.** An item is a
+/// document and its record; an artifact is a grouping and one number. Routing both through one
+/// endpoint would mean a caller could learn which of the two an identifier names by the *shape* of
+/// the answer, and would put a record assembler and a masked count behind one status code.
+///
+/// **`404` is the only failure shape**, and it is one construction site: an identifier naming
+/// nothing, one naming a point, one whose layer this principal cannot reach, one suppressed, and
+/// one below its layer's existence criterion are all the same answer with the same detail. That
+/// last route reads as new and is not — Appendix C's C17 annotation: the criterion tests the
+/// **masked** count, so it can only cross the bar when this principal's own visible membership
+/// changes, which is a fact on their own side of the boundary.
+///
+/// Gated like `/v1/viewport` and `/v1/items`: the work is a mask composition and a bitmap
+/// intersection, both cached per session in the steady state, but neither is free on a cold one.
+async fn artifact(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(raw): AxumPath<u64>,
+    Json(req): Json<ArtifactReq>,
+) -> Result<Json<ArtifactResp>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
+
+    let served = tokio::task::spawn_blocking(move || {
+        let _gate_permits = gate_permits;
+        state
+            .engine
+            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.slice)
+            .map_err(crate::error::map_engine_error)
+    })
+    .await
+    .map_err(map_join_error)??;
+
+    // One `None` arm, one construction site, one detail string — a second with different wording,
+    // or a log line inside only one of the withheld cases, would be exactly the oracle the single
+    // failure shape exists to prevent.
+    let served = served.ok_or_else(|| ApiError::Unknown("unknown artifact".to_string()))?;
+    Ok(Json(ArtifactResp {
+        layer: served.layer,
+        stable_key: served.stable_key,
+        masked_count: served.masked_count,
+    }))
 }
 
 async fn item(

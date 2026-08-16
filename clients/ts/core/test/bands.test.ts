@@ -69,7 +69,8 @@ describe('bandsOfResult', () => {
       positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars,
-      subCells: null
+      subCells: null,
+      artifacts: []
     };
 
     const bands = bandsOfResult(result, 4, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
@@ -91,7 +92,8 @@ describe('bandsOfResult', () => {
       positions: new Float64Array(8),
       world: new Float32Array(8),
       scalars: {},
-      subCells: null
+      subCells: null,
+      artifacts: []
     };
     const [only] = bandsOfResult(result, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
     // A subarray would share the 4-element response buffer; a copy owns exactly its own two.
@@ -413,7 +415,8 @@ describe('bandSplitter', () => {
       positions: new Float64Array(n * 2),
       world: Float32Array.from({length: n * 2}, (_, i) => i),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
-      subCells: null
+      subCells: null,
+      artifacts: []
     };
     const meta = {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0};
 

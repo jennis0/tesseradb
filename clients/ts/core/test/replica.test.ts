@@ -20,7 +20,8 @@ function response(tiles: {tile: bigint; served: number; visible?: number}[], pin
     positions: new Float64Array(total * 2),
     world: new Float32Array(total * 2),
     scalars: {},
-    subCells: null
+    subCells: null,
+    artifacts: []
   };
   return {
     result,

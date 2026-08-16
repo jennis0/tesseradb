@@ -165,12 +165,17 @@ def test_canonicalisation_refuses_rather_than_canonicalises_a_malformed_body():
 
 
 def test_the_canonical_form_names_its_surfaces():
-    """`surfaces()` is the comparator's iteration order — the four names are contract within the
-    suite, and the canary's per-surface control assertions key off them."""
+    """`surfaces()` is the comparator's iteration order — the five names are contract within the
+    suite, and the canary's per-surface control assertions key off them.
+
+    Pinned deliberately: a surface that stopped being compared would take its whole channel out of
+    every determinism assertion in the suite, silently. Adding one is a decision, so it is made
+    here."""
     assert set(canonicalise_viewport(_base()).surfaces()) == {
         "tiles",
         "points",
         "underlay",
+        "artifacts",
         "trailer",
     }
     assert isinstance(canonicalise_viewport(_base()), Streamed)

@@ -23,7 +23,8 @@ function emptyResponse(pin = 'p1'): ViewportResponse {
     positions: new Float64Array(0),
     world: new Float32Array(0),
     scalars: {},
-    subCells: null
+    subCells: null,
+    artifacts: []
   };
   return {
     result,
@@ -49,7 +50,8 @@ function servedResponse(visible: bigint): ViewportResponse {
     positions: new Float64Array([1, 1]),
     world: new Float32Array([0.1, 0.1]),
     scalars: {},
-    subCells: null
+    subCells: null,
+    artifacts: []
   };
   return {
     result,

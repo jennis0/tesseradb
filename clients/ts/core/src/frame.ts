@@ -13,6 +13,9 @@
  *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars —
  *                          zero or more frames, concatenating to the full points stream
  *       kind 4  trailer    JSON; exactly one, last — its presence marks the response complete
+ *       kind 5  artifacts  Arrow IPC stream: layer utf8, tessera_id uint64, stable_key utf8
+ *                          (nullable), masked_count uint64 — at most one, after tiles and before
+ *                          any points frame; ABSENT when the response served none
  *
  * Every failure here throws, and strictly: a truncated body, an unknown kind, a missing trailer
  * or a misplaced tiles frame must never decode to a plausible shorter response — a sample
@@ -25,6 +28,14 @@ export type FramedStreams = {
   /** One entry per kind-3 frame, in arrival order — decode each alone, concatenate the rows. */
   points: Uint8Array[];
   subCells: Uint8Array | null;
+  /**
+   * The kind-5 artifacts payload, or `null` when the response served none.
+   *
+   * `null` and an empty table are the same fact here — the server omits the frame rather than
+   * sending an empty one, so a deployment with no layers pays nothing for the channel — which is
+   * why this does not carry the request/result distinction {@link subCells} does.
+   */
+  artifacts: Uint8Array | null;
   /** The kind-4 trailer's raw JSON bytes. */
   trailer: Uint8Array;
 };
@@ -33,6 +44,7 @@ export const FRAME_TILES = 1;
 export const FRAME_SUB_CELLS = 2;
 export const FRAME_POINTS = 3;
 export const FRAME_TRAILER = 4;
+export const FRAME_ARTIFACTS = 5;
 
 const FRAME_HEADER_BYTES = 5;
 
@@ -41,6 +53,7 @@ export function splitFramedStreams(buf: Uint8Array): FramedStreams {
   let tiles: Uint8Array | null = null;
   const points: Uint8Array[] = [];
   let subCells: Uint8Array | null = null;
+  let artifacts: Uint8Array | null = null;
   let trailer: Uint8Array | null = null;
 
   let at = 0;
@@ -69,6 +82,13 @@ export function splitFramedStreams(buf: Uint8Array): FramedStreams {
         }
         subCells = payload;
         break;
+      case FRAME_ARTIFACTS:
+        if (artifacts) throw new Error('more than one artifacts frame');
+        if (points.length > 0) {
+          throw new Error('the artifacts frame must precede every points frame');
+        }
+        artifacts = payload;
+        break;
       case FRAME_POINTS:
         points.push(payload);
         break;
@@ -88,5 +108,5 @@ export function splitFramedStreams(buf: Uint8Array): FramedStreams {
   if (!trailer) {
     throw new Error('viewport payload has no trailer: the response is incomplete');
   }
-  return {tiles, points, subCells, trailer};
+  return {tiles, points, subCells, artifacts, trailer};
 }

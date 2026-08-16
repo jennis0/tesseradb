@@ -1,7 +1,7 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
@@ -265,5 +265,26 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     }
   }
 
-  return {tiles, ids, codes, positions, world, scalars, subCells};
+  // Empty when the response carried no artifacts frame, which is the ordinary state of a
+  // deployment with no layers — and of a principal who reaches none, and of a view holding none.
+  // Those are one answer on purpose; see `Artifact`.
+  const artifacts: Artifact[] = [];
+  if (parts.artifacts) {
+    const t = tableFromIPC(parts.artifacts);
+    const layer = t.getChild('layer')!;
+    const stableKey = t.getChild('stable_key')!;
+    const tesseraId = u64Column(t, 'tessera_id');
+    const maskedCount = u64Column(t, 'masked_count');
+    for (let i = 0; i < tesseraId.length; i++) {
+      artifacts.push({
+        layer: String(layer.get(i)),
+        tesseraId: tesseraId[i]!,
+        // The one nullable column: a publisher need not supply a key.
+        stableKey: stableKey.get(i) === null ? null : String(stableKey.get(i)),
+        maskedCount: maskedCount[i]!
+      });
+    }
+  }
+
+  return {tiles, ids, codes, positions, world, scalars, subCells, artifacts};
 }

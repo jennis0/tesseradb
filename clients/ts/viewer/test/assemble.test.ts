@@ -191,7 +191,8 @@ describe('assemble', () => {
       positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}},
-      subCells: null
+      subCells: null,
+      artifacts: []
     };
     const bands = bandsOfResult(result, 2, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 

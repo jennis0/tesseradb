@@ -209,6 +209,32 @@ export type TileCounts = {tile: bigint; visible: bigint; matched: bigint; served
 
 export type SubCell = {cell: bigint; count: bigint};
 
+/**
+ * One annotation artifact — a cluster, a boundary, a topic — as a viewport serves it.
+ *
+ * **`maskedCount` is how many members *this principal* can see, and never how many the artifact
+ * has.** Two principals looking at the same `tesseraId` legitimately get different numbers, and
+ * neither is the artifact's size; a surface that presented it as "the cluster's size" would be
+ * asserting the bug the whole mechanism exists to prevent.
+ *
+ * **It does not change as the map moves.** The count is over the whole membership, not over the
+ * viewport — a per-viewport count would let two boxes be differenced for the members between them.
+ * A panel showing it will hold steady during a pan, which is correct.
+ *
+ * There is deliberately no ordinal, no membership and no unmasked size on this wire, and an
+ * artifact withheld from this principal is simply absent with no reason given — indistinguishable
+ * from one that was never published. Do not model a "hidden" state; there is nothing to fill it
+ * from.
+ */
+export type Artifact = {
+  layer: string;
+  /** Wire identity, u64 — never narrowed to a number. Stable across principals and sessions. */
+  tesseraId: bigint;
+  /** The publisher's own key, when they supplied one. */
+  stableKey: string | null;
+  maskedCount: bigint;
+};
+
 export type ViewportResult = {
   tiles: TileCounts[];
   /** Wire identity, u64 — never narrowed to a number. */
@@ -246,6 +272,15 @@ export type ViewportResult = {
    */
   scalars: Record<string, ScalarColumn>;
   subCells: SubCell[] | null;
+  /**
+   * The artifacts this viewport served — empty when none did.
+   *
+   * **Empty and absent are one state here**, unlike {@link subCells}: the server omits the frame
+   * whenever nothing qualifies, and *why* nothing qualified — no layer reachable, none intersecting
+   * the view, none clearing its existence criterion — is deliberately not on the wire. Which layers
+   * a principal reaches at all comes from `GET /v1/meta`.
+   */
+  artifacts: Artifact[];
 };
 
 /**

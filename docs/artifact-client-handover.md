@@ -16,28 +16,32 @@ this programme (owner direction).
 
 ---
 
-## 1. Read this first: three decoders, one of them updated
+## 1. The wire is decoded end to end already
 
 The frame grammar has **three independent implementations**, deliberately (contracts §0.2's
-second-reader posture). A response carrying artifacts is a **kind-5 frame**, and all three refuse an
-unknown kind rather than skipping it:
+second-reader posture), and all three refuse an unknown kind rather than skipping it. All three now
+know the kind-5 artifacts frame:
 
-| Decoder | Path | Knows kind 5? |
-|---|---|---|
-| Rust | `crates/tessera-wire/src/payload.rs` | ✔ yes |
-| TypeScript | `clients/ts/core/src/frame.ts` | ✘ **throws** |
-| Python oracle | `reference/oracle/wire.py` | ✘ **throws** |
+| Decoder | Path |
+|---|---|
+| Rust | `crates/tessera-wire/src/payload.rs` |
+| TypeScript | `clients/ts/core/src/frame.ts`, decoded in `decode.ts` |
+| Python oracle | `reference/oracle/wire.py` |
 
-**So the first artifact a viewport serves breaks the browser client and the conformance oracle**, with
-`unknown frame kind 5`. Neither is covered by `cargo test`, which is why the Rust gate is green and
-this is still true. Teaching the TS decoder the frame is your first task; the Python oracle is not
-strictly yours, but leaving it is leaving a landmine for whoever runs the suite next, and it is a
-handful of lines. Refusing an unknown kind is correct and must stay — do not soften it to a skip.
+`decodeViewport` returns `artifacts: Artifact[]` on `ViewportResult` — `{layer, tesseraId,
+stableKey, maskedCount}`, typed in `core/src/types.ts` with the rules that matter on the type
+itself. **Empty is the only "nothing here" state**: the server omits the frame when nothing
+qualifies, so there is no absent-versus-empty distinction to model.
+
+Two things not to undo. Refusing an unknown frame kind is deliberate — do not soften it to a skip,
+or a future frame's data is silently dropped. And `artifacts` is a **required** field on
+`ViewportResult`, so a consumer cannot forget the channel exists; that is why the test literals in
+`core/test/` carry `artifacts: []`.
 
 The captured goldens (`clients/ts/core/test/fixtures/viewport-*.bin`) were taken against a bundle
-with no layers, so they carry no kind-5 frame and still pass. Re-capture only if you want a golden
-that exercises artifacts, and if you do, re-capture deliberately: a decoder test passing against a
-stale golden is worse than no test.
+with no layers, so they carry no kind-5 frame and still pass — `frame.test.ts` asserts exactly that.
+Re-capture only if you want a golden that exercises artifacts, and if you do, re-capture
+deliberately: a decoder test passing against a stale golden is worse than no test.
 
 ---
 
@@ -195,19 +199,29 @@ server does not send them and it should stay that way.
 
 ---
 
+### Drilling down — `POST /v1/artifacts/{tessera_id}`
+
+Session token, body `{"slice": "s0", "idset": <optional>}`. The slice is **required**, unlike
+`/v1/items`: a point's record is the same wherever it is read from, but a masked count is an
+intersection in row space and row space is per slice.
+
+```json
+{ "layer": "clusters/hdbscan-2026-08", "stable_key": "c-0001", "masked_count": 143 }
+```
+
+A separate route from `/v1/items` because they answer about different things — a document and its
+record, against a grouping and one number — and routing both through one endpoint would let a caller
+learn which of the two an identifier names from the shape of the answer.
+
+**`404` is the only failure shape**, one construction site, one detail string: an identifier naming
+nothing, one naming a point, one whose layer this principal cannot reach, one suppressed, and one
+below its layer's existence criterion are all the same answer, byte for byte. Do not build UI that
+distinguishes them; there is nothing to distinguish them by.
+
+The count it returns is the same number the viewport frame carried, from the same predicate. A
+cluster openable but not visible on the map — or the reverse — would be that rule transcribed twice.
+
 ## 4. Gaps you will hit
-
-**There is no HTTP route for artifact drill-down.** `Engine::artifact(session, tessera_id, idset,
-slice)` exists and is tested — it returns the same `ArtifactOut` the viewport does, from the same
-predicate — but nothing exposes it. `POST /v1/items/{tessera_id}` handles **points only** and will
-answer `404` for an artifact identifier, because an artifact has no term postings for the
-entity-space visibility test to find.
-
-If the client needs click-a-cluster, adding the route is small and the engine method is ready.
-Two things it must preserve: the caller supplies the slice (a masked count is per row space), and
-the answer must come from `Engine::artifact` and nothing else — a cluster reachable by identifier
-but not by viewport would be the one rule transcribed twice, which is the failure this codebase
-keeps writing down.
 
 **`min_visible_members` in `dev-server.toml` is parsed and unused.** The criterion is per-layer
 (`visible_when`) and the deployment-wide key predates it. Reconciling the two is open work on the
@@ -227,18 +241,17 @@ one-time setup.
 
 ## 5. Suggested route to something the owner can look at
 
-1. Teach `clients/ts/core/src/frame.ts` kind 5 and decode it in `decode.ts` beside `subCells`. Keep
-   the strictness — unknown kinds throw.
-2. Get a bundle and a server running per [`clients/ts/README.md`](../clients/ts/README.md). Note
+1. Get a bundle and a server running per [`clients/ts/README.md`](../clients/ts/README.md). Note
    `data/bench-fixtures/` is not in the repo; build one, or use whatever the owner has locally.
-3. Write a script beside `clients/ts/scripts/` that registers a layer and publishes a synthetic
+2. Write a script beside `clients/ts/scripts/` that registers a layer and publishes a synthetic
    clustering over the fixture's own external ids — spatial k-means over the points is plenty, the
    point is the masking, not the clustering. Make it idempotent by versioning the layer name.
-4. Draw the clusters. A hull or a labelled centroid is the obvious thing; there is no geometry on the
+3. Draw the clusters. A hull or a labelled centroid is the obvious thing; there is no geometry on the
    wire yet (derived content is Stage 3), so you are drawing from the member positions the points
    frame already carries, or a marker per cluster placed client-side.
-5. Show the count beside each cluster, and make the principal switcher (`presets.json`, already
+4. Show the count beside each cluster, and make the principal switcher (`presets.json`, already
    built by `measure-principals.mjs`) flip between two principals over the same view.
+5. Wire the click through `POST /v1/artifacts/{tessera_id}` if you want a detail panel.
 
 **The screenshot that proves the stage** is two principals, one clustering, visibly different counts
 on the same cluster — and at least one cluster present for one and absent for the other. That second
@@ -255,9 +268,10 @@ broad principal reports.
 | Membership, durable form | `crates/tessera-lifecycle/src/membership.rs` |
 | Layer registry, publication | `crates/tessera-lifecycle/src/registry.rs` |
 | Viewport serving pass | `crates/tessera-engine/src/viewport.rs` — `Engine::serve_artifacts` |
-| Drill-down (unrouted) | `crates/tessera-engine/src/viewport.rs` — `Engine::artifact` |
+| Drill-down | `crates/tessera-engine/src/viewport.rs` — `Engine::artifact`; route in `viewer.rs` |
 | Control verbs | `crates/tessera-server/src/control.rs` — `register_layer`, `publish_artifacts` |
 | Wire frame | `crates/tessera-wire/src/payload.rs` — `artifacts_frame` |
+| Client decode | `clients/ts/core/src/frame.ts`, `decode.ts`, `types.ts` |
 | What the counts must do | `crates/tessera-engine/tests/artifact_serving.rs` |
 | What the wire must not carry | `crates/tessera-server/tests/layers.rs` |
 

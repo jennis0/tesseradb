@@ -27,7 +27,9 @@ The steps, numbered as §12.2 numbers them:
 4. Points: the kind-3 payloads concatenated, compared as bytes in served order. Contracts §3.2
    orders points ascending by `tessera_id` within each tile, so comparing them *unsorted* is
    stronger than sorting them — a reordering is a defect, not noise.
-5. The underlay: its own stream, its own comparison.
+5. The underlay: its own stream, its own comparison. The artifacts frame likewise, and unsorted —
+   its row order is the serving pass's own and deterministic, so a reordering is a defect rather
+   than noise, exactly as for points.
 6. Headers are excluded — this module takes body bytes only. §12.2's exception ("except where a
    stage's entitlement is about one") is the driver's business (build-order row 3), not a second
    input here.
@@ -85,11 +87,19 @@ class Streamed:
     is preserved rather than flattened. `trailer` is the kind-4 object minus the elapsed-time
     fields, re-serialised with sorted keys; it is a fourth compared surface because its `points`
     and `flushes` counts are deterministic functions of served content (module doc).
+
+    `artifacts` is `b""` whenever the response served none — which, unlike `underlay`'s absence, is
+    **not** a statement about the request. The server omits the frame when nothing qualifies, so an
+    empty surface here is the ordinary state of a deployment with no layers and is never asserted
+    non-vacuous. It is compared all the same: without it, two responses differing only in which
+    clusters they served would canonicalise identically, and a determinism break in the artifact
+    channel would pass every comparison in the suite.
     """
 
     tiles: bytes
     points: bytes
     underlay: bytes
+    artifacts: bytes
     trailer: bytes
 
     def surfaces(self) -> dict[str, bytes]:
@@ -99,6 +109,7 @@ class Streamed:
             "tiles": self.tiles,
             "points": self.points,
             "underlay": self.underlay,
+            "artifacts": self.artifacts,
             "trailer": self.trailer,
         }
 
@@ -132,7 +143,7 @@ def canonicalise_viewport(body: bytes) -> Streamed:
     # Step 1, and the grammar check. The decoded rows are discarded — the canonical form is bytes,
     # not decoded values — but the decode is what enforces the closed trailer key set and the
     # served-sum and points-count consistency rules before any bytes are trusted.
-    _tiles, _points, _sub_cells, trailer = wire.decode_frames(body)
+    _tiles, _points, _sub_cells, _artifacts, trailer = wire.decode_frames(body)
     frames = wire.split_frames(body)
 
     # Step 2. Sorted keys and fixed separators so the remainder has one serialisation; the wire
@@ -157,11 +168,17 @@ def canonicalise_viewport(body: bytes) -> Streamed:
     # unrequested, keeping absent distinct from schema-only-empty.
     points_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_POINTS)
     underlay_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_SUB_CELLS)
+    # Taken as bytes and **not sorted**, unlike tiles. Tile emission order is not contract, so it is
+    # normalised away; the artifact frame's row order is the serving pass's own — layer by layer,
+    # ordinal by ordinal — and is deterministic for a fixed registry and store. Sorting it would
+    # hide a reordering rather than canonicalise one.
+    artifacts_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_ARTIFACTS)
 
     # Step 6 is structural: this function's one parameter is the body.
     return Streamed(
         tiles=sink.getvalue(),
         points=points_bytes,
         underlay=underlay_bytes,
+        artifacts=artifacts_bytes,
         trailer=trailer_bytes,
     )

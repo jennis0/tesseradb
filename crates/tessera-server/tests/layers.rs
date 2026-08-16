@@ -530,6 +530,81 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     );
 }
 
+async fn drill(
+    server: &TestServer,
+    terms: &[&str],
+    tessera_id: &str,
+) -> (u16, serde_json::Value) {
+    let auth = authorise(server, terms).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .bearer_auth(token)
+        .json(&json!({ "slice": "s0" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// **Drill-down agrees with the viewport, and every withheld case is one `404`.** A cluster
+/// reachable by identifier but not on the map would be the one rule transcribed twice.
+#[tokio::test]
+async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_identically() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    // A bar the broad principal clears and the narrow one misses, taken from the fixture's own
+    // term rule rather than from anything the server said.
+    let expected_narrow = (0..300u64).filter(|s| terms_of(*s).contains(&1)).count() as u64;
+    let mut d = declaration("clusters/a", None);
+    d["visible_when"] = json!({ "min_visible": expected_narrow + 1 });
+    assert_eq!(register(&server, d).await.0, 201);
+    let members: Vec<String> = (0..300u64).map(member).collect();
+    let (status, _) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "stable_key": "c0", "members": members }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let served = viewport_artifacts(&server, &["0"], json!({})).await.unwrap();
+    assert_eq!(served.len(), 1);
+    let id = served[0].tessera_id.to_string();
+
+    let (status, body) = drill(&server, &["0"], &id).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["layer"], "clusters/a");
+    assert_eq!(body["stable_key"], "c0");
+    assert_eq!(
+        body["masked_count"].as_u64().unwrap(),
+        served[0].masked_count,
+        "one predicate, one answer — the map and the drill-down cannot disagree"
+    );
+    assert!(
+        body.get("ordinal").is_none() && body.get("members").is_none(),
+        "and the drill-down carries no more than the frame does: {body}"
+    );
+
+    // Below its criterion for this principal: `404`, and the same `404` a never-issued identifier
+    // gets. A held identifier is not a way round the criterion.
+    let (status, withheld) = drill(&server, &["1"], &id).await;
+    assert_eq!(status, 404, "{withheld}");
+    let (nonexistent_status, nonexistent) = drill(&server, &["0"], "123456789").await;
+    assert_eq!(nonexistent_status, 404);
+    assert_eq!(
+        withheld, nonexistent,
+        "an artifact withheld and an identifier naming nothing are one answer, byte for byte — a \
+         second detail string would be the oracle the single failure shape exists to prevent"
+    );
+}
+
 /// An idset guards a keyed identifier and means nothing beside an external id, so accepting one
 /// there would imply a check that never ran.
 #[tokio::test]
