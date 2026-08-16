@@ -1513,10 +1513,11 @@ impl LiveState {
         }
     }
 
-    /// Drop the fold's executed deletions from every resident membership — the second half of the
-    /// artifact pass, applied once the prefix carrying the rewritten extents is live.
-    fn retire_artifact_members(&self, retired: &croaring::Bitmap) {
-        lock_recover(&self.artifacts).retire_members(retired);
+    /// Apply the fold's executed deletions to the resident artifact store — the second half of the
+    /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired artifacts
+    /// leave their levels; retired members leave the memberships that survive.
+    fn retire_artifacts(&self, retired: &croaring::Bitmap) {
+        lock_recover(&self.artifacts).retire(retired);
     }
 
     /// Where an entity sits: `(layer, level, ordinal)`. Addressing only — see
@@ -2039,6 +2040,13 @@ impl WritePath {
                 continue;
             };
             for (ordinal, blob) in pack.iter() {
+                // **An empty blob is a hole and not a fault** — the ordinal exists and holds no
+                // artifact, which is what a fold leaves behind where Rule F's arm retired one. It
+                // is written rather than packed around because an ordinal is identity; reading it
+                // as undecodable would alarm on every level a deletion has ever touched.
+                if blob.is_empty() {
+                    continue;
+                }
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                     undecodable += 1;
                     continue;
@@ -5675,7 +5683,7 @@ impl Executor {
         // publication assigns from it, and one that still carried the superseded prefix's paths
         // would name files nothing contains. The interim is fail-closed in both copies: a retired
         // entity is denied, so it was already outside every masked count.
-        self.live.retire_artifact_members(&retired);
+        self.live.retire_artifacts(&retired);
         self.live.mark_memberships_published();
         self.membership_extents = repacked;
 
@@ -8190,11 +8198,12 @@ impl Executor {
     /// covering `[0, len)`, so the accumulated extents of every earlier publication collapse into
     /// one file each and the prefix names nothing it does not contain.
     ///
-    /// **A level with a hole refuses the whole fold**, where the append-only path merely skips it.
-    /// The asymmetry is the consequence: a skipped publication leaves the level's earlier extents
-    /// standing and retries at the next tick, while a level this rewrite omits is one the new prefix
-    /// has no extent for at all — its artifacts come back registered, addressable, and served as
-    /// absent. Nothing produces a hole today; this is what happens if something starts to.
+    /// **Holes are written, not packed around**, which is the asymmetry with the append-only path:
+    /// that one skips a level whose unpublished range has a gap, because a gap there means a
+    /// publication landed out of order. Here a gap is the *expected* state — it is what Rule F's
+    /// arm leaves behind when this fold retires an artifact — and closing it would hand every later
+    /// artifact in the level the identity of its neighbour, since an ordinal *is* the identity a
+    /// caller's `tessera_id` resolves to.
     fn rewrite_membership_extents(
         &self,
         prefix_dir: &std::path::Path,
@@ -8202,16 +8211,7 @@ impl Executor {
         n: u64,
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let (ready, holed) = self.live.with_artifacts(|store| store.repack_all(retired));
-        if let Some((layer, level)) = holed.first() {
-            return Err(tessera_store::StoreError::MalformedBundle {
-                detail: format!(
-                    "{layer} level {level} has a hole in its ordinals, so the fold cannot rewrite \
-                     its memberships — an extent addresses a dense range, and a level this pass \
-                     omits comes back served as absent"
-                ),
-            });
-        }
+        let ready = self.live.with_artifacts(|store| store.repack_all(retired));
         if ready.is_empty() {
             return Ok(Vec::new());
         }

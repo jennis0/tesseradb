@@ -732,10 +732,26 @@ The 13–25 s per 10⁷-artifact level this section once quoted is bitmap constr
 projection's reads are the larger term, and the pass costs minutes single-threaded at the design
 point. ⊘ **Measured, not built.**
 
-**Rule F needs an artifact arm too, and currently has nothing to execute.** The fold's passes drop
-rows and postings; a deleted artifact has neither. Retirement must additionally drop its membership
-file, its `artifacts.arrow` slot and every edge naming it — a new category the retirement derivation
-does not cover. A **dropped level or layer** reclaims the same way, which is what §5's lifecycle table
+**Rule F's artifact arm is what makes retirement sound, and the fold's other passes cannot supply
+it.** They drop rows and postings; a deleted artifact has neither, so the derivation would place it
+in `executed` *vacuously* at the first fold and retire the overlay entry that is the only thing
+hiding it. The arm therefore runs in the same publication: the artifact's record leaves its level,
+and the ordinal it held **becomes a hole rather than closing up** — an ordinal is identity, so
+packing around the gap would hand every later artifact in the level the identity of its neighbour.
+The packed extent carries a hole as an empty blob, which the offsets already express.
+
+**Edges naming a deleted artifact are answered by the predicate, not by rewriting them**, and the
+distinction matters because the obvious reading is fail-open. Dropping the edge from a label that
+pointed at the deleted artifact would leave the label *unattached* — and an unattached artifact
+serves on its own conjuncts, so the deletion of a cluster would publish every label written about
+it. What holds instead is an existence term beside the disposition one: an attachment must still
+**resolve**, and a hole resolves to nothing. The withholding then survives the retirement of the
+entry that first caused it, with no state to remember and no edge to rewrite.
+
+⊘ **Content is not reclaimed.** A retired artifact's supplied content stays in the record-blob
+extents the fold carries forward, unreferenced: nothing addresses it once the slot is a hole, so
+this is hygiene rather than a disclosure, and it is what a later content-rewriting pass would
+collect. A **dropped level or layer** reclaims the same way, which is what §5's lifecycle table
 already assumes without saying who does it.
 
 **And the arm needs a membership clause the moment decision 0072 is built** (review 2026-08-15; the

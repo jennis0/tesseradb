@@ -170,9 +170,9 @@ fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
 }
 
 /// Publish one artifact over `sources` and wait for it to be durable.
-fn publish(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
+fn publish(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) -> tessera_types::TesseraId {
     engine.register_layer(declaration("clusters/a")).unwrap();
-    engine
+    let ids = engine
         .publish_artifacts(
             "clusters/a".into(),
             0,
@@ -183,6 +183,15 @@ fn publish(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
         )
         .unwrap();
     wait_for_publication(fx, engine, 1);
+    ids[0]
+}
+
+/// Invert an artifact's identifier through the admin plane's own resolver — the route
+/// `/control/changes` takes, so a deletion here goes through the misdirection guard rather than
+/// round it.
+fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **A node holding artifacts folds at all** — which it did not until the pass existed, because the
@@ -307,6 +316,174 @@ fn a_second_fold_rewrites_what_the_first_one_wrote() {
     assert_ne!(after_first, after_second);
     assert_eq!(fx.membership_files(&engine).len(), 1);
     assert_eq!(count(&engine), 300);
+}
+
+// ---- Rule F's artifact arm ---------------------------------------------------------------------
+
+/// The cluster layer a label hangs from, and the label layer itself. Both ungated, so every
+/// withholding below comes from the arm under test rather than from an access label.
+fn labels_over(target: &str) -> LayerDeclaration {
+    let mut d = declaration("topics/x");
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        kind: "label_text".into(),
+        corpus_derived: false,
+    }];
+    d.depends_on = vec![target.into()];
+    d
+}
+
+/// **A deleted artifact leaves its level at the fold that executes the deletion**, and the ordinal
+/// it held becomes a hole rather than closing up.
+///
+/// The hole is the whole of the durable state: an ordinal is identity, so packing around the gap
+/// would hand every later artifact in the level the identity of its neighbour, and every
+/// `tessera_id` a caller holds beyond it would resolve to the wrong cluster.
+#[test]
+fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("c0".into()), fx.members(0..100)),
+                IncomingArtifact::from_entities(Some("c1".into()), fx.members(100..200)),
+                IncomingArtifact::from_entities(Some("c2".into()), fx.members(200..300)),
+            ],
+        )
+        .unwrap();
+    wait_for_publication(&fx, &engine, 1);
+    assert_eq!(artifacts_of(&engine).len(), 3);
+
+    // The middle one, so a level that packed around the gap would be caught by the survivor after
+    // it rather than by a count alone.
+    let deleted = artifact_entity(&engine, ids[1]);
+    let last_before = artifact_entity(&engine, ids[2]);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("an artifact takes a deletion like any other entity");
+    assert_eq!(artifacts_of(&engine).len(), 2, "hidden at the ack");
+
+    fold(&engine);
+
+    assert_eq!(artifacts_of(&engine).len(), 2, "and still hidden after it");
+    assert_eq!(engine.published_artifacts(), 2, "the level holds two records");
+    let survivor = engine
+        .locate_artifact(last_before)
+        .expect("the survivor still has an address");
+    assert_eq!(
+        (survivor.ordinal, survivor.stable_key.as_deref()),
+        (2, Some("c2")),
+        "the survivor after the hole keeps its ordinal and its key — its identity did not shift up"
+    );
+    // The **address** still resolves, because it is the layer's reserved run that answers it and a
+    // run is not per artifact. What is gone is the record at that ordinal, which is the hole.
+    assert_eq!(
+        engine
+            .locate_artifact(deleted)
+            .and_then(|at| at.stable_key),
+        None,
+        "and the deleted artifact's slot holds nothing"
+    );
+}
+
+/// **Retirement's precondition, which is what makes the arm a safety property rather than
+/// reclamation.** A deleted artifact has no rows and no postings, so compaction's derivation calls
+/// its deletion executed *vacuously* at the first fold and retires the overlay entry — the only
+/// thing hiding it. If the slot outlived that entry, the artifact would come back **served**.
+#[test]
+fn a_deleted_artifact_does_not_return_when_its_overlay_entry_retires() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        let id = publish(&fx, &engine, 0..300);
+        let entity = artifact_entity(&engine, id);
+        engine
+            .accept_change(entity, ChangeOp::Delete)
+            .expect("the delete is accepted");
+        fold(&engine);
+        assert!(artifacts_of(&engine).is_empty());
+    }
+
+    // **Reopened, which is where a surviving slot would show.** The overlay entry is retired and
+    // gone from the manifest; nothing but the absence of the record keeps the artifact away.
+    let engine = fx.open();
+    assert!(
+        artifacts_of(&engine).is_empty(),
+        "the artifact stayed gone across the retirement of the entry that was hiding it"
+    );
+    assert_eq!(
+        engine.published_artifacts(),
+        0,
+        "and its slot is not in the prefix the fold published"
+    );
+}
+
+/// **A label does not outlive what it labels — including past the fold that retires its target.**
+///
+/// The label is withheld at the ack because the cluster's overlay entry says *deleted*. That entry
+/// is retired by the fold, so a term resting on disposition alone would answer "not deleted, not
+/// suppressed" afterwards and serve the label again — with its text, describing the cluster that
+/// was deleted. What carries the withholding is that the target no longer resolves.
+#[test]
+fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    engine.register_layer(labels_over("clusters/a")).unwrap();
+    let cluster_id = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("c0".into()),
+                fx.members(0..300),
+            )],
+        )
+        .unwrap()[0];
+    engine
+        .publish_artifacts(
+            "topics/x".into(),
+            0,
+            vec![IncomingArtifact::attached(
+                Some("l0".into()),
+                fx.members(0..300),
+                vec![IncomingVariation::new(
+                    vec!["shipping and logistics".into()],
+                    Vec::new(),
+                )],
+                tessera_lifecycle::membership::IncomingAttachment {
+                    layer: "clusters/a".into(),
+                    level: 0,
+                    stable_key: "c0".into(),
+                },
+            )],
+        )
+        .unwrap();
+    wait_for_publication(&fx, &engine, 2);
+    assert_eq!(
+        artifacts_of(&engine).len(),
+        2,
+        "the cluster and its label both serve to begin with"
+    );
+
+    let cluster = artifact_entity(&engine, cluster_id);
+    engine
+        .accept_change(cluster, ChangeOp::Delete)
+        .expect("the delete is accepted");
+    assert!(
+        artifacts_of(&engine).is_empty(),
+        "both go at the ack: the cluster on its own disposition, the label on its target's"
+    );
+
+    fold(&engine);
+
+    assert!(
+        artifacts_of(&engine).is_empty(),
+        "and the label does not come back when the entry that hid its target retires"
+    );
 }
 
 /// **A label survives its fold, and so does the blob it is read from.**

@@ -19,13 +19,20 @@
 //!    by a filter. The model's conjunctive rule covers edge *traversal* and those routes traverse
 //!    nothing (`annotation-representation.md` §4).
 //!
-//!    **Two terms and not the target's whole predicate**, which is what §4 asks for and where its
-//!    cost argument comes from — the disposition is the lookup branch 1 already performs, while the
-//!    target's criterion and containment would need the target level's projection on every request.
-//!    ⊘ The residue is that a target withheld by *its own* criterion can still be named by a label
-//!    on a layer that declares a weaker one; that is C1's r43 surface — several layers over one
-//!    corpus are governed by the most permissive declaration among them — raised again by review on
-//!    2026-08-16 and awaiting an owner ruling rather than closed here.
+//!    **Three terms and not the target's whole predicate**, which is what §4 asks for and where its
+//!    cost argument comes from — disposition is the lookup branch 1 already performs and existence
+//!    is one store probe, while the target's criterion and containment would need the target level's
+//!    projection on every request. The residue is that a target withheld by *its own* criterion can
+//!    still be named by a label on a layer that declares a weaker one:
+//!    [decision 0086](../../../docs/decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md)
+//!    rules that it stays that way, because a label is an artifact with its own declaration and the
+//!    surface is C1's r43 one — several layers over one corpus are governed by the most permissive
+//!    declaration among them.
+//!
+//!    **Existence is a separate term from disposition because of the fold.** An overlay entry says
+//!    *deleted*; the fold that executes that deletion retires the entry in the same publication that
+//!    drops the target's slot, so a term resting on the overlay alone would start serving every
+//!    label attached to a deleted cluster at the next nightly fold.
 //! 4. **The artifact's own terms, if its layer declared that its artifacts carry them.**
 //! 5. **The existence criterion, if declared** — the masked count against a declared bar.
 //!
@@ -402,6 +409,18 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// served — a cached reachability outliving a layer suppression is the fail-open that ordering
     /// exists to avoid.
     pub attachment_gate: &'a dyn Fn(&str) -> Option<EntityId>,
+    /// The existence half of the attachment term: whether the target artifact is still there.
+    ///
+    /// **Not the same question as the disposition check beside it, and the difference is a fold.**
+    /// An overlay entry says *deleted*; the fold that executes that deletion retires the entry in
+    /// the same publication that drops the artifact's slot (Rule F's artifact arm, write-path
+    /// §5.4). After it, nothing in the overlay says anything about that entity — so a term resting
+    /// on disposition alone would start serving every label attached to it, and *a label does not
+    /// outlive what it labels* would hold only until the next nightly fold.
+    ///
+    /// A hole answers `false` here, which is what makes the fold's own hole the durable form of the
+    /// withholding rather than a state something has to remember.
+    pub attachment_resolves: &'a dyn Fn(&Attachment) -> bool,
     /// The viewer's **composed** mask — see [`MaskedSet`] for why the type forbids anything else.
     pub mask: &'a M,
 }
@@ -446,6 +465,13 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
                 if self.overlay.is_deleted(entity) || self.overlay.is_suppressed(entity) {
                     return ArtifactVerdict::Absent(Withheld::Attachment);
                 }
+            }
+            // And that the target is still *there*. Once a fold has executed the target's deletion
+            // its overlay entry is gone — retired in the same publication that dropped its slot —
+            // so the two checks above go quiet on an artifact that no longer exists. This is what
+            // carries the withholding past that fold.
+            if !(self.attachment_resolves)(attachment) {
+                return ArtifactVerdict::Absent(Withheld::Attachment);
             }
         }
 
@@ -549,6 +575,18 @@ mod tests {
         None
     }
 
+    /// The existence half where the target is still there — the ordinary state, so that a case
+    /// about disposition or reachability is not silently answered by this half instead.
+    fn target_present(_attachment: &Attachment) -> bool {
+        true
+    }
+
+    /// The existence half after a fold has retired the target: its slot is a hole, and no overlay
+    /// entry survives to say why.
+    fn target_gone(_attachment: &Attachment) -> bool {
+        false
+    }
+
     /// One artifact, with ranked variations given as `(generating set, declared size)` — the
     /// declared size separate so a test can build the *lossy projection* case, where row space
     /// holds fewer members than the entity-space set the caller published.
@@ -596,6 +634,7 @@ mod tests {
                 rows: &self.rows,
                 mask: &self.mask,
                 attachment_gate: &no_targets,
+                attachment_resolves: &target_present,
             }
         }
     }
@@ -795,6 +834,7 @@ mod tests {
             rows: &rows,
             mask: &all,
             attachment_gate: &no_targets,
+                attachment_resolves: &target_present,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -815,6 +855,7 @@ mod tests {
             rows: &rows,
             mask: &nearly,
             attachment_gate: &no_targets,
+                attachment_resolves: &target_present,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -843,6 +884,7 @@ mod tests {
                 rows: &rows,
                 mask,
                 attachment_gate: &no_targets,
+                attachment_resolves: &target_present,
             }
             .verdict(EntityId::new(999), 0, None)
         };
@@ -886,6 +928,7 @@ mod tests {
             rows: &rows,
             mask: &everything,
             attachment_gate: &no_targets,
+                attachment_resolves: &target_present,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -939,6 +982,7 @@ mod tests {
                 rows: &rows,
                 mask: &mask,
                 attachment_gate: &reaches_clusters,
+                attachment_resolves: &target_present,
             }
             .verdict(LABEL_ENTITY, 0, None)
         };
@@ -962,6 +1006,45 @@ mod tests {
         );
     }
 
+    /// **The fold's own fail-open, and the one this term's third half exists for.** A deletion's
+    /// overlay entry is retired by the fold that executes it — in the same publication that drops
+    /// the target's slot — so after that fold nothing in the overlay says the cluster was ever
+    /// deleted. A term resting on disposition alone reads "not deleted, not suppressed" and serves
+    /// every label attached to it, which turns *a label does not outlive what it labels* into a rule
+    /// that holds until the next nightly maintenance window.
+    #[test]
+    fn a_label_stays_withheld_after_the_fold_that_retired_its_targets_entry() {
+        let d = declaration(false, None);
+        let rows = attached_rows(&[1, 2, 3]);
+        let mask = Bitmap::of(&[1, 2, 3]);
+        // The post-fold state exactly: a clean overlay — the entry retired with the deletion it
+        // executed — and a target whose slot is now a hole.
+        let overlay = Overlay::new();
+        let view = |resolves: &dyn Fn(&Attachment) -> bool| {
+            ArtifactView {
+                declaration: &d,
+                overlay: &overlay,
+                satisfied: &FxHashSet::default(),
+                layer_reachable: true,
+                rows: &rows,
+                mask: &mask,
+                attachment_gate: &reaches_clusters,
+                attachment_resolves: resolves,
+            }
+            .verdict(LABEL_ENTITY, 0, None)
+        };
+
+        assert!(
+            view(&target_present).is_served(),
+            "the same overlay and the same gate serve the label while its target is there — so \
+             what the case below asserts is the existence term and nothing else"
+        );
+        assert_eq!(
+            view(&target_gone),
+            ArtifactVerdict::Absent(Withheld::Attachment)
+        );
+    }
+
     /// **The gate half, which is not optional**: a label must not outlive the *reachability* of what
     /// it labels, not only its existence. A viewer who cannot reach the cluster layer would
     /// otherwise be told what its clusters are called by a label layer they can reach.
@@ -979,6 +1062,7 @@ mod tests {
                 rows: &rows,
                 mask: &mask,
                 attachment_gate: gate,
+                attachment_resolves: &target_present,
             }
             .verdict(LABEL_ENTITY, 0, None)
         };
@@ -1011,6 +1095,7 @@ mod tests {
                 rows: &rows,
                 mask: &mask,
                 attachment_gate: &reaches_clusters,
+                attachment_resolves: &target_present,
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Attachment)

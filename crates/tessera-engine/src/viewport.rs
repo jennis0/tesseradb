@@ -3098,6 +3098,7 @@ impl Engine {
             )
         });
         let attachment_gate = self.attachment_gate(&reachable);
+        let attachment_resolves = self.attachment_resolves();
         let view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
@@ -3106,6 +3107,7 @@ impl Engine {
             rows: &rows,
             mask: &mask,
             attachment_gate: &attachment_gate,
+            attachment_resolves: &attachment_resolves,
         };
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
         // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
@@ -3264,6 +3266,23 @@ impl Engine {
         }
     }
 
+    /// The existence half of the attachment term — see
+    /// [`ArtifactView::attachment_resolves`](crate::artifacts::ArtifactView::attachment_resolves).
+    ///
+    /// One store lookup per **attached** artifact of a response, and none for a clustering that
+    /// hangs from nothing. It asks the level directly rather than going through the registry,
+    /// because the registry's reserved runs answer for the *layer* and would resolve an ordinal a
+    /// fold has emptied.
+    fn attachment_resolves(&self) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + '_ {
+        move |attachment| {
+            self.write.with_artifacts(|store| {
+                store
+                    .get(&attachment.layer, attachment.level, attachment.ordinal)
+                    .is_some()
+            })
+        }
+    }
+
     // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
     // of: the session, the generation, the slice and its data, the resolved tile ranges, the
     // composed mask, and the request's own two artifact parameters. Bundling them into a struct
@@ -3303,6 +3322,7 @@ impl Engine {
         // from: a label's target may live in any layer its own declares in `depends_on`, reachable
         // or not, and asking a second resolution would be a second answer to one question.
         let attachment_gate = self.attachment_gate(&reachable);
+        let attachment_resolves = self.attachment_resolves();
 
         // The viewport as one row-space set, built once for every layer: the merged global spans of
         // every tile this request resolved. `crossing_domain` already merges and globalises them
@@ -3381,6 +3401,7 @@ impl Engine {
                     rows: &rows,
                     mask,
                     attachment_gate: &attachment_gate,
+                    attachment_resolves: &attachment_resolves,
                 };
                 for ordinal in 0..rows.len() as u32 {
                     if !rows.intersects(ordinal, &tile_rows, mask) {

@@ -58,10 +58,13 @@ decades, and the pass measured +3.5 GB where 90 B × 4×10⁷ containers predict
   is what keeps the row form untouched by flush and merge, and it is fail-closed — a count
   understates rather than overstates. ⊘ Neither the flush-union nor the merge-rebase arm is built.
 - **The deny lane, the overlay, Rule S and Rule F** are the point path's, unchanged, and an artifact
-  reaches them by the same route a point does. Rule F's artifact arm is what this stage adds, and it
-  **has nothing to execute today**: the fold's passes drop rows and postings, and a deleted artifact
-  has neither. Retirement must additionally drop its membership, its content and **every edge naming
-  it** — which is new since the design was written, because Stage 3 built the edges.
+  reaches them by the same route a point does. ✔ **Rule F's artifact arm is built**: a deleted
+  artifact's record leaves its level in the publication that retires its overlay entry, and the
+  ordinal stays a **hole** because an ordinal is identity. Edges into it are answered by the
+  predicate — an attachment must now *resolve*, and a hole resolves to nothing — rather than
+  rewritten, because dropping the edge would leave the label unattached and therefore **served**.
+  ⊘ A retired artifact's content is not reclaimed: unreferenced bytes in the carried extents,
+  hygiene rather than disclosure.
 - **Supplied content lives in the record blob**, in artifact extents of its own, written by both the
   online publication and the build. Generating sets ride the packed membership extent beside the
   membership. `G` is entity-space and immutable, so the fold has nothing to re-base — its role is to

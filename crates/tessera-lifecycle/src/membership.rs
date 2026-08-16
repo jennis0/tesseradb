@@ -538,21 +538,32 @@ impl ArtifactStore {
     /// [`Self::unpublished`] — but the consequence differs and the caller must not treat it as a
     /// skip: an extent this rewrite omits is a level the new prefix does not carry at all, whose
     /// artifacts come back registered, addressable and served as absent.
-    pub fn repack_all(&self, retired: &Bitmap) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
+    pub fn repack_all(&self, retired: &Bitmap) -> Vec<PendingExtent> {
         let mut ready = Vec::new();
-        let mut holed = Vec::new();
         for ((layer, level), slots) in &self.levels {
             if slots.is_empty() {
-                continue;
-            }
-            if slots.iter().any(Option::is_none) {
-                holed.push((layer.clone(), *level));
                 continue;
             }
             let blobs: Vec<Vec<u8>> = slots
                 .iter()
                 .map(|slot| {
-                    let record = slot.as_ref().expect("checked dense just above");
+                    // **An empty blob is a hole, and a hole is a real state** — an artifact this
+                    // fold retired, or one whose publication is still in flight. It has to be
+                    // *written* rather than packed around: an ordinal is identity, so closing a gap
+                    // would hand every later artifact in the level the identity of its neighbour,
+                    // and every `tessera_id` a caller holds would name the wrong cluster.
+                    let Some(record) = slot else {
+                        return Vec::new();
+                    };
+                    // **Rule F's artifact arm.** An artifact whose own entity this fold executed
+                    // leaves the level here, in the same publication that retires the overlay entry
+                    // hiding it — which is the ordering the rule is about, not reclamation. A
+                    // deleted artifact has no rows and no postings, so compaction's derivation
+                    // would otherwise call it executed *vacuously* at the first fold and retire the
+                    // entry while its slot went on being served.
+                    if retired.contains(record.entity.raw() as u32) {
+                        return Vec::new();
+                    }
                     if retired.is_empty() {
                         return encode_record(record);
                     }
@@ -563,28 +574,37 @@ impl ArtifactStore {
                 .collect();
             ready.push((layer.clone(), *level, 0, blobs));
         }
-        (ready, holed)
+        ready
     }
 
-    /// Drop `retired` from every membership in place, so the resident copy says what the prefix the
-    /// fold just published says.
+    /// Drop every artifact this fold executed, and the entities it retired from what survives.
     ///
-    /// Called **after** the flip, for the reason [`Self::mark_published`] is: until the manifest
-    /// naming the rewritten extents is durable, the old prefix is still what a restart would open.
-    /// The two copies disagreeing in the interim is fail-closed either way — a retired entity is
-    /// denied, so it contributes to no masked count from either — but the *declared* size the
-    /// proportional criterion divides by is read from this copy, and it should be the published one.
-    pub fn retire_members(&mut self, retired: &Bitmap) {
+    /// The resident half of [`Self::repack_all`], applied after the flip for the reason
+    /// [`Self::mark_published`] is: until the manifest naming the rewritten extents is durable, the
+    /// old prefix is what a restart opens.
+    ///
+    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its stable key
+    /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
+    /// republication onto the identity of the artifact this fold just removed.
+    pub fn retire(&mut self, retired: &Bitmap) {
         if retired.is_empty() {
             return;
         }
-        for slots in self.levels.values_mut() {
-            for slot in slots.iter_mut().flatten() {
-                slot.members.andnot_inplace(retired);
+        for ((layer, level), slots) in self.levels.iter_mut() {
+            for slot in slots.iter_mut() {
+                let Some(record) = slot else { continue };
+                if retired.contains(record.entity.raw() as u32) {
+                    if let Some(key) = &record.stable_key {
+                        self.keys.remove(&(layer.clone(), *level, key.clone()));
+                    }
+                    *slot = None;
+                    continue;
+                }
+                record.members.andnot_inplace(retired);
             }
         }
-        // A membership that changed shape invalidates every row-space projection built from it, and
-        // a projection is only ever keyed by this version.
+        // Every row-space projection built from these is now wrong in both directions — memberships
+        // that shrank, and artifacts that are gone.
         self.version += 1;
     }
 
