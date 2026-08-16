@@ -492,6 +492,31 @@ impl ArtifactStore {
         (ready, skipped)
     }
 
+    /// How many Roaring **containers** every membership holds, summed across every level.
+    ///
+    /// **The one quantity the fold's artifact pass can be priced from**, and the reason it is
+    /// counted rather than modelled: resident cost is ~90 B per container — not per artifact and
+    /// not per member — so a membership of a hundred members costs what its *scatter* says and
+    /// nothing a manifest holds can predict that
+    /// ([the probe](../../../probes/2026-08-16-membership-residency/README.md)). A planner charging
+    /// per declared member would overcharge a compact clustering by an order and refuse folds that
+    /// fit.
+    ///
+    /// Counted over the **entity**-space form, which is what this store holds; the pass produces the
+    /// row-space form, whose container count differs but tracks it, both being decided by how
+    /// scattered a membership is in a Morton-ranked space. That is the approximation in this number,
+    /// and it is the honest one available before the pass has run.
+    ///
+    /// `O(containers)`, on the fold's planning path only — tens of milliseconds at 10⁷ artifacts,
+    /// against a fold measured in minutes.
+    pub fn membership_containers(&self) -> u64 {
+        self.levels
+            .values()
+            .flat_map(|slots| slots.iter().flatten())
+            .map(|record| record.members.statistics().n_containers as u64)
+            .sum()
+    }
+
     /// Every level's artifacts **whole**, with `retired` dropped from each membership — what the
     /// fold repacks into the prefix it is publishing.
     ///

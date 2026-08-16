@@ -4796,6 +4796,13 @@ impl Executor {
             crate::compact::FoldResources {
                 available_memory: available_memory(),
                 free_disc: free_disc(&self.bundle_root),
+                // **Read here rather than in the planner**, which is pure over the generation and
+                // has no route to the resident artifact store — and this is the one term of the
+                // fold's budget that cannot be derived from a manifest at all. A deployment with no
+                // artifacts pays one empty iteration for it.
+                membership_containers: self
+                    .live
+                    .with_artifacts(|store| store.membership_containers()),
             },
         ) {
             Ok(plan) => plan,

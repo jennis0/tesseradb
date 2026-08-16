@@ -43,11 +43,12 @@ skipped at open as a dropped layer's leftovers, and **every artifact came back a
 anywhere**. The content extents had the same shape one field over. Both now read the executor's held
 state, which is the posture the online route already takes.
 
-**Still owed here:** `plan_fold` must learn what the pass costs — **a pass it does not budget for is
-one it cannot refuse**. The measured input is the residency model: ~90 B per Roaring container, so
-+3.5 GB for 10⁷ artifacts of four runs each. What the planner cannot see is the container count, and
-inventing a constant for it would be worse than the gap; the honest options are to count containers
-from the resident store at plan time or to charge per declared member.
+**`plan_fold` budgets it** (ruled 2026-08-17): 90 B per Roaring container, counted from the resident
+store when the fold is planned rather than modelled from the manifest. Cost is per *container* — not
+per artifact and not per member — so nothing a manifest holds predicts it, and charging per declared
+member would overcharge a compact clustering by an order and refuse folds that fit. The two probes
+agree the constant independently: the residency sweep measures 78.5–94.0 B flat across three
+decades, and the pass measured +3.5 GB where 90 B × 4×10⁷ containers predicts 3.6 GB.
 
 ## What Stages 1–3 leave you
 
@@ -124,14 +125,13 @@ membership clause ships with 0072 whenever it does.
 deletion* is answerable only from the last fold's report. If something in this stage seems to want
 that lookup, that is a design question rather than a missing index.
 
-## Two rulings the stage may want first
+## The rulings the stage wanted first — both taken
 
-- **Does the attachment term extend to the target's own criterion?** Today a label is withheld when
-  its target is deleted, suppressed, or in a layer the viewer cannot reach — not when the target is
-  merely below its own existence criterion for that viewer. That matches the specification's own
-  cost argument (the term is the lookup the predicate's first branch already performs), and the
-  residue is the surface C1's r43 annotation governs: several layers over one corpus are governed by
-  the most permissive declaration among them. Raised by review 2026-08-16 and open.
+- ✔ **The attachment term does not extend to the target's own criterion** —
+  [decision 0086](decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md),
+  ruled 2026-08-17. The predicate is unchanged. What it costs is stated there: a label layer over a
+  gated cluster layer should declare a criterion at least as strong as its target's, and nothing
+  enforces that.
 - **The strict/permissive declaration is this stage's**, strict by default, with publish-time member
   validation beside it: a declared member that is *deleted* is a 422, one that is *suppressed* is
   accepted. The second half has no build-plane meaning — a bundle straight out of `tessera build`

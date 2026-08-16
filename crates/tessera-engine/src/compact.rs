@@ -542,6 +542,12 @@ pub(crate) enum NoFold {
 pub(crate) struct FoldResources {
     pub(crate) available_memory: Option<u64>,
     pub(crate) free_disc: Option<u64>,
+    /// Roaring containers across every artifact membership this node holds — the artifact pass's
+    /// price, and the one term of it a planner cannot derive. See
+    /// [`ArtifactStore::membership_containers`](tessera_lifecycle::membership::ArtifactStore::membership_containers)
+    /// for why it is counted from live state rather than modelled from the manifest, and
+    /// [`ARTIFACT_BYTES_PER_CONTAINER`] for what it is charged at.
+    pub(crate) membership_containers: u64,
 }
 
 /// The multiplier on [`memory_estimate`]'s computable terms, standing in for the one term of
@@ -575,6 +581,7 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 /// | 4 B × permutation bound | `permutation.bin`, written through a mapping (§3 pass 1) |
 /// | 4 B × entity bound | `ext-locator.u32`, same (§3 pass 3) |
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
+/// | 90 B × membership containers | the artifact pass's row forms, held while it rebuilds them |
 ///
 /// The permutation term is the **maximum** across slices rather than their sum: pass 1 folds one
 /// slice at a time and drops each slice's writer before the next, so the peak is one of them.
@@ -582,13 +589,34 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
 /// here on r1's reading, which is also the conservative one.)*
-pub(crate) fn memory_estimate(permutation_bound: u64, entity_bound: u64, dict_len: u64) -> u64 {
+pub(crate) fn memory_estimate(
+    permutation_bound: u64,
+    entity_bound: u64,
+    dict_len: u64,
+    membership_containers: u64,
+) -> u64 {
     let terms = 4u64
         .saturating_mul(permutation_bound)
         .saturating_add(4u64.saturating_mul(entity_bound))
-        .saturating_add(8u64.saturating_mul(dict_len));
+        .saturating_add(8u64.saturating_mul(dict_len))
+        .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers));
     terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
 }
+
+/// What one Roaring container costs resident, in bytes — the artifact pass's whole price model.
+///
+/// **Measured, not assumed**: 78.5–94.0 B per container across three decades of artifact count and
+/// two membership shapes, flat, because the cost is per *container* rather than per artifact or per
+/// member ([the residency probe](../../../probes/2026-08-16-membership-residency/README.md)). 90 is
+/// the realistic arm's figure, and the pessimistic arm is *cheaper* per container — the scattered
+/// case pays by holding more of them, which is exactly what counting containers rather than
+/// artifacts captures.
+///
+/// The cross-check is the pass itself: 10⁷ artifacts of four runs each measured **+3.5 GB** for the
+/// rebuilt row forms, against 90 B × 4×10⁷ containers = 3.6 GB
+/// ([the pass probe](../../../probes/2026-08-16-fold-artifact-pass/README.md)). The two probes
+/// arrive at the figure independently, which is why this is a constant and not a factor.
+const ARTIFACT_BYTES_PER_CONTAINER: u64 = 90;
 
 /// The free space a fold needs, as a percentage of the bytes its inputs' manifests name.
 ///
@@ -709,6 +737,7 @@ pub(crate) fn plan_fold(
                 .unwrap_or(0),
             entity_bound,
             u64::from(dict_len),
+            resources.membership_containers,
         );
         if need > available {
             return Err(NoFold::InsufficientMemory { need, available });
@@ -2248,7 +2277,7 @@ mod tests {
     /// assertion fails low, which is r4's original error (`permutation.bin` omitted) reintroduced.
     #[test]
     fn the_memory_estimate_is_section_3s_budget_at_ten_to_the_nine() {
-        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000);
+        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000, 0);
         let gb = need as f64 / 1e9;
         assert!(
             (17.0..=19.0).contains(&gb),
@@ -2265,11 +2294,33 @@ mod tests {
     fn the_estimate_charges_one_permutation_and_one_locator() {
         // 4 B + 4 B per entity, doubled by the safety factor, and no dictionary term.
         assert_eq!(
-            memory_estimate(1_000, 1_000, 0),
+            memory_estimate(1_000, 1_000, 0, 0),
             (4 * 1_000 + 4 * 1_000) * 2
         );
         // The dictionary term is 8 B per ordinal and independent of entity space.
-        assert_eq!(memory_estimate(0, 0, 1_000), 8 * 1_000 * 2);
+        assert_eq!(memory_estimate(0, 0, 1_000, 0), 8 * 1_000 * 2);
+    }
+
+    /// **The artifact pass is charged, and charged per container.** A deployment holding no
+    /// artifacts pays nothing for it — the term is what tells a fold it cannot fit, so a term that
+    /// fired on a corpus with no layers would refuse folds for a pass that does no work.
+    ///
+    /// The design point is the cross-check: 10⁷ artifacts of four runs each is 4×10⁷ containers,
+    /// which the estimate must price at the +3.5 GB the pass was measured to hold — doubled here by
+    /// the safety factor, as every other term is.
+    #[test]
+    fn the_estimate_charges_the_artifact_pass_per_container() {
+        assert_eq!(
+            memory_estimate(0, 0, 0, 0),
+            0,
+            "a deployment with no artifacts is charged nothing for the pass"
+        );
+        let need = memory_estimate(0, 0, 0, 40_000_000);
+        let gb = need as f64 / 1e9 / FOLD_MEMORY_SAFETY_FACTOR as f64;
+        assert!(
+            (3.2..=3.9).contains(&gb),
+            "the pass measured +3.5 GB for 4×10⁷ containers; this prices it at {gb:.1} GB"
+        );
     }
 
     /// **The disc estimate is above the live bytes, not equal to them**, which is the margin spec
