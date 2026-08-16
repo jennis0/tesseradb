@@ -42,7 +42,7 @@ delete.
 | **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
 | **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
-| **3** Content — derived, supplied, containment | **in progress** (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`) and the containment test built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. Owed: the attachment edge, and the check on the real corpus |
+| **3** Content — derived, supplied, containment | **in progress** (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. Owed: the check on the real corpus |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
 | **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
@@ -502,9 +502,24 @@ both point and artifact rows composes correctly, and a fold over one loses nothi
 two id regions cannot overlap, so a mixed window is two disjoint ranges and the merge's
 disjointness check passes rather than fires. That was the interaction the ruling could not be
 checked against when it was made.
-- The attachment edge, and the term that is fail-open if omitted: an attached artifact is tested on
-  its target's `verdict` **and** its target's gate, on every route, including the ones that never
-  traverse the edge.
+- ✔ **The attachment edge, and the term that is fail-open without it.** An artifact published as an
+  attachment to another — a label on a cluster — is tested on its target's `verdict` **and** its
+  target's gate, in the one predicate, so it holds on every route rather than on the ones that
+  traverse the edge. Suppress a cluster and its labels stop serving in the viewport *and* on an
+  identifier a viewer already holds; the same for a deletion, for the target layer's own
+  suppression, and for a viewer who does not reach the target's layer at all.
+  - **The caller names a target by its stable key**, because an ordinal never crosses the boundary
+    (C8) and a `tessera_id` in durable state would be reinterpreted by the next key rotation. What
+    is stored is the resolved `(layer, level, ordinal, entity)`, which is what makes the extra term
+    one `verdict` lookup rather than a walk through the registry.
+  - **Two refusals at publication, both fail-closed.** A target that does not exist yet is refused
+    rather than stored — an edge names a position in a dense level, so one written first would name
+    whatever later landed there (§5.0.4) — and so is an edge into a layer the attaching layer did
+    not declare in `depends_on`, which is what makes the layer-level refusal of a dangling
+    replacement sound: a dependency nobody declared is one no replacement checks.
+  - The record and the WAL both carry the edge, and both formats bump their version for it: an
+    attachment lost on the way back from disk is a label serving over a suppressed cluster, which is
+    the fail-open reappearing at a restart with nothing reporting a fault.
 
 **The check:** the design's own worked example, reproduced on real data — a broad viewer and a
 narrow viewer fail the *same* full-sample label for the same reason, and both satisfy its per-term

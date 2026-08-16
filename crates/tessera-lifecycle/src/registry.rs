@@ -74,6 +74,23 @@ pub enum RegistryError {
     /// the first edge, because an edge's target must exist before the edge (`annotation-write-cycle.md`
     /// §5.0.4) and a dangling dependency is that ordering constraint already broken.
     MissingDependency { layer: String, depends_on: String },
+    /// An artifact attaches to a layer its own layer did not declare in `depends_on`.
+    ///
+    /// **The declaration is what makes the dangling-replacement refusal sound** (§5.0.4): a
+    /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
+    /// nobody declared is an edge nothing protects.
+    UndeclaredAttachment { layer: String, target: String },
+    /// An artifact attaches to a target that does not exist — no such layer, no such level, or no
+    /// artifact under that key.
+    ///
+    /// Refused rather than stored: an edge names a position in a dense level, so one written ahead
+    /// of its target would name whatever later landed there.
+    NoSuchAttachmentTarget {
+        layer: String,
+        target: String,
+        level: u32,
+        key: String,
+    },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
 }
@@ -109,6 +126,23 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "{layer} declares depends_on {depends_on}, which is not registered — an edge's \
                  target must exist before the edge"
+            ),
+            RegistryError::UndeclaredAttachment { layer, target } => write!(
+                f,
+                "{layer} publishes an artifact attached into {target}, which it does not declare in \
+                 depends_on — an attached artifact is withheld with its target, and a dependency \
+                 nobody declared is one no replacement checks"
+            ),
+            RegistryError::NoSuchAttachmentTarget {
+                layer,
+                target,
+                level,
+                key,
+            } => write!(
+                f,
+                "{layer} publishes an artifact attached to {key} in level {level} of {target}, \
+                 which holds no such artifact — a target exists before the edge into it, or the \
+                 edge names whatever later lands there"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -386,6 +420,47 @@ impl LayerRegistry {
             }
         }
 
+        // **Attachments, resolved before anything is allocated.** The caller names a target by the
+        // stable key they published it under — an ordinal is never disclosed (C8), so a key is the
+        // only address they hold — and what is stored is the resolved `(level, ordinal, entity)`.
+        // Resolving once here rather than per request is what makes the extra predicate term one
+        // `verdict` lookup instead of a registry walk.
+        let attachments: Vec<Option<crate::membership::Attachment>> = incoming
+            .iter()
+            .map(|artifact| {
+                let Some(wanted) = &artifact.attached_to else {
+                    return Ok(None);
+                };
+                if !layer.declaration.depends_on.contains(&wanted.layer) {
+                    return Err(RegistryError::UndeclaredAttachment {
+                        layer: layer_name.to_string(),
+                        target: wanted.layer.clone(),
+                    });
+                }
+                let missing = || RegistryError::NoSuchAttachmentTarget {
+                    layer: layer_name.to_string(),
+                    target: wanted.layer.clone(),
+                    level: wanted.level,
+                    key: wanted.stable_key.clone(),
+                };
+                let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
+                let ordinal = store
+                    .ordinal_of_key(&wanted.layer, wanted.level, &wanted.stable_key)
+                    .ok_or_else(missing)?;
+                let entity = target
+                    .runs
+                    .get(wanted.level as usize)
+                    .and_then(|runs| runs.entity_of(ordinal as u64))
+                    .ok_or_else(missing)?;
+                Ok(Some(crate::membership::Attachment {
+                    layer: wanted.layer.clone(),
+                    level: wanted.level,
+                    ordinal,
+                    entity: EntityId::new(entity),
+                }))
+            })
+            .collect::<Result<_, _>>()?;
+
         let first_ordinal = store.next_ordinal(layer_name, level) as u64;
         let needed = first_ordinal + incoming.len() as u64;
 
@@ -431,6 +506,14 @@ impl LayerRegistry {
                             generated_from: serialise_members(&v.generated_from),
                         })
                         .collect(),
+                    attached_to: attachments[i].as_ref().map(|a| {
+                        crate::wal::PublishedAttachment {
+                            layer: a.layer.clone(),
+                            level: a.level,
+                            ordinal: a.ordinal,
+                            entity: a.entity,
+                        }
+                    }),
                 }
             })
             .collect();
@@ -873,6 +956,7 @@ mod tests {
             stable_key: Some(key.into()),
             members: croaring::Bitmap::of(members),
             variations: Vec::new(),
+            attached_to: None,
         }
     }
 
@@ -888,6 +972,99 @@ mod tests {
         reg.apply(&record);
         assert_eq!(store.apply(&record, 0), 0);
         Ok(record)
+    }
+
+    /// **An attachment resolves to an address, and the target must already be there.** The caller
+    /// names a key because that is all they hold; what is stored is `(level, ordinal, entity)`, so
+    /// the extra visibility term is one lookup rather than a walk through the registry.
+    #[test]
+    fn an_attachment_resolves_to_its_targets_entity_and_the_target_must_exist_first() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let mut labels = declaration("topics/x");
+        labels.depends_on = vec!["clusters/a".into()];
+        register(&mut reg, &mut alloc, labels).unwrap();
+
+        let label = |target: &str| {
+            let mut artifact = incoming("l0", &[1, 2]);
+            artifact.attached_to = Some(crate::membership::IncomingAttachment {
+                layer: "clusters/a".into(),
+                level: 0,
+                stable_key: target.into(),
+            });
+            artifact
+        };
+
+        // The cluster does not exist yet: refused, and the batch spends nothing.
+        let mark = alloc.low_water();
+        assert_eq!(
+            publish(&mut reg, &mut store, &mut alloc, "topics/x", &[label("c0")]),
+            Err(RegistryError::NoSuchAttachmentTarget {
+                layer: "topics/x".into(),
+                target: "clusters/a".into(),
+                level: 0,
+                key: "c0".into(),
+            })
+        );
+        assert_eq!(alloc.low_water(), mark);
+
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c0", &[1, 2, 3])],
+        )
+        .unwrap();
+        publish(&mut reg, &mut store, &mut alloc, "topics/x", &[label("c0")]).unwrap();
+
+        // The stored edge names the cluster's own entity — the identifier the predicate reads.
+        let cluster = store.get("clusters/a", 0, 0).unwrap().entity;
+        assert_eq!(
+            store.get("topics/x", 0, 0).unwrap().attached_to,
+            Some(crate::membership::Attachment {
+                layer: "clusters/a".into(),
+                level: 0,
+                ordinal: 0,
+                entity: cluster,
+            })
+        );
+    }
+
+    /// An edge into a layer nobody declared is an edge no replacement checks, so it is refused at
+    /// publication rather than discovered when the target layer is replaced out from under it.
+    #[test]
+    fn an_attachment_into_an_undeclared_layer_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        // `topics/x` declares no dependency at all.
+        register(&mut reg, &mut alloc, declaration("topics/x")).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c0", &[1, 2, 3])],
+        )
+        .unwrap();
+
+        let mut artifact = incoming("l0", &[1]);
+        artifact.attached_to = Some(crate::membership::IncomingAttachment {
+            layer: "clusters/a".into(),
+            level: 0,
+            stable_key: "c0".into(),
+        });
+        assert_eq!(
+            publish(&mut reg, &mut store, &mut alloc, "topics/x", &[artifact]),
+            Err(RegistryError::UndeclaredAttachment {
+                layer: "topics/x".into(),
+                target: "clusters/a".into(),
+            })
+        );
     }
 
     #[test]

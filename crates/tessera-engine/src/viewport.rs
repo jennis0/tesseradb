@@ -3097,6 +3097,7 @@ impl Engine {
                 &slice_data.row_space,
             )
         });
+        let attachment_gate = self.attachment_gate(&reachable);
         let view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
@@ -3104,6 +3105,7 @@ impl Engine {
             layer_reachable: true,
             rows: &rows,
             mask: &mask,
+            attachment_gate: &attachment_gate,
         };
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
         // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
@@ -3239,6 +3241,29 @@ impl Engine {
         Some(values)
     }
 
+    /// The attachment term's gate half, shared by both serving routes.
+    ///
+    /// Answers *this viewer reaches that layer, and here is its own entity* — or `None`, which the
+    /// predicate reads as absence. One function rather than two call sites doing the same two steps,
+    /// on the argument the shared predicate itself rests on: a route that gated attachments
+    /// differently from the other would be two transcriptions of one rule, and the one that drifted
+    /// would be serving labels for hidden clusters.
+    ///
+    /// **A dropped target layer answers `None`**, and so does a name this principal cannot reach.
+    /// The two are the same answer here for the same reason they are the same answer everywhere
+    /// else: which of them applies is exactly the fact the gate withholds.
+    fn attachment_gate<'a>(
+        &'a self,
+        reachable: &'a tessera_lifecycle::ResolvedLayers,
+    ) -> impl Fn(&str) -> Option<EntityId> + 'a {
+        move |layer: &str| {
+            if !reachable.contains(layer) {
+                return None;
+            }
+            self.write.layer_entity(layer)
+        }
+    }
+
     // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
     // of: the session, the generation, the slice and its data, the resolved tile ranges, the
     // composed mask, and the request's own two artifact parameters. Bundling them into a struct
@@ -3274,6 +3299,10 @@ impl Engine {
         if names.is_empty() {
             return Ok(Vec::new());
         }
+        // Built once for the whole response, and from the *same* resolution the names above came
+        // from: a label's target may live in any layer its own declares in `depends_on`, reachable
+        // or not, and asking a second resolution would be a second answer to one question.
+        let attachment_gate = self.attachment_gate(&reachable);
 
         // The viewport as one row-space set, built once for every layer: the merged global spans of
         // every tile this request resolved. `crossing_domain` already merges and globalises them
@@ -3351,6 +3380,7 @@ impl Engine {
                     layer_reachable: true,
                     rows: &rows,
                     mask,
+                    attachment_gate: &attachment_gate,
                 };
                 for ordinal in 0..rows.len() as u32 {
                     if !rows.intersects(ordinal, &tile_rows, mask) {

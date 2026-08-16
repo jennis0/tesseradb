@@ -301,6 +301,15 @@ artifacts/<layer>/
   edges.arrow                       # (layer, level, ordinal) → (layer, level, ordinal)
 ```
 
+✔ **An attachment travels in the attached artifact's own record, not in a file of its own** (built
+2026-08-16). The edge is read on exactly the path that reads the artifact — the predicate tests
+every attached artifact on its target's disposition and gate (§4) — so a separate file would be a
+second read, and another manifest entry per publication, for a field the record is already being
+decoded for. The address stored is the target's `(layer, level, ordinal)` with its **entity** beside
+it, which is what makes the extra term one `verdict` lookup. `edges.arrow` as a general
+many-edges-per-artifact structure is a shape for the tree work, not a layout: a level's lineage is
+what Stage 5 puts there.
+
 ⊘ **One membership file per artifact does not survive the bundle's digest model, so the
 `members/<ordinal>.roaring` line above is a shape, not a layout** (review 2026-08-15, verified
 against the code). Every bundle file is a manifest entry, digested at write and parsed at open; at

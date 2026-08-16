@@ -11,8 +11,15 @@
 //!    it is accepted, whatever else is true, so an artifact reaches the same `deleted > suppressed`
 //!    composition a point does, by the same route.
 //! 2. **The layer's gate.** Whether this viewer may know the layer exists at all.
-//! 3. **The artifact's own terms, if its layer declared that its artifacts carry them.**
-//! 4. **The existence criterion, if declared** — the masked count against a declared bar.
+//! 3. **What it is attached to, if it is an attachment.** An artifact that exists only as an
+//!    attachment to another — a toponymy label on a cluster — is tested on its target's disposition
+//!    and reachability as well as on its own. Without that term the predicate is per-artifact by
+//!    construction, so suppressing a cluster stops the cluster serving while every label naming and
+//!    describing it goes on serving to whoever reaches it directly: by search, by a held identifier,
+//!    by a filter. The model's conjunctive rule covers edge *traversal* and those routes traverse
+//!    nothing (`annotation-representation.md` §4).
+//! 4. **The artifact's own terms, if its layer declared that its artifacts carry them.**
+//! 5. **The existence criterion, if declared** — the masked count against a declared bar.
 //!
 //! Two of those were once one thing, and separating them is
 //! [decision 0079](../../../docs/decisions/0079-the-gate-is-one-flag-not-three-modes.md): the three
@@ -43,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
-use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore};
+use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment};
 use tessera_lifecycle::Overlay;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
 use tessera_types::{EntityId, TermId};
@@ -73,6 +80,13 @@ pub struct ArtifactRows {
     /// disclosure. Carrying the declared size makes the loss detectable, and a lossy projection
     /// fails containment for everybody rather than passing it for somebody.
     variations: Vec<Vec<ProjectedSet>>,
+    /// Per ordinal, what this artifact is an attachment to — `None` for an ordinary artifact.
+    ///
+    /// **Entity space, and deliberately not projected.** A target is tested on its disposition and
+    /// on its layer's gate, neither of which is a row-space question, so a projection would be a
+    /// second address for something already addressed. It rides here because this is the structure a
+    /// level's serving path already holds per ordinal.
+    attachments: Vec<Option<Attachment>>,
 }
 
 /// The containment test's three outcomes.
@@ -112,13 +126,16 @@ impl ArtifactRows {
     ) -> Self {
         let mut rows: Vec<Option<Bitmap>> = Vec::new();
         let mut variations: Vec<Vec<ProjectedSet>> = Vec::new();
+        let mut attachments: Vec<Option<Attachment>> = Vec::new();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             if rows.len() <= idx {
                 rows.resize_with(idx + 1, || None);
                 variations.resize_with(idx + 1, Vec::new);
+                attachments.resize_with(idx + 1, || None);
             }
             rows[idx] = Some(space.project(&record.members));
+            attachments[idx] = record.attached_to.clone();
             variations[idx] = record
                 .variations
                 .iter()
@@ -128,7 +145,18 @@ impl ArtifactRows {
                 })
                 .collect();
         }
-        ArtifactRows { rows, variations }
+        ArtifactRows {
+            rows,
+            variations,
+            attachments,
+        }
+    }
+
+    /// What the artifact at `ordinal` hangs from, if it hangs from anything.
+    fn attachment(&self, ordinal: u32) -> Option<&Attachment> {
+        self.attachments
+            .get(ordinal as usize)
+            .and_then(Option::as_ref)
     }
 
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
@@ -305,6 +333,9 @@ pub enum Withheld {
     OwnTerms,
     /// The masked count does not clear the declared criterion.
     Criterion,
+    /// The artifact is an attachment, and what it attaches to is suppressed, deleted, or in a layer
+    /// this viewer does not reach. **A label does not outlive the thing it labels.**
+    Attachment,
     /// The artifact carries supplied content and this viewer contains no variation's generating
     /// set — or the variation they would have been served has no readable content.
     Containment,
@@ -352,6 +383,17 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     pub layer_reachable: bool,
     /// This slice's row form of the layer's membership.
     pub rows: &'a ArtifactRows,
+    /// The gate half of the attachment term: the target layer's own entity where this viewer
+    /// reaches that layer, and `None` where they do not.
+    ///
+    /// **A hook rather than a resolved answer, because the target is another layer.** The layer this
+    /// view is for was resolved once per session; a label's target may live in any layer its own
+    /// declares in `depends_on`, and which of those a viewer reaches is the same one set probe
+    /// `ResolvedLayers` answers for its own. Returning the layer's entity rather than a bool is what
+    /// lets the **live** suppression check run here too, in the order it runs for the layer being
+    /// served — a cached reachability outliving a layer suppression is the fail-open that ordering
+    /// exists to avoid.
+    pub attachment_gate: &'a dyn Fn(&str) -> Option<EntityId>,
     /// The viewer's **composed** mask — see [`MaskedSet`] for why the type forbids anything else.
     pub mask: &'a M,
 }
@@ -383,7 +425,23 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             return ArtifactVerdict::Absent(Withheld::LayerGate);
         }
 
-        // 3. The artifact's own terms, if its layer says it carries them.
+        // 3. What it hangs from, if it hangs from anything. Both halves — the target's own
+        //    disposition and the reachability of the target's layer — because a label must not
+        //    outlive either the existence or the reachability of what it labels. Running it here is
+        //    what puts it on every route: search, a held identifier and a filter reach a label
+        //    directly and traverse no edge, so a rule stated only for traversal never reaches them.
+        if let Some(attachment) = self.rows.attachment(ordinal) {
+            let Some(target_layer_entity) = (self.attachment_gate)(&attachment.layer) else {
+                return ArtifactVerdict::Absent(Withheld::Attachment);
+            };
+            for entity in [target_layer_entity, attachment.entity] {
+                if self.overlay.is_deleted(entity) || self.overlay.is_suppressed(entity) {
+                    return ArtifactVerdict::Absent(Withheld::Attachment);
+                }
+            }
+        }
+
+        // 4. The artifact's own terms, if its layer says it carries them.
         if self.declaration.access.artifacts_carry_own {
             match own_terms {
                 Some(term) if self.satisfied.contains(&term) => {}
@@ -391,7 +449,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             }
         }
 
-        // 4. The existence criterion, against the **live** masked count. The same number is
+        // 5. The existence criterion, against the **live** masked count. The same number is
         //    returned to the caller, so the tested quantity and the served quantity cannot drift.
         let masked_count = self.rows.masked_count(ordinal, self.mask);
         if let Some(criterion) = self.declaration.visible_when {
@@ -411,7 +469,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             }
         }
 
-        // 5. Containment, last: the first variation whose generating set this viewer holds
+        // 6. Containment, last: the first variation whose generating set this viewer holds
         //    **entirely**. A viewer satisfying none receives no artifact — not the artifact with
         //    its description missing, which is the in-between state decision 0076 forbids.
         let variation = match self.rows.satisfied_variation(ordinal, self.mask) {
@@ -473,7 +531,14 @@ mod tests {
         ArtifactRows {
             rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
             variations: vec![Vec::new(); sets.len()],
+            attachments: vec![None; sets.len()],
         }
+    }
+
+    /// The gate an unattached artifact's test passes: nothing calls it, and a `None` if anything did
+    /// is the fail-closed answer rather than a pass nobody wrote.
+    fn no_targets(_layer: &str) -> Option<EntityId> {
+        None
     }
 
     /// One artifact, with ranked variations given as `(generating set, declared size)` — the
@@ -489,6 +554,7 @@ mod tests {
                     declared: *declared,
                 })
                 .collect()],
+            attachments: vec![None],
         }
     }
 
@@ -521,6 +587,7 @@ mod tests {
                 layer_reachable: reachable,
                 rows: &self.rows,
                 mask: &self.mask,
+                attachment_gate: &no_targets,
             }
         }
     }
@@ -719,6 +786,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &all,
+            attachment_gate: &no_targets,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -738,6 +806,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &nearly,
+            attachment_gate: &no_targets,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -765,6 +834,7 @@ mod tests {
                 layer_reachable: true,
                 rows: &rows,
                 mask,
+                attachment_gate: &no_targets,
             }
             .verdict(EntityId::new(999), 0, None)
         };
@@ -807,6 +877,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &everything,
+            attachment_gate: &no_targets,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -814,6 +885,141 @@ mod tests {
             "a viewer who can see every row there is must still not be served a set that lost \
              members on the way into row space"
         );
+    }
+
+    // ---- the attachment term ------------------------------------------------------------------
+
+    /// The cluster a label hangs from, as these tests address it.
+    const CLUSTERS: &str = "clusters/a";
+    const CLUSTER_LAYER_ENTITY: EntityId = EntityId::new(4_294_967_290);
+    const CLUSTER_ENTITY: EntityId = EntityId::new(4_294_901_760);
+    const LABEL_ENTITY: EntityId = EntityId::new(4_294_836_224);
+
+    /// One label, attached to a cluster in another layer.
+    fn attached_rows(members: &[u32]) -> ArtifactRows {
+        ArtifactRows {
+            rows: vec![Some(Bitmap::of(members))],
+            variations: vec![Vec::new()],
+            attachments: vec![Some(Attachment {
+                layer: CLUSTERS.to_string(),
+                level: 0,
+                ordinal: 3,
+                entity: CLUSTER_ENTITY,
+            })],
+        }
+    }
+
+    fn reaches_clusters(layer: &str) -> Option<EntityId> {
+        (layer == CLUSTERS).then_some(CLUSTER_LAYER_ENTITY)
+    }
+
+    /// **The fail-open this term closes.** Suppressing a cluster hides the cluster; without the
+    /// extra term every label naming and describing it goes on serving to anyone holding their
+    /// identifier — and those labels *are* the description of the thing that was just hidden.
+    #[test]
+    fn suppressing_a_cluster_withholds_the_labels_attached_to_it() {
+        let d = declaration(false, None);
+        let rows = attached_rows(&[1, 2, 3]);
+        let mask = Bitmap::of(&[1, 2, 3]);
+
+        let verdict = |overlay: &Overlay| {
+            ArtifactView {
+                declaration: &d,
+                overlay,
+                satisfied: &FxHashSet::default(),
+                layer_reachable: true,
+                rows: &rows,
+                mask: &mask,
+                attachment_gate: &reaches_clusters,
+            }
+            .verdict(LABEL_ENTITY, 0, None)
+        };
+
+        let mut overlay = Overlay::new();
+        assert!(verdict(&overlay).is_served());
+
+        // The label's own entity is untouched; only the cluster's is suppressed.
+        overlay.apply(CLUSTER_ENTITY, ChangeOp::Suppress);
+        assert_eq!(
+            verdict(&overlay),
+            ArtifactVerdict::Absent(Withheld::Attachment)
+        );
+
+        // And a deletion, which is the irreversible one.
+        let mut overlay = Overlay::new();
+        overlay.apply(CLUSTER_ENTITY, ChangeOp::Delete);
+        assert_eq!(
+            verdict(&overlay),
+            ArtifactVerdict::Absent(Withheld::Attachment)
+        );
+    }
+
+    /// **The gate half, which is not optional**: a label must not outlive the *reachability* of what
+    /// it labels, not only its existence. A viewer who cannot reach the cluster layer would
+    /// otherwise be told what its clusters are called by a label layer they can reach.
+    #[test]
+    fn a_label_is_withheld_where_the_target_layer_is_not_reached() {
+        let d = declaration(false, None);
+        let rows = attached_rows(&[1, 2, 3]);
+        let mask = Bitmap::of(&[1, 2, 3]);
+        let verdict = |gate: &dyn Fn(&str) -> Option<EntityId>| {
+            ArtifactView {
+                declaration: &d,
+                overlay: &Overlay::new(),
+                satisfied: &FxHashSet::default(),
+                layer_reachable: true,
+                rows: &rows,
+                mask: &mask,
+                attachment_gate: gate,
+            }
+            .verdict(LABEL_ENTITY, 0, None)
+        };
+
+        assert!(verdict(&reaches_clusters).is_served());
+        // Unreachable, dropped, never registered: one answer, because which of them applies is
+        // exactly what the gate withholds.
+        assert_eq!(
+            verdict(&no_targets),
+            ArtifactVerdict::Absent(Withheld::Attachment)
+        );
+    }
+
+    /// Suppressing the *layer* the target lives in withholds the labels too — the live half of the
+    /// gate, which a cached reachability would otherwise outlive.
+    #[test]
+    fn suppressing_the_target_layer_withholds_the_labels_attached_into_it() {
+        let d = declaration(false, None);
+        let rows = attached_rows(&[1, 2, 3]);
+        let mask = Bitmap::of(&[1, 2, 3]);
+        let mut overlay = Overlay::new();
+        overlay.apply(CLUSTER_LAYER_ENTITY, ChangeOp::Suppress);
+
+        assert_eq!(
+            ArtifactView {
+                declaration: &d,
+                overlay: &overlay,
+                satisfied: &FxHashSet::default(),
+                layer_reachable: true,
+                rows: &rows,
+                mask: &mask,
+                attachment_gate: &reaches_clusters,
+            }
+            .verdict(LABEL_ENTITY, 0, None),
+            ArtifactVerdict::Absent(Withheld::Attachment)
+        );
+    }
+
+    /// An artifact that hangs from nothing asks nothing, so a clustering pays no lookup per cluster
+    /// for a relationship it does not have.
+    #[test]
+    fn an_unattached_artifact_never_consults_the_gate() {
+        let d = declaration(false, None);
+        // `no_targets` refuses every layer; the artifact serves anyway, because nothing asks.
+        let fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
+        assert!(fx
+            .view(&d, true)
+            .verdict(EntityId::new(999), 0, None)
+            .is_served());
     }
 
     /// A layer declaring no supplied content has nothing to contain, and its artifacts serve on the

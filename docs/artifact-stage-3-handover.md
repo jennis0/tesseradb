@@ -1,13 +1,13 @@
-# Stage 3 handover — content, and the edge that is still owed
+# Stage 3 handover — content and the attachment edge, and the check still owed
 
 **Status:** Live handover. Delete it when Stage 3 closes; the status record is
 [`artifact-delivery.md`](artifact-delivery.md) and stays.
 
 **Where the work is:** branch `artifacts/stage-3`, worktree
-`.claude/worktrees/artifacts-stage-3`, seven commits on top of `16ca0e9` (the last Stage 2 commit).
-The gate is green at `1ed15c0` — `cargo test --workspace`, `cargo clippy --workspace --all-targets
--- -D warnings`, `scripts/check-layers.sh`, `scripts/check-doc-links.py`, and the client suite under
-`clients/ts` — with one known-flaky exception noted at the end.
+`.claude/worktrees/artifacts-stage-3`, on top of `16ca0e9` (the last Stage 2 commit). The gate is
+green — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`scripts/check-layers.sh`, `scripts/check-doc-links.py`, and the client suite under `clients/ts` —
+with one known-flaky exception noted at the end.
 
 ## What is built
 
@@ -33,53 +33,31 @@ the serving path does bitmap arithmetic on per request and a compressed home wou
 per artifact; the kind-5 frame and the drill-down response carry the chosen variation; all three
 decoders — Rust, TypeScript, the Python oracle — read it.
 
+**The attachment edge.** An artifact published as an attachment to another is tested on its target's
+`verdict` **and** its target's gate, inside the one predicate — so it holds on every route rather
+than on the ones that traverse the edge, which is the whole of the fail-open the corpus has caught
+twice. The caller names a target by its stable key, since an ordinal never crosses the boundary;
+what is stored is the resolved `(layer, level, ordinal, entity)`, so the extra term is one `verdict`
+lookup. Publication refuses a target that does not exist yet, and refuses an edge into a layer the
+attaching layer did not declare in `depends_on` — the declaration is what makes the refusal of a
+dangling replacement sound. **Nothing of the edge crosses the wire**: it is a visibility term, and
+traversal is Stage 5's.
+
 ## What is owed
 
-### 1. The attachment edge — the substantial one, and it carries a fail-open
-
-**Nothing exists yet.** `depends_on` on a layer declaration and `RegistryError::MissingDependency`
-are the only edge-shaped things in the code, and they constrain *layer* registration order, not
-artifact edges. `annotation-representation.md` §2.4 sketches `edges.arrow` as
-`(layer, level, ordinal) → (layer, level, ordinal)`; nothing writes or reads it.
-
-**The rule, from `annotation-representation.md` §4** (the paragraph beginning *"The predicate carries
-one term beyond the artifact's own"*): an artifact that exists only as an attachment to another — a
-toponymy label on a cluster — is **also** tested on the `verdict` **and the gate** of what it
-attaches to, **on every route**, including the ones that never traverse the edge.
-
-That last clause is the whole of it. The model's conjunctive rule covers edge *traversal*; search, a
-held identifier and a filter reach the label **directly** and never traverse anything. Without the
-extra term, suppressing a cluster hides the cluster while every label naming and describing it goes
-on serving — and those labels are exactly the description of the thing that was just hidden. The
-corpus records this class of error being caught twice before; do not rediscover it a third time.
-
-Implementation notes:
-
-- The term is one extra `verdict` lookup on an identifier the label already stores, and it is the
-  same lookup [`ArtifactView::verdict`](../crates/tessera-engine/src/artifacts.rs)'s first branch
-  already performs — so the cost argument is settled, and the work is plumbing the target's identity
-  to the predicate rather than inventing a test.
-- The gate half is not optional: *a label must not outlive the reachability of what it labels*.
-- Write ordering is constrained — `annotation-representation.md` §5.0.4: an edge's target must exist
-  before the edge. The layer-level analogue is already enforced at registration; the artifact-level
-  one is not.
-- Both serving routes must get it, and the drill-down test in
-  `crates/tessera-engine/tests/artifact_content.rs` is the shape to copy: assert the two routes agree
-  rather than asserting each separately.
-
-### 2. The stage check, on the real corpus
+### 1. The stage check, on the real corpus — all that is left
 
 `artifact-delivery.md` §5.2 names the fixtures: `topics/ctfidf-2026-08` and
 `centroids/kmeans-2026-08` over the 2.4M bundle. The result to produce is the design's own worked
 example — **a broad viewer and a narrow viewer failing the *same* full-sample label for the same
 reason, and both satisfying its per-term variant** — plus: suppressing a cluster stops its labels
-serving on a held identifier, not only on traversal (which needs item 1).
+serving on a held identifier, not only on traversal.
 
 Stage 2's equivalent is the model to follow: a script that publishes against a live server, a table
 of five principals in `artifact-delivery.md`, and a repro that fails if the numbers stop moving with
 the principal.
 
-### 3. Two recorded loose ends, neither reachable today
+### 2. Two recorded loose ends, neither reachable today
 
 - **The content extent is absent from `manifest.files`**, so a torn one is unattributable to a
   digest. Every sibling record extent is digested — the flush's on the pool, the coalesce's at

@@ -1540,6 +1540,15 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
+    /// A layer's own entity — where its suppression lands — without cloning its declaration.
+    ///
+    /// The attachment term asks this per attached artifact of a response, and a declaration carries
+    /// a name, a title, a slice list and a content vocabulary; cloning all of it to read one `u64`
+    /// would put the cost of the term on the wrong side of the argument that it is one lookup.
+    pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
+        lock_recover(&self.registry).get(name).map(|layer| layer.entity)
+    }
+
     fn registry_for_publication(&self) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
@@ -2511,6 +2520,11 @@ impl WritePath {
         name: &str,
     ) -> Option<tessera_types::layer::RegisteredLayer> {
         self.live.registered_layer(name)
+    }
+
+    /// See [`LiveState::layer_entity`] — the attachment term's lookup, without the declaration.
+    pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
+        self.live.layer_entity(name)
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order.

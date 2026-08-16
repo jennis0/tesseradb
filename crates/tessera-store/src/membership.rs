@@ -61,7 +61,12 @@ use memmap2::Mmap;
 use crate::error::{Result, StoreError};
 
 const MAGIC: &[u8; 4] = b"TSMB";
-const VERSION: u16 = 1;
+/// Bumped whenever a blob's *content* changes shape, even though this module holds a blob opaquely:
+/// the refusal has to happen at the file, because the decoder on the other side of the boundary
+/// sees only bytes. Version 2 is the artifact record carrying its attachment — an extent written
+/// under version 1 restores every label as unattached, which serves the labels of suppressed
+/// clusters.
+const VERSION: u16 = 2;
 const HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4;
 
 fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {

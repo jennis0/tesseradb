@@ -56,6 +56,20 @@ pub struct IncomingArtifact {
     /// The order is the caller's ranking and the service takes no opinion on it
     /// ([decision 0078](../../../docs/decisions/0078-the-service-takes-no-opinion-on-which-variation.md)).
     pub variations: Vec<IncomingVariation>,
+    /// The artifact this one exists only as an attachment to — a toponymy label on a cluster.
+    ///
+    /// **Named by the target's own stable key, because an ordinal is never disclosed.** A response
+    /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
+    /// address for the target beyond the key they published it under.
+    pub attached_to: Option<IncomingAttachment>,
+}
+
+/// The target of an attachment, as a caller names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingAttachment {
+    pub layer: String,
+    pub level: u32,
+    pub stable_key: String,
 }
 
 /// One ranked variation of an artifact's supplied content, as a caller offers it.
@@ -111,7 +125,20 @@ impl IncomingArtifact {
             stable_key,
             members: bitmap,
             variations: Vec::new(),
+            attached_to: None,
         }
+    }
+
+    /// The same, attached to another layer's artifact — the shape a label layer publishes.
+    pub fn attached(
+        stable_key: Option<String>,
+        members: impl IntoIterator<Item = EntityId>,
+        variations: Vec<IncomingVariation>,
+        attached_to: IncomingAttachment,
+    ) -> Self {
+        let mut artifact = IncomingArtifact::with_content(stable_key, members, variations);
+        artifact.attached_to = Some(attached_to);
+        artifact
     }
 
     /// The same, carrying supplied content.
@@ -147,6 +174,37 @@ pub struct ArtifactRecord {
     /// per generation and intersected per request, and a form that had to be decompressed to be
     /// tested would pay that cost on every artifact of every viewport.
     pub variations: Vec<VariationSet>,
+    /// What this artifact exists as an attachment to, resolved at publication.
+    ///
+    /// **A visibility term, not a navigation aid.** An artifact carrying one is tested on its
+    /// target's disposition and reachability as well as on its own conjuncts, on **every** route —
+    /// see [`Attachment`].
+    pub attached_to: Option<Attachment>,
+}
+
+/// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
+/// the target's entity carried beside it.
+///
+/// **The entity is stored rather than re-derived, because it is what the predicate reads.** The
+/// extra term an attached artifact carries is one `verdict` lookup — the same lookup the
+/// predicate's first branch already performs on the artifact's own entity — and re-deriving it from
+/// the target layer's reserved runs on every request would put the registry in a path that needs
+/// nothing but an identifier. The address `(layer, level, ordinal)` travels with it because that is
+/// the edge's identity, and traversal will read it.
+///
+/// **The target exists before the edge does** (§5.0.4). An edge names a position in a dense level,
+/// so one written ahead of its target would name whatever later landed there; publication refuses
+/// an unresolvable target rather than storing one. The target's layer must be one the attaching
+/// layer declared in `depends_on`, which is what makes the layer-level refusal of a dangling
+/// replacement sound: a dependency nobody declared is one nothing checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub layer: String,
+    pub level: u32,
+    pub ordinal: u32,
+    /// The target's own entity — its address for the deny lane, and the identifier the extra
+    /// predicate term is evaluated on.
+    pub entity: EntityId,
 }
 
 /// One variation's generating set, as the registry holds it, and the content it gates.
@@ -333,6 +391,12 @@ impl ArtifactStore {
                     stable_key: published.stable_key.clone(),
                     members,
                     variations,
+                    attached_to: published.attached_to.clone().map(|a| Attachment {
+                        layer: a.layer,
+                        level: a.level,
+                        ordinal: a.ordinal,
+                        entity: a.entity,
+                    }),
                 },
             );
         }
@@ -558,12 +622,20 @@ impl ArtifactStore {
 /// generating sets, in one blob.
 ///
 /// ```text
-/// blob      := u16 LE key_len | key bytes (UTF-8)
-///            | u16 LE variation_count
-///            | u32 LE members_len | membership bytes (portable Roaring)
-///            | variation*
-/// variation := u32 LE set_len | generating-set bytes (portable Roaring)
+/// blob       := u16 LE key_len | key bytes (UTF-8)
+///             | u16 LE variation_count
+///             | u32 LE members_len | membership bytes (portable Roaring)
+///             | variation*
+///             | attachment
+/// variation  := u32 LE set_len | generating-set bytes (portable Roaring)
+/// attachment := u8 0                                     -- unattached
+///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
+///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
 /// ```
+///
+/// **The attachment is stored and not re-derived**, on the reason [`Attachment`] gives: it is a
+/// term of the visibility predicate, so an artifact restored without it is one that serves where
+/// the live copy would withhold — the fail-open the term exists to close, reappearing at a restart.
 ///
 /// **Every length is explicit, including the membership's.** The membership used to be the blob's
 /// tail and its length was *"whatever is left"*, which is exactly the shape that decodes a truncated
@@ -611,6 +683,25 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
             out.extend_from_slice(set);
         }
     }
+    match &record.attached_to {
+        None => out.push(0),
+        Some(attachment) => {
+            let layer = attachment.layer.as_bytes();
+            // Same argument as the key's, and stricter in consequence: a layer name that could not
+            // round-trip would restore an attached artifact as an unattached one, which serves it
+            // where the live copy withholds it. Refused at encode, which the decoder then reports.
+            let Ok(layer_len) = u16::try_from(layer.len()) else {
+                out.push(u8::MAX);
+                return out;
+            };
+            out.push(1);
+            out.extend_from_slice(&layer_len.to_le_bytes());
+            out.extend_from_slice(layer);
+            out.extend_from_slice(&attachment.level.to_le_bytes());
+            out.extend_from_slice(&attachment.ordinal.to_le_bytes());
+            out.extend_from_slice(&attachment.entity.raw().to_le_bytes());
+        }
+    }
     out
 }
 
@@ -654,6 +745,26 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
             generated_from: deserialise_members(take(set_len)?)?,
         });
     }
+    // An attachment absent is one byte and never zero bytes: *unattached* and *this reader does not
+    // know whether it was attached* must not encode the same, since the second answer is one that
+    // serves a label whose cluster is hidden.
+    let attached_to = match take(1)?[0] {
+        0 => None,
+        1 => {
+            let layer_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+            let layer = std::str::from_utf8(take(layer_len)?).ok()?.to_string();
+            let level = u32::from_le_bytes(take(4)?.try_into().ok()?);
+            let ordinal = u32::from_le_bytes(take(4)?.try_into().ok()?);
+            let entity = EntityId::new(u64::from_le_bytes(take(8)?.try_into().ok()?));
+            Some(Attachment {
+                layer,
+                level,
+                ordinal,
+                entity,
+            })
+        }
+        _ => return None,
+    };
     // **Trailing bytes are a decode failure**, not slack to ignore: a blob longer than its own
     // structure means the writer and this reader disagree about the format, and the half that
     // decoded cleanly is the more dangerous outcome of the two.
@@ -665,6 +776,7 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
         stable_key,
         members,
         variations,
+        attached_to,
     })
 }
 
@@ -698,6 +810,7 @@ mod tests {
             stable_key: None,
             members: Bitmap::of(members),
             variations: Vec::new(),
+            attached_to: None,
         }
     }
 
@@ -751,6 +864,50 @@ mod tests {
         assert_eq!(deserialise_members(&serialise_members(&empty)), Some(empty));
         assert_eq!(deserialise_members(&[0xff, 0xff, 0xff, 0xff]), None);
         assert_eq!(deserialise_members(&[]), None);
+    }
+
+    /// **An attachment survives the packed extent, and a lost one is a decode failure.** A label
+    /// restored as unattached is a label that serves when its cluster is suppressed — the fail-open
+    /// the term exists to close, reappearing at a restart, with nothing anywhere reporting a fault.
+    #[test]
+    fn an_attachment_round_trips_and_a_truncated_one_is_refused() {
+        let mut r = record(100, &[1, 2, 3]);
+        r.stable_key = Some("l0".into());
+        r.variations = vec![VariationSet {
+            values: Some(vec!["a label".into()]),
+            generated_from: Bitmap::of(&[1, 2]),
+        }];
+        r.attached_to = Some(Attachment {
+            layer: "clusters/a".into(),
+            level: 0,
+            ordinal: 17,
+            entity: EntityId::new(4_294_901_759),
+        });
+
+        let blob = encode_record(&r);
+        let back = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        assert_eq!(back.attached_to, r.attached_to);
+        assert_eq!(back.stable_key, r.stable_key);
+
+        // An unattached artifact round-trips too, carrying its one absence byte — *unattached* and
+        // *this reader could not tell* must not encode the same.
+        let mut plain = r.clone();
+        plain.attached_to = None;
+        let plain_blob = encode_record(&plain);
+        let restored = decode_record(plain.entity, &plain_blob).unwrap();
+        assert_eq!(restored.attached_to, None);
+        assert_eq!(restored.members, plain.members);
+
+        // Every truncation from the end of the variations onwards refuses. The one that matters is
+        // the shortest: it is byte-for-byte the unattached artifact's blob without its absence
+        // byte, and a reader that shrugged at a missing tail would decode it as unattached.
+        for len in (plain_blob.len() - 1)..blob.len() {
+            assert!(
+                decode_record(r.entity, &blob[..len]).is_none(),
+                "a blob truncated to {len} of {} bytes must refuse",
+                blob.len()
+            );
+        }
     }
 
     #[test]

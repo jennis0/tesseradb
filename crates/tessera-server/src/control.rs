@@ -1815,6 +1815,28 @@ struct IncomingArtifactBody {
     /// handler's.
     #[serde(default)]
     content: Vec<IncomingVariationBody>,
+    /// The artifact this one exists only as an attachment to — a label on a cluster.
+    ///
+    /// An attached artifact is withheld wherever its target is: suppress the cluster and its labels
+    /// stop serving on every route, the ones that traverse no edge included.
+    #[serde(default)]
+    attached_to: Option<AttachmentBody>,
+}
+
+/// How a caller names an attachment's target.
+///
+/// **By the target's own stable key, because an ordinal never crosses the boundary** — a
+/// publication answers with a `tessera_id` per artifact and no position in a level (C8), so a key
+/// is the only address a caller holds. Refused if the target does not exist yet: an edge names a
+/// position in a dense level, and one written first would name whatever later landed there.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachmentBody {
+    layer: String,
+    /// Defaults to the target layer's only level, as `level` does for the batch itself.
+    #[serde(default)]
+    level: u32,
+    stable_key: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1969,11 +1991,26 @@ async fn publish_artifacts(
                     tessera_lifecycle::membership::IncomingVariation::new(v.values, set)
                 })
                 .collect();
-            tessera_lifecycle::IncomingArtifact::with_content(
-                artifact.stable_key,
-                members,
-                variations,
-            )
+            let attached_to = artifact.attached_to.map(|a| {
+                tessera_lifecycle::membership::IncomingAttachment {
+                    layer: a.layer,
+                    level: a.level,
+                    stable_key: a.stable_key,
+                }
+            });
+            match attached_to {
+                None => tessera_lifecycle::IncomingArtifact::with_content(
+                    artifact.stable_key,
+                    members,
+                    variations,
+                ),
+                Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
+                    artifact.stable_key,
+                    members,
+                    variations,
+                    attached_to,
+                ),
+            }
         })
         .collect();
     let keys: Vec<Option<String>> = incoming.iter().map(|a| a.stable_key.clone()).collect();

@@ -364,6 +364,22 @@ pub struct PublishedArtifact {
     pub members: Vec<u8>,
     /// The artifact's supplied content, as ranked variations. Empty on a layer declaring none.
     pub variations: Vec<PublishedVariation>,
+    /// What this artifact is an attachment to, **resolved** — the caller named the target by its
+    /// stable key, and replay applies the address that was decided rather than re-resolving a key
+    /// whose target may since have been dropped.
+    pub attached_to: Option<PublishedAttachment>,
+}
+
+/// The resolved target of an attachment inside a [`PublishedArtifact`] — see
+/// [`crate::membership::Attachment`], whose fields these are.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishedAttachment {
+    pub layer: String,
+    pub level: u32,
+    pub ordinal: u32,
+    pub entity: EntityId,
 }
 
 /// One ranked variation inside a [`PublishedArtifact`].
@@ -470,7 +486,10 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// Version 11 adds [`WalRecord::ArtifactPublish`], appended on the same rule. Version 12 gives
 /// [`PublishedArtifact`] its `variations` field — an *appended struct field*, which postcard would
 /// otherwise read out of the bytes of whatever record follows, so the bump is the whole guard.
-const WAL_VERSION: u16 = 12;
+/// Version 13 gives it `attached_to`, on the same rule — and here the guard is load-bearing twice
+/// over, because an attachment is a *visibility* term: a log read on version 12's rules restores
+/// the label of a suppressed cluster as an unattached artifact, and serves it.
+const WAL_VERSION: u16 = 13;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1772,6 +1791,7 @@ mod tests {
                     stable_key: Some("c-0017".into()),
                     members: serialise_members(&first),
                     variations: Vec::new(),
+                    attached_to: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
                 // absent `stable_key` is the other optional field — both under postcard, which
@@ -1785,6 +1805,15 @@ mod tests {
                         values: vec!["a label".into()],
                         generated_from: serialise_members(&first),
                     }],
+                    // A label attached to a cluster — the third optional field, and the one whose
+                    // loss is a fail-open rather than a missing name: an attachment read back as
+                    // `None` serves the label of a suppressed cluster.
+                    attached_to: Some(PublishedAttachment {
+                        layer: "clusters/hdbscan-2026-08".into(),
+                        level: 0,
+                        ordinal: 17,
+                        entity: EntityId::new(4_294_901_759),
+                    }),
                 },
             ],
         };
