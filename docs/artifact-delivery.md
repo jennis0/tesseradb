@@ -357,16 +357,18 @@ principal broader than any the viewer offers — the top 16,384 ranked terms. Un
 Reproduced by `clients/ts/viewer/smoke-artifacts.mjs`, which fails if the counts stop moving with
 the principal.
 
-⊘ **A zero masked count is served by the drill-down where the viewport withholds it**, on a layer
-that declares no criterion. The viewport rule is *any member visible to this principal falls inside
-the requested tiles*, so a cluster this principal can see none of never appears on the map; the
-identifier route applies the existence predicate alone, which an artifact with a zero count passes
-when `visible_when` is `null`. Both are the ruled behaviour (decision 0075: the criterion is what
-decides existence, and *no criterion* is a declaration), and identifiers are stable across
-principals by C17 — so a principal handed an identifier learns that the cluster exists and that it
-sees none of it. Declaring a criterion closes it, which is what the field is for. Left for the
-owner rather than repaired: it is a question about what an undeclared criterion should mean, not
-about the implementation.
+✔ **A zero masked count is served by the drill-down where the viewport withholds it**, on a layer
+that declares no criterion — and that is **ruled correct**
+([decision 0084](decisions/0084-an-undeclared-criterion-declares-no-test.md), owner, 2026-08-16).
+The viewport rule is *any member visible to this principal falls inside the requested tiles*, so a
+cluster this principal can see none of never appears on the map; the identifier route applies the
+existence predicate alone, which an artifact with a zero count passes when `visible_when` is
+`null`. A declaration of *no threshold* is a declaration, and the service adds no floor of its own:
+one that the schema cannot express, applied on the service's initiative, would be a rule nobody
+wrote and nobody could turn off. `min_visible = 1` expresses the floor exactly, for a deployment
+that wants it. The cost is recorded rather than sheltered — C17's bound moves from *items the
+principal already sees* to *the layer's gate*, and the decision carries the three properties that
+bound it. No code changed.
 
 ### Stage 3 — Content: derived, supplied, and the containment test
 

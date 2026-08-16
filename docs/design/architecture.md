@@ -1083,6 +1083,8 @@ The alternative formulation — project the fragment into row space, then test t
 
 **C17, annotated: an artifact's identifier probes the same channel and stays inside the same bound** *(r43)*. A held `tessera_id` naming an artifact turns `404` when the artifact is suppressed or deleted, exactly as for a point — and additionally when its masked count falls below its layer's existence criterion. That third route reads as new and is not: the criterion tests the **masked** count, so it can only cross the bar when the probing principal's own visible membership changes, which is a fact on their own side of the boundary. What it never signals is a member leaving that they could not see.
 
+**C17, annotated again: an undeclared criterion moves the bound from what a principal sees to the layer's gate** *(r44; owner-ruled 2026-08-16, [decision 0084](../decisions/0084-an-undeclared-criterion-declares-no-test.md))*. The annotation above says the artifact routes stay inside C17's bound of *items the principal already sees*. That holds wherever a layer declares an existence criterion, and **not** where it declares none: an artifact whose masked count is zero passes an absent criterion, so a principal holding its identifier is told it exists while seeing no member of it. The viewport never shows such an artifact — candidacy is *any visible member inside the requested tiles* — so the channel is the identifier route alone, and a principal reaches it only for an identifier someone handed them. **The bound is therefore the layer's gate**: a principal who does not reach the layer learns nothing, by the same single set probe a never-registered name gets. Three properties bound it inside that, and each is structural rather than a mitigation: an identifier is a keyed permutation and so is neither guessable nor enumerable; what is disclosed is existence and a zero, never a membership, an unmasked size, an ordinal or another artifact; and **any** declared criterion closes it, `min_visible = 1` being the weakest form the schema can express. Accepted as the declaration's meaning — the service adds no floor the operator did not write, because a floor applied on the service's own initiative would make two identically-declared layers behave differently for a reason no reader of the declaration could recover.
+
 **A row deliberately not added, recorded so it is not read as an oversight.** A variant was considered in which the served set is *truncated* to whatever a fixed-width precomputed list happens to yield, rather than evaluated from the mask. No such list exists (§7.2 declines the route), and this variant must not arrive with one: the drawn count would then depend on *unmasked* tile density, which is both a mild I7 regression — a partial-coverage viewer on a dense tile is under-served relative to the definition, the same failure mode as sample-then-filter in attenuated form — and a genuine new channel needing its own entry. If it is ever revisited, it is not a no-op.
 
 Owner and review date for C1, C4, C6, C12, C14, C15, C16, C17, C18, C19, C27 and C28 to be assigned before launch.
@@ -1193,6 +1195,16 @@ Both were checked exhaustively against explicit quantification over all well-for
 
 ## Appendix G — Revision history
 
+- **r44** — **C17 annotated a second time** (2026-08-16, owner ruling,
+  [decision 0084](../decisions/0084-an-undeclared-criterion-declares-no-test.md)). Stage 2's two
+  artifact routes disagree in one configuration — a layer declaring no existence criterion, and a
+  principal whose masked count is zero — and the disagreement is ruled correct: the declaration
+  governs, and the service adds no floor the operator did not write. What that costs is that C17's
+  bound is no longer *items the principal already sees* but **the layer's gate**, which r43's
+  annotation had claimed held for every artifact route. Recorded at C17 rather than as a new row:
+  it is the same channel — existence probing on a held identifier — with a wider bound, not a
+  second one. No invariant changes: the masked count is still computed from inside `M_auth` alone
+  and is still exact.
 - **r43** — **The annotations design becomes normative, and this document owes it two amendments**
   (2026-08-16, decisions 0074–0083; the designs are
   [`annotations.md`](annotations.md), [`annotation-representation.md`](annotation-representation.md)
