@@ -461,27 +461,34 @@ function artifactLayers(store: Store): Layer[] {
     position: [p.x / CELLS_PER_WORLD_UNIT, p.y / CELLS_PER_WORLD_UNIT] as [number, number]
   }));
   // Against the largest count *in this view for this principal*, so the smallest cluster is still
-  // visible when every count is small. It rescales as the mask changes, which is honest: the rings
+  // visible when every count is small. It rescales as the mask changes, which is honest: the marks
   // compare counts to each other and never to an absolute the viewer has not been given.
   const largest = data.reduce((m, d) => Math.max(m, d.count), 1);
+  // **A small marker, not a disc over the cluster's ground.** A radius large enough to encode a
+  // count covers hundreds of marks, and twenty of them overlap into a mess in the dense middle —
+  // where the clusters are. Worse, a big circle reads as *extent*, which is exactly what this is
+  // not: there is no geometry on the wire and the position is one point the publisher chose. A dot
+  // with a number beside it claims only what it can.
+  const radiusOf = (count: number) => 3 + 5 * Math.sqrt(count / largest);
 
   return [
     new ScatterplotLayer({
       id: 'artifact-rings',
       data,
       getPosition: (d: (typeof data)[number]) => d.position,
-      getRadius: (d: (typeof data)[number]) => 10 + 34 * Math.sqrt(d.count / largest),
+      getRadius: (d: (typeof data)[number]) => radiusOf(d.count),
       radiusUnits: 'pixels' as const,
-      // Filled, but barely: the disc is what deck.gl hit-tests, so an unfilled ring would be
-      // clickable only on its own outline. Twelve of 255 is enough to pick and not enough to grey
-      // the marks underneath — which are the data, and must not be dimmed by an annotation.
+      // Solid, and dark-edged so it holds against both a dense patch of marks and empty ground.
       filled: true,
-      getFillColor: [255, 214, 102, 12],
+      getFillColor: [255, 209, 102, 235],
       stroked: true,
-      getLineColor: [255, 214, 102, 235],
+      getLineColor: [18, 20, 26, 220],
       lineWidthUnits: 'pixels' as const,
-      getLineWidth: 2,
+      getLineWidth: 1.5,
+      // Comfortably clickable however small the count: the dot can be three pixels across, and a
+      // cluster that cannot be hit is a cluster that cannot be opened.
       pickable: true,
+      radiusMinPixels: 4,
       // Read by the click handler exactly as `tesseraIds` is for a mark — a different array under a
       // different name, because the two identify different kinds of thing and open different
       // routes. One endpoint answering both would let a caller learn which kind an identifier
@@ -495,17 +502,26 @@ function artifactLayers(store: Store): Layer[] {
       data,
       getPosition: (d: (typeof data)[number]) => d.position,
       getText: (d: (typeof data)[number]) => d.count.toLocaleString('en-GB'),
-      getSize: 12,
+      getSize: 11,
       sizeUnits: 'pixels' as const,
-      getColor: [255, 240, 200, 255],
-      getPixelOffset: [0, -2],
-      outlineWidth: 3,
-      outlineColor: [12, 14, 18, 255],
+      getColor: [255, 238, 200, 255],
+      // Above its own dot, clear of it at every size — a label sitting *on* the marker is
+      // unreadable over a dense patch however it is outlined.
+      getPixelOffset: (d: (typeof data)[number]) => [0, -(radiusOf(d.count) + 9)],
+      // A panel-coloured plate rather than a text outline: over a million coloured marks an
+      // outline still leaves the glyphs competing with whatever is behind them.
+      background: true,
+      getBackgroundColor: [18, 20, 26, 215],
+      backgroundPadding: [4, 2, 4, 2],
+      getBorderColor: [255, 209, 102, 90],
+      getBorderWidth: 1,
       fontSettings: {sdf: true},
-      // Not pickable: the ring beneath it answers the click, and a label that swallowed picks
-      // would make a cluster openable only around its edges.
+      fontWeight: 600,
+      // Not pickable: the dot beneath it answers the click, and a label that swallowed picks would
+      // move a cluster's hit area off the cluster.
       pickable: false,
-      parameters: {depthCompare: 'always' as const}
+      parameters: {depthCompare: 'always' as const},
+      updateTriggers: {getPixelOffset: largest}
     })
   ];
 }
