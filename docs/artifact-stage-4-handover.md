@@ -34,7 +34,7 @@ What `publish_fold` does at step 3a: rewrites every level whole into the prefix 
 one extent per level, dropping the fold's **executed deletions** from each membership and nothing
 else — a suppressed member keeps its bit (Rule S) and no generating set is touched. The content
 extents are carried by hard link beside them, and the row forms are rebuilt inline after the swap
-rather than left to whoever arrives first. Five tests in `artifact_fold.rs`.
+rather than left to whoever arrives first. Eleven tests in `artifact_fold.rs`.
 
 **Two stale-manifest defects were found in the doing, both of the class below.** The fold took its
 layer registry from the live manifest, which a side-manifest write does not refresh — so it
@@ -56,7 +56,9 @@ decades, and the pass measured +3.5 GB where 90 B × 4×10⁷ containers predict
   rebuilt when the generation moves. The row form covers members holding **base** rows; a member
   whose row is still in a flush extent contributes nothing until the fold folds it. That boundary
   is what keeps the row form untouched by flush and merge, and it is fail-closed — a count
-  understates rather than overstates. ⊘ Neither the flush-union nor the merge-rebase arm is built.
+  understates rather than overstates. ✔ **Built**, and the projection is keyed by prefix, slice and
+  store version rather than by the segments version: keying on the version a flush moves rebuilt
+  every level on every flush, for a set of bits that had not moved.
 - **The deny lane, the overlay, Rule S and Rule F** are the point path's, unchanged, and an artifact
   reaches them by the same route a point does. ✔ **Rule F's artifact arm is built**: a deleted
   artifact's record leaves its level in the publication that retires its overlay entry, and the
@@ -91,10 +93,13 @@ new per-publication list needs the same posture, and
 `two_publications_of_content_both_survive_the_loss_of_the_whole_log` is the shape of test that
 catches it — a single publication passes whatever the manifest does.
 
-**The merge arm is the one a reader leaves out, and leaving it out is fail-open.** Union at flush,
-**rebase over the merged span at a merge**, rebuild at the fold. The merge arm's bound is
-proportional to the merged span rather than to the artifact population, which is also why it is the
-arm whose cost surprises.
+**The merge arm was the one a reader leaves out — and it is gone rather than built.** A merge
+permutes row space inside its span, so a form holding those row ids would count whichever documents
+landed there afterwards: fail-open, and upward, which is the direction that lifts an artifact over
+its existence criterion. The base-row rule removes the state it needs, so a flush appends rows the
+form does not hold and a merge renumbers rows it does not hold. What pins it is
+`a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count`, which runs a real merge over four
+extents rather than asserting the property from the rule.
 
 **Rule F and Rule S must not be conflated, and the artifact arm is where they meet.** A suppression
 retires only on unsuppress and never touches a membership; a deletion retires only at the fold that

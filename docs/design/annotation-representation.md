@@ -784,6 +784,8 @@ artifacts were degraded* is answerable only from the last fold's report.
 row space, which renumbers only at the fold — a stated rule now, not an assumption: the row form
 covers members holding base rows, and a member whose row is still in a flush extent contributes
 nothing until the fold folds it ([`annotation-write-cycle.md`](annotation-write-cycle.md) §4.1).
+That rule is what makes this pass the *only* rebuild: a flush appends rows the form does not hold
+and a merge renumbers rows it does not hold, so neither disturbs it and neither needs an arm.
 **Predicate membership does not share that**, because it is re-derived per request against current
 row space.
 

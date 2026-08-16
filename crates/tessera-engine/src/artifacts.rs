@@ -149,13 +149,19 @@ impl ArtifactRows {
                 variations.resize_with(idx + 1, Vec::new);
                 attachments.resize_with(idx + 1, || None);
             }
-            rows[idx] = Some(space.project(&record.members));
+            rows[idx] = Some(space.project_base(&record.members));
             attachments[idx] = record.attached_to.clone();
             variations[idx] = record
                 .variations
                 .iter()
                 .map(|v| ProjectedSet {
-                    rows: space.project(&v.generated_from),
+                    // Base rows here too, and here the consequence is sharper than a low count: a
+                    // generating set that lost members in projection can never be contained, so a
+                    // label whose sample includes documents ingested since the last fold is
+                    // withheld from **everyone** until that fold. Fail-closed, and the direction
+                    // this must fail in — the alternative is serving content on a set that no
+                    // longer names what the text was derived from.
+                    rows: space.project_base(&v.generated_from),
                     declared: v.generated_from.cardinality(),
                 })
                 .collect();
@@ -252,16 +258,23 @@ impl ArtifactRows {
 /// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
 /// wrong**, and a mismatch on any of them rebuilds:
 ///
-/// - the **prefix** and **segments version**, because a flush or a fold renumbers row space
-///   wholesale, so a projection built over the old one names other people's documents;
+/// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
+///   over the old one names other people's documents;
 /// - the **slice**, because row space is per slice;
 /// - the **store version**, because a publication adds memberships the projection has never seen —
 ///   and a cached projection that silently omitted them would serve a level with its newest
 ///   clusters absent, indistinguishable from clusters that failed their criterion.
+///
+/// **The segments version is deliberately not a term, and that is what the base-row rule buys.**
+/// A flush and a merge both move it, and both leave every bit of this projection correct: the form
+/// holds base rows only ([`RowSpace::project_base`]), an append adds none of them and a merge
+/// renumbers only the extent rows above them. Keying on it instead would rebuild every level on
+/// every flush — tens of seconds per level at 10⁷ artifacts, paid by whichever request arrived
+/// next, for a set of bits that did not move. The one operation that *does* renumber the base is
+/// the fold, and a fold publishes a new prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectionKey {
     prefix: String,
-    segments_version: u64,
     slice: String,
     store_version: u64,
 }
@@ -301,7 +314,6 @@ impl ArtifactProjections {
     pub fn get_or_build(
         &self,
         prefix: &str,
-        segments_version: u64,
         slice: &str,
         layer: &str,
         level: u32,
@@ -311,7 +323,6 @@ impl ArtifactProjections {
     ) -> Arc<ArtifactRows> {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
-            segments_version,
             slice: slice.to_string(),
             store_version,
         };

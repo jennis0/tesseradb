@@ -8270,7 +8270,6 @@ impl Executor {
                     self.live.with_artifacts(|store| {
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
-                            generation.segments_version,
                             slice,
                             layer,
                             *level,

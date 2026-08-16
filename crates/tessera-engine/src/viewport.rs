@@ -3088,7 +3088,6 @@ impl Engine {
         let rows = self.write.with_artifacts(|store| {
             self.artifact_projections.get_or_build(
                 &generation.prefix,
-                generation.segments_version,
                 slice,
                 &name,
                 level,
@@ -3384,7 +3383,6 @@ impl Engine {
                 let rows = self.write.with_artifacts(|store| {
                     self.artifact_projections.get_or_build(
                         &generation.prefix,
-                        generation.segments_version,
                         slice,
                         &name,
                         level,

@@ -775,6 +775,25 @@ impl RowSpace {
         rows
     }
 
+    /// Project into the **base** rows alone, ignoring every extent above them.
+    ///
+    /// **The artifact row forms' projection, and the asymmetry is deliberate**
+    /// (`annotation-write-cycle.md` §4.1). A session's mask must see every row a viewer may see, so
+    /// it takes [`Self::project`]; a *shared, deployment-wide* membership form must not have to be
+    /// rebuilt every time a flush appends, because at 10⁷ artifacts that rebuild is tens of seconds
+    /// and it lands on whichever request arrives next. Restricting the form to base rows is what
+    /// makes it survive a flush (an append moves no bit it holds) and a merge (only extent rows
+    /// renumber, and it references none) — so it is rebuilt only by the fold, which is the one
+    /// operation that renumbers the base.
+    ///
+    /// The price is that a member ingested since the last fold contributes nothing to its
+    /// artifact's masked count. That is fail-closed — the count **understates**, exactly as a
+    /// buffered point is invisible until its flush — and typically zero for a clustering, whose
+    /// members predate the layer that names them.
+    pub fn project_base(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
+        self.base.project(mask)
+    }
+
     /// The rows contributed by the extents at or after `from` — the only part a flush recomputes.
     pub fn project_extents_from(&self, mask: &croaring::Bitmap, from: usize) -> croaring::Bitmap {
         let mut rows = croaring::Bitmap::new();

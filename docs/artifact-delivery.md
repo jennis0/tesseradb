@@ -594,9 +594,11 @@ supersedes the Stage 3 handover, now retired.
 **Capability:** ingest, delete, suppress and the fold leave every artifact correct, and the fold
 does not resurrect a withheld label.
 
-- The row operator's three arms: **union the new extents at flush, rebase over the merged span at a
-  merge, rebuild at the fold.** The merge arm is the one a reader leaves out, and leaving it out is
-  fail-open.
+- ✔ The row operator's arms — and there is **one**, not three. The plan called for union at flush,
+  rebase over the merged span at a merge, and rebuild at the fold, with the merge arm named as the
+  one a reader leaves out. The write cycle's base-row rule (§4.1) removes the state the other two
+  would operate on: the form holds base rows only, so a flush appends rows it does not hold and a
+  merge renumbers rows it does not hold. The fold rebuilds it, inline, and nothing else has to.
 - The fold's artifact pass, in the cheaper of the two constructions (§6 measures which), plus
   **Rule F's artifact arm** — membership file, `artifacts.arrow` slot and every edge naming a
   deleted artifact dropped *before* the overlay entry retires.

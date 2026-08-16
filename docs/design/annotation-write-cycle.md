@@ -382,8 +382,18 @@ references none), at the price of understating a count for members ingested sinc
 fail-closed, the same posture as a buffered point being invisible until its flush, and typically
 zero for clusterings, whose members predate the layer. A deployment whose selections need same-day
 counts over fresh ingests can direct-evaluate the residue in entity space — I1's `direct_eval(L)`
-shape, one level up — recorded as the refinement, not the default. ⊘ Neither arm is built or
-measured.
+shape, one level up — recorded as the refinement, not the default. ⊘ The refinement is not built.
+
+**This is what removes the flush-union and merge-rebase arms rather than deferring them.** An
+earlier plan gave the row operator three arms — union the new extents at a flush, rebase over the
+merged span at a merge, rebuild at the fold — and named the merge arm as the one a reader leaves
+out, fail-open when left out because a merged span's row ids name different entities afterwards. A
+form that references no extent row has no such state: a flush appends rows it does not hold and a
+merge renumbers rows it does not hold, so **the fold is the only operation that invalidates it**,
+and the fold rebuilds it inline (rep §5.0.3). The projection is therefore keyed by prefix, slice and
+store version and *not* by the segments version — keying on the version a flush moves would rebuild
+every level on every flush, tens of seconds per level at 10⁷ artifacts, for a set of bits that did
+not move.
 
 ### 4.2 The fold's report is the notification mechanism
 

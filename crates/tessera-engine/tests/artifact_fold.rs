@@ -318,6 +318,177 @@ fn a_second_fold_rewrites_what_the_first_one_wrote() {
     assert_eq!(count(&engine), 300);
 }
 
+// ---- the row form's boundary: base rows, and what that costs ------------------------------------
+
+/// Ingest one item at the fixture's origin, carrying the term every principal here holds.
+///
+/// **The batch name and the idempotency key are derived from `external_id`**, and that is not
+/// tidiness: a second ingest under a batch key already seen is *replayed* rather than accepted, so
+/// a helper with a fixed key silently ingests nothing the second time it is called and every flush
+/// after the first has nothing to publish.
+fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
+    let descriptors = vec![b"0".to_vec()];
+    let mut key = [0u8; 32];
+    for (slot, byte) in key.iter_mut().zip(external_id) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(external_id.to_vec()),
+        slice: "s0".to_string(),
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+    };
+    engine
+        .accept_ingest(
+            vec![row],
+            String::from_utf8_lossy(external_id).into_owned(),
+            key,
+        )
+        .expect("the ingest is accepted")[0]
+}
+
+fn flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().flushes == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never landed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// **The boundary condition the write cycle sets, and the cost it names.** An artifact's row form
+/// covers members holding **base** rows; a member whose row is still in a flush extent contributes
+/// nothing until the fold folds it in.
+///
+/// That is what keeps the form untouched by a flush — an append moves no bit it holds — and it is
+/// fail-closed in the only direction available: the masked count **understates** for members
+/// ingested since the last fold, exactly as a buffered point is invisible until its flush. The
+/// alternative, rebuilding every level whenever a flush appends, is tens of seconds per level at
+/// the scale this design is for, paid by whichever request arrives next.
+#[test]
+fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+
+    // A member that does not exist when the corpus is built: ingested here, and named by the
+    // artifact published after it.
+    let fresh = ingest(&engine, b"fresh-member");
+    let mut members = fx.members(0..300);
+    members.push(fresh);
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(Some("c0".into()), members)],
+        )
+        .unwrap();
+    wait_for_publication(&fx, &engine, 1);
+
+    assert_eq!(
+        count(&engine),
+        300,
+        "buffered: the member has no row at all yet, so it is in no count"
+    );
+
+    flush(&engine);
+    assert_eq!(
+        count(&engine),
+        300,
+        "flushed: it has a row, but an extent row — the form covers base rows, so the count \
+         understates rather than the form being rebuilt"
+    );
+
+    fold(&engine);
+    assert_eq!(
+        count(&engine),
+        301,
+        "folded: its row is a base row now, and the pass rebuilt the form over it"
+    );
+}
+
+/// **A flush leaves every artifact's count where it was**, which is the property that lets the form
+/// outlive one — and the one a rebuild-on-every-publication cache would hide rather than provide.
+///
+/// Checked over members that were in the base all along, so the answer is the same before and
+/// after: what would break it is a form rebuilt against a row space it was not built for, which is
+/// how a stale projection announces itself — as a *changed* count for an unchanged membership.
+#[test]
+fn a_flush_disturbs_no_artifacts_count() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    assert_eq!(count(&engine), 300);
+
+    ingest(&engine, b"unrelated");
+    flush(&engine);
+
+    assert_eq!(
+        count(&engine),
+        300,
+        "an append moved no bit this form holds"
+    );
+}
+
+/// **The arm a reader leaves out, and why leaving it out cannot bite here.** A merge permutes row
+/// space *inside the span it merges*, so a row id in that span names a different entity afterwards
+/// — and a membership form holding those ids would go on counting them, naming whichever documents
+/// landed there. That is the fail-open the design warns about, and it is fail-**open** rather than
+/// closed because the count can only be wrong upward: a stranger's row inside the span counts as a
+/// member, and one extra member can lift an artifact over its existence criterion.
+///
+/// The base-row rule removes the state it needs. The form references no extent row, and a merge
+/// renumbers nothing else, so there is no arm to build and nothing to rebase — which is what this
+/// pins: an artifact's count survives a merge that genuinely permuted the rows beneath it.
+#[test]
+fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.set_merge_for_test(false);
+    publish(&fx, &engine, 0..300);
+    assert_eq!(count(&engine), 300);
+
+    // Two flushes, so the merge below has two extents to collapse and a span to permute. The
+    // ingests are unrelated to the artifact: what is under test is whether *its* rows survive
+    // somebody else's renumbering.
+    // Four, which is the tier width the merge policy collapses on — fewer and the merge below
+    // never triggers, and the case would pass by never exercising anything.
+    for batch in [
+        b"merge-a".as_slice(),
+        b"merge-b".as_slice(),
+        b"merge-c".as_slice(),
+        b"merge-d".as_slice(),
+    ] {
+        ingest(&engine, batch);
+        flush(&engine);
+    }
+
+    engine.set_merge_for_test(true);
+    ingest(&engine, b"merge-e");
+    flush(&engine);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().merges == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        count(&engine),
+        300,
+        "the merge renumbered rows above the base and this artifact holds none of them"
+    );
+}
+
 // ---- Rule F's artifact arm ---------------------------------------------------------------------
 
 /// The cluster layer a label hangs from, and the label layer itself. Both ungated, so every
