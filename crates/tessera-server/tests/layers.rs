@@ -637,3 +637,64 @@ async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids()
     assert_eq!(status, 422, "{body}");
     assert!(body.to_string().contains("idset"), "{body}");
 }
+
+/// **Derived geometry crosses the wire, and it moves with the principal.**
+///
+/// The count obviously belongs to the viewer; a centroid looks like a property of the cluster,
+/// which is what makes a build-time one the fail-open worth a wire-level test of its own. Two
+/// principals, one cluster, two different shapes — and the narrow principal's hull is drawn from
+/// positions they are entitled to.
+#[tokio::test]
+async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut d = declaration("clusters/a", None);
+    d["visible_when"] = serde_json::Value::Null;
+    assert_eq!(register(&server, d).await.0, 201);
+
+    let members: Vec<String> = (0..300u64).map(member).collect();
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "stable_key": "c0", "members": members }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let broad = viewport_artifacts(&server, &["0"], json!({})).await.unwrap();
+    let narrow = viewport_artifacts(&server, &["1"], json!({})).await.unwrap();
+
+    // The layer declares `centroid` and `hull`, so both arrive and `box` does not.
+    let (b, n) = (&broad[0], &narrow[0]);
+    let (bc, nc) = (b.centroid.expect("declared"), n.centroid.expect("declared"));
+    assert!(b.hull.is_some() && n.hull.is_some(), "hull is declared");
+    assert!(b.bbox.is_none() && n.bbox.is_none(), "box is not");
+
+    assert!(
+        (bc[0] - nc[0]).abs() > 1.0 || (bc[1] - nc[1]).abs() > 1.0,
+        "one cluster, two principals, and a centroid that did not move: {bc:?} against {nc:?} — \
+         which is what a build-time centroid looks like on this wire"
+    );
+    // The narrow principal's hull is inside the broad one's bounds: they see a subset of the
+    // members, so their hull cannot reach further out than the full one.
+    let broad_hull = b.hull.as_ref().unwrap();
+    let narrow_hull = n.hull.as_ref().unwrap();
+    let bounds = |h: &Vec<[u32; 2]>| {
+        [
+            h.iter().map(|v| v[0]).min().unwrap(),
+            h.iter().map(|v| v[1]).min().unwrap(),
+            h.iter().map(|v| v[0]).max().unwrap(),
+            h.iter().map(|v| v[1]).max().unwrap(),
+        ]
+    };
+    let (bb, nb) = (bounds(broad_hull), bounds(narrow_hull));
+    assert!(
+        nb[0] >= bb[0] && nb[1] >= bb[1] && nb[2] <= bb[2] && nb[3] <= bb[3],
+        "the narrow hull {nb:?} reaches outside the broad one {bb:?}"
+    );
+    // Same artifact throughout: only what is said about it moved.
+    assert_eq!(b.tessera_id, n.tessera_id);
+}

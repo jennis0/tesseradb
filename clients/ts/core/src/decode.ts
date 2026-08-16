@@ -275,13 +275,39 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const stableKey = t.getChild('stable_key')!;
     const tesseraId = u64Column(t, 'tessera_id');
     const maskedCount = u64Column(t, 'masked_count');
+    // Derived geometry, in the same grid units as `codes` — no extent needed to draw it. A null is
+    // *this layer declares none*, never *withheld*: an artifact whose content could not be served
+    // does not appear at all.
+    const centroidX = t.getChild('centroid_x')!;
+    const centroidY = t.getChild('centroid_y')!;
+    const boxMinX = t.getChild('box_min_x')!;
+    const boxMinY = t.getChild('box_min_y')!;
+    const boxMaxX = t.getChild('box_max_x')!;
+    const boxMaxY = t.getChild('box_max_y')!;
+    const hullX = t.getChild('hull_x')!;
+    const hullY = t.getChild('hull_y')!;
     for (let i = 0; i < tesseraId.length; i++) {
+      const cx = centroidX.get(i);
+      const bx = boxMinX.get(i);
+      const hx = hullX.get(i);
+      const hy = hullY.get(i);
+      let hull: [number, number][] | null = null;
+      if (hx !== null && hy !== null) {
+        hull = [];
+        for (let v = 0; v < hx.length; v++) hull.push([Number(hx.get(v)), Number(hy.get(v))]);
+      }
       artifacts.push({
         layer: String(layer.get(i)),
         tesseraId: tesseraId[i]!,
-        // The one nullable column: a publisher need not supply a key.
+        // A publisher need not supply a key.
         stableKey: stableKey.get(i) === null ? null : String(stableKey.get(i)),
-        maskedCount: maskedCount[i]!
+        maskedCount: maskedCount[i]!,
+        centroid: cx === null ? null : [Number(cx), Number(centroidY.get(i))],
+        box:
+          bx === null
+            ? null
+            : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
+        hull
       });
     }
   }

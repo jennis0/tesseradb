@@ -63,7 +63,7 @@ use tessera_types::{EntityId, GenerationStamp, RowId, TesseraId, API_VERSION};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, RowProjection};
+use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, MaskedSet, RowProjection};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
@@ -546,13 +546,13 @@ pub struct ViewCoordinates {
 
 /// One artifact, as a viewport serves it.
 ///
-/// **Four fields, and the absences are the design.** There is no ordinal — a position in a dense
+/// **The absences are the design.** There is no ordinal — a position in a dense
 /// level, so two of them count what lies between (C8). There is no declared size — a corpus-wide
 /// count over items this principal may not see, and the denominator the proportional criterion
 /// divides by, which is a predicate input and never a field. There is no membership. And there is
 /// no reason-for-absence anywhere in the response, because an artifact that failed its criterion
 /// must be indistinguishable from one that was never published.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactOut {
     /// The layer it belongs to. A name the principal reaches, always — the serving pass intersects
     /// with the session's resolved set before it looks at any membership.
@@ -565,6 +565,14 @@ pub struct ArtifactOut {
     /// **How many of this artifact's members this principal can see** — never how many it has. The
     /// same number the existence criterion was tested against, computed once and used for both.
     pub masked_count: u64,
+    /// The layer's declared derived properties, recomputed **for this principal** from the same
+    /// visible rows the count was taken over — see [`crate::derived`]. Empty where the layer
+    /// declares none, which is the default and the cheap path.
+    ///
+    /// A shape here describes the members this viewer can see and no others, which is what makes
+    /// it safe beside a gate that may have admitted the artifact on its own terms: such an artifact
+    /// is authorised to *exist*, not to describe members the viewer cannot see.
+    pub derived: crate::derived::DerivedContent,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -3098,6 +3106,27 @@ impl Engine {
         else {
             return Ok(None);
         };
+        // The same computation the viewport does, from the same composed mask — one route's
+        // geometry differing from the other's would be two transcriptions of one rule, which is
+        // exactly what the shared predicate above exists to prevent.
+        let declared_derived: Vec<crate::derived::DerivedProperty> = layer
+            .declaration
+            .content
+            .derived
+            .iter()
+            .filter_map(|name| crate::derived::DerivedProperty::parse(name))
+            .collect();
+        let derived = if declared_derived.is_empty() {
+            crate::derived::DerivedContent::default()
+        } else {
+            let locator =
+                crate::derived::RowLocator::new(segments_with_row_bases(slice, slice_data)?);
+            let visible = rows
+                .get(ordinal)
+                .map(|members| mask.visible_rows(members))
+                .unwrap_or_default();
+            crate::derived::compute(&declared_derived, &visible, &locator)
+        };
         Ok(Some(ArtifactOut {
             layer: name.clone(),
             tessera_id: id,
@@ -3107,6 +3136,7 @@ impl Engine {
                     .and_then(|r| r.stable_key.clone())
             }),
             masked_count,
+            derived,
         }))
     }
 
@@ -3161,10 +3191,12 @@ impl Engine {
         // every tile this request resolved. `crossing_domain` already merges and globalises them
         // for the filter's crossing, and reusing it is what keeps the two from disagreeing about
         // which rows a request covers.
-        let row_bases: Vec<u32> = segments_with_row_bases(slice, slice_data)?
-            .iter()
-            .map(|&(_, base)| base)
-            .collect();
+        let segments = segments_with_row_bases(slice, slice_data)?;
+        let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+        // Built once per request rather than per layer: it is the same slice's segment list for
+        // every artifact in the response, and a layer declaring no derived content never asks it
+        // anything.
+        let locator = crate::derived::RowLocator::new(segments);
         let mut tile_rows = croaring::Bitmap::new();
         for span in crossing_domain(ranges, &row_bases) {
             tile_rows.add_range(span);
@@ -3198,6 +3230,17 @@ impl Engine {
             {
                 continue;
             }
+
+            // Parsed once per layer. A name outside the vocabulary cannot reach here — the
+            // declaration was refused at registration — so an unparseable one is dropped rather
+            // than erroring the whole response.
+            let declared_derived: Vec<crate::derived::DerivedProperty> = layer
+                .declaration
+                .content
+                .derived
+                .iter()
+                .filter_map(|name| crate::derived::DerivedProperty::parse(name))
+                .collect();
 
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
@@ -3245,6 +3288,20 @@ impl Engine {
                     let Ok(tessera_id) = self.identity_key.forward(shard, entity) else {
                         continue;
                     };
+                    // **From the composed mask, and only from it.** The visible rows are the
+                    // artifact's membership intersected with what this principal may see, so every
+                    // property below is a function of `membership ∩ M_auth` and nothing else
+                    // (`annotations.md` §4.2). Skipped entirely where the layer declares nothing,
+                    // which is what keeps a count-only layer at count-only cost.
+                    let derived = if declared_derived.is_empty() {
+                        crate::derived::DerivedContent::default()
+                    } else {
+                        let visible = rows
+                            .get(ordinal)
+                            .map(|members| mask.visible_rows(members))
+                            .unwrap_or_default();
+                        crate::derived::compute(&declared_derived, &visible, &locator)
+                    };
                     out.push(ArtifactOut {
                         layer: name.clone(),
                         tessera_id,
@@ -3254,6 +3311,7 @@ impl Engine {
                                 .and_then(|r| r.stable_key.clone())
                         }),
                         masked_count,
+                        derived,
                     });
                 }
             }

@@ -183,6 +183,53 @@ pub struct SuppliedContent {
     pub corpus_derived: bool,
 }
 
+/// One member of the closed vocabulary of properties the engine recomputes per viewer.
+///
+/// **The vocabulary lives here, beside the declaration that names it**, so the set a caller may
+/// declare and the set the engine implements are one list rather than two that can drift — a
+/// declared property nothing computes would be silently absent from every artifact.
+///
+/// The masked **count** is not here: it is intrinsic, every artifact has one, and the existence
+/// criterion requires it computed regardless. Everything below is opt-in because it costs
+/// O(visible members) per artifact per request against the count's O(containers touched).
+///
+/// ⊘ **`extractive_terms` is specified and not implemented** (`annotations.md` §4.2, marked per
+/// [decision 0013](../../../docs/decisions/0013-mark-specified-vs-implemented.md)). It is not in
+/// this list, so a layer declaring it is **refused at registration** rather than registered and
+/// served without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedProperty {
+    /// The mean position of the visible members.
+    Centroid,
+    /// The axis-aligned bounds of the visible members.
+    Box,
+    /// The convex hull of the visible members.
+    Hull,
+}
+
+impl DerivedProperty {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "centroid" => Some(DerivedProperty::Centroid),
+            "box" => Some(DerivedProperty::Box),
+            "hull" => Some(DerivedProperty::Hull),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DerivedProperty::Centroid => "centroid",
+            DerivedProperty::Box => "box",
+            DerivedProperty::Hull => "hull",
+        }
+    }
+
+    /// Every name a declaration may carry.
+    pub const VOCABULARY: [&'static str; 3] = ["centroid", "box", "hull"];
+}
+
 /// What a layer's artifacts carry.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ContentDeclaration {
@@ -403,6 +450,14 @@ pub enum DeclarationError {
     SelfDependency,
     /// The same slice, level title or supplied-content kind declared twice.
     Duplicate(String),
+    /// A derived property outside [`DerivedProperty::VOCABULARY`].
+    ///
+    /// **Refused rather than ignored**, and that is a fail-closed choice rather than tidiness: a
+    /// served artifact missing content its layer declared is indistinguishable, to a client, from
+    /// one whose content was withheld — and nothing is ever withheld from a served artifact
+    /// (decision 0076). Accepting an unknown name would put the client in the position of guessing
+    /// which of the two it was looking at.
+    UnknownDerived(String),
 }
 
 impl std::fmt::Display for DeclarationError {
@@ -435,6 +490,14 @@ impl std::fmt::Display for DeclarationError {
                 write!(f, "a layer may not name itself in depends_on")
             }
             DeclarationError::Duplicate(what) => write!(f, "declared twice: {what}"),
+            DeclarationError::UnknownDerived(name) => write!(
+                f,
+                "'{name}' is not a derived property this service computes; the vocabulary is {} — \
+                 a name outside it is refused rather than ignored, because an artifact served \
+                 without content its layer declared cannot be told apart from one whose content \
+                 was withheld",
+                DerivedProperty::VOCABULARY.join(", ")
+            ),
         }
     }
 }
@@ -494,6 +557,18 @@ impl LayerDeclaration {
                 return Err(DeclarationError::Duplicate(format!("slice {slice}")));
             }
         }
+        let mut derived: BTreeSet<&str> = BTreeSet::new();
+        for name in &self.content.derived {
+            if DerivedProperty::parse(name).is_none() {
+                return Err(DeclarationError::UnknownDerived(name.clone()));
+            }
+            if !derived.insert(name.as_str()) {
+                return Err(DeclarationError::Duplicate(format!(
+                    "derived property {name}"
+                )));
+            }
+        }
+
         let mut kinds: BTreeSet<&str> = BTreeSet::new();
         for supplied in &self.content.supplied {
             if !kinds.insert(supplied.kind.as_str()) {

@@ -164,6 +164,42 @@ describe('the artifacts frame, decoded from a captured response', () => {
   it('reads a response with no artifacts frame as no artifacts, not as a failure', () => {
     expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
   });
+
+  it('carries the derived geometry in the same grid units as the points', () => {
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
+    // The captured layer declares all three, so every row carries all three. A null here would be
+    // *the layer declares none* and never *withheld* — content is never withheld from a served
+    // artifact — so a null on a layer that declares the property is a decoder or a server bug.
+    for (const a of result.artifacts) {
+      expect(a.centroid).not.toBeNull();
+      expect(a.box).not.toBeNull();
+      expect(a.hull).not.toBeNull();
+
+      const [cx, cy] = a.centroid!;
+      const [minX, minY, maxX, maxY] = a.box!;
+      // The centroid is a mean of the members' positions, so it lies inside their bounds. This
+      // catches the axis transposition a two-column-per-shape wire invites.
+      expect(cx).toBeGreaterThanOrEqual(minX);
+      expect(cx).toBeLessThanOrEqual(maxX);
+      expect(cy).toBeGreaterThanOrEqual(minY);
+      expect(cy).toBeLessThanOrEqual(maxY);
+
+      // Hull vertices are positions of real members, so they sit on the box's bounds or inside.
+      expect(a.hull!.length).toBeGreaterThan(0);
+      for (const [x, y] of a.hull!) {
+        expect(x).toBeGreaterThanOrEqual(minX);
+        expect(x).toBeLessThanOrEqual(maxX);
+        expect(y).toBeGreaterThanOrEqual(minY);
+        expect(y).toBeLessThanOrEqual(maxY);
+      }
+      // Grid units, not data coordinates: the axes span 2^32, exactly as `codes` does.
+      expect(maxX).toBeLessThanOrEqual(2 ** 32);
+    }
+    // Different clusters, different shapes — one geometry repeated across rows would mean the
+    // decoder read row 0 for everybody.
+    const centroids = new Set(result.artifacts.map((a) => a.centroid!.join(',')));
+    expect(centroids.size).toBe(result.artifacts.length);
+  });
 });
 
 describe('the drill-down', () => {

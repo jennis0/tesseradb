@@ -296,6 +296,22 @@ export type Artifact = {
   /** The publisher's own key, when they supplied one. */
   stableKey: string | null;
   maskedCount: bigint;
+  /**
+   * Derived geometry, recomputed **for this principal** from the members they can see — in the
+   * same grid units as `codes`, so it draws with `positionOfCode`'s arithmetic and needs no
+   * extent.
+   *
+   * `null` means the layer declares this property, or rather does not: content is never withheld
+   * from a served artifact, so a null is a fact about the layer and never about the viewer. The
+   * shape moves with the principal for the same reason the count does — a narrow viewer's centroid
+   * sits over the members *they* can see, which is usually not where a broad viewer's sits. Do not
+   * cache one principal's geometry against a `tesseraId` and reuse it for another.
+   */
+  centroid: [number, number] | null;
+  /** `[minX, minY, maxX, maxY]`, grid units. */
+  box: [number, number, number, number] | null;
+  /** Convex hull vertices, counter-clockwise, grid units. */
+  hull: [number, number][] | null;
 };
 
 export type ViewportResult = {

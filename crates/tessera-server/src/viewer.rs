@@ -21,7 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{
-    artifacts_frame, points_frame, sub_cells_frame, tiles_frame, trailer_frame, ScalarColumn,
+    artifacts_frame, points_frame, sub_cells_frame, tiles_frame, trailer_frame, ArtifactRow,
+    ScalarColumn,
 };
 
 use tessera_engine::viewport::ViewportRequest;
@@ -658,12 +659,19 @@ impl ViewportSink for WireSink {
     /// `streamed-serving.md` §2 puts first deliberately.
     fn artifacts(&mut self, artifacts: &[tessera_engine::ArtifactOut]) -> SinkResult {
         let serialise_start = Instant::now();
-        let layer: Vec<&str> = artifacts.iter().map(|a| a.layer.as_str()).collect();
-        let tessera_id: Vec<u64> = artifacts.iter().map(|a| a.tessera_id.raw()).collect();
-        let stable_key: Vec<Option<&str>> =
-            artifacts.iter().map(|a| a.stable_key.as_deref()).collect();
-        let masked_count: Vec<u64> = artifacts.iter().map(|a| a.masked_count).collect();
-        let frame = artifacts_frame(&layer, &tessera_id, &stable_key, &masked_count);
+        let rows: Vec<ArtifactRow<'_>> = artifacts
+            .iter()
+            .map(|a| ArtifactRow {
+                layer: a.layer.as_str(),
+                tessera_id: a.tessera_id.raw(),
+                stable_key: a.stable_key.as_deref(),
+                masked_count: a.masked_count,
+                centroid: a.derived.centroid,
+                bbox: a.derived.bbox,
+                hull: a.derived.hull.as_deref(),
+            })
+            .collect();
+        let frame = artifacts_frame(&rows);
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.send(frame)
     }
@@ -1326,6 +1334,15 @@ struct ArtifactResp {
     /// has. There is deliberately no ordinal, no membership and no declared size here; see
     /// `tessera_engine::ArtifactOut`.
     masked_count: u64,
+    /// The layer's declared derived geometry, recomputed for this principal, in the grid units the
+    /// viewport's positions use. Absent where the layer declares none — never *withheld*, since an
+    /// artifact whose content could not be served is a `404` (decision 0076).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    centroid: Option<[f64; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#box: Option<[u32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hull: Option<Vec<[u32; 2]>>,
 }
 
 /// `POST /v1/artifacts/{tessera_id}` — drill down on one artifact.
@@ -1372,6 +1389,9 @@ async fn artifact(
         layer: served.layer,
         stable_key: served.stable_key,
         masked_count: served.masked_count,
+        centroid: served.derived.centroid,
+        r#box: served.derived.bbox,
+        hull: served.derived.hull,
     }))
 }
 

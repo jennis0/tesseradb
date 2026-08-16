@@ -650,3 +650,47 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
         assert_eq!(got, expected, "entity {entity}");
     }
 }
+
+/// **The count and the geometry must be taken over the same set**, and this is where that is
+/// asserted rather than assumed. `count_intersection` composes term by term and never materialises;
+/// `visible_rows` materialises, and derived content is computed from what it returns. A viewer
+/// served a count of forty beside a hull drawn from thirty-nine members would have two answers to
+/// one question and no way to tell which was wrong.
+///
+/// Driven with a suppression *and* a buffered arrival, because those are the two terms that make
+/// the composed mask differ from the projection at all.
+#[test]
+fn the_materialised_visible_rows_agree_with_the_composed_count() {
+    use tessera_engine::compose::MaskedSet;
+
+    let fx = build_fixture();
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        OUT_OF_FRAGMENT,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    let mask = compose_with(&fx, &overlay, &buffer);
+
+    // Over the whole row space, and over a scatter, rather than one range that might miss the two
+    // rows the diffs touch.
+    let whole = croaring::Bitmap::from_range(0..(BOUND as u32));
+    assert_eq!(
+        mask.visible_rows(&whole).cardinality(),
+        mask.count_intersection(&whole),
+        "the whole row space"
+    );
+    let scatter: croaring::Bitmap = (0..BOUND as u32).filter(|r| r % 3 == 0).collect();
+    assert_eq!(
+        mask.visible_rows(&scatter).cardinality(),
+        mask.count_intersection(&scatter),
+        "a scattered membership"
+    );
+    // And every row it returns really is visible, one by one — a cardinality that agreed while the
+    // members differed would pass both assertions above.
+    for row in mask.visible_rows(&scatter).iter() {
+        assert!(mask.contains_row(row), "row {row} is not in the mask");
+    }
+}

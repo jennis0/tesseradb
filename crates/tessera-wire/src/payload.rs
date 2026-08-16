@@ -38,8 +38,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
-    UInt8Array,
+    Int8Array, ListBuilder, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
+    UInt32Builder, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
@@ -239,57 +239,129 @@ pub fn sub_cells_frame(cells: &[u64], counts: &[u64]) -> Vec<u8> {
     out
 }
 
-/// The kind-5 artifacts frame: one row per served artifact — `(layer, tessera_id, stable_key,
-/// masked_count)`.
+/// One served artifact, as the kind-5 frame carries it.
+///
+/// **A struct rather than parallel slices**, because the geometry columns are optional per row and
+/// keeping eleven slices aligned at the call site is the shape a mismatch hides in.
 ///
 /// **What is not here is the design.** No ordinal: a position in a dense level, so two of them
 /// count what lies between (C8). No declared membership size: a corpus-wide count over items this
 /// principal may not see, and the denominator the proportional criterion divides by — a predicate
 /// input, never a field. No membership. And no reason an artifact is absent, because one that
 /// failed its criterion must be indistinguishable from one that was never published.
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactRow<'a> {
+    pub layer: &'a str,
+    pub tessera_id: u64,
+    pub stable_key: Option<&'a str>,
+    pub masked_count: u64,
+    /// Derived geometry, in the **grid units** the points frame's `code` is built from — the
+    /// client needs no quantisation extent to draw either. Each is present exactly when the
+    /// artifact's layer declared it, and describes the members *this* principal can see.
+    pub centroid: Option<[f64; 2]>,
+    /// `[qx_min, qy_min, qx_max, qy_max]`.
+    pub bbox: Option<[u32; 4]>,
+    pub hull: Option<&'a [[u32; 2]]>,
+}
+
+/// The kind-5 artifacts frame: one row per served artifact.
 ///
 /// `masked_count` is `UInt64` and `tessera_id` is `UInt64`, matching the points frame's `tessera_id`
 /// column so a client's decoder has one identifier type across the response.
 ///
+/// **The geometry columns are nullable and the schema is fixed**, because one response carries
+/// artifacts from several layers and layers declare different vocabularies. A null is *this layer
+/// declares no centroid*; it is never *withheld*, since an artifact whose content could not be
+/// served is absent entirely (decision 0076). The hull travels as two `List<UInt32>` columns rather
+/// than one interleaved list so that a client reads an axis without a stride.
+///
 /// # Panics
 ///
-/// Panics on a length mismatch between the four columns, or on Arrow construction failure.
-pub fn artifacts_frame(
-    layer: &[&str],
-    tessera_id: &[u64],
-    stable_key: &[Option<&str>],
-    masked_count: &[u64],
-) -> Vec<u8> {
-    let rows = layer.len();
-    assert_eq!(rows, tessera_id.len(), "layer/tessera_id length mismatch");
-    assert_eq!(rows, stable_key.len(), "layer/stable_key length mismatch");
-    assert_eq!(
-        rows,
-        masked_count.len(),
-        "layer/masked_count length mismatch"
-    );
+/// Panics on Arrow construction failure.
+pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
+    // One definition of the hull's element field, used by the schema and by the builders below:
+    // a `ListBuilder` builds a **nullable** item field by default, and a vertex is never null — a
+    // hull is a list of positions or it is absent entirely. Declaring it twice is how the two drift
+    // into the mismatch Arrow then refuses at batch construction.
+    let item = || Arc::new(Field::new("item", DataType::UInt32, false));
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("tessera_id", DataType::UInt64, false),
-        // The only nullable column here: a publisher need not supply a key.
+        // A publisher need not supply a key.
         Field::new("stable_key", DataType::Utf8, true),
         Field::new("masked_count", DataType::UInt64, false),
+        Field::new("centroid_x", DataType::Float64, true),
+        Field::new("centroid_y", DataType::Float64, true),
+        Field::new("box_min_x", DataType::UInt32, true),
+        Field::new("box_min_y", DataType::UInt32, true),
+        Field::new("box_max_x", DataType::UInt32, true),
+        Field::new("box_max_y", DataType::UInt32, true),
+        Field::new(
+            "hull_x",
+            DataType::List(item()),
+            true,
+        ),
+        Field::new(
+            "hull_y",
+            DataType::List(item()),
+            true,
+        ),
     ]));
+
+    let mut hull_x = ListBuilder::new(UInt32Builder::new()).with_field(item());
+    let mut hull_y = ListBuilder::new(UInt32Builder::new()).with_field(item());
+    for row in rows {
+        match row.hull {
+            Some(vertices) => {
+                for v in vertices {
+                    hull_x.values().append_value(v[0]);
+                    hull_y.values().append_value(v[1]);
+                }
+                hull_x.append(true);
+                hull_y.append(true);
+            }
+            None => {
+                hull_x.append_null();
+                hull_y.append_null();
+            }
+        }
+    }
+
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(layer.iter().copied())),
+        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.layer))),
         Arc::new(UInt64Array::from_iter_values(
-            tessera_id.iter().copied(),
+            rows.iter().map(|r| r.tessera_id),
         )),
-        Arc::new(StringArray::from_iter(stable_key.iter().copied())),
+        Arc::new(StringArray::from_iter(rows.iter().map(|r| r.stable_key))),
         Arc::new(UInt64Array::from_iter_values(
-            masked_count.iter().copied(),
+            rows.iter().map(|r| r.masked_count),
         )),
+        Arc::new(Float64Array::from_iter(
+            rows.iter().map(|r| r.centroid.map(|c| c[0])),
+        )),
+        Arc::new(Float64Array::from_iter(
+            rows.iter().map(|r| r.centroid.map(|c| c[1])),
+        )),
+        Arc::new(UInt32Array::from_iter(
+            rows.iter().map(|r| r.bbox.map(|b| b[0])),
+        )),
+        Arc::new(UInt32Array::from_iter(
+            rows.iter().map(|r| r.bbox.map(|b| b[1])),
+        )),
+        Arc::new(UInt32Array::from_iter(
+            rows.iter().map(|r| r.bbox.map(|b| b[2])),
+        )),
+        Arc::new(UInt32Array::from_iter(
+            rows.iter().map(|r| r.bbox.map(|b| b[3])),
+        )),
+        Arc::new(hull_x.finish()),
+        Arc::new(hull_y.finish()),
     ];
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");
 
-    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows * 48 + 1024);
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows.len() * 96 + 1024);
     let len_at = begin_frame(&mut out, FRAME_ARTIFACTS);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);

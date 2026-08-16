@@ -320,6 +320,21 @@ pub trait MaskedSet {
     /// unmasked extent by panning: a viewer sees a shape's edge in a region holding nothing they
     /// may see. Asking the mask instead makes the fault unexpressible.
     fn intersects_set(&self, set: &Bitmap) -> bool;
+
+    /// `set ∩ mask`, materialised — the rows of an artifact's membership that **this** viewer may
+    /// see.
+    ///
+    /// The one input to derived content, and the reason it is on this trait rather than beside it:
+    /// *a derived property is a function of `membership ∩ M_auth` and of nothing else*
+    /// (`annotations.md` §4.2). A centroid computed over the membership and then served to a viewer
+    /// who sees a tenth of it describes documents they may not see — the count's failure mode in a
+    /// shape nobody thinks to check, because the geometry *looks* like something the engine derived.
+    /// Handing the computation a bitmap it did not get from here is the way that happens, so the
+    /// only way to obtain one is to ask the composed mask for it.
+    ///
+    /// Materialising is the cost derived content opts into: O(visible members), against the count's
+    /// O(containers touched). That asymmetry is why the vocabulary is declared per layer.
+    fn visible_rows(&self, set: &Bitmap) -> Bitmap;
 }
 
 impl MaskedSet for EffectiveMask {
@@ -347,6 +362,19 @@ impl MaskedSet for EffectiveMask {
         visible.andnot_inplace(&self.minus);
         !visible.is_empty()
     }
+
+    /// The same term-by-term composition the count takes, materialised: `(base ∩ set) − minus`,
+    /// then the buffer's additions that fall inside `set`. `plus ∩ base = ∅` holds structurally, so
+    /// the union adds each row once and the cardinality of what comes back equals
+    /// [`Self::count_intersection`] exactly — which the test beside it asserts rather than assumes,
+    /// because a derived property computed over a different set from the count served beside it is
+    /// the disagreement a viewer would see and could not explain.
+    fn visible_rows(&self, set: &Bitmap) -> Bitmap {
+        let mut visible = self.base.bitmap().and(set);
+        visible.andnot_inplace(&self.minus);
+        visible.or_inplace(&self.plus.and(set));
+        visible
+    }
 }
 
 /// A mask with no denials — **test-only**, so that no release build can put an uncomposed set where
@@ -359,6 +387,10 @@ impl MaskedSet for Bitmap {
 
     fn intersects_set(&self, set: &Bitmap) -> bool {
         self.intersect(set)
+    }
+
+    fn visible_rows(&self, set: &Bitmap) -> Bitmap {
+        self.and(set)
     }
 }
 

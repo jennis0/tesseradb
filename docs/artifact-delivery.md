@@ -403,8 +403,24 @@ bound it. No code changed.
 
 **Capability:** a label is served only to a viewer who can see everything it was generated from.
 
-- The declared derived vocabulary — count intrinsic, centroid/hull/box opt-in — under the closure
-  rule that a derived property is a function of `membership ∩ M_auth` and nothing else.
+- ✔ The declared derived vocabulary — count intrinsic, `centroid`/`box`/`hull` opt-in — under the
+  closure rule that a derived property is a function of `membership ∩ M_auth` and nothing else. The
+  rule is enforced by the type rather than by care: the visible rows come from the composed mask's
+  own `visible_rows`, which is the only way to obtain them, so a property computed over full
+  membership has no input to be computed from. ⊘ `extractive_terms` is **refused at registration**
+  along with every other unknown name, because a layer registered with content nothing computes
+  serves artifacts a client cannot tell from ones whose content was withheld.
+  - The geometry travels in the **grid units** the points frame's `code` is built from, so a client
+    draws it with arithmetic it already has and needs no quantisation extent. The hull is integer
+    monotone-chain in `i128` — an `i64` cross product overflows on a hull spanning the map, which is
+    the ordinary case rather than an edge one — so the vertex list is exact and identical across
+    platforms, which is what lets the conformance oracle compare it byte for byte.
+  - Found in the doing: the **count and the geometry must be taken over the same set**, and nothing
+    was asserting it. `count_intersection` composes term by term and never materialises;
+    `visible_rows` materialises. A test now pins their agreement under a suppression and a buffered
+    arrival together — the two terms that make the composed mask differ from the projection at all.
+  - The **wire shape reached `contracts.md`** in the same pass: the kind-5 frame had shipped at
+    Stage 2 without a contracts entry, so §3.2 listed four frame kinds and the server emitted five.
 - Supplied content in the record blob; **`G` as an immutable sorted entity-space array**, mmapped on
   touch; containment `and_cardinality(G, M_auth) == |G|` against the **composed** mask, cached
   nowhere, and costing the same on the pass and fail paths.

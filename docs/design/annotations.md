@@ -347,7 +347,14 @@ client's obligations rather than the server's.
 ### 4.2 Declaring derived content
 
 A layer declares which derived properties its artifacts expose, from a closed vocabulary the engine
-implements. **Count is intrinsic** — every artifact has a masked count, and the existence criterion
+implements — **`centroid`, `box` and `hull` as built** (Stage 3), each computed from the visible
+rows and served in the grid units the point path already uses, so a client needs no quantisation
+extent to draw one. A name outside the vocabulary is **refused at registration** rather than
+accepted and quietly omitted: an artifact served without content its layer declared cannot be told
+apart, by a client, from one whose content was withheld — and nothing is withheld from a served
+artifact. ⊘ **`extractive_terms` is specified and not implemented**, and is therefore refused with
+the rest; a layer that wants it waits for the term route rather than registering and receiving
+silence. **Count is intrinsic** — every artifact has a masked count, and the existence criterion
 requires it computed regardless. Everything else is opt-in, because a hull over masked members costs O(visible
 members) per artifact per request where a count is one bitmap operation, and a client drawing only
 centroids should not pay hull cost for every artifact on screen.

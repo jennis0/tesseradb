@@ -572,13 +572,20 @@ pub struct DecodedViewport {
 }
 
 /// One row of the kind-5 artifacts frame, as a test reads it back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` and not `Eq`: a centroid is a mean and travels as `f64`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactRow {
     pub layer: String,
     pub tessera_id: u64,
     pub stable_key: Option<String>,
     /// **How many members this principal can see** — never how many the artifact has.
     pub masked_count: u64,
+    /// Derived geometry, in grid units, computed over the members this principal can see. `None`
+    /// is *the layer declares none* and never *withheld*.
+    pub centroid: Option<[f64; 2]>,
+    pub bbox: Option<[u32; 4]>,
+    pub hull: Option<Vec<[u32; 2]>>,
 }
 
 fn str_col(
@@ -674,7 +681,45 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     let tessera_id = u64_col(&batch, 1);
                     let stable_key = str_col(&batch, 2);
                     let masked_count = u64_col(&batch, 3);
+                    let f64_at = |col: usize, i: usize| {
+                        let a = batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::Float64Array>()
+                            .unwrap();
+                        a.is_valid(i).then(|| a.value(i))
+                    };
+                    let u32_at = |col: usize, i: usize| {
+                        let a = batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::UInt32Array>()
+                            .unwrap();
+                        a.is_valid(i).then(|| a.value(i))
+                    };
+                    let hull_axis = |col: usize, i: usize| {
+                        let a = batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::ListArray>()
+                            .unwrap();
+                        a.is_valid(i).then(|| {
+                            let values = a.value(i);
+                            let values = values
+                                .as_any()
+                                .downcast_ref::<arrow::array::UInt32Array>()
+                                .unwrap();
+                            (0..values.len()).map(|k| values.value(k)).collect::<Vec<_>>()
+                        })
+                    };
                     for i in 0..batch.num_rows() {
+                        let hull = match (hull_axis(10, i), hull_axis(11, i)) {
+                            (Some(xs), Some(ys)) => {
+                                Some(xs.into_iter().zip(ys).map(|(x, y)| [x, y]).collect())
+                            }
+                            (None, None) => None,
+                            _ => panic!("a hull with one axis and not the other"),
+                        };
                         rows.push(ArtifactRow {
                             layer: layer.value(i).to_string(),
                             tessera_id: tessera_id.value(i),
@@ -682,6 +727,17 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 .is_valid(i)
                                 .then(|| stable_key.value(i).to_string()),
                             masked_count: masked_count.value(i),
+                            centroid: f64_at(4, i)
+                                .map(|x| [x, f64_at(5, i).expect("both axes or neither")]),
+                            bbox: u32_at(6, i).map(|min_x| {
+                                [
+                                    min_x,
+                                    u32_at(7, i).unwrap(),
+                                    u32_at(8, i).unwrap(),
+                                    u32_at(9, i).unwrap(),
+                                ]
+                            }),
+                            hull,
                         });
                     }
                 }

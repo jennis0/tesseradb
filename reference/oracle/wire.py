@@ -7,7 +7,8 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
     kind 4  trailer    JSON                                   exactly one, last
     kind 5  artifacts  (layer, tessera_id, stable_key,        at most one, after tiles and before
-                        masked_count)                          any points; absent when none served
+                        masked_count, and the derived            any points; absent when none served
+                        geometry columns)
 
 Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
@@ -26,8 +27,28 @@ from __future__ import annotations
 import io
 import json
 import struct
+from typing import NamedTuple
 
 import pyarrow.ipc as ipc
+
+
+class Artifact(NamedTuple):
+    """One served artifact, as the kind-5 frame carries it.
+
+    Every field here is a fact about *this principal's* view of the artifact, and none is a fact
+    about the artifact: `masked_count` is what they can see, and the geometry describes the members
+    they can see. Two principals disagreeing about one `tessera_id` is correct, and a comparator
+    that asserted agreement across principals would be asserting the bug.
+    """
+
+    layer: str
+    tessera_id: int
+    stable_key: str | None
+    masked_count: int
+    centroid: tuple[float, float] | None
+    box: tuple[int, int, int, int] | None
+    hull: list[tuple[int, int]] | None
+
 
 FRAME_TILES = 1
 FRAME_SUB_CELLS = 2
@@ -98,7 +119,7 @@ def decode_frames(data: bytes):
     tiles: list[tuple[int, int, int, int]] = []
     points: list[tuple[int, int]] = []
     sub_cells: list[tuple[int, int]] | None = None
-    artifacts: list[tuple[str, int, str | None, int]] | None = None
+    artifacts: list[Artifact] | None = None
     trailer: dict | None = None
 
     for index, (kind, payload) in enumerate(frames):
@@ -144,14 +165,57 @@ def decode_frames(data: bytes):
                 # membership size. The oracle must not treat it as a cardinality of anything it
                 # can enumerate independently: no unmasked quantity reaches this wire at all, by
                 # design, so there is nothing here to reconcile against a corpus-wide figure.
-                artifacts.extend(
-                    zip(
-                        batch.column("layer").to_pylist(),
-                        batch.column("tessera_id").to_pylist(),
-                        batch.column("stable_key").to_pylist(),
-                        batch.column("masked_count").to_pylist(),
+                #
+                # The geometry columns carry the same warning in a shape that hides it better: a
+                # centroid or a hull is computed over `membership ∩ M_auth`, so two principals
+                # legitimately disagree about the same `tessera_id` here too, and neither shape is
+                # the artifact's. A `None` is *this layer declares no such property* — never
+                # *withheld*, since an artifact whose content could not be served is absent whole.
+                columns = {
+                    name: batch.column(name).to_pylist()
+                    for name in (
+                        "layer",
+                        "tessera_id",
+                        "stable_key",
+                        "masked_count",
+                        "centroid_x",
+                        "centroid_y",
+                        "box_min_x",
+                        "box_min_y",
+                        "box_max_x",
+                        "box_max_y",
+                        "hull_x",
+                        "hull_y",
                     )
-                )
+                }
+                for row in range(batch.num_rows):
+                    cx = columns["centroid_x"][row]
+                    bx = columns["box_min_x"][row]
+                    hx, hy = columns["hull_x"][row], columns["hull_y"][row]
+                    if (hx is None) != (hy is None):
+                        raise ValueError("a hull with one axis and not the other")
+                    artifacts.append(
+                        Artifact(
+                            layer=columns["layer"][row],
+                            tessera_id=columns["tessera_id"][row],
+                            stable_key=columns["stable_key"][row],
+                            masked_count=columns["masked_count"][row],
+                            centroid=(
+                                None if cx is None else (cx, columns["centroid_y"][row])
+                            ),
+                            box=(
+                                None
+                                if bx is None
+                                else (
+                                    bx,
+                                    columns["box_min_y"][row],
+                                    columns["box_max_x"][row],
+                                    columns["box_max_y"][row],
+                                )
+                            ),
+                            hull=None if hx is None else list(zip(hx, hy)),
+                        )
+                    )
             if not artifacts:
                 raise ValueError(
                     "an empty artifacts frame: the server omits the frame when nothing is served, "
@@ -242,7 +306,7 @@ def decode_viewport_with_subcells(data: bytes):
 
 
 def decode_viewport_artifacts(data: bytes):
-    """The artifacts a response served, as `(layer, tessera_id, stable_key, masked_count)` rows.
+    """The artifacts a response served, as [`Artifact`] rows.
 
     `[]` when the response carried no artifacts frame — and that is not a loss of information: the
     server omits the frame precisely when nothing is served, and *why* nothing is served (no layer

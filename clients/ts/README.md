@@ -109,9 +109,17 @@ TESSERA_SESSION_CRED=… node scripts/capture-golden.mjs --terms 0
 Capture against the **wide** fixture (`data/scaled/attrs/schema-wide.toml`, nineteen columns and
 twelve Arrow types), not against a demo bundle: `decode.test.ts` walks the captured `meta.json` and
 checks every declared column decodes at its declared type, so a six-column capture keeps the test
-passing while quietly dropping two thirds of the types it covers. `viewport-artifacts.bin` is
-captured too when the server carries a layer, and the other two are captured with `layers: []` so
-they keep pinning the no-artifacts-frame case whatever the server holds.
+passing while quietly dropping two thirds of the types it covers. The other two are captured with
+`layers: []` so they keep pinning the no-artifacts-frame case whatever the server holds.
+
+**`viewport-artifacts.bin` is the exception, and may be captured against any corpus that carries a
+layer.** It is taken at `k = 0` — the annotation channel's own request shape — so the body holds no
+points frame at all, and the wide fixture's breadth, which is entirely a property of the *points*
+columns, has nothing to contribute to it. What it must carry is several artifacts with genuinely
+different geometry: a layer declaring `centroid`, `box` and `hull` over clusters that occupy
+different parts of the map. Clusters cut from runs of consecutive ids do **not** qualify on a
+synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
+so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
 
 ## Annotation layers, and the number beside a cluster
 
