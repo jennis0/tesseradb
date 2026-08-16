@@ -43,7 +43,7 @@ delete.
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
 | **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
 | **3** Content — derived, supplied, containment | **done** 2026-08-16 (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. Layers, levels and bulk publication are definable at build time as well as online |
-| **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
+| **4** The write cycle | not started; [handed over](artifact-stage-4-handover.md) | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — . **Its first job is the fold's artifact pass**, not its last: a bundle carrying artifacts does not fold at all, and since Stage 3 that includes every bundle built with them |
 | **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
@@ -401,9 +401,9 @@ bound it. No code changed.
 
 ### Stage 3 — Content: derived, supplied, and the containment test
 
-**In progress on `artifacts/stage-3`; what is owed and what will bite the next implementer is
-in [the Stage 3 handover](artifact-stage-3-handover.md)**, which is deleted when the stage
-closes.
+**Done on `artifacts/stage-3`.** The traps this machinery carries were handed to Stage 4 with the
+stage's close — [the Stage 4 handover](artifact-stage-4-handover.md) — and the Stage 3 handover is
+retired.
 
 **Capability:** a label is served only to a viewer who can see everything it was generated from.
 
@@ -588,6 +588,10 @@ principal. Fixture note: bench bundles predating a manifest field refuse to open
 `scripts/bench_build_fixtures.sh --scales 2422486` rebuilds the 2.4M corpus first (ten seconds).
 
 ### Stage 4 — The write cycle
+
+**What is owed and what will bite whoever picks it up is in
+[the Stage 4 handover](artifact-stage-4-handover.md)**, which is deleted when the stage closes. It
+supersedes the Stage 3 handover, now retired.
 
 **Capability:** ingest, delete, suppress and the fold leave every artifact correct, and the fold
 does not resurrect a withheld label.

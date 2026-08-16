@@ -212,14 +212,16 @@ pub struct Attachment {
 pub struct VariationSet {
     /// The content values, positional to the layer's declared kinds.
     ///
-    /// ⊘ **`None` where the durable copy has not been read back**, which today means *restored
-    /// from a packed extent rather than replayed from the log*: the extent carries generating sets
-    /// and not values, because values belong in the record blob
-    /// ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md))
-    /// and that write is not built. A variation with no values is **not served** — the artifact is
-    /// absent, on the same rule that refuses one whose content its layer declared and which did not
-    /// arrive. Serving the identity and the count with the description missing is the in-between
-    /// state decision 0076 forbids.
+    /// **`None` where this copy does not carry them**, which means *restored from a packed extent
+    /// rather than replayed from the log*: the extent carries generating sets and not values,
+    /// because values live in the record blob
+    /// ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md)).
+    ///
+    /// It is not an absence of content — the serving path reads the blob at the artifact's own
+    /// entity when this is `None`, and the two copies are written by the same publication. What it
+    /// means is *ask the blob*, and a blob that cannot answer **withholds the artifact**: served
+    /// with its identity and its count and no description is the in-between state decision 0076
+    /// forbids.
     pub values: Option<Vec<String>>,
     /// Entity-space, canonical. **Empty means corpus-independent** — containment is vacuous and the
     /// variation serves to everyone who reaches the layer — and that is a real declaration rather
