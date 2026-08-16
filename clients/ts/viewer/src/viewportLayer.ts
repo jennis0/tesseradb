@@ -478,11 +478,15 @@ function artifactLayers(store: Store): Layer[] {
       getPosition: (d: (typeof data)[number]) => d.position,
       getRadius: (d: (typeof data)[number]) => radiusOf(d.count),
       radiusUnits: 'pixels' as const,
-      // Solid, and dark-edged so it holds against both a dense patch of marks and empty ground.
+      // **The panels' own colours, not a colour of its own.** An annotation is chrome over the
+      // data, so it is drawn in the greys the rest of the instrument is drawn in — `#eaeef3` on
+      // `#0d0f12`, the CSS's text and background. Giving it a hue would put it in competition with
+      // the palette the marks are encoded by, and the one saturated colour this map has already
+      // means something else: amber is the selected item.
       filled: true,
-      getFillColor: [255, 209, 102, 235],
+      getFillColor: [234, 238, 243, 240],
       stroked: true,
-      getLineColor: [18, 20, 26, 220],
+      getLineColor: [13, 15, 18, 235],
       lineWidthUnits: 'pixels' as const,
       getLineWidth: 1.5,
       // Comfortably clickable however small the count: the dot can be three pixels across, and a
@@ -504,16 +508,21 @@ function artifactLayers(store: Store): Layer[] {
       getText: (d: (typeof data)[number]) => d.count.toLocaleString('en-GB'),
       getSize: 11,
       sizeUnits: 'pixels' as const,
-      getColor: [255, 238, 200, 255],
+      getColor: [234, 238, 243, 255],
+      // The panels' typeface, so a count floating over the map is the same object as a count in a
+      // panel rather than a second kind of thing.
+      fontFamily: 'SFMono-Regular, Menlo, monospace',
       // Above its own dot, clear of it at every size — a label sitting *on* the marker is
       // unreadable over a dense patch however it is outlined.
       getPixelOffset: (d: (typeof data)[number]) => [0, -(radiusOf(d.count) + 9)],
       // A panel-coloured plate rather than a text outline: over a million coloured marks an
-      // outline still leaves the glyphs competing with whatever is behind them.
+      // outline still leaves the glyphs competing with whatever is behind them. The plate is the
+      // panels' own `rgba(13, 15, 18, 0.92)` over their own `#222` border, so the labels read as
+      // the instrument's type floating over the map.
       background: true,
-      getBackgroundColor: [18, 20, 26, 215],
+      getBackgroundColor: [13, 15, 18, 235],
       backgroundPadding: [4, 2, 4, 2],
-      getBorderColor: [255, 209, 102, 90],
+      getBorderColor: [34, 34, 34, 255],
       getBorderWidth: 1,
       fontSettings: {sdf: true},
       fontWeight: 600,
