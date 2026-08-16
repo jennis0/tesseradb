@@ -31,6 +31,13 @@
 // a corpus-wide count over items a viewer may not see, and the whole point of the masked count
 // beside a cluster is that it is *not* that number. Sizes are printed here, for the operator
 // choosing a criterion, and go no further.
+//
+// **What the positions are, stated plainly**: centroids over the *publisher's* full view, for every
+// cluster including the ones a given viewer is not served. So the file is corpus-derived geometry
+// beside the wire — exactly the thing the wire refuses to carry — and it is safe here only because
+// the demo serves it to the operator's own browser. Real geometry arrives as derived content
+// (Stage 3), recomputed per viewer from `membership ∩ M_auth`; a deployment must delete this file
+// rather than promote it.
 import {readFile, writeFile, mkdir} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -87,10 +94,12 @@ if (labelLayer && !labelTerm) {
 }
 
 const SIDECAR_NOTE =
-  "Development scaffolding: these positions are the publisher's, not the service's. There is no " +
-  'artifact geometry on the wire, and the viewer draws a marker only for an artifact the server ' +
-  'actually served. No membership and no declared size: the count beside a cluster is the ' +
-  "viewer's own, and it is never the cluster's size.";
+  "Development scaffolding, and a disclosure if it is ever served to anyone who is not the " +
+  'publisher: these centroids are computed over the publisher\'s OWN full view, so they are ' +
+  'corpus-derived geometry sitting beside the wire rather than on it, and the file enumerates ' +
+  'every cluster including ones the server withholds. The viewer draws a marker only for an ' +
+  'artifact the server actually served, which is what makes it safe HERE. No membership and no ' +
+  "declared size: the count beside a cluster is the viewer's own, and never the cluster's size.";
 
 // --------------------------------------------------------------------------------- the plumbing
 

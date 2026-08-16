@@ -56,9 +56,13 @@ build-plane route are built, and the check is met on the 2.4M corpus (`artifact-
   `coalesce.rs`'s publication — and this one is named and undigested. Its two addressing files *are*
   fsynced now, and the build plane's copy of the extent **is** digested, since a build digests
   everything it writes.
-- **A node with published artifacts still never folds.** Stage 2's refusal (the prefix-relative
-  membership paths) is joined by a second route now that content extents exist: the fold refuses on
-  a corpus with no blob-resident column, naming the wrong cause.
+- **A node with published artifacts still never folds**, and the build plane widened that from a
+  state a deployment entered deliberately to one every bundle built with artifacts is in at its
+  first open — the fold keys on the memberships being present, not on how they arrived. Stage 2's
+  refusal (the prefix-relative membership paths) is joined by a second route now that content
+  extents exist: the fold refuses on a corpus with no blob-resident column, naming the wrong cause.
+  **Whoever takes Stage 4 should treat this as the stage's first job**, not its last: the bundles
+  the build plane exists for are the ones that most need compaction.
 
 ## What will bite you
 

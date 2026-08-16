@@ -77,6 +77,9 @@ enum Command {
         /// **Publishing at volume is a build job** for the same reason attaching a slice is: the
         /// control plane's route is one fsync per batch with the log pinned until a manifest
         /// carries it, which a 10⁷-artifact level must not ride.
+        ///
+        /// Note the interaction with `--limit`: a member outside the limited prefix names nothing
+        /// this build assigned, and refuses it. Limit the members file with the corpus.
         #[arg(long, value_name = "PATH")]
         artifact_members: Option<PathBuf>,
         /// Mint an external ID for every item from its source entity id, and write the

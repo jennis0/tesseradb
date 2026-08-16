@@ -485,9 +485,11 @@ Three files, and the split is by grain rather than by kind — one artifact's de
 10⁷-artifact level's membership is a column.
 
 - **`--layers <toml>`**, a list of declarations in registration order (a layer follows what it
-  `depends_on`). The gate is stated either way round and always explicitly — `gate = "<descriptor>"`
-  or `ungated = true` — because TOML has no null and, more to the point, the value a default would
-  supply is the widest one there is.
+  `depends_on`). **The two disclosure controls are stated either way round and always explicitly** —
+  `gate = "<descriptor>"` or `ungated = true`, and `visible_when = { min_visible = … }` or
+  `visible_when = "none"` — because TOML has no null and, more to the point, the value a default
+  would supply is in both cases the widest one there is. The control plane's JSON requires both
+  fields for the same reason and can write `null`; the words stand in for it.
 - **`--artifacts <parquet>`**, one row per `(artifact, variation)`: `layer`, `stable_key`, and
   optionally `level`, `variation`, `values` (the layer's declared content kinds, in declared order)
   and `attached_layer`/`attached_level`/`attached_key`.

@@ -37,6 +37,7 @@ slices = ["s0"]
 membership = "enumerated"
 ungated = true
 artifacts_carry_own = false
+visible_when = { min_visible = 2 }
 content = { derived = ["centroid"] }
 
 [[layer]]
@@ -46,6 +47,7 @@ slices = ["s0"]
 membership = "enumerated"
 ungated = true
 artifacts_carry_own = false
+visible_when = "none"
 depends_on = ["clusters/a"]
 
 [[layer.content.supplied]]
@@ -265,6 +267,57 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
         .artifact(&session, label_id, None, "s0")
         .unwrap()
         .is_none());
+}
+
+/// **A built bundle can be published into, and neither publication loses the other.** The build
+/// writes its membership extent into the same directory a later online publication writes to, and
+/// the two name their files from different counters — so this is the test that says the counters do
+/// not meet. A collision would overwrite a built extent in place while the manifest still named it,
+/// and the built artifacts would come back carrying another publication's members.
+#[test]
+fn a_built_bundle_takes_an_online_publication_beside_its_own() {
+    let fx = fixture();
+    let published_id = {
+        let engine = fx.open();
+        let map = source_to_new_map(&fx.root, "v00000");
+        let entities: Vec<EntityId> = MEMBERS
+            .filter(|m| terms_of(*m).contains(&SUBSET_TERM))
+            .map(|m| EntityId::new(map[&m]))
+            .collect();
+        engine
+            .publish_artifacts(
+                CLUSTERS.into(),
+                0,
+                vec![tessera_lifecycle::IncomingArtifact::from_entities(
+                    Some("c-online".into()),
+                    entities,
+                )],
+            )
+            .expect("a built layer takes a publication")[0]
+    };
+
+    // Reopened: the built cluster, the built label and the online cluster all serve.
+    let engine = fx.open();
+    let served = artifacts_of(&engine, &full_coverage_credential());
+    let keys: Vec<&str> = served
+        .iter()
+        .filter_map(|a| a.stable_key.as_deref())
+        .collect();
+    for expected in ["c-0000", "l-0000", "c-online"] {
+        assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
+    }
+    // The built cluster still holds the members the build gave it — an extent overwritten by the
+    // online publication would show up here as a count from the wrong membership.
+    let built = served
+        .iter()
+        .find(|a| a.stable_key.as_deref() == Some("c-0000"))
+        .unwrap();
+    assert_eq!(built.masked_count, MEMBERS.count() as u64);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(engine
+        .artifact(&session, published_id, None, "s0")
+        .unwrap()
+        .is_some());
 }
 
 /// **The mark the build spent must survive into the manifest**, or the first online registration

@@ -18,6 +18,14 @@
 //!    describing it goes on serving to whoever reaches it directly: by search, by a held identifier,
 //!    by a filter. The model's conjunctive rule covers edge *traversal* and those routes traverse
 //!    nothing (`annotation-representation.md` §4).
+//!
+//!    **Two terms and not the target's whole predicate**, which is what §4 asks for and where its
+//!    cost argument comes from — the disposition is the lookup branch 1 already performs, while the
+//!    target's criterion and containment would need the target level's projection on every request.
+//!    ⊘ The residue is that a target withheld by *its own* criterion can still be named by a label
+//!    on a layer that declares a weaker one; that is C1's r43 surface — several layers over one
+//!    corpus are governed by the most permissive declaration among them — raised again by review on
+//!    2026-08-16 and awaiting an owner ruling rather than closed here.
 //! 4. **The artifact's own terms, if its layer declared that its artifacts carry them.**
 //! 5. **The existence criterion, if declared** — the masked count against a declared bar.
 //!

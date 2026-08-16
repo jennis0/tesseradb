@@ -102,8 +102,15 @@ struct LayerEntry {
     ungated: bool,
     /// Whether each artifact carries its own access label. **No default** (C27).
     artifacts_carry_own: bool,
-    #[serde(default)]
-    visible_when: Option<tessera_types::layer::ExistenceCriterion>,
+    /// The masked count an artifact must clear to be served at all — `{ min_visible = 1000 }`,
+    /// `{ min_fraction = 0.1 }`, or the word `"none"`.
+    ///
+    /// **Required, for the gate's reason**: the value an absent line would supply is *no
+    /// criterion*, which serves the existence and count of every artifact down to a single member
+    /// — the outcome decision 0079 exists to keep one schema word from producing. The control
+    /// plane's JSON demands the field too, and can write `null`; TOML cannot, so the word stands
+    /// in for it.
+    visible_when: CriterionEntry,
     #[serde(default)]
     hierarchy: Option<tessera_types::layer::Hierarchy>,
     #[serde(default)]
@@ -112,6 +119,32 @@ struct LayerEntry {
     depends_on: Vec<String>,
     #[serde(default)]
     levels: Vec<tessera_types::layer::LevelDeclaration>,
+}
+
+/// A declared criterion, or the word that declares none.
+///
+/// Untagged, and the table is tried first: `{ min_visible = … }` is a table and `"none"` is a
+/// string, so no input can satisfy both.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CriterionEntry {
+    Declared(tessera_types::layer::ExistenceCriterion),
+    None(NoCriterion),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoCriterion {
+    None,
+}
+
+impl From<CriterionEntry> for Option<tessera_types::layer::ExistenceCriterion> {
+    fn from(entry: CriterionEntry) -> Self {
+        match entry {
+            CriterionEntry::Declared(criterion) => Some(criterion),
+            CriterionEntry::None(NoCriterion::None) => None,
+        }
+    }
 }
 
 impl LayerEntry {
@@ -143,7 +176,7 @@ impl LayerEntry {
                 label,
                 artifacts_carry_own: self.artifacts_carry_own,
             },
-            visible_when: self.visible_when,
+            visible_when: self.visible_when.into(),
             hierarchy: self.hierarchy.unwrap_or(tessera_types::layer::Hierarchy {
                 kind: tessera_types::layer::HierarchyKind::Flat,
                 prune_children: false,
@@ -236,8 +269,20 @@ pub fn read(
     if let Some(path) = artifacts {
         read_artifacts(path, &mut plan)?;
     }
-    if let Some(path) = members {
-        read_members(path, &mut plan)?;
+    match (members, artifacts) {
+        (Some(path), Some(_)) => read_members(path, &mut plan)?,
+        // **Which artifacts exist is the artifacts file's to say.** Without it a members file
+        // would be both the roster and the population, and a mistyped key would publish an
+        // artifact rather than fail to find one.
+        (Some(path), None) => {
+            return Err(BuildError::Invalid(format!(
+                "{}: members were given without an artifacts file, which is what declares the \
+                 artifacts they belong to; a key with no artifact behind it must be a refusal \
+                 rather than a new artifact",
+                path.display()
+            )))
+        }
+        (None, _) => {}
     }
     Ok(plan)
 }
@@ -250,6 +295,9 @@ pub fn read(
 /// rows and must agree across them — a caller writing two different targets for one artifact has
 /// written something nobody can act on, so it is a refusal rather than a last-row-wins.
 fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
+    // Which artifacts a row has already been seen for, so a second row can be checked against the
+    // first rather than overwriting it.
+    let mut seen: std::collections::BTreeSet<(String, u32, String)> = std::collections::BTreeSet::new();
     for batch in batches(path)? {
         let batch = batch?;
         let layer = utf8(path, &batch, "layer")?;
@@ -284,25 +332,27 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
                     )))
                 }
             };
-            if attachment.is_some() {
-                if entry.attached_to.is_some() && entry.attached_to != attachment {
-                    return Err(BuildError::Invalid(format!(
-                        "{}: artifact {} names two different attachment targets across its rows",
-                        path.display(),
-                        address.2
-                    )));
-                }
-                entry.attached_to = attachment;
+            // **Every row of an artifact carries the same attachment, and silence is a
+            // disagreement too.** Keeping the first row's target when a later row names none
+            // would make an artifact's edge depend on which of its rows the reader saw first.
+            if seen.contains(&address) && entry.attached_to != attachment {
+                return Err(BuildError::Invalid(format!(
+                    "{}: artifact {} does not name the same attachment on all of its rows",
+                    path.display(),
+                    address.2
+                )));
             }
+            entry.attached_to = attachment;
+            seen.insert(address.clone());
 
             let Some(index) = variation.as_ref().and_then(|c| value_index(c, row)) else {
                 continue;
             };
             let slot = variation_slot(entry, index);
-            slot.values = values
-                .as_ref()
-                .map(|c| strings_at(c, row))
-                .unwrap_or_default();
+            slot.values = match values.as_ref() {
+                None => Vec::new(),
+                Some(column) => strings_at(path, column, row, &address.2)?,
+            };
         }
     }
     Ok(())
@@ -325,7 +375,33 @@ fn read_members(path: &Path, plan: &mut LayerPlan) -> Result<()> {
 
         for row in 0..batch.num_rows() {
             let address = address(path, layer, &level, key, row)?;
-            let entry = plan.artifacts.entry(address.clone()).or_default();
+            // **The artifacts file is the roster, and a key not on it is a refusal.** A
+            // mistyped key would otherwise publish a phantom artifact carrying the members it
+            // stole from a real one — an extra cluster nobody wrote, beside a real cluster
+            // whose masked count is quietly short and which may fall below its own criterion
+            // and vanish. Neither has an error anywhere to notice.
+            let Some(entry) = plan.artifacts.get_mut(&address) else {
+                return Err(BuildError::Invalid(format!(
+                    "{}: names {} in level {} of {}, which the artifacts file does not declare",
+                    path.display(),
+                    address.2,
+                    address.1,
+                    address.0
+                )));
+            };
+            // **A null member is a refusal, not entity zero.** Arrow's `value` reads the values
+            // buffer whatever the validity bitmap says, and a Parquet writer leaves a zero
+            // there — so a producer whose join missed a row would publish the corpus's
+            // lowest-numbered document into the cluster, moving its masked count for every
+            // viewer who can see that one document.
+            if member.is_null(row) {
+                return Err(BuildError::Invalid(format!(
+                    "{}: {} has a null member; a null is not entity zero, and publishing it as \
+                     one puts a document nobody named into the artifact",
+                    path.display(),
+                    address.2
+                )));
+            }
             let source = member.value(row);
             match variation.as_ref().and_then(|c| value_index(c, row)) {
                 None => entry.members.push(source),
@@ -388,8 +464,9 @@ pub fn publish(
         registry.apply(&record);
     }
 
-    // Grouped by `(layer, level)` and published in key order, so a level's ordinals — and therefore
-    // its entities — are a function of the artifacts, never of the file's row order.
+    // Grouped by `(layer, level)`, each level's artifacts in stable-key order — so a level's
+    // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
+    // row order.
     let mut batched: BTreeMap<(&str, u32), Vec<(&str, &PlannedArtifact)>> = BTreeMap::new();
     for ((layer, level, key), artifact) in &plan.artifacts {
         batched
@@ -398,7 +475,26 @@ pub fn publish(
             .push((key.as_str(), artifact));
     }
 
-    for ((layer, level), artifacts) in batched {
+    // **Published in declaration order, which is the order that honours `depends_on`.** An
+    // attachment resolves against what is already published, so a label layer must follow the layer
+    // it attaches into — and iterating the map instead would publish in alphabetical order, making
+    // an operator's file work or fail on how their layers happen to sort.
+    let mut order: Vec<(&str, u32)> = Vec::with_capacity(batched.len());
+    for declaration in &plan.declarations {
+        let name = declaration.name.as_str();
+        order.extend(
+            batched
+                .keys()
+                .filter(|(layer, _)| *layer == name)
+                .copied(),
+        );
+    }
+
+    for address in order {
+        let (layer, level) = address;
+        let artifacts = batched
+            .remove(&address)
+            .expect("every address came from the map a statement ago");
         let mut incoming = Vec::with_capacity(artifacts.len());
         for (key, artifact) in artifacts {
             incoming.push(resolved(layer, level, key, artifact, resolve)?);
@@ -537,6 +633,11 @@ fn write_content_extent(
     if rows.is_empty() {
         return Ok(());
     }
+    // **No multi-partition refusal here, and that is a property of the build rather than an
+    // omission**: a batch build writes exactly one partition, so the online path's refusal — an
+    // artifact belongs to no partition, and writing its content into each would give one record
+    // stack two layers with overlapping has-row bitmaps — has no case to fire on. It becomes this
+    // function's problem the day a build writes two, and the argument lives on the online copy.
     let extents_rel = format!("partitions/{partition}/attrs/record/extents");
     let dir = prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
@@ -692,15 +793,38 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
 }
 
-fn strings_at(column: &ListArray, row: usize) -> Vec<String> {
+/// One row's content values.
+///
+/// **Every failure here is a refusal rather than a shorter list.** A null element read as `""`
+/// serves an artifact with an empty description — the in-between state decision 0076 forbids,
+/// reached past the publication check, which counts values rather than reading them. A child array
+/// this reader cannot take would produce *no* values, which the count check does refuse, but with a
+/// message about arity that sends an operator looking in the wrong place.
+fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<Vec<String>> {
     if column.is_null(row) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let values = column.value(row);
-    match values.as_any().downcast_ref::<StringArray>() {
-        Some(strings) => (0..strings.len()).map(|i| strings.value(i).to_string()).collect(),
-        None => Vec::new(),
-    }
+    let strings = values.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
+            path.display(),
+            values.data_type()
+        ))
+    })?;
+    (0..strings.len())
+        .map(|i| {
+            if strings.is_null(i) {
+                return Err(BuildError::Invalid(format!(
+                    "{}: {key} supplies a null value; an artifact is served with every kind its \
+                     layer declares or it is not served at all, so a null here would be an empty \
+                     description rather than a withheld artifact",
+                    path.display()
+                )));
+            }
+            Ok(strings.value(i).to_string())
+        })
+        .collect()
 }
 
 /// One row's `(layer, level, stable_key)`.

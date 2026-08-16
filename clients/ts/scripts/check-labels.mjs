@@ -165,12 +165,27 @@ console.table(rows);
 
 const holders = presets.filter((p) => p.terms.includes(labelTerm)).map((p) => p.label);
 const nonHolders = presets.filter((p) => !p.terms.includes(labelTerm) && p.terms.length === 1);
+// **A principal holding the label term and nothing else is served the per-term description** —
+// stated of the single-term holders specifically, because accepting either description of every
+// holder is an assertion that passes whichever one containment picked.
 expect(
-  'principals holding the label term are served the per-term description',
-  holders.every((label) =>
-    [...served.get(label).all.values()]
-      .filter((a) => a.layer === labelLayer)
-      .every((l) => l.text.endsWith(`term ${labelTerm}`) || l.text.endsWith('whole cluster'))
+  `a principal whose only term is ${labelTerm} is served the per-term description`,
+  presets
+    .filter((p) => p.terms.length === 1 && p.terms.includes(labelTerm))
+    .every((p) =>
+      [...served.get(p.label).all.values()]
+        .filter((a) => a.layer === labelLayer)
+        .every((l) => l.text.endsWith(`term ${labelTerm}`))
+    )
+);
+// And the whole-cluster description reaches somebody — otherwise the ranking's first entry is
+// never exercised and the table's contrast is an artefact of nobody containing anything.
+expect(
+  'some principal contains the whole cluster and is served the description generated from it',
+  holders.some((label) =>
+    [...served.get(label).all.values()].some(
+      (a) => a.layer === labelLayer && a.text.endsWith('whole cluster')
+    )
   )
 );
 expect(
@@ -202,16 +217,21 @@ const change = async (op) => {
   if (!r.ok) throw new Error(`${op}: ${r.status} ${await r.text()}`);
 };
 
+// **The unsuppress runs whatever happens in between.** This suppresses a cluster on a live
+// deployment; a throw between the two calls — a non-404 from the drill-down, an interrupt — would
+// otherwise leave an operator's cluster hidden with nothing saying so.
 await change('suppress');
-const afterSuppression = await artifacts(witnessToken, [clusterLayer, labelLayer]);
-expect('the suppressed cluster is gone from the viewport', !afterSuppression.has(`${clusterLayer}::${cluster.key}`));
-expect('its label is gone with it', !afterSuppression.has(`${labelLayer}::${label.key}`));
-expect(
-  'and the identifier route — which traverses no edge — agrees',
-  (await byIdentifier(witnessToken, label.id)) === null
-);
-
-await change('unsuppress');
+try {
+  const afterSuppression = await artifacts(witnessToken, [clusterLayer, labelLayer]);
+  expect('the suppressed cluster is gone from the viewport', !afterSuppression.has(`${clusterLayer}::${cluster.key}`));
+  expect('its label is gone with it', !afterSuppression.has(`${labelLayer}::${label.key}`));
+  expect(
+    'and the identifier route — which traverses no edge — agrees',
+    (await byIdentifier(witnessToken, label.id)) === null
+  );
+} finally {
+  await change('unsuppress');
+}
 const restored = await artifacts(witnessToken, [clusterLayer, labelLayer]);
 expect('lifting the suppression restores both, the label never having been touched itself', restored.has(`${labelLayer}::${label.key}`));
 

@@ -913,11 +913,11 @@ impl Engine {
             .values()
             .map(|partition| partition.manifest.entity_id_high_water)
             .collect();
-        // **The row-less mark's homes are the side manifests only.** `MANIFEST.json` is written by
-        // the build, which allocates points and nothing else, so it carries no opinion about a
-        // region no build has ever touched — where the point mark's build value is a real floor.
-        // Folding the ceiling in as the bundle term is what says "nothing row-less yet" without
-        // inventing a field the build would have to write.
+        // **The row-less mark's homes are the side manifests only**, and `SEGMENTS-0.json` is one
+        // of them — a build given `--layers` spends row-less ids and records the mark there, so
+        // this is where a built layer's claim is honoured. `MANIFEST.json` carries no such field at
+        // all, and folding the ceiling in as the bundle term is what says "nothing row-less yet"
+        // without inventing one.
         let side_manifest_low_waters: Vec<u64> = bundle
             .partitions
             .values()

@@ -1886,8 +1886,10 @@ pub(crate) struct WritePathState {
 pub(crate) struct ManifestSeed<'a> {
     /// `max(build MANIFEST, side manifests)` — the point region's floor.
     pub high_water: u64,
-    /// `min(ceiling, side manifests)` — the row-less region's ceiling. The build manifest carries
-    /// no term: a build allocates points and nothing else.
+    /// `min(ceiling, side manifests)` — the row-less region's ceiling. A build carries a term here
+    /// whenever it was given `--layers`: the layers it registered spent row-less ids, and the mark
+    /// recording that has to survive into what this seeds from, or the first online registration
+    /// reissues them.
     pub low_water: u64,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],

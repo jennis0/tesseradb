@@ -461,6 +461,14 @@ closes.
     - The one refusal that has no build-plane meaning is publish-time validation against the deny
       lane: a bundle straight out of `tessera build` has no overlay, so no declared member can be
       deleted yet.
+    - ⊘ **A bundle built with artifacts never folds, from its first open** — and this is the build
+      plane's sharpest cost, found by review 2026-08-16. The fold's refusal on published artifact
+      memberships (Stage 2's, still open) keys on the memberships being *there*, not on their
+      having arrived online, so a built bundle enters that state having taken no control-plane
+      call. The bundles this route exists for — 10⁷ artifacts — are therefore exactly the ones
+      that will never compact until Stage 4's fold artifact pass lands. An operator sees segment
+      count and tombstone load grow, `fold_failures` climb, and an alarm naming published artifact
+      memberships on a node nobody published into.
   - Found in the doing: **a generating set can lose members on the way into row space.** The set is
     entity-space and permanent; row space holds only what this slice has folded in, so a member
     awaiting a fold projects to nothing and drops silently out of the test — leaving a viewer
@@ -518,9 +526,15 @@ two id regions cannot overlap, so a mixed window is two disjoint ranges and the 
 disjointness check passes rather than fires. That was the interaction the ruling could not be
 checked against when it was made.
 - ✔ **The attachment edge, and the term that is fail-open without it.** An artifact published as an
-  attachment to another — a label on a cluster — is tested on its target's `verdict` **and** its
-  target's gate, in the one predicate, so it holds on every route rather than on the ones that
-  traverse the edge. Suppress a cluster and its labels stop serving in the viewport *and* on an
+  attachment to another — a label on a cluster — is tested on its target's **disposition** (the
+  overlay's `deleted > suppressed` composition, which is what `annotation-representation.md` §4
+  means by *the target's `verdict`* — the same lookup the predicate's first branch performs) **and**
+  on its target's gate, in the one predicate, so it holds on every route rather than on the ones
+  that traverse the edge. ⊘ What the term deliberately does **not** re-evaluate is the target's own
+  criterion and containment: those need the target level's projection per request, where this is one
+  lookup, and a target withheld by *its own* criterion while its label serves is the surface C1's
+  r43 annotation already governs — several layers over one corpus are governed by the most
+  permissive declaration among them. Raised by review 2026-08-16; an owner ruling, not a defect. Suppress a cluster and its labels stop serving in the viewport *and* on an
   identifier a viewer already holds; the same for a deletion, for the target layer's own
   suppression, and for a viewer who does not reach the target's layer at all.
   - **The caller names a target by its stable key**, because an ordinal never crosses the boundary

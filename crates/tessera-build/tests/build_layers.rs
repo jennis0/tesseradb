@@ -100,6 +100,7 @@ slices = ["s0"]
 membership = "enumerated"
 ungated = true
 artifacts_carry_own = false
+visible_when = "none"
 hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
@@ -111,6 +112,12 @@ corpus_derived = true
 /// One row per `(artifact, variation)`: two clusters with no content, and one label carrying two
 /// ranked descriptions and hanging from the first cluster.
 fn write_artifacts(path: &Path) {
+    write_artifacts_named(path, "topics/x")
+}
+
+/// The same, with the label layer under another name — so a test can put it either side of the
+/// cluster layer alphabetically.
+fn write_artifacts_named(path: &Path, labels: &str) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("stable_key", DataType::Utf8, false),
@@ -123,7 +130,7 @@ fn write_artifacts(path: &Path) {
         Field::new("attached_layer", DataType::Utf8, true),
         Field::new("attached_key", DataType::Utf8, true),
     ]));
-    let layers = StringArray::from(vec!["clusters/a", "clusters/a", "topics/x", "topics/x"]);
+    let layers = StringArray::from(vec!["clusters/a", "clusters/a", labels, labels]);
     let keys = StringArray::from(vec!["c-0000", "c-0001", "l-0000", "l-0000"]);
     let variation = UInt32Array::from(vec![None, None, Some(0), Some(1)]);
     let mut values = ListBuilder::new(StringBuilder::new());
@@ -156,6 +163,14 @@ fn write_artifacts(path: &Path) {
 /// One row per `(artifact, member)`, in **source** entity ids — and deliberately shuffled, since
 /// ordinals must be a function of the artifacts and not of the file's row order.
 fn write_members(path: &Path, members_of_first_cluster: &[u64]) {
+    write_members_of(path, members_of_first_cluster, "topics/x")
+}
+
+fn write_members_named(path: &Path, labels: &str) {
+    write_members_of(path, &(0..30).collect::<Vec<u64>>(), labels)
+}
+
+fn write_members_of(path: &Path, members_of_first_cluster: &[u64], labels: &str) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("stable_key", DataType::Utf8, false),
@@ -174,11 +189,11 @@ fn write_members(path: &Path, members_of_first_cluster: &[u64]) {
     };
     for &m in members_of_first_cluster {
         row("clusters/a", "c-0000", None, m);
-        row("topics/x", "l-0000", None, m);
+        row(labels, "l-0000", None, m);
         // Variation 0 was generated from the whole cluster; variation 1 from a third of it.
-        row("topics/x", "l-0000", Some(0), m);
+        row(labels, "l-0000", Some(0), m);
         if m % 3 == 0 {
-            row("topics/x", "l-0000", Some(1), m);
+            row(labels, "l-0000", Some(1), m);
         }
     }
     for m in 100..110u64 {
@@ -332,6 +347,26 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     assert_eq!(a.layers, b.layers);
     assert_eq!(a.entity_id_low_water, b.entity_id_low_water);
     assert_eq!(a.membership_extents, b.membership_extents);
+
+    // **The bytes, not only the descriptors.** A `MembershipExtent` carries a path, a layer, a
+    // level, an ordinal range and a count — and no digest — so two builds that resolved a member
+    // to *different entities* would agree on every field above while their packed memberships
+    // differed. The entity is what the Roaring blob holds, and this is the only place it is
+    // compared.
+    assert!(!a.membership_extents.is_empty());
+    for extent in &a.membership_extents {
+        let one = std::fs::read(streamed.join("v00000").join(&extent.path)).unwrap();
+        let other = std::fs::read(linear.join("v00000").join(&extent.path)).unwrap();
+        assert_eq!(one, other, "the packed memberships of {} differ", extent.layer);
+    }
+    assert_eq!(a.artifact_record_extents, b.artifact_record_extents);
+    for extent in &a.artifact_record_extents {
+        for file in [&extent.blocks, &extent.hasrow, &extent.directory] {
+            let one = std::fs::read(streamed.join("v00000").join(file)).unwrap();
+            let other = std::fs::read(linear.join("v00000").join(file)).unwrap();
+            assert_eq!(one, other, "the artifact content in {file} differs");
+        }
+    }
 }
 
 /// **A member the build did not assign refuses the build.** Dropping it instead would move both
@@ -364,6 +399,107 @@ fn the_registrys_refusals_are_the_builds_refusals() {
     let out = inputs.dir.join("bundle");
     let err = build(&args(&inputs, &out)).expect_err("a dependency must exist before its dependent");
     assert!(format!("{err}").contains("depends_on"), "{err}");
+}
+
+/// **A key the artifacts file does not declare is a refusal, not a new artifact.** A mistyped key
+/// in the members file would otherwise publish a phantom beside a real cluster whose count is
+/// quietly short — and on a layer declaring no supplied content nothing downstream notices.
+#[test]
+fn a_member_row_naming_an_undeclared_artifact_is_refused() {
+    let inputs = inputs();
+    // Every member of `c-0000` except one, whose key is mistyped.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("member", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["clusters/a", "clusters/a"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["c-0000", "c-OOO0"])),
+            Arc::new(UInt64Array::from(vec![0u64, 1])),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&inputs.members).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let out = inputs.dir.join("bundle");
+    let err = build(&args(&inputs, &out)).expect_err("an undeclared key is a refusal");
+    assert!(format!("{err}").contains("c-OOO0"), "{err}");
+}
+
+/// **A null member is not entity zero.** Arrow reads the values buffer whatever the validity
+/// bitmap says, so a producer whose join missed a row would publish the corpus's lowest-numbered
+/// document into the artifact, moving its masked count for whoever can see that document.
+#[test]
+fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
+    let inputs = inputs();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("member", DataType::UInt64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["clusters/a", "clusters/a"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["c-0000", "c-0000"])),
+            Arc::new(UInt64Array::from(vec![Some(7u64), None])),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&inputs.members).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let out = inputs.dir.join("bundle");
+    let err = build(&args(&inputs, &out)).expect_err("a null member is a refusal");
+    assert!(format!("{err}").contains("null member"), "{err}");
+}
+
+/// **Publication follows the declaration order, not the alphabet.** An attachment resolves against
+/// what is already published, so a label layer must be published after the layer it attaches into —
+/// and the file's own order is what states that, `depends_on` having been declared in it.
+#[test]
+fn a_label_layer_sorting_before_its_target_still_publishes() {
+    let inputs = inputs();
+    // `annotations/…` sorts before `clusters/…`, which is the case an alphabetical publication
+    // order would refuse with "holds no such artifact" for a target that is plainly there.
+    let renamed = |text: &str| text.replace("topics/x", "annotations/topics");
+    std::fs::write(&inputs.layers, renamed(LAYERS_TOML)).unwrap();
+    write_artifacts_named(&inputs.artifacts, "annotations/topics");
+    write_members_named(&inputs.members, "annotations/topics");
+
+    let out = inputs.dir.join("bundle");
+    build(&args(&inputs, &out)).expect("declaration order is what decides, not the layer's name");
+    let manifest = manifest_of(&out);
+    assert!(manifest
+        .membership_extents
+        .iter()
+        .any(|e| e.layer == "annotations/topics"));
+}
+
+/// **The existence criterion cannot be omitted**, on the gate's argument: the value an absent line
+/// would supply is the widest one — no criterion at all, serving the existence and masked count of
+/// every artifact down to a single member. The control plane's JSON demands the field too, so a
+/// declaration moved from one route to the other cannot lose a disclosure control on the way.
+#[test]
+fn a_layer_omitting_its_existence_criterion_is_refused() {
+    let inputs = inputs();
+    let mut without = String::new();
+    for line in LAYERS_TOML.lines() {
+        if !line.starts_with("visible_when") {
+            without.push_str(line);
+            without.push('\n');
+        }
+    }
+    std::fs::write(&inputs.layers, without).unwrap();
+    let out = inputs.dir.join("bundle");
+    let err = build(&args(&inputs, &out)).expect_err("an absent criterion is a refusal");
+    assert!(format!("{err}").contains("visible_when"), "{err}");
 }
 
 /// A layer in a slice this build does not write would be registered, reachable and empty — which
