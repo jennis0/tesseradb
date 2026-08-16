@@ -401,6 +401,10 @@ bound it. No code changed.
 
 ### Stage 3 — Content: derived, supplied, and the containment test
 
+**In progress on `artifacts/stage-3`; what is owed and what will bite the next implementer is
+in [the Stage 3 handover](artifact-stage-3-handover.md)**, which is deleted when the stage
+closes.
+
 **Capability:** a label is served only to a viewer who can see everything it was generated from.
 
 - ✔ The declared derived vocabulary — count intrinsic, `centroid`/`box`/`hull` opt-in — under the
