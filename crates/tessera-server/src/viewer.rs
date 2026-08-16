@@ -133,10 +133,17 @@ async fn meta(
     // viewer listener. The bearer here is a session token, so a valid, unexpired session is
     // required exactly as for `/v1/viewport`.
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    state.authenticated_session(token)?;
+    let entry = state.authenticated_session(token)?;
 
     let meta = state.engine.meta();
     let selection = state.engine.config();
+    // **Gate-filtered per principal, and this is the only per-principal field on the document.**
+    // Everything else here is a deployment constant identical for every caller; the layer list is
+    // not, and a shared cache over this response would hand one principal another's registry. The
+    // filtering is two steps in the engine — reachability by terms, then a live suppression check
+    // on each layer's own entity — so a layer this caller may not know about is absent by the same
+    // route a name nobody registered is.
+    let layers = state.engine.visible_layers(&entry.session);
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -288,6 +295,54 @@ async fn meta(
             // "the deployment truncated".
             "max_category_values": state.max_category_values,
         },
+        // The annotation layers this principal may know exist, and what each declared.
+        //
+        // **Never the artifact cardinality.** A count of artifacts in a layer is a corpus-wide
+        // count over objects the principal may not individually see, which is C8's row — and it is
+        // the obvious field to add here, which is why its absence is stated rather than left to be
+        // noticed. Nothing on this document says how big a layer is.
+        //
+        // What *is* published is the declaration: identity, structure, the derived vocabulary a
+        // client must know to draw anything, which slices the layer appears in, and what kinds of
+        // supplied content its artifacts carry. Publishing the supplied *kinds* is safe because an
+        // artifact failing containment is absent whole, so no served artifact ever lacks a content
+        // its layer declared — there is no shell to be distinguishable from absence.
+        //
+        // The gate label is **not** published. A caller who reaches a layer has already satisfied
+        // it, so the label adds nothing they can act on; a caller who has not never sees the entry.
+        // Publishing it would put a term name on a document whose whole purpose is that the
+        // unreachable case is indistinguishable from the nonexistent one.
+        "layers": layers.iter().map(|layer| {
+            let d = &layer.declaration;
+            serde_json::json!({
+                "name": d.name,
+                "title": d.title,
+                "slices": d.slices,
+                "membership": d.membership,
+                "hierarchy": {
+                    "kind": d.hierarchy.kind,
+                    // The layer's **default** cut depth, not its only setting: a viewport request
+                    // may ask for more detail than it (decision 0083). A budget is not a disclosure
+                    // control — every artifact a deeper cut returns has passed its own existence
+                    // test — which is why the default is publishable and adjustable at all.
+                    "prune_children": d.hierarchy.prune_children,
+                },
+                // Empty for a treed layer, which declares none: its lineage is in its edges, and a
+                // level number would say nothing about position in it (decision 0082).
+                "levels": d.levels.iter().map(|l| serde_json::json!({
+                    "level": l.level,
+                    "title": l.title,
+                    "zoom": l.zoom.map(|(lo, hi)| serde_json::json!([lo, hi])),
+                })).collect::<Vec<_>>(),
+                "derived_content": d.content.derived,
+                "supplied_content": d.content.supplied.iter()
+                    .map(|s| s.kind.clone()).collect::<Vec<_>>(),
+                "depends_on": d.depends_on,
+                // The version a client echoes to notice a gate edit, in the same shape as every
+                // other version coordinate it holds.
+                "version": layer.version,
+            })
+        }).collect::<Vec<_>>(),
     })))
 }
 

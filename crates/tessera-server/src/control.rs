@@ -246,7 +246,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
         .route("/control/flush", post(flush))
-        .route("/control/compact", post(compact));
+        .route("/control/compact", post(compact))
+        // A declaration is small — no batch shape and no body limit of its own, so it inherits
+        // axum's 2 MiB default, which is three orders above the largest declaration anyone can
+        // write. `PUT` rather than `POST` because the name is the identity and the operation is
+        // refused rather than repeated if it is taken; there is no server-minted name to `POST` to.
+        .route("/control/layers", axum::routing::put(register_layer))
+        .route("/control/layers/{name}", axum::routing::delete(drop_layer));
     // The faults build's arming surface (decision 0071) — absent from a default build rather
     // than mounted and refusing, and above the credential layer below like every other route.
     #[cfg(feature = "fault-injection")]
@@ -1690,6 +1696,62 @@ async fn flush(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
     state.engine.request_fold();
     StatusCode::ACCEPTED
+}
+
+/// `PUT /control/layers` — register one annotation layer.
+///
+/// **Synchronous, unlike [`flush`] and [`compact`] beside it, and the difference is what the
+/// caller is owed.** Those two answer 202 for work that takes minutes; a registration is a WAL
+/// append and an fsync, and the caller cannot proceed without the `tessera_id` it returns — that
+/// identifier is the only address by which the layer can later be suppressed, since an entity id
+/// never crosses the boundary (**I10**).
+///
+/// **A failure means the layer does not exist**, which is the opposite of `/control/changes`'s
+/// posture and deliberately so: a suppression is applied even when its append fails, because
+/// leaving an accepted deny unapplied is a fail-open. A layer has no such asymmetry — one that
+/// existed in memory and not in the log would come back from a restart as a free name, having
+/// already handed this caller an identifier for its entity.
+///
+/// Refusals are 422 and say why: the caller's own declaration measured against the deployment's
+/// published rules — a name already taken, a name tombstoned, a nested layer that declared levels.
+async fn register_layer(
+    State(state): State<Arc<AppState>>,
+    body: Json<tessera_types::layer::LayerDeclaration>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let declaration = body.0;
+    let name = declaration.name.clone();
+    // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
+    // suppression is never queued behind ingest; a registration is not a deny, and delaying one
+    // under ingest load is backpressure working rather than a security operation refused.
+    let id = tokio::task::spawn_blocking(move || state.engine.register_layer(declaration))
+        .await
+        .map_err(crate::error::map_join_error)?
+        .map_err(crate::error::map_accept_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() })),
+    ))
+}
+
+/// `DELETE /control/layers/{name}` — drop a layer and tombstone its name for ever.
+///
+/// **The name never comes back**, and that is the operation rather than a side effect of it.
+/// Bookmarks, edges and suppressions all travel by name, so a recreated `clusters/topics` would
+/// silently inherit every stale reference to the old one. A caller who wants the name again wants a
+/// different name.
+///
+/// The entity ids do not come back either — the allocator is monotone with no free list, and
+/// reclaiming them is decision 0072's work, which is settled, unbuilt, and conditional on the
+/// membership-reconciliation clause shipping with it.
+async fn drop_layer(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    tokio::task::spawn_blocking(move || state.engine.drop_layer(name))
+        .await
+        .map_err(crate::error::map_join_error)?
+        .map_err(crate::error::map_accept_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
