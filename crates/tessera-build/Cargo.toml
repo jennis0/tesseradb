@@ -16,6 +16,11 @@ tessera-spatial = { path = "../tessera-spatial" }
 # refused where its author can read the message (decision 0070).
 tessera-analyse = { path = "../tessera-analyse" }
 tessera-store = { path = "../tessera-store" }
+# The layer registry, the entity allocator and the artifact store — **the same code the control
+# plane runs**, so a layer declared as a build input is validated, allocated and published by one
+# implementation rather than by a second copy of the rules (see `layers.rs`). The edge is one-way:
+# lifecycle knows nothing of the build.
+tessera-lifecycle = { path = "../tessera-lifecycle" }
 tessera-authz = { path = "../tessera-authz" }
 # The build writes the filter artefact through the crate that reads it, exactly as it writes
 # authorisation postings through `tessera-authz` — the format's owner owns both halves, so the

@@ -608,9 +608,11 @@ nothing is asserted that later becomes false.
 
 **Bulk publication is operational, not semantic.** A 10⁷-artifact level is a build-plane job for the
 same reason `tessera build --attach-slice` is — volume that must not ride the trickle path — and a
-level published in pieces is coherent at every step, merely incomplete. That is the ordinary
-`⊘ specified-not-implemented` distinction between *cannot* and *should not*, and it matters because
-the atomic reading would have forced a rebuild for a one-artifact correction.
+level published in pieces is coherent at every step, merely incomplete. It matters because the
+atomic reading would have forced a rebuild for a one-artifact correction. ✔ Built 2026-08-16: the
+build takes a declaration file and two Parquet files, resolves members through its own assignment,
+and runs the registry, the allocator and the publication the control plane runs — so the two routes
+place the same ordinals on the same entities and refuse the same declarations.
 
 ### 5.0.1 Edit is a first-class operation here, and it is not for points
 
@@ -1378,6 +1380,11 @@ document had one cause — reasoning about entity space while designing a row-sp
 error was invisible from inside the argument that made it.
 
 ## Appendix R
+
+**r5 — 2026-08-16.** §2.4 records where an attachment lives — in the attached artifact's own
+record, the edge being read on exactly the path that reads the artifact — and §5.0's bulk-publication
+note becomes a statement of what exists: the build plane takes declarations, memberships, content and
+edges, running the control plane's own registry and publication. Nothing about the model moved.
 
 **r4 — 2026-08-16. Promoted to normative.** §6.2 is rewritten onto
 [decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md): a tree and a

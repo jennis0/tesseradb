@@ -470,14 +470,35 @@ exists for every entity (I10). Contradicts the model's addressing as read; rulin
 
 | Operation | Route | What is durable | Refused when |
 |---|---|---|---|
-| **Layer create** | control verb; the slice lifecycle's shape verbatim ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
-| **Level publish** (bulk) | build plane, `--attach-slice`'s shape: files built beside the live prefix, then a manifest publication | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
+| **Layer create** | control verb; the slice lifecycle's shape verbatim ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — `tessera build --layers` writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
+| **Level publish** (bulk) | build plane, `--attach-slice`'s shape: `tessera build --artifacts`/`--artifact-members`, members named by source id and resolved through the build's own assignment, packed into the same membership and record extents a control-plane publication writes | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
 | **Layer suppress / unsuppress** | `/control/changes` **on the layer's own entity** — which is why it has one. Rule S applies; the reachability check gains one live `verdict` lookup ahead of the session's resolved set | the existing deny machinery, end to end | never for load |
 | **Layer drop** | WAL'd registry tombstone; vanishes from discovery at ack; artifacts reclaimed at the fold; **the name stays tombstoned for ever** | the tombstone | — |
 | **Replace** (wholesale — changing the analysis, not refreshing it; [decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) | create successor, then drop predecessor — never 10⁷ denies through a lane sized for trickle (rep §5). **Nothing carries across**: new identities are new objects, so suppressions, edges and bookmarks end with the predecessor, correctly — a replacement that strands live suppressions is **reported**, not refused (rep §5.0.2; ⊘ the report is unbuilt). **Not atomic, deliberately**: if the drop fails after the create, both generations serve — each individually gated and sound, so the intermediate state is duplication, never disclosure, and the caller retries the drop. The reverse order has an outage window and is not used. ⊘ Until the edit pass lands this is the only refresh, and callers should be told what it loses | the two registry records | the dangling-dependent refusal (rep §5.0.4), which binds replacement only |
 | **Layer gate edit** | widening: in place, version bump. **Narrowing: in place, version bump — sound only under the rule below** — with layer suppression first when the narrowing is an emergency | WAL'd registry edit | — |
 | **Level lifecycle ops** | **none exist.** Lifecycle is a layer property (model §2.1); a level is replaced by replacing its layer | — | a per-level suppress or drop is refused as an unknown operation |
 | **Criterion or own-terms change on a populated layer** ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)) | by direction, with the criterion and the flag as the subjects. **Narrowing** — declaring or raising the criterion, setting the own-terms flag: in place, version bump. **Widening** — removing or lowering the criterion, clearing the flag: **the suppress–edit–unsuppress path, layer-level** — the same decomposition as an artifact gate narrowing, because the fail-open direction here is the widening | WAL'd registry edit | in-place widening is refused; the register row for the own-terms flag (model §4.2) accompanies the mechanism |
+
+### 6.1 The build-plane inputs
+
+Three files, and the split is by grain rather than by kind — one artifact's declaration is a line, a
+10⁷-artifact level's membership is a column.
+
+- **`--layers <toml>`**, a list of declarations in registration order (a layer follows what it
+  `depends_on`). The gate is stated either way round and always explicitly — `gate = "<descriptor>"`
+  or `ungated = true` — because TOML has no null and, more to the point, the value a default would
+  supply is the widest one there is.
+- **`--artifacts <parquet>`**, one row per `(artifact, variation)`: `layer`, `stable_key`, and
+  optionally `level`, `variation`, `values` (the layer's declared content kinds, in declared order)
+  and `attached_layer`/`attached_level`/`attached_key`.
+- **`--artifact-members <parquet>`**, one row per `(artifact, member)`: `layer`, `stable_key`,
+  `member`, and optionally `level` and `variation` — a null variation being the artifact's
+  membership, `k` being variation *k*'s generating set.
+
+**Members are source ids**, resolved through the build's own assignment exactly as the pairs file's
+are; an id the build did not assign refuses the build. **Ordinals are assigned in
+`(layer, level, stable_key)` order**, so identity does not depend on how a Parquet file happened to
+be written, and a stable key is required — it is what an edge into the layer names.
 
 The layer entity exists for one reason: an operator discovering a leaking layer needs immediate,
 reversible, fail-closed hiding, and a gate re-evaluated only at authorise cannot give it — a layer
@@ -639,6 +660,12 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r4 — 2026-08-16.** §6 gains the build plane, which the operations table had allocated to layer
+creation's control verb alone: `tessera build` now takes a declaration file and two artifact files
+(§6.1). No rule moved — the build runs the registry, the allocator and the publication the control
+plane runs, so the routes cannot disagree about what a layer is — and the bulk-publication note in
+`annotation-representation.md` §5.0 loses its unbuilt marker with it.
 
 **r3 — 2026-08-16. Promoted to normative.** No mechanism changed. Decisions 0082 and 0083 fall
 entirely on the read path — a layer's lineage lives in its edges, and a response is bounded by a

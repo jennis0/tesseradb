@@ -55,6 +55,30 @@ enum Command {
         /// `--id-key-file` already does — so no environment-specific path appears in the schema.
         #[arg(long, value_name = "KEY=PATH", value_parser = parse_values_binding)]
         values: Vec<(String, PathBuf)>,
+        /// `layers.toml`: annotation layers to register into this bundle, in registration order —
+        /// a layer must follow every layer it names in `depends_on`.
+        ///
+        /// **A build input on `--schema`'s terms**, not server configuration: it compiles into
+        /// MANIFEST.json, and a served bundle comes up with its layers already there. The
+        /// declarations are validated and their ids allocated by the same registry and allocator
+        /// `PUT /control/layers` uses, so both routes refuse the same declarations.
+        #[arg(long, value_name = "PATH")]
+        layers: Option<PathBuf>,
+        /// Parquet of one row per `(artifact, variation)`: `layer`, `stable_key`, and optionally
+        /// `level`, `variation`, `values` (a list of the layer's declared content kinds, in
+        /// declared order) and `attached_layer`/`attached_level`/`attached_key`. Needs `--layers`.
+        #[arg(long, value_name = "PATH")]
+        artifacts: Option<PathBuf>,
+        /// Parquet of one row per `(artifact, member)`: `layer`, `stable_key`, `member` — a
+        /// **source** entity id, as the pairs file uses — and optionally `level` and `variation`,
+        /// where a null variation is the artifact's membership and `k` is variation *k*'s
+        /// generating set. Needs `--layers`.
+        ///
+        /// **Publishing at volume is a build job** for the same reason attaching a slice is: the
+        /// control plane's route is one fsync per batch with the log pinned until a manifest
+        /// carries it, which a 10⁷-artifact level must not ride.
+        #[arg(long, value_name = "PATH")]
+        artifact_members: Option<PathBuf>,
         /// Mint an external ID for every item from its source entity id, and write the
         /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
         /// manufacturing an external ID for an item whose caller supplied none, and this
@@ -857,6 +881,9 @@ fn main() -> ExitCode {
             limit,
             schema,
             values,
+            layers,
+            artifacts,
+            artifact_members,
             mint_external_ids,
             no_oracle_pairs,
             batch_items,
@@ -988,6 +1015,9 @@ fn main() -> ExitCode {
                 memory_budget,
                 band_rows: None,
                 schema,
+                layers,
+                artifacts,
+                artifact_members,
             };
             match tessera_build::build(&args) {
                 Ok(report) => {

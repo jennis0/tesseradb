@@ -1253,6 +1253,33 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let attributes_by_entity =
         read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
 
+    // Layers and their artifacts, resolved here for the reason the attribute tail is: this is
+    // where the two structures that turn a source id into the entity this build assigned it are
+    // both still alive. A member is named by source id, exactly as the pairs file's ids are.
+    let published_layers = match &args.layers {
+        None => crate::layers::PublishedLayers::default(),
+        Some(path) => {
+            let plan = crate::layers::read(
+                path,
+                args.artifacts.as_deref(),
+                args.artifact_members.as_deref(),
+            )?;
+            crate::layers::publish(
+                &plan,
+                &|source| {
+                    source_ids
+                        .binary_search(&source)
+                        .ok()
+                        .map(|ordinal| entity_of_ordinal[ordinal] as u64)
+                },
+                n,
+                &args.out.join(crate::PREFIX),
+                crate::PHASH,
+                &args.slice_id,
+            )?
+        }
+    };
+
     drop(source_ids);
     drop(entity_of_ordinal);
 
@@ -1426,6 +1453,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
     other_paths.extend(presence_paths);
+    other_paths.extend(published_layers.paths.iter().cloned());
     let report = write_manifests(
         args,
         &BundleFiles {
@@ -1440,6 +1468,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         pair_count,
         plan.recorded_batch_items,
         &minters,
+        &published_layers,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.

@@ -42,7 +42,7 @@ delete.
 | **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
 | **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
-| **3** Content — derived, supplied, containment | **check met** 2026-08-16 (`artifacts/stage-3`); one ⊘ open below | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. ⊘ Open inside the stage: layers definable at build time, which is what a 10⁷-artifact layer needs |
+| **3** Content — derived, supplied, containment | **done** 2026-08-16 (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. Layers, levels and bulk publication are definable at build time as well as online |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
 | **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
@@ -440,12 +440,27 @@ closes.
     *storage* half survived review, its *visibility* half was the fail-open. Sharing is safe because
     the two never share an entity — artifact ids descend from the ceiling, point ids ascend from
     zero — so which rule governs a row is a range check on its id.
-  - ⊘ **Layers and levels must be definable at build time, not only online** *(owner, 2026-08-16)*.
-    Nothing in the shape above forecloses it: a layer's property names are positions in its own
-    declaration, and the declaration reaches the manifest identically whether a build wrote it or a
-    registration did. The build-plane route itself is unbuilt — `tessera build` takes no layer file
-    — and it is what a 10⁷-artifact layer needs, publication at that volume being a build job for
-    the same reason `--attach-slice` is.
+  - ✔ **Layers, levels and their artifacts are definable at build time** *(owner, 2026-08-16;
+    built)*. `tessera build --layers <toml>` registers layers into the manifest, and
+    `--artifacts`/`--artifact-members` publish into them — memberships, ranked content, generating
+    sets and attachment edges — so a bundle is served with its annotations already there and a
+    10⁷-artifact level never rides the trickle path, where every batch is an fsync and the log is
+    pinned until a manifest carries it.
+    - **One implementation of the rules, not two.** The build calls the same registry, the same
+      allocator and the same publication the control plane calls, and discards the WAL records they
+      return because a build's durable output is its manifest. So a declaration refused online is
+      refused at build with the same words, and ordinals and entities land where a registration
+      would have put them — verified by a test that registers a layer online *after* opening a
+      built bundle and finds no id reissued.
+    - **Members are named by source id**, resolved through the build's own assignment as the pairs
+      file's ids are; a `tessera_id` would name an entity space the build is still assigning. An id
+      the build did not assign refuses the build rather than being dropped.
+    - **Ordinals are a function of the artifacts, never of the file's row order** — publication is
+      in `(layer, level, stable_key)` order, and a stable key is required, because an ordinal is
+      identity and an edge names its target by key.
+    - The one refusal that has no build-plane meaning is publish-time validation against the deny
+      lane: a bundle straight out of `tessera build` has no overlay, so no declared member can be
+      deleted yet.
   - Found in the doing: **a generating set can lose members on the way into row space.** The set is
     entity-space and permanent; row space holds only what this slice has folded in, so a member
     awaiting a fold projects to nothing and drops silently out of the test — leaving a viewer

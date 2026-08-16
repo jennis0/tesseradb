@@ -22,6 +22,7 @@
 pub mod deep;
 pub mod error;
 pub mod input;
+pub mod layers;
 pub mod observer;
 mod pipeline;
 pub mod schema;
@@ -109,6 +110,23 @@ pub struct BuildArgs {
     /// realistically, per the owner ruling that made it a representative cost rather than a
     /// reduction target.
     pub mint_external_ids: bool,
+    /// `layers.toml`: annotation layers to register into this bundle's manifest, in registration
+    /// order (`layers`). Omit for a bundle with no layers, which is what every build wrote before
+    /// this input existed.
+    ///
+    /// **A build input on `schema`'s terms** — it compiles into the manifest, and the engine seeds
+    /// its registry from there before replaying a WAL record. What it is *not* is a second
+    /// authority: the declarations run through the same registry and the same allocator the
+    /// control plane uses, so both routes refuse the same declarations and place the same ids.
+    pub layers: Option<PathBuf>,
+    /// Parquet of one row per `(artifact, variation)`: `layer`, `stable_key`, and optionally
+    /// `level`, `variation`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
+    /// [`BuildArgs::layers`].
+    pub artifacts: Option<PathBuf>,
+    /// Parquet of one row per `(artifact, member)`: `layer`, `stable_key`, `member` — a **source**
+    /// entity id — and optionally `level` and `variation`, a null variation being the artifact's
+    /// membership and `k` variation *k*'s generating set. Requires [`BuildArgs::layers`].
+    pub artifact_members: Option<PathBuf>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
     /// The file is read by nothing on any request path — its consumers are the test-only
@@ -216,6 +234,16 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     if args.batch_items == Some(0) {
         return Err(BuildError::Invalid(
             "--batch-items 0 is meaningless; omit it for a single batch".into(),
+        ));
+    }
+    // An artifact names the layer it belongs to, so a layer file is what makes those names
+    // resolvable. Refused rather than ignored: a build that quietly dropped the artifacts would
+    // produce a bundle whose clusters are absent, which no viewer can tell from clusters that
+    // failed their existence criterion.
+    if args.layers.is_none() && (args.artifacts.is_some() || args.artifact_members.is_some()) {
+        return Err(BuildError::Invalid(
+            "--artifacts and --artifact-members name artifacts in layers, so they need --layers"
+                .into(),
         ));
     }
     for (what, value) in [("slice id", args.slice_id.as_str())] {
@@ -623,7 +651,35 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         .map_err(|e| BuildError::io(&row_entity_path, e))?;
     fsync_file(&row_entity_path)?;
 
-    // ---- 8. manifests ------------------------------------------------------------------
+    // ---- 8. layers, and the artifacts published into them ------------------------------
+    // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
+    // named by source id resolves, and the row-less region can be allocated against a settled
+    // point mark.
+    let published_layers = match &args.layers {
+        None => crate::layers::PublishedLayers::default(),
+        Some(path) => {
+            let plan = crate::layers::read(
+                path,
+                args.artifacts.as_deref(),
+                args.artifact_members.as_deref(),
+            )?;
+            let by_source: HashMap<u64, u64> = staged
+                .iter()
+                .enumerate()
+                .map(|(position, item)| (item.source_id, position as u64))
+                .collect();
+            crate::layers::publish(
+                &plan,
+                &|source| by_source.get(&source).copied(),
+                n,
+                &args.out.join(PREFIX),
+                PHASH,
+                &args.slice_id,
+            )?
+        }
+    };
+
+    // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([
         permutation_path,
         row_entity_path,
@@ -632,6 +688,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     ]);
     other_paths.extend(presence_paths);
     other_paths.extend(filter_paths);
+    other_paths.extend(published_layers.paths.iter().cloned());
     write_manifests(
         args,
         &BundleFiles {
@@ -646,6 +703,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         pair_count,
         args.batch_items.filter(|&b| b < n),
         &minters,
+        &published_layers,
     )
 }
 
@@ -688,6 +746,7 @@ fn write_manifests(
     pair_count: u64,
     batch_items_recorded: Option<u64>,
     minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    published_layers: &crate::layers::PublishedLayers,
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -729,16 +788,18 @@ fn write_manifests(
     let segments = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
-        // A build allocates points and nothing else, so the row-less region is untouched. Layers
-        // are registered on the control plane against a running node — there is no build-time
-        // route to one — which is why these three are the empty state rather than something
-        // carried forward from an input.
-        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-        layers: Vec::new(),
+        // The row-less region's mark, and it must be the manifest's: the WAL carries the same one
+        // in its registration records and rotation reclaims those, so a mark that lived only there
+        // is lost at the first rotation and the next registration is handed ids a live layer
+        // already holds (decision 0074). `ROWLESS_CEILING` when `--layers` was not given, which is
+        // the untouched region rather than a default standing in for a lost value.
+        entity_id_low_water: published_layers.low_water,
+        layers: published_layers.layers.clone(),
+        // Nothing a build writes has ever been dropped: a tombstone is a control-plane act against
+        // a running node, and a build produces a bundle rather than editing one.
         layer_tombstones: Vec::new(),
-        // A build registers no layers, so it publishes no artifacts and no extents.
-        membership_extents: Vec::new(),
-        artifact_record_extents: Vec::new(),
+        membership_extents: published_layers.membership_extents.clone(),
+        artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
             slice: args.slice_id.clone(),
             seg_id: SEG_ID.to_string(),
@@ -1336,6 +1397,9 @@ mod tests {
             identity_key_hex: KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
+            layers: None,
+            artifacts: None,
+            artifact_members: None,
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,

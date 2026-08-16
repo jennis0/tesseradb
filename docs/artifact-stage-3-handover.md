@@ -1,8 +1,8 @@
-# Stage 3 handover — content, the attachment edge, and what bites
+# Stage 3's leftovers — what bites in this machinery
 
-**Status:** Live handover. **Stage 3's check is met** (`artifact-delivery.md` §3), so what remains
-here is the traps, for whoever picks up Stage 4 in this machinery. Delete it when the owner closes
-the stage; the status record is [`artifact-delivery.md`](artifact-delivery.md) and stays.
+**Status:** **Stage 3 is finished** (`artifact-delivery.md` §3), so what remains here is the traps,
+for whoever picks up Stage 4 in this machinery. Delete it once those have been read across; the
+status record is [`artifact-delivery.md`](artifact-delivery.md) and stays.
 
 **Where the work is:** branch `artifacts/stage-3`, worktree
 `.claude/worktrees/artifacts-stage-3`, on top of `16ca0e9` (the last Stage 2 commit). The gate is
@@ -46,23 +46,27 @@ traversal is Stage 5's.
 
 ## What is still open
 
-**One ⊘ inside the stage**, and it is the owner's: *layers and levels must be definable at build
-time, not only online* (2026-08-16). Nothing in what is built forecloses it — a layer's property
-names are positions in its own declaration, and the declaration reaches the manifest identically
-whether a build wrote it or a registration did — but `tessera build` takes no layer file, and that
-route is what a 10⁷-artifact layer needs.
+**Nothing of Stage 3's own.** The content, the containment test, the attachment edge and the
+build-plane route are built, and the check is met on the 2.4M corpus (`artifact-delivery.md` §3).
 
-**Two loose ends, neither reachable today**, both Stage 4's fold pass:
+**Two loose ends belong to Stage 4's fold pass**, and neither is reachable today:
 
 - **The content extent is absent from `manifest.files`**, so a torn one is unattributable to a
   digest. Every sibling record extent is digested — the flush's on the pool, the coalesce's at
   `coalesce.rs`'s publication — and this one is named and undigested. Its two addressing files *are*
-  fsynced now.
+  fsynced now, and the build plane's copy of the extent **is** digested, since a build digests
+  everything it writes.
 - **A node with published artifacts still never folds.** Stage 2's refusal (the prefix-relative
   membership paths) is joined by a second route now that content extents exist: the fold refuses on
   a corpus with no blob-resident column, naming the wrong cause.
 
 ## What will bite you
+
+**A layer is only as good as the slice it names.** A declaration naming a slice the bundle does not
+carry registers cleanly, is reachable, and serves nothing — which no client can tell from a layer
+whose artifacts were all withheld. The build refuses it; the control plane, which cannot know what
+slices a later attach will bring, does not.
+
 
 **The stale manifest, which has now bitten twice.** Both publication paths clone the *live
 generation's* manifest, and a side-manifest write does not swap the generation — so a list that is
