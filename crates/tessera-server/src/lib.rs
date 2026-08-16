@@ -292,7 +292,6 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         stream_flush_bytes: config.stream_flush_bytes,
         stream_write_stall_ms: config.stream_write_stall_ms,
         stream_deadline_ms: config.stream_deadline_ms,
-        min_visible_members: config.min_visible_members,
         session_credential: config.session_credential.clone(),
         operator_credential: config.operator_credential.clone(),
         dev_cors_origins: config.dev_cors_origins.clone(),

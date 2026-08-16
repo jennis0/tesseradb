@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 42
+**Status:** Draft for review — revision 45
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -437,7 +437,7 @@ Where a tile is small enough to materialise, compute breakdowns exactly; above t
 
 **No bounding box is stored, and its absence is a decision.** Membership bitmaps are entity-space, and the pruning question is answered in row space instead: a node's members occupy row-ID ranges per segment, and intersecting those with the viewport's ranges is a masked test. A build-time box computed over **full** membership and used to decide where a node is served would disclose the unmasked extent by panning — a viewer sees the box's edge in a region holding nothing they may see.
 
-The governing threshold — `min_visible_members` in this section's original vocabulary, the **existence criterion** in the annotations design, which owns it now ([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)) — is a **disclosure control**. Every *displayed* item is authorised either way, so it exists to bound the residual structural leak in C1: that a node's existence and shape derive from global density including items the principal cannot see. It never modifies a number; it decides whether the node is served at all. Name it separately from anything the caller's clustering uses, and review it as a security control. §8.4 specifies its interaction with filtering. *(r43: `min_visible_members` survives as the required `[disclosure]` config key — the **absolute** form's parameter, parsed at startup and read by no handler, ⊘ specified and not implemented. The criterion is declared **per layer** rather than per deployment, and the proportional form has no key at all; both arrive with Stage 2, which is where the deployment-wide key is reconciled with the per-layer declaration.)*
+The governing threshold — `min_visible_members` in this section's original vocabulary, the **existence criterion** in the annotations design, which owns it now ([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)) — is a **disclosure control**. Every *displayed* item is authorised either way, so it exists to bound the residual structural leak in C1: that a node's existence and shape derive from global density including items the principal cannot see. It never modifies a number; it decides whether the node is served at all. Name it separately from anything the caller's clustering uses, and review it as a security control. §8.4 specifies its interaction with filtering. *(r45: the criterion is declared **per layer**, in an absolute and a proportional form, and has no deployment-wide form at all — the `min_visible_members` config key is deleted rather than wired ([decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)), because a deployment default would make an undeclared criterion mean *inherit* where [decision 0084](../decisions/0084-an-undeclared-criterion-declares-no-test.md) rules it means *no test*, and a layer could not then decline the floor. `[disclosure]` remains required, holding `token_max_lifetime` alone. Built and enforced at Stage 2 — this section's threshold is a live control, no longer ⊘.)*
 
 *Annotated 2026-08-01 (no revision here — no parameter, definition or contract changes; raised from the client-interaction design, whose §9.1 generalises this section and §7.6 into one gating rule).* **This threshold is small-cell suppression, and C1's outstanding review should be conducted in that field's vocabulary rather than from first principles.** Statistical disclosure control — the census-table literature — has spent five decades on exactly this rule, and its central known weakness is the **differencing attack**: two overlapping releases whose difference isolates a cell below the threshold. Two halves, one already covered. **Covered:** §8.4 fixes maximum depth against `M_auth` and never against `M_sel`, which blocks the filter-differencing route and is the operational form of **I12** — a filter may move the frontier up, never down, so no sequence of filters differences a suppressed node into view. **The second half — differencing across pan, zoom and slice — is dissolved rather than answered** *(r43)*, and by the mechanism change above rather than by review: under per-node testing a node's verdict is a function of its own membership and `M_auth`, with no viewport input at all, so two overlapping viewports agree on every node in the overlap and their difference yields only which nodes intersect which viewport — geometry the viewer already holds from the nodes they were served. The request-time budget does not reopen it: every cut returns a subset of the same passing set, and a caller can obtain that whole set by asking for a deep one. **This is analysis of the new mechanism, not the review C1 still owes**, which is now a review of a per-node rule rather than of a walk. Appendix C lists C1's owner and review date as outstanding before launch; that review is the place for it, and the finding here is that it has a literature and a named attack to be checked against rather than being a fresh judgement. A survey of the adjacent fields (2026-08-01) also found **no analogue anywhere for rollup-rather-than-suppression** — every clustering and mapping system surveyed either recomputes per query or regenerates per viewer — which is a claim of absence, recorded as such, and which raises rather than lowers the burden on this review, since there is no prior art whose failure modes we inherit and can borrow.
 
@@ -1195,6 +1195,16 @@ Both were checked exhaustively against explicit quantification over all well-for
 
 ## Appendix G — Revision history
 
+- **r45** — **§7.5's threshold has no deployment-wide form, and its config key is deleted**
+  (2026-08-16, [decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)).
+  The reconciliation r43 deferred to Stage 2, settled the only way r44's ruling leaves open: a
+  deployment default would make an undeclared criterion mean *inherit this floor* where decision
+  0084 rules it means *no test*, and no layer could then decline it. `min_visible_members` is
+  removed from `Config`, from `AppState` and from every fixture; `[disclosure]` stays required and
+  holds `token_max_lifetime` alone. The startup obligation it carried — state your disclosure
+  parameters, do not inherit them — is discharged where the parameter now lives, at layer
+  registration, which has no default either. §7.5's threshold stops being ⊘ and becomes a control
+  that runs.
 - **r44** — **C17 annotated a second time** (2026-08-16, owner ruling,
   [decision 0084](../decisions/0084-an-undeclared-criterion-declares-no-test.md)). Stage 2's two
   artifact routes disagree in one configuration — a layer declaring no existence criterion, and a
@@ -1223,9 +1233,8 @@ Both were checked exhaustively against explicit quantification over all well-for
   — and what a filter does to artifact display becomes ⊘ open, with the disclosure half (containment
   and the criterion against `M_auth` alone) unchanged. **The threshold this document calls
   `min_visible_members` is the annotations design's existence criterion**, now declared per layer and
-  in two forms; the deployment-wide config key of that name survives as the absolute form's
-  parameter, still ⊘ parsed and unread, and is reconciled with the per-layer declaration at Stage 2
-  rather than here. **Appendix C:** **C1**'s mitigation is characterised correctly — a criterion bounds a
+  in two forms; the deployment-wide config key of that name is reconciled with the per-layer
+  declaration at Stage 2 rather than here (r45: deleted — decision 0085). **Appendix C:** **C1**'s mitigation is characterised correctly — a criterion bounds a
   grouping's existence and shape and never its count, which §7.1 and §7.3 already serve exactly, and
   several layers over one corpus are governed by the most permissive declaration among them; **C27**
   (an artifact layer's own-terms flag) and **C28** (a caller's corpus-independence declaration on

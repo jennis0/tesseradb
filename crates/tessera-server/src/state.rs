@@ -557,13 +557,6 @@ pub struct AppState {
     pub stream_write_stall_ms: u64,
     /// The whole emit phase's wall budget. See `Config::stream_deadline_ms`.
     pub stream_deadline_ms: u64,
-    /// The disclosure floor: the smallest group whose existence may be reflected in a response.
-    /// Parsed and stored because design §7.5/§2.3 makes a missing `[disclosure]` section a
-    /// refusal to start.
-    /// ⊘ Specified, not implemented: no handler reads this, so no aggregate is suppressed for
-    /// being below the floor. The value is enforced as a *configuration* obligation only.
-    #[allow(dead_code)]
-    pub min_visible_members: u64,
     pub session_credential: String,
     pub operator_credential: String,
     /// `serve.dev_cors_origins`. Empty — the default — means the viewer and session routers mount

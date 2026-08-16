@@ -531,7 +531,9 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 
 - **Verify** `croaring`-written portable Roaring round-trips through `pyroaring` byte-for-byte (both implement `RoaringFormatSpec`; one-hour check the oracle depends on).
 - **Verify** conditional-put semantics for `CURRENT` on the target object store; fallback is a publisher-side lock only publishers pay.
-- Region breakdown materialisation threshold *value* (its evaluation basis is fixed in 3.2) — set at deployment review alongside `min_visible_members`.
+- Region breakdown materialisation threshold *value* (its evaluation basis is fixed in 3.2) — set at deployment review. (It has no companion: the disclosure threshold it once sat beside is
+  declared per artifact layer and has no deployment-wide setting —
+  [decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md).)
 - `readyz` freshness lag default — and the gate itself, which does not exist (§2.3).
 - **The reader must refuse a non-canonical `SEGMENTS-<n>.json` name** (§2.1). The grammar is ruled — unpadded — and the writer already conforms; the reader still parses a padded name leniently and then fails to open it, which is the silent path the ruling exists to close.
 

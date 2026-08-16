@@ -332,7 +332,6 @@ async fn an_undersized_cache_bound_refuses_to_start() {
             [plugin]
             module = "builtin:passthrough"
             [disclosure]
-            min_visible_members = 10
             token_max_lifetime = 3600
             [serve]
             viewer = "127.0.0.1:0"

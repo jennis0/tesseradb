@@ -358,7 +358,6 @@ wal = "$DEV/$scale/wal.log"
 module = "builtin:passthrough"
 
 [disclosure]
-min_visible_members = 10
 token_max_lifetime = 3600
 
 [serve]

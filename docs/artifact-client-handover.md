@@ -238,9 +238,11 @@ cluster openable but not visible on the map — or the reverse — would be that
 
 ## 4. Gaps you will hit
 
-**`min_visible_members` in `dev-server.toml` is parsed and unused.** The criterion is per-layer
-(`visible_when`) and the deployment-wide key predates it. Reconciling the two is open work on the
-tracker; for now, set the behaviour you want in the declaration and ignore the config key.
+**~~`min_visible_members` in `dev-server.toml` is parsed and unused.~~** Closed 2026-08-16: the
+key is deleted and the criterion is declared per layer only
+([decision 0085](decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)). Set the
+behaviour you want in the layer's `visible_when`; a `tessera.toml` still carrying the key is
+harmless but means nothing.
 
 **The write-ahead log grows from the first publication and is never trimmed.** Membership has no
 home on disk outside the log yet — that packaging decision is the owner's, and unbuilt — so

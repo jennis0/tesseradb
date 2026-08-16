@@ -464,7 +464,8 @@ per-tile is a property of a lean schema, not a constant.
 ### 5.2 Thresholds and the frontier
 
 **Filtering may relax no disclosure control, and that half is settled.** §8.4 governs which cluster
-labels are shown. The **existence criterion** — `min_visible_members` in the config, §7.5's threshold —
+labels are shown. The **existence criterion** — §7.5's threshold, declared per layer and nowhere
+else ([decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)) —
 is evaluated against **`M_auth`** and never `M_sel`, per node and independently of any other node, which
 is the operational form of **I12**: *a filter may move the frontier up, never down.*
 

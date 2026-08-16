@@ -375,6 +375,17 @@ principal broader than any the viewer offers — the top 16,384 ranked terms. Un
 Reproduced by `clients/ts/viewer/smoke-artifacts.mjs`, which fails if the counts stop moving with
 the principal.
 
+✔ **The deployment-wide `min_visible_members` key is deleted, not wired**
+([decision 0085](decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md), 2026-08-16)
+— the reconciliation architecture r43 deferred to this stage. A deployment default would make an
+undeclared criterion mean *inherit this floor* where [decision 0084](decisions/0084-an-undeclared-criterion-declares-no-test.md)
+rules it means *no test*, and no layer could then decline it; the proportional form has no
+deployment-wide parameter to default in any case. `[disclosure]` stays required and holds
+`token_max_lifetime` alone, and the startup obligation the key carried — state your disclosure
+parameters, do not inherit them — is discharged at layer registration, which has no default either.
+§7.5's threshold stops being ⊘ specified-and-unimplemented and becomes a control that runs
+(architecture **r45**).
+
 ✔ **A zero masked count is served by the drill-down where the viewport withholds it**, on a layer
 that declares no criterion — and that is **ruled correct**
 ([decision 0084](decisions/0084-an-undeclared-criterion-declares-no-test.md), owner, 2026-08-16).
@@ -573,12 +584,18 @@ nothing is drawn. A fixture built on it would have tested artifacts against a th
 should not be an artifact. The tagged programme takes the arm instead, and earns it only because it
 declares derived geometry — without something to draw it is a category with extra steps.
 
-**One register claim is checked without a fixture of its own.** C1 now records that a criterion
-bounds a grouping's existence and shape and never its count, because the density underlay already
-serves exact masked counts at any depth. The check is therefore against machinery that exists: sum
-the underlay across a below-criterion cluster's extent and recover the count the criterion withheld.
-It belongs to Stage 2's battery and needs no new layer — the point is that the recovery **succeeds**,
-and that the register says so.
+**One register claim is checked without a fixture of its own — ✔ done 2026-08-16.** C1 records that
+a criterion bounds a grouping's existence and shape and never its count, because the density
+underlay already serves exact masked counts at any depth. The check was therefore against machinery
+that already exists, and needed no new layer:
+`a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay` publishes a cluster whose
+membership is every point in one depth-1 cell, sets a bar the narrow principal cannot clear, and
+finds the artifact **absent** while that principal's own tile count over the cell is **exactly** the
+number withheld — 816 of them. The point is that the recovery succeeds and that the register says
+so; the assertion that would fail is the one where the two disagree, which would mean C1 overstates
+the exposure. Nothing here is a leak — every number summed is a masked count the principal already
+holds — and the value of the test is that it fails the day anyone describes the criterion as
+protecting counts.
 
 **Four things this fixture must get right, each of which has already gone wrong once:**
 

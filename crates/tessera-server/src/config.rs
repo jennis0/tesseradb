@@ -1,9 +1,13 @@
 //! Fail-closed configuration: `tessera.toml` (SA §7).
 //!
-//! `[disclosure]` has no defaults at all: absence of the section, or of either key inside it, is
-//! a startup error naming design §7.5/§2.3. `min_visible_members` is parsed and stored even though
-//! no handler reads it — ⊘ specified, not implemented — because the *startup rule* is what this
-//! section enforces: a deployment must state its disclosure parameters rather than inherit them.
+//! `[disclosure]` has no defaults at all: absence of the section, or of the key inside it, is
+//! a startup error naming design §7.5/§2.3 — a deployment must state its disclosure parameters
+//! rather than inherit them. The section holds `token_max_lifetime` alone. The existence
+//! criterion it once also carried is declared **per layer** and has no deployment-wide form
+//! ([decision 0085](../../../docs/decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)):
+//! a deployment default would make an undeclared criterion mean *inherit* where
+//! [decision 0084](../../../docs/decisions/0084-an-undeclared-criterion-declares-no-test.md) rules
+//! it means *no test*.
 //! Every other section either has a documented default (`max_k = 1000`) or is required outright.
 //! Credentials are never inline: `[serve]`'s `*_credential_file`/`*_credential_env` pairs are the
 //! only way to supply the session/operator bearer secrets.
@@ -46,7 +50,7 @@ pub enum ConfigError {
     Toml(toml::de::Error),
     /// The `[disclosure]` section is absent entirely.
     MissingDisclosureSection,
-    /// The `[disclosure]` section is present but missing one of its two required keys.
+    /// The `[disclosure]` section is present but missing one of its required keys.
     MissingDisclosureKey(&'static str),
     /// Neither `*_credential_file` nor `*_credential_env` was set for this credential, or the
     /// named file/env var could not be read.
@@ -782,11 +786,6 @@ pub struct Config {
     pub bundle_path: PathBuf,
     pub cache_dir: PathBuf,
     pub wal_path: PathBuf,
-    /// The disclosure floor. Parsed and stored because design §7.5/§2.3 makes a missing
-    /// `[disclosure]` section a refusal to start.
-    /// ⊘ Specified, not implemented: no handler reads it, so nothing is suppressed for being below
-    /// the floor.
-    pub min_visible_members: u64,
     pub token_max_lifetime_secs: u64,
     pub viewer_addr: SocketAddr,
     pub session_addr: SocketAddr,
@@ -1732,11 +1731,6 @@ fn parse(text: &str) -> Result<Config> {
     let table = disclosure_value
         .as_table()
         .ok_or(ConfigError::MissingDisclosureSection)?;
-    let min_visible_members = table
-        .get("min_visible_members")
-        .and_then(toml::Value::as_integer)
-        .ok_or(ConfigError::MissingDisclosureKey("min_visible_members"))?
-        as u64;
     let token_max_lifetime_secs = table
         .get("token_max_lifetime")
         .and_then(toml::Value::as_integer)
@@ -2222,7 +2216,6 @@ fn parse(text: &str) -> Result<Config> {
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
         wal_path: raw.bundle.wal,
-        min_visible_members,
         token_max_lifetime_secs,
         viewer_addr,
         session_addr,
@@ -2324,7 +2317,6 @@ mod tests {
             [plugin]
             module = "builtin:passthrough"
             [disclosure]
-            min_visible_members = 10
             [serve]
             viewer = "127.0.0.1:7407"
             session = "127.0.0.1:7408"
@@ -2636,7 +2628,6 @@ compaction_after_deletions = 9000
             [plugin]
             module = "builtin:passthrough"
             [disclosure]
-            min_visible_members = 10
             token_max_lifetime = 3600
             {ingest_section}
             [serve]

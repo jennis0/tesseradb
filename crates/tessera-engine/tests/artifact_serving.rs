@@ -433,3 +433,88 @@ fn a_publication_reaches_the_next_viewport_through_the_projection_cache() {
     assert_eq!(after.len(), 2);
     assert_eq!(after[1].masked_count, 100);
 }
+
+// ---- C1's recovery, checked rather than asserted ---------------------------------------------
+
+/// The quadrant the compact cluster below occupies: one Morton cell at depth 1 — the lower-left
+/// quarter of the `0..1000` extent. The upper bound stops just short of the split, because a bbox
+/// touching 500.0 touches the neighbouring cell too and the request would answer for all four.
+const QUADRANT: [f64; 4] = [0.0, 0.0, 499.999, 499.999];
+
+/// Every source id whose point falls in the lower-left quadrant, from the generator's own
+/// arithmetic (`write_points_n`: `x = 37 s mod 1000`, `y = 53 s mod 1000`) rather than from
+/// anything the engine reported.
+fn sources_in_quadrant() -> Vec<u64> {
+    (0..N_ITEMS)
+        .filter(|s| (s * 37) % 1000 < 500 && (s * 53) % 1000 < 500)
+        .collect()
+}
+
+/// **The register says this recovery succeeds, and the point is that it does.**
+///
+/// C1 records that an existence criterion bounds a grouping's *existence and shape* and never its
+/// *count*, because §7.1's tile counts and §7.3's underlay already serve exact masked counts at any
+/// depth. So for a **compact** artifact — one whose membership is everything inside a region — a
+/// principal the criterion withheld the cluster from can sum the density underlay over that region
+/// and recover precisely the number they were not told.
+///
+/// This is a check on the register's honesty, not a bug report: nothing here is a leak, because
+/// every number summed is a masked count this principal was already entitled to. Were the sum to
+/// *disagree* with the withheld count, C1's row would be overstating the exposure and would need
+/// rewriting; were the recovery to be closed off, it could only be by removing the underlay, which
+/// is a core capability. The one thing this must not become is a claim that the criterion protects
+/// the count.
+#[test]
+fn a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay() {
+    let fx = fixture();
+    let engine = fx.open();
+    let sources = sources_in_quadrant();
+    let expected_narrow = visible_to_subset(sources.iter().copied());
+    assert!(expected_narrow > 0, "the fixture must put visible points in the quadrant");
+
+    // A bar the narrow principal cannot clear, from the independently computed intersection.
+    engine
+        .register_layer(declaration(
+            "clusters/compact",
+            Some(ExistenceCriterion::MinVisible(expected_narrow + 1)),
+        ))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/compact".into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("c0".into()),
+                fx.members(sources.iter().copied()),
+            )],
+        )
+        .unwrap();
+
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let view = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 1, QUADRANT, N_ITEMS as usize),
+        )
+        .expect("a viewport over the cluster's own quadrant");
+
+    assert!(
+        view.artifacts.is_empty(),
+        "the criterion withholds it from this principal: {:?}",
+        view.artifacts
+    );
+    assert_eq!(
+        view.tiles.len(),
+        1,
+        "the quadrant is one depth-1 cell, so this sum is over the cluster's extent and nothing \
+         else: {:?}",
+        view.tiles.iter().map(|t| (t.tile, t.visible)).collect::<Vec<_>>()
+    );
+    let recovered: u64 = view.tiles.iter().map(|t| t.visible).sum();
+    assert_eq!(
+        recovered, expected_narrow,
+        "the counts this principal was already entitled to sum to exactly the number the criterion \
+         withheld — which is what C1 records, and what a criterion described as protecting counts \
+         would contradict"
+    );
+}

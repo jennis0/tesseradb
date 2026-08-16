@@ -518,10 +518,12 @@ wal   = "/var/lib/tessera/wal"
 [plugin]
 module = "builtin:passthrough"        # the only accepted value; anything else is refused
 
-[disclosure]                          # no defaults; absence of the section or either key
+[disclosure]                          # no defaults; absence of the section or the key
                                       # is a startup error
-min_visible_members = 25              # §7.5 — reviewed as a security control
 token_max_lifetime  = 3600            # seconds, integer. Required: there is no backstop default
+                                      # §7.5's threshold is *not* here: the existence criterion is
+                                      # declared per layer and has no deployment-wide form
+                                      # (decision 0085)
 
 [serve]
 viewer  = "127.0.0.1:7407"            # loopback by default; binding wider is an explicit act

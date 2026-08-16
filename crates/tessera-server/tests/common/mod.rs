@@ -485,7 +485,6 @@ async fn mount_server_with_flush(
         stream_flush_bytes,
         stream_write_stall_ms,
         stream_deadline_ms: 60_000,
-        min_visible_members: 10,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         dev_cors_origins,
