@@ -1,14 +1,18 @@
 # Annotations — artifacts, edges and layers
 
-**Date:** 2026-08-15
-**Status:** Provisional — **reviewed and ruled** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md); the rulings are decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). **To become normative:** what genuinely remains — search's containment gate (the review's ruling 5, still open), the filter axis (§11), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4), the proportional criterion's denominator for predicate membership (§5), the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it), and the measurements [`annotation-representation.md`](annotation-representation.md) §11.3 names — plus the amendments owed to the normative architecture at promotion: §7.5's descent ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)) and §7.7's ladder ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)). [`annotation-write-cycle.md`](annotation-write-cycle.md) is reviewed and dispositioned; where this document disagrees with it, that one wins.
+**Date:** 2026-08-15 · **Promoted:** 2026-08-16
+**Status:** **Normative for the annotation model** — what an artifact, an edge and a layer *are*, and what governs whether one is served. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). The two amendments owed to the normative architecture are **performed** — §7.5's descent and §7.7's ladder, architecture r43, which also carries the register rows this design owes. `architecture.md` remains the specification and wins every conflict; [`annotation-write-cycle.md`](annotation-write-cycle.md) owns the write cycle, and where this document disagrees with it, that one wins.
+**⊘ Five things are open inside a normative document, each due at the stage that needs it** — this is deliberate, and they are marked ⊘ at their sites rather than held against promotion: search's containment gate (the review's ruling 5 — Stage 8), the filter axis (§11 — Stage 8), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4 — Stage 2), the proportional criterion's denominator for predicate membership (§5 — Stage 6), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). None of them blocks the spine, and each is named where an implementer meets it. The measurements [`annotation-representation.md`](annotation-representation.md) §11.3 lists are owed on the same terms — allocated to stages, not to promotion.
 **Supersedes** the retired `derived-artifact-gating.md`, whose taxonomy this collapses — three gates become one containment test plus one existence criterion (§4, §5); that document is deleted (2026-08-15). What existed nowhere else is carried here: the point-scale cardinality argument for edges and the structural form of an edge gate (§5), and the induced-subgraph sampling problem, parked by name (§11).
 **Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), [0006](../decisions/0006-per-session-handles-retired.md), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are cited as **spec §n**.
 
-> **⊘ None of this is built.** There are no artifacts, no layers, no membership structure and no
-> frontier. Issues [#13] and [#41] are the epics; both are unstarted. Every claim below describes a
-> mechanism, never a property the system has today.
+> **⊘ Almost none of this is built.** There are no artifacts, no layers and no membership structure.
+> What exists is the entity allocation the design turns on
+> ([decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md)'s Morton tiebreak, in
+> both build paths). Every other claim below describes a mechanism, never a property the system has
+> today. **Status lives in [`artifact-delivery.md`](../artifact-delivery.md)**, by owner direction —
+> not in issues [#13] and [#41], which describe the capability from outside and are not the record.
 
 ---
 
@@ -996,6 +1000,17 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r4 — 2026-08-16. Promoted to normative.** The two rulings taken after r3 are folded in: a layer's
+lineage is its **edges** and its levels are declared resolutions, independent structures neither of
+which carries the other ([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
+§6), and what bounds a treed layer's response is a **request-time artifact budget** rather than a
+declared depth ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md), §6). The
+amendments this document owed the normative architecture are **performed** — §7.5's descent and
+§7.7's ladder, with §8.4's second threshold withdrawn alongside them and the register gaining C27,
+C28 and annotations to C1 and C17 (architecture r43). What promotion did **not** do is close the five
+⊘ items in the status line: they are allocated to the stages that need them, which is the whole
+argument for promoting now — an implementer building the spine is not blocked by search's gate.
 
 **r3 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. Existence became one test
 (§3), the gate modes one flag beside an independent criterion (§5), the ladder ranked variations

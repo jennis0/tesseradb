@@ -1,23 +1,25 @@
 # Annotations — the write cycle
 
-**Date:** 2026-08-15
-**Status:** Provisional — **reviewed, dispositioned, and corrected to the owner rulings** (three
-independent reviews, 2026-08-15: disclosure, write-path integration, data modelling; the rulings
-are decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)).
-Companion to [`annotations.md`](annotations.md)
-(the model) and [`annotation-representation.md`](annotation-representation.md) (the representation);
-this owns how artifacts, levels and layers behave in the write cycle — their own operations (spec
-§5–§6), and what a point-side event obliges artifact-side (spec §2–§4). **To become normative:**
-the costs in spec §8 measured, of which the three maintenance arms (spec §2) are the ones that
-could refute the shape; spec §11's residue settled; and what genuinely remains open elsewhere —
-search's containment gate, the filter axis, membership packaging, the proportional criterion's
-denominator for predicate membership, and the deferred edit pass. **Review found
-four fail-opens**, all now closed in the text: the fold shrinking a generating set through its row
-form; a missing merge arm; retirement retiring the entry that hid a deleted artifact before dropping
-what still served it; and — in the sibling representation document — a suppressed cluster's labels
-still serving on routes that do not traverse the edge. **Supersedes in scope** the sections
-listed in spec §10 — where the sibling documents disagree with this one, none is normative and this
-is newer.
+**Date:** 2026-08-15 · **Promoted:** 2026-08-16
+**Status:** **Normative for the annotation write cycle** — how artifacts, levels and layers behave
+under write: their own operations (spec §5–§6), and what a point-side event obliges artifact-side
+(spec §2–§4). Reviewed under three lenses (2026-08-15: disclosure, write-path integration, data
+modelling) and ruled by decisions
+[0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md).
+Companion to [`annotations.md`](annotations.md) (the model) and
+[`annotation-representation.md`](annotation-representation.md) (the representation).
+**Supersedes in scope** the sections listed in spec §10 — where a sibling document disagrees with
+this one on the write cycle, this one wins. [`write-path.md`](write-path.md) is normative for the
+point-side write path and this defers to it; `architecture.md` remains the specification.
+**Review found four fail-opens**, all closed in the text: the fold shrinking a generating set
+through its row form; a missing merge arm; retirement retiring the entry that hid a deleted artifact
+before dropping what still served it; and — in the sibling representation document — a suppressed
+cluster's labels still serving on routes that do not traverse the edge.
+**⊘ Open inside a normative document, allocated to stages rather than held against promotion:** spec
+§8's costs are unmeasured, of which the three maintenance arms (spec §2) are the ones that could
+refute the shape — **Stage 4's first measurement, not its last** — and spec §11's residue, plus the
+deferred edit pass (Stage 7) and the proportional criterion's denominator for predicate membership
+(Stage 6).
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
 [`write-path.md`](write-path.md) §2–§5 (**normative** for the write path); [`compaction.md`](compaction.md)
 §3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3;
@@ -637,6 +639,14 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r3 — 2026-08-16. Promoted to normative.** No mechanism changed. Decisions 0082 and 0083 fall
+entirely on the read path — a layer's lineage lives in its edges, and a response is bounded by a
+request-time budget — and neither touches an operation table here: publishing an edge was already the
+ordering constraint spec §5.0.4 names, and a treed layer's level component is always 0, which the
+`(layer, level, ordinal)` address already admits. Recorded because *nothing changed* is a finding
+when two rulings land on a sibling document, and the alternative is a reader assuming this one is
+stale.
 
 **r2 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. The operation tables are the
 substance: the artifact edit row is marked deferred with the edit pass, the layer table's

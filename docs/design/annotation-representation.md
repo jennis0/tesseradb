@@ -1,7 +1,8 @@
 # Annotations — the representation
 
-**Date:** 2026-08-15
-**Status:** Provisional — **reviewed and ruled** (Stage 0, 2026-08-15, three lenses; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md); the rulings are decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). Companion to [`annotations.md`](annotations.md), which owns the *model*; this owns what the model is made of. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) — reviewed, dispositioned — supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. **To become normative:** what genuinely remains — search's containment gate (§8, the one ruling still open), the filter axis (§6.3), membership packaging (§2.4), the proportional criterion's denominator for predicate membership (model §5), the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it), and the unmeasured items §11.3 names.
+**Date:** 2026-08-15 · **Promoted:** 2026-08-16
+**Status:** **Normative for the annotation representation** — what the model is made of: storage, addressing, the visibility predicate's evaluation, the fold's artifact pass, and serving. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). Companion to [`annotations.md`](annotations.md), which owns the *model*. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. `architecture.md` remains the specification and wins every conflict.
+**⊘ Four things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), the filter axis (§6.3 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
 **Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
@@ -271,6 +272,10 @@ lookup table in either direction:
 entity  = level.entity_base + ordinal        ordinal = entity − level.entity_base
 ```
 
+**The address is unchanged by a layer having no levels** — a treed layer's level component is always
+0 and one reserved entity run serves it (§6.2). The component stays in the address rather than
+becoming conditional, so one form addresses every layer.
+
 That is the answer to how artifacts address each other, and it is unaffected by the representation
 result. **The width and 0-as-missing arguments do not survive it** — both were properties of the
 assignment column, which is gone. They are recorded in §2.5 rather than deleted, because the column
@@ -280,8 +285,8 @@ is the obvious design and will be proposed again.
 
 ```
 artifacts/<layer>/
-  registry.json                     # gate, structure, pruning policy, derived vocabulary,
-                                    #   slices, zoom→level map, hierarchy kind
+  registry.json                     # gate, structure, default cut depth, derived vocabulary,
+                                    #   slices, declared levels, zoom→level map where levels exist
   levels/<k>/meta.json              # artifact count, entity_base, zoom range,
                                     #   membership source, containment verification result
   levels/<k>/members/<ordinal>.roaring   # enumerated membership, entity space (§2, §2.1)
@@ -798,32 +803,30 @@ off it (§5.0.2).
 
 ## 6. Serving
 
-A viewport response carries, per visible layer, the artifacts at the levels the layer's
-**zoom-to-level map** admits at that depth. That map is what bounds the work, and it is not a
-concession — it is what every mapping pipeline does, and it is the caller stating which level is
-meaningful at which scale.
+A viewport response carries, per visible layer, the artifacts whose rows intersect the tile's ranges
+and which pass their own existence test. **What bounds that set depends on the layer's structure**
+(§6.2): a treed layer is cut to the request's artifact budget
+([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)), and a levelled layer
+serves the level asked for. Either way the bound is a function of the **declaration and the request**
+— never the principal, and never a statistic — which is §8.2's standing rule about routes, and what
+keeps service time from becoming a function of how much a principal can see.
 
-**It is a function of the declaration alone** — never the request, the principal, or a statistic —
-which is §8.2's standing rule about routes, and is what keeps service time from becoming a function
-of how much a principal can see.
+**Visibility resolution is a session one-off, not a per-request charge.** §8 measures resolving an
+entire layer's visibility at **883 ms** for 10⁷ artifacts: paid once, cached, invalidated on the
+generation key. A viewport thereafter is a row-range intersection against the resolved set, which is
+cheap. Quoting that 883 ms per request — as an earlier revision did, concluding a fine level was
+unservable — is the arithmetic to avoid, and it is worth naming because both readings were in this
+document at once.
 
-**Cost is a session one-off, not a per-request charge, and an earlier revision of this section
-contradicted this document's own measurement.** §8 measures resolving an entire layer's visibility at
-**883 ms** for 10⁷ artifacts and concludes it is affordable — once per session, cacheable, invalidated
-on the generation key. §6 then quoted the same 883 ms as a per-request cost and concluded a fine level
-was unservable. **Both cannot be true.** The resolution is the first: visibility is resolved once, and
-a viewport thereafter is a row-range intersection against the resolved set, which is cheap. There is
-no per-request 883 ms and never was.
-
-**And the client caches, so this is replica sync rather than request cost.** What reaches a client is
+**The client caches, so a level is replica sync rather than request cost.** What reaches a client is
 not membership but identity, geometry, count and label — of order a hundred bytes an artifact — and
 client-interaction already models a client as a versioned partial replica that fetches once and
-reconciles against a version coordinate. A level is exactly that: fetched, cached, invalidated when
-the coordinate moves. Sizing it as though every viewport re-fetched it is the wrong model.
+reconciles against a version coordinate. Sizing a level as though every viewport re-fetched it is the
+wrong model.
 
-**So the zoom-to-level map is not a cost bound, and nothing here requires one.** It survives only as
-advisory metadata — a min/max zoom a sensible client follows and a UI exposes, as every tile schema
-does.
+**The zoom-to-level map is therefore advisory and not a cost bound** — a min/max zoom a sensible
+client follows and a UI exposes, as every tile schema does. It does not exist at all for a treed
+layer, which has no levels to map (§6.2).
 
 ### 6.1 Artifacts cannot be sampled, and that is the real constraint
 
@@ -837,42 +840,49 @@ This is a sharper constraint than the density argument an earlier revision gave,
 elsewhere. Faced with too many artifacts, the options are **serve them all**, **reduce by the layer's
 own structure**, or **refuse** — never sample.
 
-### 6.2 Two kinds of layered hierarchy, and a spectrum between
+### 6.2 A tree and a level set are different structures
 
-**Reduction means different things in the two, and the design has been written for one of them.**
+**Lineage lives in a layer's edges; levels are declared resolutions. Neither carries the other**
+([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)), and the
+two are independent declarations rather than alternatives — a layer may have edges, levels, both or
+neither.
 
-***Nested.*** Each artifact has parents and children; a coarser view is an **ancestor**. Reducing
-preserves the claim — *"these points are in this cluster, described more coarsely"* — which is §7.5's
-rollup-rather-than-suppression, and it is why a viewer is never left with nothing. `reach` (§3) is
-well defined here. **Levels need not align with tree depth**: a semantic level and a structural depth
-are different things, and nothing should assume an artifact's level equals its distance from a root.
+***A tree, and no levels — the clustering case.*** Each artifact has parents and children and a
+coarser view is an **ancestor**; the structure is entirely in the edges. Every artifact sits at
+level 0, which becomes an address component carrying no information, and one reserved entity run
+serves the layer. `reach` (§3) is well defined here. **A condensed tree is unbalanced** — HDBSCAN
+splits a branch where the density says to, so one region splits at depth two and another at depth
+nine — so cutting it at `min_cluster_size` values gives levels whose members sit at many depths, and
+*descend one level* is not *descend one edge*. An earlier revision said levels need not align with
+tree depth and then used them as the ladder a frontier descends, which is sound only if they do; the
+structures are separated instead of requiring balanced trees, which no clustering algorithm produces.
 
-***Stacked flat.*** Each level is an independent analysis at its own coarseness, with no guaranteed
-parent/child relation and possibly slightly different information — three HDBSCAN runs at three
-`min_cluster_size` settings, which is exactly what §11's Tier A produced. A coarser view is **another
-level**, not an ancestor, and switching to it does not coarsen a claim, it **replaces one analysis
-with a different one**. `reach` is undefined across levels because there are no edges to close over.
+***Levels, and no lineage — the stacked case.*** Each level is an independent analysis at its own
+coarseness, with no parent/child relation and possibly different information: three HDBSCAN runs at
+three `min_cluster_size` settings, which is exactly what §11's Tier A produced, where a point that
+was noise in the coarse run may join a cluster in the fine one. A coarser view is **another level**,
+not an ancestor, and switching to it does not coarsen a claim, it **replaces one analysis with a
+different one**. `reach` is undefined across levels because there are no edges to close over.
 
-***And a spectrum.*** Toponymy's layered clusterer sits between: some parent/child links, no
-guarantee they cover. Where links exist, rollup; where they do not, the only reduction is a level
-switch.
+***Both, and they agree — the administrative case.*** A ward is a ward everywhere on the map, so the
+resolution is semantic and balanced: the layer declares levels *and* carries containment edges, and a
+level number and a tree depth mean the same thing. This is what levels were for, and the only case in
+which reading one as the other is safe.
 
-| | Nested | Stacked flat |
-|---|---|---|
-| A coarser view is | an ancestor | a different level |
-| Reduction means | the same claim, coarser | a different analysis |
-| `reach`, and the frontier | well defined | undefined across levels |
-| If a level is too dense | ancestors are always available | there may be nothing coarser |
-| A client toggling picks | a depth | an analysis |
+| | A tree | Stacked levels | Administrative |
+|---|---|---|---|
+| The lineage is in | edges | absent — the levels are independent | edges, matching the levels |
+| Levels declared | none; every artifact at level 0 | one per analysis | one per scale |
+| A coarser view is | an ancestor | a different analysis | either, interchangeably |
+| The zoom→level map | does not apply | advisory, the client's choice | its purpose |
+| `reach` | well defined | undefined across levels | well defined |
 
-**A layer declares which it is**, and the declaration is what decides whether `reach`, the frontier
-and rollup mean anything for it — not a property to be inferred from whether edges happen to exist.
+**A layer declares its structure**, and it is never inferred from whether edges happen to exist.
 
-**Two admissions this forces.** §3's `reach` and §6's frontier are written for the nested case and
-say so nowhere; and **§11's Tier A is the stacked case** — three independent HDBSCAN runs whose
-nesting was never verified — so the campaign measured stacked-level membership while the surrounding
-prose assumed nested. Nothing in the *sizing* results depends on it (they are properties of Morton
-contiguity, not of edges), but no measurement here supports a claim about rollup.
+**One admission this leaves.** §3's `reach` and §6's frontier are written for the treed case and say
+so nowhere, and **§11's Tier A is the stacked case** — three independent runs whose nesting was never
+verified. Nothing in the *sizing* results depends on it, since they are properties of Morton
+contiguity rather than of edges, but no measurement here supports a claim about rollup.
 
 ### 6.3 Three selection regimes, chosen by what the artifact is
 
@@ -885,11 +895,29 @@ draw the whole level, mask the counts.** There is no descent and no frontier, be
 a boundary discloses nothing (§8.2) — the disclosure is entirely in the number beside it.
 
 ***Corpus-derived hierarchies with no canonical scale — the clustering case.*** An embedding
-projection has no units, so a level corresponds to no zoom and there is nothing to declare. Every
-candidate is tested independently against the existence criterion on its own membership
-([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)); if the layer is
-**nested**, display pruning then decides how much passing sub-structure to show, and if it is
-**stacked** the choice of level is the client's.
+projection has no units, so no resolution corresponds to a zoom and there is nothing to declare.
+Every candidate is tested independently against the existence criterion on its own membership
+([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)). For a treed layer a
+viewport then intersects a root **and** every passing descendant of it, so something must bound the
+response, and **that bound is a request parameter in the shape of the mark budget a viewport already
+carries** ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)); the layer
+declares only its default, which is what `prune_children` is. Since artifacts cannot be sampled
+(§6.1), a budget is met by **serving ancestors instead of their descendants** — the *reduce by the
+layer's own structure* route, and the reason rollup still has a job now that per-artifact testing has
+taken its disclosure one away. For a stacked layer the choice of level is the client's and no cut
+arises.
+
+**The depth of that cut is free, and the resemblance to §8.4 is the trap.** §8.4 fixed maximum depth
+against `M_auth` and never `M_sel` because *there* the depth was itself the disclosure control, and a
+filter that deepened it would have differenced a suppressed node into view — the operational form of
+**I12**. Here the control is the criterion, evaluated per artifact against `M_auth`, so a shallower
+cut serves strictly less and a deeper one serves only artifacts that already passed their own test.
+**A budget is not a control**, and the two must not be conflated for occupying the same place in a
+request. ⊘ **A budget resolving to different depths in different branches is the honest general case
+and is unspecified**: one depth for the whole tree is what a first implementation does, and it is
+visibly wrong on an unbalanced tree, which is every real clustering. ⊘ **The cut is unmeasured** — a
+walk over the edges of the passing set within the viewport, bounded by that set rather than by the
+tree, with an unknown constant.
 
 ⊘ **The filter axis is unresolved, and decision 0080 removed the last mechanism that gave it a
 partial answer.** An earlier revision here ran a display threshold against `M_sel` — the filtered
@@ -1026,9 +1054,9 @@ live suppression check on the layer's own entity running ahead of the cached res
 resolve-once-at-authorise rule this section previously stated). A gate-failed name and a
 never-registered name stay indistinguishable in outcome and in work.
 
-Per layer: identity, structure (flat or hierarchical, level count), the zoom-to-level map, the
-declared derived vocabulary, which slices it appears in, and what kinds of supplied content its
-artifacts carry.
+Per layer: identity, structure (whether it carries edges, and its declared levels if any), the
+zoom-to-level map where levels exist, the default cut depth, the declared derived vocabulary, which
+slices it appears in, and what kinds of supplied content its artifacts carry.
 
 **Never the artifact cardinality.** A count of artifacts in a layer is a corpus-wide count over
 objects the principal may not individually see, which is C8's row.
@@ -1049,12 +1077,12 @@ gate and a lifecycle, a **level** is a resolution within one. So the recasts bel
 each with one or more levels — and an earlier revision of this section said "level" throughout where
 it meant "layer".
 
-| Existing thing, as a layer | Its artifacts | Its levels | Membership |
+| Existing thing, as a layer | Its artifacts | Its structure | Membership |
 |---|---|---|---|
-| A clustering | clusters | the levels it was cut at | stored (§2) |
-| The density underlay (§7.3) | Morton cells | one per depth — covering, strictly nesting | **computed**: the cell is a prefix of the row's own Morton code, so nothing is stored |
-| A category column | values | one | the value column, already built |
-| The term index | terms | one | postings — non-partitioning |
+| A clustering | clusters | a tree in its edges, no levels (§6.2) | stored (§2) |
+| The density underlay (§7.3) | Morton cells | levels *and* lineage — one level per depth, covering and strictly nesting, so the two agree | **computed**: the cell is a prefix of the row's own Morton code, so nothing is stored |
+| A category column | values | one level, no lineage | the value column, already built |
+| The term index | terms | one level, no lineage | postings — non-partitioning |
 
 **The density row is the one that pays.** A point's cell at depth *d* is a prefix of its row ID, so the
 membership is free — the cell is derivable, never stored; and the masked count of a cell is `range_cardinality` over a contiguous
@@ -1062,10 +1090,10 @@ range — §7.1's existing operation, not a scan. The old taxonomy already carri
 this class — *"a Morton range — none: the range **is** the subset"* — as an observation with no
 mechanism behind it. This is the mechanism.
 
-What the recast buys is **one serving path**: a client receives levels of artifacts with masked counts,
-whether those artifacts are clusters (stored column), density cells (computed) or boundaries (bitmaps),
-and the zoom-to-level map generalises a level-of-detail story the corpus currently tells twice — once
-for tiles and once for the frontier.
+What the recast buys is **one serving path**: a client receives artifacts with masked counts, whether
+those are clusters (a tree, cut to a budget), density cells (computed, one level per depth) or
+boundaries (bitmaps), and one level-of-detail story replaces the two the corpus tells separately for
+tiles and for annotation structure.
 
 **The hazard, and it is why the unification needs stating carefully: these levels share a shape, and
 each carries its own disclosure rule.** Density cells serve exact masked counts at any depth with no
@@ -1154,8 +1182,9 @@ in-memory by necessity as well as by design, and reports resident sizes alongsid
   choice. The file layout in §2.4 is provisional until this lands.
 - **M3 → a decision record**, and if taken, a change to the build's signature-sort comparator. It
   cannot be retrofitted under **I9**, so it is decided before the first build that writes artifacts.
-- **M4 → §6's zoom-to-level map** becomes either a required declaration or an optimisation, and the
-  serving section gets its cost table.
+- **M4 → §6's zoom-to-level map** is settled by ruling rather than by measurement: it is advisory
+  metadata, it bounds no work, and a treed layer has none
+  ([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md), §6, §6.2).
 - **M5 → §2.3's width rule** becomes measured or is withdrawn.
 - **M6 → §8's escalation resolves**, either dissolving the register row or confirming it.
 
@@ -1227,7 +1256,11 @@ frontier is a per-artifact test
 ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)), and replacement is
 distinguished from edit by identity
 ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md), which
-withdrew §5.0.2's publish-time refusal).
+withdrew §5.0.2's publish-time refusal). Two later rulings restructure §6: a layer's lineage is its
+**edges** and its levels are declared resolutions, which are independent structures
+([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md), §6.2), and
+what bounds a treed layer's response is a **request-time artifact budget** rather than a declared
+depth ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md), §6.3).
 
 **Still open beneath them:** the fold's Rule F membership clause (§5.0.3, live once decision 0072
 is built), ⊘ the filter axis (§6.3), ⊘ a packaging for membership (§2.4), ⊘ the proportional
@@ -1311,6 +1344,18 @@ document had one cause — reasoning about entity space while designing a row-sp
 error was invisible from inside the argument that made it.
 
 ## Appendix R
+
+**r4 — 2026-08-16. Promoted to normative.** §6.2 is rewritten onto
+[decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md): a tree and a
+level set are different structures and independently declared, so a treed layer declares no levels
+and sits entirely at level 0 on one reserved entity run, while levels remain for balanced semantic
+resolutions and for stacked independent analyses. §6.3 gains
+[decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)'s request-time budget and
+the reason a budget is not a disclosure control. §6's opener no longer claims the zoom-to-level map
+bounds the work — it contradicted this document's own §8 measurement two paragraphs later, and the
+map is advisory, absent entirely for a treed layer; M4 (§11.2) is thereby settled by ruling rather
+than by measurement. §10's table separates lineage from levels for each recast. The architecture
+amendments this design owed are performed (r43).
 
 **r3 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. The entity-ID region is
 settled downward (§4), the visibility predicate carries the flag, the criterion and variation

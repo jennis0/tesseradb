@@ -463,13 +463,19 @@ per-tile is a property of a lean schema, not a constant.
 
 ### 5.2 Thresholds and the frontier
 
-**Two thresholds, with different jobs, and filtering may relax neither.** §8.4 governs the frontier — the
-set of cluster labels shown at a given zoom. The naive implementation gets the direction wrong:
-`M_sel ⊆ M_auth`, so filtered counts are never higher, and descending on `M_sel` against a fixed threshold
-would make the frontier uniformly *coarser* as someone types, dissolving the map exactly when it is most
-needed. So `min_visible_members` is evaluated against **`M_auth`** and sets the maximum depth — a
-disclosure control and the operational form of **I12**, *a filter may move the frontier up, never down* —
-while a much smaller display threshold against `M_sel` decides how far within that bound to descend.
+**Filtering may relax no disclosure control, and that half is settled.** §8.4 governs which cluster
+labels are shown. The **existence criterion** — `min_visible_members` in the config, §7.5's threshold —
+is evaluated against **`M_auth`** and never `M_sel`, per node and independently of any other node, which
+is the operational form of **I12**: *a filter may move the frontier up, never down.*
+
+⊘ **The display half is open, and the mechanism this section described is withdrawn** *(2026-08-16,
+architecture r43,
+[decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md))*. It was a second, much
+smaller threshold evaluated against `M_sel` inside a root-down descent, deciding how far within the
+maximum depth to go; the descent is gone and that threshold with it, and nothing yet says what a filter
+does to artifact display. The direction argument survives as a constraint on whatever replaces it:
+`M_sel ⊆ M_auth`, so filtered counts are never higher, and a *fixed* bar against `M_sel` stops earlier
+everywhere — dissolving the map as someone types, exactly when it is most needed.
 
 The selection threshold takes its total from **`M_auth`**, never `M_sel`. Anchoring on filtered counts would
 make θ a function of the filter, and both **I12** and §8.4 break at once.
@@ -688,6 +694,17 @@ needs and the arm as declared does not carry:
 ---
 
 ## Appendix R — review trail
+
+**2026-08-16 — §5.2's display threshold is withdrawn with §7.5's descent** (architecture r43,
+decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md),
+[0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
+[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)). Nodes are tested individually
+against `M_auth`, so the second bar this section described — evaluated against `M_sel` inside the
+walk — has no walk to sit in. **The disclosure half is unchanged and is the half this design owns**:
+containment and the existence criterion never see `M_sel`, which is **I12**'s operational form. What
+a filter does to artifact display is ⊘ open and is named as such rather than left reading as
+specified. §9's coverage claim is untouched — the frontier half of **I12** was already blocked on
+machinery this design does not build, and still is.
 
 **2026-08-12 — the second operand kind lands** (decision 0068). §2 gains the row-space set bounded by
 the request's own domain, which a rendered column's leaf resolves to, and §6 records what `/v1/meta`

@@ -19,7 +19,8 @@ overlap; the rest take it so that a stage's diff stays separable and the main tr
 **Reads with:** [`design/annotations.md`](design/annotations.md) (the model),
 [`design/annotation-representation.md`](design/annotation-representation.md) (the representation),
 [`design/annotation-write-cycle.md`](design/annotation-write-cycle.md) (the write cycle) — all three
-**reviewed and ruled** (decisions 0074–0081), provisional pending promotion;
+**normative** as of 2026-08-16 (decisions 0074–0083; the architecture amendments they owed are
+performed at r43);
 [`design/correctness-suite.md`](design/correctness-suite.md) §12 (the fixture
 machinery this extends); [`probes/dataset.md`](../probes/dataset.md) (the corpus);
 [`probes/2026-08-15-artifact-representation/`](../probes/2026-08-15-artifact-representation/) (the
@@ -34,13 +35,13 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
-| **0** Rulings and promotion | **ruled, bar search** — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md) and the eight rulings. Open: search's gate (ruling 5), the filter axis, membership packaging, the proportional denominator; two architecture amendments owed (§7.5, §7.7) |
+| **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
 | **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it, and the geometry read moved so it costs no extra pass; verified on the real 2.4M corpus. The registry is not started |
 | **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | — |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
-| **5** Hierarchy, levels, selection | not started | the non-covering case behaves as the design says under both pruning settings, and the build named the lossy edge in advance | — |
-| **6** Predicate membership | not started | the taxonomy layer returns identical masked counts as an enumerated layer and as a predicate one | — |
+| **5** Trees, levels and the cut | not started | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | — |
+| **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
 | **8** Filters, search, scale | not started | an invisible artifact and a nonexistent one cost the same; 10⁹ points with ~10⁷ artifacts serves and folds inside budget | — |
 
@@ -58,12 +59,16 @@ before the first build that writes an artifact or not at all. It also renumbers 
 every fixture, so it wants to be taken *once*, in the same rebuild as the full-schema 2.4M corpus
 [#88] is already committed to.
 
-**All three designs are reviewed and ruled, and not yet normative.** The Stage 0 review's findings
-are dispositioned by decisions 0074–0081; what remains before promotion is search's containment
-gate (the one open ruling), the register rows, and the two amendments the rulings owe the normative
-architecture — §7.5's descent (decision 0080) and §7.7's ladder (decision 0078). The roadmap gates
-this work on the three designs becoming normative. Writing code against an unpromoted draft here
-means writing it twice.
+**All three designs are normative**, as of 2026-08-16. The Stage 0 review's findings are
+dispositioned by decisions 0074–0083, the register carries their rows, and the two amendments the
+rulings owed the normative architecture are performed — §7.5's descent and §7.7's ladder, with
+§8.4's second threshold withdrawn alongside them (architecture r43). The roadmap's gate on this work
+is discharged. **Five items stay open inside those normative documents**, marked ⊘ at their sites and
+allocated to the stages that need them: search's containment gate and the filter axis (Stage 8),
+membership packaging (Stage 2), the proportional criterion's denominator for predicate membership
+(Stage 6), and the edit pass (Stage 7). None of them touches the spine, which is why promoting
+before they close was the cheaper order — the alternative was holding an implementer on a question
+about search.
 
 Everything else is ordinary sequencing: a layer must exist before an artifact, an artifact before
 its content, content before the events that can invalidate it.
@@ -78,8 +83,8 @@ inherit it.
 
 ## 2. Stage 0 — what must be settled, and what it blocks
 
-No code. The adversarial review is run and the ruling pass is made (decisions 0074–0081); what
-remains is promotion — search's gate, the register rows, and the two architecture amendments.
+No code, and it is finished. The adversarial review is run, the ruling pass is made (decisions
+0074–0083), the register rows are written and the two architecture amendments are performed.
 
 | What | State | Blocks | Note |
 |---|---|---|---|
@@ -90,6 +95,8 @@ remains is promotion — search's gate, the register rows, and the two architect
 | **Review ruling 4** — the artifact **edit** mechanism | **deferred to its own design pass** *(owner, 2026-08-15)* | Stage 7 only | not load-bearing: publishing and republishing artifacts needs no edit route. Two consequences, both stated rather than discovered — the emergency path becomes *suppress, then republish* (slower, not weaker), and runtime selections, whose whole lifecycle is editing, wait for it |
 | Where supplied content **lives** | ✔ **ruled** — [decision 0077](decisions/0077-supplied-content-lives-in-the-record-blob.md) | Stage 3 | the record blob, at the artifact's entity. Its addressing is rank in the blob's **own** has-row bitmap, independent of row space, so an artifact having no row does not bear on it |
 | **Review ruling 5** — how search gates on containment | open | Stage 8 | the term-signature conjunction is the candidate shape; the route stays withdrawn until ruled, which costs nothing before Stage 8 |
+| **A hierarchy lives in its edges; levels are resolutions** | ✔ **ruled** — [decision 0082](decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md) | Stage 5 | a condensed tree is unbalanced, so a level number says nothing about lineage. A treed layer declares **no levels**; levels stay for balanced semantic resolutions and for stacked independent analyses, and the two are independent declarations. Rollup then falls out of per-artifact testing — ⊘ under an **absolute** criterion only, since a ratio does not shrink downward |
+| **The frontier is a request-time budget** | ✔ **ruled** — [decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | Stages 2, 5 | levels had been bounding the response quietly; with the tree in edges a viewport intersects a root and every passing descendant. The cut's depth becomes a request parameter beside the mark budget, met by serving ancestors and never by sampling. **A budget is not a disclosure control** — every artifact it returns passed its own test — which §8.4's maximum depth was, and the two occupy the same place in a request |
 | Implement [0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) — slot reuse | **deferred, deliberately** *(owner, 2026-08-15)* | nothing here | not a dependency: artifacts need identity, the deny lane and the opaque identifier, none of which need reuse. Deferring **removes** the recycled-slot fail-open rather than carrying it; the membership-reconciliation clause ships with it whenever it lands |
 | **The signature-sort tiebreak** (rep §12) | ✔ **ruled 2026-08-15** — [decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) | Stage 1 | taken: allocation becomes `(signature, morton_code, source_id)`. Free in the format and *measured* so; what it costs in the build's batch plan is named there and sized in Stage 1 |
 | The descent change — per-artifact test replacing §7.5's tree walk | ✔ **ruled** — [decision 0080](decisions/0080-the-frontier-is-a-per-artifact-test.md) | Stage 5 | dropped. Non-covering hierarchies make the walk ill-defined; the rollup promise weakens and the caller supplies a covering top level if they want it. ⊘ §7.5 amendment owed |
@@ -97,8 +104,8 @@ remains is promotion — search's gate, the register rows, and the two architect
 | The three gate modes | ✔ **ruled** — [decision 0079](decisions/0079-the-gate-is-one-flag-not-three-modes.md) | Stages 1–2 | they were a two-by-two in three names. One flag — does the artifact carry its own terms — beside the independent criterion, which also stops a schema word disabling a disclosure control |
 | The suppression-carry refusal | ✔ **withdrawn** — [decision 0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | — | the premise was wrong: a refresh need not mint identities. An **edit** keeps them and suppressions survive natively; a **replacement** ends them and nothing carries, correctly. A report replaces the refusal; the stable key is optional again |
 | Membership as a filter (rep §7) | open | Stage 8 | a disclosure question, not a cost one |
-| Appendix C edits: C1 gains layers as a differencing surface; a C23-shaped row for the own-terms flag; a C12-shaped row for the corpus-independence declaration; C17 annotated; C7's disposition (already written, r42) | part done | Stages 2–4 | the register is exhaustive by construction or it is not a register |
-| `derived-artifact-gating.md` — retired | **decided; deletion owed at promotion** | promotion | its taxonomy is superseded; what existed nowhere else — the point-scale edge argument, the edge gate's form, the induced-subgraph sampling problem — is carried in the model (§5, §11), and the roadmap's gate now names the three successors |
+| Appendix C edits | ✔ **done** — architecture r43 | Stages 2–4 | **C1** annotated twice: a criterion bounds a grouping's existence and shape and **never its count**, which §7.1 and §7.3 already serve exactly, so a compact artifact's masked count is recoverable by summing the underlay whatever it declares; and where several layers cover the same points, the most permissive declaration governs what is recoverable about all of them. **C27** — the own-terms flag, C23-shaped. **C28** — the corpus-independence declaration on supplied content, C12-shaped, `High if mis-declared`. **C17** — an artifact identifier probes the same channel and stays inside the same bound. C7's disposition was already written (r42) |
+| `derived-artifact-gating.md` — retired | ✔ **deleted** 2026-08-15 | — | its taxonomy is superseded; what existed nowhere else — the point-scale edge argument, the edge gate's form, the induced-subgraph sampling problem — is carried in the model (§5, §11), and the roadmap names the three successors |
 
 **Two design items are owed and are not rulings.** The entity budget under repeated replacement —
 a 10⁷-artifact layer mints 10⁷ IDs per wholesale replacement against a `u32` space (write-cycle §9; the burn is replacement's, not the model's — decision 0081), with
@@ -216,7 +223,10 @@ never the cluster's size.
   visibility set as candidacy only, keyed on `(layer, version, generation)`.
 - Viewport carries the artifacts whose rows intersect the tile ranges, with masked counts.
   Drill-down by `tessera_id` resolves through the resolved set. Ordinals never cross the wire.
-- Contracts work: the viewport frame and `/v1/items` shapes for an artifact.
+- Contracts work: the viewport frame and `/v1/items` shapes for an artifact — including the
+  **artifact budget** request field, which a flat layer ignores. It is defined here rather than at
+  Stage 5 because it is a wire shape, and adding a request field to a shipped frame later is the
+  change this ordering exists to avoid ([decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md)).
 
 **The check:** on the real 2.4M clustering, a broad principal and a one-term principal receive
 different counts for the same cluster, neither equal to its declared size; clusters below the criterion
@@ -267,37 +277,55 @@ stage exists for: delete a member of a label's generating set, watch the label v
 run a fold, and **it stays gone**. **Data:** the seeded generator at 10⁶–10⁸ (§5.1) — real data
 cannot carry this, because the check is "nothing is missing or extra" over all *n*.
 
-### Stage 5 — Hierarchy, levels and selection
+### Stage 5 — Trees, levels and the cut
 
-**Capability:** several levels of structure, chosen by zoom or by the client, with rollup that is
-honest about what it cannot cover.
+**Capability:** a layer's lineage lives in its edges, its levels are declared resolutions, and a
+viewport returns a cut through the tree that fits what the client can draw.
 
-- Parent/child edges; per-artifact criterion testing rather than a tree walk (decision 0080);
-  display pruning as a declared policy per layer with a per-level override that may only **raise**
-  the criterion.
+- Parent/child edges as the hierarchy, with per-artifact criterion testing and no walk
+  (decision 0080). A treed layer declares **no levels** and sits at level 0 on one reserved run; a
+  levelled layer declares them, and may carry edges as well, which is the administrative case
+  (decision 0082).
+- The **request-time artifact budget** (decision 0083), in the shape of the mark budget a viewport
+  already carries, met by serving ancestors instead of their descendants and never by sampling.
+  `prune_children` becomes the layer's default rather than its only setting. ⊘ One depth for the
+  whole tree is what this stage builds; a budget resolving to different depths in different branches
+  is the honest general case and is unspecified.
+- Display pruning as a declared policy per layer, with a per-level override on levelled layers that
+  may only **raise** the criterion.
 - Build-time containment verification that **reports** violating edges rather than deciding
   anything.
-- Nested against stacked declared, never inferred; the zoom-to-level map as advisory metadata.
 - **A level is served partially and never withheld because part of it is suppressed.**
 
-**The check:** the non-covering case on real data — a principal holding only the term covering a
-child's stray members sees nothing with pruning on and sees the child with pruning off, and the
-build's report named that edge in advance. **Data:** the real clustering's four levels, whose
-non-covering edges are a property of HDBSCAN and not planted (§5.2).
+**The check** has three parts, and the middle one is the reason this stage is not just plumbing.
+*The non-covering case on real data:* HDBSCAN's children are subsets of their parents but do not
+exhaust them, so a principal holding only the term covering a parent's stray members sees that parent
+and no child, and the build's report named the edge in advance. *The criterion's two forms, which
+diverge here and nowhere else:* under `min_visible` a passing child never sits beneath a failing
+parent, and under `min_fraction` one does — a run that fails to reproduce that gap has not exercised
+the proportional form at all. *The budget:* a cut at one depth and a cut at a deeper one agree on
+every artifact both return, and neither reveals an artifact that failed its own test. **Data:** the
+real clustering's condensed tree, whose non-exhausting splits are a property of HDBSCAN rather than
+something planted (§5.2).
 
 ### Stage 6 — Predicate membership
 
-**Capability:** a boundary or a category behaves as a layer, with membership derived per request and
-never stale.
+**Capability:** a boundary or a tagged set behaves as a layer, with membership derived per request
+and never stale.
 
 - Spatial predicate: the shape only, decomposed to Morton ranges, counted by `range_cardinality`.
 - Attribute predicate: no new storage — the existing value column and postings.
 - The per-request bound the design does not yet specify (§2 above).
+- ⊘ The proportional criterion's denominator, which this stage is where it bites: *"the points inside
+  this shape"* declares no member set and its size changes at every write. Until it is ruled a
+  predicate layer may declare an absolute criterion or none.
 
-**The check:** the arXiv taxonomy layer is built twice — once enumerated at Stage 5, once as an
-attribute predicate here — and the two return **identical** masked counts for every principal and
-every viewport; a point ingested inside a boundary is a member on the next request with nothing
-rebuilt. **Data:** `taxonomy/arxiv-2026-08` and `regions/synthetic-geo` (§5.2).
+**The check:** the tagged-programme layer is built twice — once enumerated, once as an attribute
+predicate here — and the two return **identical** masked counts for every principal and every
+viewport; a point ingested inside a boundary is a member on the next request with nothing rebuilt.
+The layer earns the attribute source by declaring **derived** geometry: a tagged set with nothing to
+draw is a category, and the model sends that case to a column rather than to an artifact. **Data:**
+`programmes/portfolio` and `regions/synthetic-geo` (§5.2).
 
 ### Stage 7 — Runtime artifacts
 
@@ -374,25 +402,51 @@ that reaches 10⁹ without a bundle on disk, following the decomposition probe's
 
 The corpus is 2,422,486 real arXiv papers with real BGE→PCA→UMAP coordinates, real categories and
 real author surnames — so the *access terms* are real, which is what makes a containment test mean
-something. Seven layers, each earning its place by being the case some stage cannot test without it:
+something. Six layers, each earning its place by being the case some stage cannot test without it:
 
-| Layer | Artifacts | Membership | Gate | Content | The case it carries |
-|---|---:|---|---|---|---|
-| `clusters/hdbscan-2026-08` | 8 / 111 / 884 / ~10⁴ over four levels | enumerated | no own terms; criterion | count, centroid, hull | the baseline; 20–25% noise means **non-covering in both directions**, which is the shape model §6 exists for |
-| `topics/ctfidf-2026-08` | ~3 per cluster, plus per-term variants | enumerated (the sample) | no own terms; no criterion — containment decides | label text from real titles | the containment result that surprises: broad and narrow viewers fail the *same* label |
-| `centroids/kmeans-2026-08` | 4,000 flat | enumerated | no own terms; criterion | **supplied** centre+radius fitted over full membership | model §8.6's trap — supplied geometry that looks derived; a viewer failing its containment sees no artifact (decision 0076), and the everyone-visible remedy is a last-ranked variation |
-| `taxonomy/arxiv-2026-08` | ~60 archives → ~176 subject classes | attribute predicate (the real `categories` column) | own terms `public`; no criterion | authored names | a **covering** hierarchy, zero-count artifacts, and Stage 6's two-membership-sources equality check |
-| `regions/synthetic-geo` | ~2,000 | spatial predicate | own terms `public`; no criterion | authored polygons | the perimeter cost, and §5.1's "draw all boundaries or gate them" trap |
-| `selections/analyst-*` | ~50 | enumerated, scattered | own terms: per-analyst; no criterion | none | model §8.3 — the set of ten that shows seven |
-| `programmes/portfolio` | ~30 | enumerated | own terms: any principal; no criterion | authored name and extent | model §8.5 — a named programme with a **zero** count and no hull |
+| Layer | Artifacts | Structure | Membership | Access | Content | The case it carries |
+|---|---:|---|---|---|---|---|
+| `clusters/hdbscan-2026-08` | ~10⁴ nodes | **a tree in its edges**, no levels | enumerated | no own terms; criterion | count, centroid, hull | the baseline. 20–25% noise means children are subsets of their parents but never exhaust them, which is exactly the shape per-node testing exists for, and the tree the budget cuts |
+| `topics/ctfidf-2026-08` | ~3 per cluster, plus per-term variants | attached by edge | enumerated (the sample) | no own terms; no criterion — containment decides | label text from real titles | the containment result that surprises: broad and narrow viewers fail the *same* label |
+| `centroids/kmeans-2026-08` | 4,000 | flat | enumerated | no own terms; criterion | **supplied** centre+radius fitted over full membership | model §8.6's trap — supplied geometry that looks derived; a viewer failing its containment sees no artifact (decision 0076), and the everyone-visible remedy is a last-ranked variation |
+| `regions/synthetic-geo` | ~2,000 over three scales | **levels *and* lineage** — they agree | spatial predicate | own terms `public`; no criterion | authored polygons and names | the administrative case decision 0082 names, where a level number and a tree depth mean the same thing — the only shape in which reading one as the other is safe. Also the perimeter cost and §5.1's "draw all boundaries or gate them" trap |
+| `programmes/portfolio` | ~30 | flat | **attribute predicate**, and an enumerated twin built from the same rule | own terms: any principal; no criterion | authored name, **derived** extent | Stage 6's equality check — the same layer by rule and by list must return identical masked counts — and model §8.5's programme with a **zero** count and no hull |
+| `selections/analyst-*` | ~50 | flat | enumerated, scattered | own terms: per-analyst; no criterion | none | model §8.3 — the set of ten that shows seven |
 
-**Three things this fixture must get right, each of which has already gone wrong once:**
+**A seventh layer was dropped rather than descoped.** arXiv subject classes were carrying the
+attribute-predicate arm, and the configuration exercise found the model sends exactly that case to a
+**category**: the value belongs to the corpus's own vocabulary, thousands of items carry it, and
+nothing is drawn. A fixture built on it would have tested artifacts against a thing the design says
+should not be an artifact. The tagged programme takes the arm instead, and earns it only because it
+declares derived geometry — without something to draw it is a category with extra steps.
+
+**One register claim is checked without a fixture of its own.** C1 now records that a criterion
+bounds a grouping's existence and shape and never its count, because the density underlay already
+serves exact masked counts at any depth. The check is therefore against machinery that exists: sum
+the underlay across a below-criterion cluster's extent and recover the count the criterion withheld.
+It belongs to Stage 2's battery and needs no new layer — the point is that the recovery **succeeds**,
+and that the register says so.
+
+**Four things this fixture must get right, each of which has already gone wrong once:**
+
+*The clustering ships as a condensed tree, not as cut levels* — and this is new, from
+[decision 0082](decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md). The campaign
+produced three independent HDBSCAN runs at three `min_cluster_size` settings, which is the **stacked**
+case and has no lineage at all; the fixture this stage needs is one run whose condensed tree is
+exported with its parent/child edges intact. That is the shape the library already computes and the
+one an earlier plan discarded by cutting it into levels. Both fixtures are worth having — the stacked
+one is a real configuration and tests the other half of §6.2 — but they are **two layers, not one**,
+and the treed one is the baseline.
 
 *The clustering is HDBSCAN on a 250k sample with every row assigned by nearest centroid and the
 noise fraction restored by a distance cut* — that is what the campaign ran, and it bounds what the
 fixture licenses: the cluster count and noise fraction are HDBSCAN's, the fine boundary detail is
-not. Worth one attempt at full 2.4M HDBSCAN on the GPU over the 2-D projection before accepting the
-sample; if it does not run, the caveat is carried in the fixture's manifest rather than in someone's
+not. ⊘ **Nearest-centroid assignment does not extend the condensed tree**, which is a consequence of
+the change above rather than a known problem: a row assigned to a leaf by distance has no place in
+that leaf's ancestry unless the assignment is propagated up the edges, and whether that reproduces
+HDBSCAN's own membership is unverified. Worth one attempt at full 2.4M HDBSCAN on the GPU over the
+2-D projection before accepting the sample, which would dissolve it; if that does not run, the
+propagation rule and this caveat are carried in the fixture's manifest rather than in someone's
 memory.
 
 *Geographic shapes are drawn at native density.* The campaign's 56× corridor figure was its own
@@ -418,10 +472,14 @@ Label text per replica is recombined from the real title vocabulary deterministi
 replica index: it reads like an arXiv topic and is a sentence nobody wrote. Generating sets are
 sampled per replica exactly as at 2.4M.
 
-Arithmetic, *modelled*: 413 replicas × 884 at L2 ≈ **3.7×10⁵** artifacts at 10⁹; a fourth level at
-`min_cluster_size ≈ 6` is expected to give ~10⁴ per replica, so ≈ **4×10⁶**. Reaching the design's
-10⁷ ceiling needs a fifth level or a top-up from the seeded generator — decided by measuring the
-fourth level's count, not by predicting it.
+Arithmetic, *modelled*, and **restated on tree nodes rather than cut levels**
+([decision 0082](decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)): the count
+that matters is a condensed tree's total node count per replica, not a chosen level's width. At
+`min_cluster_size ≈ 6` the 2.4M tree is expected to carry ~10⁴ nodes, so 413 replicas give
+≈ **4×10⁶** artifacts at 10⁹. Reaching the design's 10⁷ ceiling needs a smaller
+`min_cluster_size` or a top-up from the seeded generator — **decided by measuring the tree, not by
+predicting it**, and the measurement is now one number per run rather than one per level, which is
+the small practical gain the ruling brings here.
 
 **What does not transfer, stated so nobody quotes it later:** cluster *semantics* (a replica's
 cluster means nothing), and the fact that the same paper appears 413 times, which makes any
