@@ -7912,7 +7912,12 @@ impl Executor {
             // in extents of its own but on the same list and behind the same reader. Artifact and
             // point entities are disjoint by construction — two regions, growing towards each other
             // — so the rows never collide and each side reads its tags against its own declaration.
-            match self.write_content_extent(&prefix_dir, partition, n) {
+            match self.write_content_extent(
+                &prefix_dir,
+                partition,
+                live.bundle.partitions.len(),
+                n,
+            ) {
                 // **Assigned from the held list, never pushed onto the clone.** The manifest this
                 // publication started from is the *stale* generation's, so extending it drops
                 // every earlier publication's entry — and an artifact whose content extent is
@@ -7991,11 +7996,32 @@ impl Executor {
         &self,
         prefix_dir: &std::path::Path,
         partition: &str,
+        partitions: usize,
         n: u64,
     ) -> tessera_store::Result<Option<tessera_store::manifest::RecordExtent>> {
         let rows = self.live.unpublished_content();
         if rows.is_empty() {
             return Ok(None);
+        }
+        // **An artifact belongs to no partition**, and this loop runs once per partition — so a
+        // second partition would receive an extent holding the *same* artifact entities, and two
+        // layers of one record stack whose has-row bitmaps overlap is a state the stack refuses
+        // outright, breaking every later coalesce of a window containing both.
+        //
+        // Refused rather than guessed. Which partition should own an artifact's content, or whether
+        // the rows should be split across them by some rule, is a layout question a multi-partition
+        // bundle has to answer and nothing here can: writing to the first partition alone would
+        // leave the content unreadable from a slice carried by another, and writing to all of them
+        // is the overlap above. No such bundle exists today (nothing splits one), which is why this
+        // is a refusal with an alarm rather than a design.
+        if partitions > 1 {
+            return Err(tessera_store::StoreError::MalformedBundle {
+                detail: format!(
+                    "this bundle has {partitions} partitions and an artifact belongs to none of \
+                     them, so where its supplied content should be written is undecided; the \
+                     publication is refused rather than writing the same rows into every partition"
+                ),
+            });
         }
 
         let extents_rel = format!("partitions/{partition}/attrs/record/extents");

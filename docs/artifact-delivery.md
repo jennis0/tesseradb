@@ -485,8 +485,13 @@ durability lens found one serious defect and three real ones, all now fixed:
   after. The row is abandoned whole now.
 - The fold's refusal on a corpus with no blob-resident column names the wrong cause once artifact
   content exists (⊘ Stage 4's fold pass owns it; the refusal is currently shadowed by the membership
-  one, so nothing changes in practice), and ⊘ `write_content_extent` is not partition-scoped, which
-  would write the same artifact rows into every partition of a multi-partition bundle.
+  one, so nothing changes in practice). **The multi-partition case now refuses loudly**: an artifact
+  belongs to no partition, so writing its content once per partition would give one record stack two
+  layers with overlapping has-row bitmaps — a state the stack refuses outright, breaking every later
+  coalesce over a window holding both. Which partition should own it, or how the rows should be
+  split, is a layout question only a multi-partition bundle can answer and none exists; refusing is
+  the honest placeholder. ⊘ The extent is still absent from `manifest.files`, so a torn one is
+  unattributable to a digest.
 
 **What the review confirms about the uniform-storage ruling.** A coalesce over an extent holding
 both point and artifact rows composes correctly, and a fold over one loses nothing — because the
