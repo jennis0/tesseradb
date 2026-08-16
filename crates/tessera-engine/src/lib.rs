@@ -262,6 +262,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
         dict_extents: Vec::new(),

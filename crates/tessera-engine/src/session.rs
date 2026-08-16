@@ -1029,6 +1029,11 @@ impl Engine {
                 .get(&partition)
                 .map(|p| p.manifest.record_extents.clone())
                 .unwrap_or_default();
+            let artifact_record_extents = bundle
+                .partitions
+                .get(&partition)
+                .map(|p| p.manifest.artifact_record_extents.clone())
+                .unwrap_or_default();
             let text_extents = bundle
                 .partitions
                 .get(&partition)
@@ -1042,6 +1047,7 @@ impl Engine {
                     &bundle.manifest.vocabularies,
                     &extents,
                     &record_extents,
+                    &artifact_record_extents,
                     &text_extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
@@ -2667,6 +2673,7 @@ pub(crate) fn open_rotation(
             // The record blob rotates with the prefix for the reason the value columns do: the
             // fold rewrites it, and the superseded prefix's files are pre-blanking.
             &partition.manifest.record_extents,
+            &partition.manifest.artifact_record_extents,
             &partition.manifest.text_extents,
             true,
         )

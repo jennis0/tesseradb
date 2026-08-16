@@ -2233,6 +2233,14 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.membership_extents.iter().cloned())
             .collect();
+        // The content half, seeded identically and for the identical reason.
+        let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.artifact_record_extents.iter().cloned())
+            .collect();
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
 
@@ -2289,6 +2297,7 @@ impl WritePath {
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
                     membership_extents: seeded_membership_extents,
+                    artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
@@ -3485,6 +3494,7 @@ mod vocabulary_extensions_tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
@@ -4086,6 +4096,10 @@ struct Executor {
     /// The deny list solves the identical problem by writing complete state from the live overlay;
     /// this is that posture for a list the overlay does not hold.
     membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
+    /// Every artifact **content** extent this node has published, complete current state, held for
+    /// the reason above and written the same way. The two lists travel together: a membership
+    /// without its content leaves an artifact whose description cannot be read, which withholds it.
+    artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
     pending_reclaim: Vec<PendingReclaim>,
     /// The sender pool tasks are given a clone of.
     ///
@@ -5268,6 +5282,7 @@ impl Executor {
             // prefix-relative and the fold publishes a *new* prefix, so carrying them without
             // copying the files would name nothing.
             membership_extents: live_manifest.membership_extents.clone(),
+            artifact_record_extents: Vec::new(),
             segments,
             deltas: carried_tiers.clone(),
             // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
@@ -7898,8 +7913,19 @@ impl Executor {
             // point entities are disjoint by construction — two regions, growing towards each other
             // — so the rows never collide and each side reads its tags against its own declaration.
             match self.write_content_extent(&prefix_dir, partition, n) {
-                Ok(Some(extent)) => manifest.record_extents.push(extent),
-                Ok(None) => {}
+                // **Assigned from the held list, never pushed onto the clone.** The manifest this
+                // publication started from is the *stale* generation's, so extending it drops
+                // every earlier publication's entry — and an artifact whose content extent is
+                // un-named comes back with its description unreadable and is withheld from every
+                // viewer, with the log already released. The membership list above takes this
+                // posture for the same reason; a `push` here reintroduced the bug it fixes.
+                Ok(Some(extent)) => {
+                    self.artifact_record_extents.push(extent);
+                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
+                }
+                Ok(None) => {
+                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
+                }
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -8021,6 +8047,16 @@ impl Executor {
             writer.push_row(entity, &fields).map_err(io(&blocks))?;
         }
         writer.finish().map_err(io(&blocks))?;
+        // **`finish` syncs the blocks and not the two files that address them.** The directory goes
+        // out through an Arrow writer and the has-row bitmap through a plain write, so a crash
+        // after the manifest is durable can leave either torn — and a torn addressing file refuses
+        // the **whole** record stack at open, taking every point's blob-resident field with it.
+        // The membership path syncs per file for the same reason; this one has to do it here
+        // because the blob writer is shared with the flush, which syncs its extent another way.
+        for path in [&hasrow, &directory] {
+            let file = std::fs::File::open(path).map_err(io(path))?;
+            file.sync_all().map_err(io(path))?;
+        }
         tessera_store::fsync_dir(&dir)?;
         Ok(Some(extent))
     }

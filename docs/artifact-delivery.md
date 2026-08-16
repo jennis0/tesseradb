@@ -451,6 +451,44 @@ bound it. No code changed.
   at all (decisions 0076, 0078). The three outcomes are a type rather than an `Option`, because
   *this layer declares no content* and *you may not read this content* are different answers and
   collapsing them serves the second case with its description missing.
+- ⊘ **Supplied content reaches no client.** The engine stores it, gates it and reads it back, and
+  then it stops: the kind-5 frame carries no content column, the drill-down response no field, and
+  `PUT /control/layers/{name}/artifacts` accepts no content — so a layer declaring any is refused
+  every publication through the boundary. The containment rule is exercisable from the engine's
+  tests alone. This is the next piece of Stage 3 rather than an open question.
+
+**The review of the first three commits, and what it changed** *(2026-08-16, two independent
+lenses — disclosure and invariants; correctness and durability)*. The disclosure lens found the
+predicate clean: the criterion, the gate, suppression, the count and the geometry all hold, both
+serving routes agree, and no unmasked quantity or reason-for-absence reaches the wire. The
+durability lens found one serious defect and three real ones, all now fixed:
+
+- **A second publication silently un-named the first one's content extent** — the manifest a
+  publication starts from is a clone of the *stale* generation's, so appending to it drops every
+  earlier entry. Once the log is released, that file holds the only copy of its labels, and its
+  artifacts come back with content that cannot be read and are withheld from every viewer with
+  nothing reporting a fault. **This is the identical bug the membership list was given a held list
+  to fix, reintroduced one line below the fix for it.** Artifact content extents now have their own
+  manifest list, held complete in the executor and assigned rather than extended;
+  `two_publications_of_content_both_survive_the_loss_of_the_whole_log` fails without the fix,
+  losing exactly the first artifact.
+- **The extent's two addressing files were neither fsynced nor digested.** `RecordBlobWriter::finish`
+  syncs the blocks alone, and a torn directory or has-row bitmap refuses the **whole** record stack
+  at open — every point's blob-resident field, not just the artifacts'. Both are synced here now.
+  ⊘ They are still absent from `manifest.files`, so a failure is unattributable to a digest.
+- **The field-tag overflow guard dropped a field where its comment claimed it dropped the row**,
+  which made the in-memory and on-disk copies disagree: served in full before a restart, withheld
+  after. The row is abandoned whole now.
+- The fold's refusal on a corpus with no blob-resident column names the wrong cause once artifact
+  content exists (⊘ Stage 4's fold pass owns it; the refusal is currently shadowed by the membership
+  one, so nothing changes in practice), and ⊘ `write_content_extent` is not partition-scoped, which
+  would write the same artifact rows into every partition of a multi-partition bundle.
+
+**What the review confirms about the uniform-storage ruling.** A coalesce over an extent holding
+both point and artifact rows composes correctly, and a fold over one loses nothing — because the
+two id regions cannot overlap, so a mixed window is two disjoint ranges and the merge's
+disjointness check passes rather than fires. That was the interaction the ruling could not be
+checked against when it was made.
 - The attachment edge, and the term that is fail-open if omitted: an attached artifact is tested on
   its target's `verdict` **and** its target's gate, on every route, including the ones that never
   traverse the edge.

@@ -738,6 +738,7 @@ fn write_manifests(
         layer_tombstones: Vec::new(),
         // A build registers no layers, so it publishes no artifacts and no extents.
         membership_extents: Vec::new(),
+        artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: args.slice_id.clone(),
             seg_id: SEG_ID.to_string(),

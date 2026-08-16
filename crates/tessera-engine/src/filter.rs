@@ -1134,6 +1134,7 @@ impl FilterColumns {
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
         record_extents: &[tessera_store::manifest::RecordExtent],
+        artifact_record_extents: &[tessera_store::manifest::RecordExtent],
         text_extents: &[tessera_store::manifest::TextExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
@@ -1305,8 +1306,14 @@ impl FilterColumns {
         // entities have no record".
         let blob_resident = declared.iter().any(|d| blob_resident(d, vocabularies));
         let record_dir = partition_dir.join("attrs").join("record");
+        // **Both lists, one stack.** Artifact content extents hold the same format and the same
+        // reader as a point's; they are listed separately because their *ownership* differs (see
+        // `SegmentsManifest::artifact_record_extents`), not their bytes. Opening them together is
+        // what makes `fields_of` answer for an artifact entity, and it is safe because the two
+        // never share one: artifact ids descend from the ceiling, point ids ascend from zero.
         let extent_paths: Vec<RecordExtentPaths> = record_extents
             .iter()
+            .chain(artifact_record_extents.iter())
             .map(|e| RecordExtentPaths {
                 blocks: prefix_dir.join(&e.blocks),
                 hasrow: prefix_dir.join(&e.hasrow),

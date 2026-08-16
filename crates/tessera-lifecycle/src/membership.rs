@@ -455,11 +455,25 @@ impl ArtifactStore {
                     for (k, value) in values.iter().enumerate() {
                         let tag = v * values.len() + k;
                         // A layer whose kinds and variations multiply past the tag space cannot be
-                        // written back, and a truncated tag would put one kind's text under
-                        // another's name. Refused by dropping the row, which withholds the artifact
-                        // — the same answer as content that never arrived.
-                        let Ok(tag) = u16::try_from(tag) else { continue };
+                        // written back. **The whole artifact's row is abandoned, not the one
+                        // field**: the reader requires every declared kind or none, so a row
+                        // missing one withholds the artifact — while the *in-memory* copy, tried
+                        // first, would go on serving it in full. Dropping the field alone therefore
+                        // makes the two copies disagree, and which one a viewer gets depends on
+                        // whether the process has restarted since publication.
+                        let Ok(tag) = u16::try_from(tag) else {
+                            // No logging facade in this crate; the withholding is what a reader
+                            // sees, and `supplied_content` refuses on the same condition at the
+                            // other end.
+                            fields.clear();
+                            break;
+                        };
                         fields.push((tag, value.clone()));
+                    }
+                    if fields.is_empty() && !variation.values.as_ref().is_none_or(Vec::is_empty) {
+                        // The break above cleared it: abandon this artifact entirely rather than
+                        // writing the variations that happened to fit.
+                        break;
                     }
                 }
                 if !fields.is_empty() {

@@ -455,6 +455,129 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
     }
 }
 
+/// Delete every member of the WAL sequence — the log is a sequence beside the configured base
+/// path, and the base path itself is never a file.
+fn remove_the_whole_log(fx: &Fixture) {
+    let dir = fx.wal.parent().expect("the log has a directory");
+    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(dir)
+        .expect("the log's directory exists")
+        .flatten()
+    {
+        let name = entry.file_name();
+        if name
+            .to_string_lossy()
+            .starts_with(&format!("{}-", stem.to_string_lossy()))
+        {
+            std::fs::remove_file(entry.path()).expect("a log member is removable");
+            removed += 1;
+        }
+    }
+    assert!(
+        removed > 0,
+        "no log member was found to delete — the test would prove nothing"
+    );
+}
+
+/// Wait for the executor's drain close to publish at least `want` artifact content extents.
+fn content_extents(fx: &Fixture, want: usize) -> Vec<std::path::PathBuf> {
+    let dir = fx
+        .root
+        .join("v00000")
+        .join("partitions")
+        .join("default")
+        .join("attrs")
+        .join("record")
+        .join("extents");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("artifacts-"))
+                    && p.to_string_lossy().ends_with(".blocks.bin")
+            })
+            .collect();
+        if found.len() >= want {
+            return found;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only {} of {want} content extents were published within 10s",
+            found.len()
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// **Two publications, and both labels survive the loss of the log.**
+///
+/// The regression this exists for: an artifact publication starts from a *clone of the stale
+/// generation's* manifest, so a second publication that merely appended its extent to that clone
+/// drops the first one's entry. The file stays on disk, named by nothing — and once the log is
+/// released, the text in it is the only copy. The artifact then comes back with content that
+/// cannot be read and is withheld from every viewer, silently, which is indistinguishable from a
+/// containment failure.
+///
+/// A single publication would pass whatever the manifest did, which is why this publishes twice.
+#[test]
+fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        engine.register_layer(label_layer("topics/a", true)).unwrap();
+        engine
+            .publish_artifacts(
+                "topics/a".into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some("t0".into()),
+                    fx.members(0..100),
+                    vec![variation("the first label", &fx, 0..10)],
+                )],
+            )
+            .unwrap();
+        content_extents(&fx, 1);
+
+        engine
+            .publish_artifacts(
+                "topics/a".into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some("t1".into()),
+                    fx.members(100..200),
+                    vec![variation("the second label", &fx, 100..110)],
+                )],
+            )
+            .unwrap();
+        content_extents(&fx, 2);
+    }
+
+    remove_the_whole_log(&fx);
+    let engine = fx.open();
+    let served = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(
+        served.len(),
+        2,
+        "both artifacts came back from the manifest, with no log to replay: {served:?}"
+    );
+    let labels: Vec<&str> = served
+        .iter()
+        .map(|a| a.content.first().expect("content survived").as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["the first label", "the second label"],
+        "each artifact kept its own text — the first publication's extent must still be named by \
+         the manifest the second one wrote"
+    );
+}
+
 /// The four ways a batch can disagree with what its layer declared, each refused at publication.
 #[test]
 fn content_that_disagrees_with_the_declaration_is_refused() {

@@ -298,6 +298,7 @@ fn fixture() -> Fixture {
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
         &opened.partitions[&phash].manifest.record_extents,
+        &opened.partitions[&phash].manifest.artifact_record_extents,
         &opened.partitions[&phash].manifest.text_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -1087,6 +1088,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &opened.manifest.declared_scalars,
             &opened.manifest.vocabularies,
             extents,
+            &[],
             &[],
             &[],
             true,
@@ -2210,6 +2212,7 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &fx.declared,
         &fx.vocabularies,
         &fx.extents,
+        &[],
         &[],
         &[],
         true,

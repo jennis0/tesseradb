@@ -111,6 +111,7 @@ fn build_bundle(root: &Path) {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: "main".to_string(),
             seg_id: "seg0".to_string(),

@@ -785,6 +785,27 @@ pub struct SegmentsManifest {
     /// exactly what a lost list looks like, and the artifacts are then served as absent with nothing
     /// anywhere reporting a fault.
     pub membership_extents: Vec<MembershipExtent>,
+    /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
+    /// store as [`SegmentsManifest::record_extents`], listed separately.
+    ///
+    /// **Separate because ownership differs, not because the bytes do.** A point extent is written
+    /// by a flush and consumed by the coalesce and the fold; an artifact extent is written by an
+    /// artifact publication, which clones a *stale* manifest and so must restate its whole list
+    /// rather than extend one — the posture `membership_extents` takes above and for the same
+    /// reason. Keeping them on one list would put a held list and a maintained list in the same
+    /// field, where a coalesce consuming an entry and a publication restating it would each undo
+    /// the other.
+    ///
+    /// ⊘ **They are therefore not coalesced or folded**, and accumulate one file per publication
+    /// until the fold's artifact pass rewrites them (Stage 4, which also owns the fold refusal a
+    /// node with published artifacts already takes). A reader opens them alongside the point
+    /// extents; the two never share an entity, artifact ids descending from the ceiling and point
+    /// ids ascending from zero.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument: an absent list and an empty one are
+    /// indistinguishable under a default, and only one of them is safe to serve — an artifact whose
+    /// content extent went missing is withheld from every viewer with nothing reporting a fault.
+    pub artifact_record_extents: Vec<RecordExtent>,
     pub segments: Vec<SegmentDescriptor>,
     /// Every live delta postings tier, **by prefix-relative path**, in serving order.
     ///
@@ -1111,6 +1132,7 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),

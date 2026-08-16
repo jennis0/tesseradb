@@ -104,6 +104,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             slice: SLICE.to_string(),
             seg_id: "seg0".to_string(),
