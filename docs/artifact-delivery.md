@@ -36,7 +36,7 @@ Nothing is built. There are no artifacts, no layers, no membership structure and
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
 | **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
-| **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it, and the geometry read moved so it costs no extra pass; verified on the real 2.4M corpus. The registry is not started |
+| **1** The spine — allocation and the layer registry | **in progress** (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **the tiebreak is in, both build paths**, with a test that fails without it, and the geometry read moved so it costs no extra pass; verified on the real 2.4M corpus. **The registry's core is in** — two-region allocator, declaration, WAL records, gate resolution — and is **not yet wired into the engine**. Owed: the manifest section, the control verbs, `/v1/meta` |
 | **2** One flat level, masked counts | not started | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | — |
 | **3** Content — derived, supplied, containment | not started | both principals fail the same real label and both satisfy its per-term variant | — |
 | **4** The write cycle | not started | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | — |
@@ -141,6 +141,42 @@ dropped permanently — with no artifacts in it at all.
 *and in work* — from a name that was never registered; suppression takes effect at the ack for an
 already-open session; a dropped name is refused on recreation; all of it survives WAL replay and
 restart. **Data:** none new.
+
+**Where the registry got to** (2026-08-16, `artifacts/stage-1`). Three of the five bullets are
+built, tested and gate-green; **the registry is not yet wired into the engine**, so none of it is
+load-bearing and the served system is exactly as it was.
+
+*Built.* The two-region allocator, with exhaustion as the two marks meeting rather than a fixed
+ceiling that knows about one population. Row-less allocation hands out whole 2¹⁶-aligned blocks and
+nothing finer — a level's membership then sits inside whole Roaring containers, where a straddling
+level pays for a partial container at each end on every operation for ever. The top 65 535 ids are
+unusable by design and there is a test saying so, because "recovering" them would put the first
+row-less block across a boundary. Single layer entities come from a block the registry holds, since
+mixing widths in the allocator leaves the mark unaligned after every one of them. The declaration
+type is the configuration exercise's vocabulary exactly, with the two register-watched fields
+carrying no default and a test that fails if one acquires one. The WAL carries `LayerCreate` and
+`LayerDrop` at version 10, and the registry resolves reachability once per session so that a
+gate-failed name and a never-registered one cost **one identical set probe**.
+
+*Owed, and the reason it is next rather than now.* The **manifest section** — a mark that lives only
+in the WAL is lost at the first rotation, which is the recovery hazard
+[decision 0074](decisions/0074-row-less-entities-are-allocated-downward.md) names as the part to get
+right. The overlay solves the same problem twice over, with a snapshot record *and* a manifest home,
+and the registry should follow it rather than pick one. Making `entity_id_low_water` required
+touches 27 `SegmentsManifest` construction sites; making it optional reintroduces the fail-open,
+since an absent mark and a lost one are then the same value. ⊘ **Until that lands, `/control` has no
+layer verb and nothing calls `allocate_rowless` outside tests** — which is why the gap is a
+boundary rather than a bug.
+
+*Also owed:* the control-plane create/drop verbs, `/v1/meta`'s gate-filtered view, and the live
+`verdict` check ahead of the cached resolution. The registry already carries the version key the
+last of those needs.
+
+**One trap worth carrying forward,** because it cost a debugging round and would have shipped
+silently: `skip_serializing_if` is fatal under postcard. The WAL decodes positionally, so omitting
+an absent `Option` shortens the record and every field after it reads the wrong bytes — a layer can
+replay carrying a different gate. The rule is now absolute at the site, with a test that turns
+re-adding one into a red build.
 
 **Where the tiebreak got to.** Landed in both build paths as a **16-byte sort record**, with the
 batch plan's residency model widened to match — a model left at 12 would plan a batch the loop
