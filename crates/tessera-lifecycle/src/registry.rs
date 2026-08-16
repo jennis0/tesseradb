@@ -61,6 +61,15 @@ pub enum RegistryError {
     NotEnumerated { layer: String },
     /// This level already holds an artifact under that key, or the batch repeats it.
     DuplicateKey { layer: String, key: String },
+    /// The batch's supplied content does not match what the layer declares.
+    ///
+    /// **Every case here is fail-closed and none is repairable by the service.** A layer publishes
+    /// its content *kinds* in `/v1/meta` so a client knows what to draw, and that is only safe
+    /// because no served artifact ever lacks one its layer declared — so an artifact arriving
+    /// without a declared kind is refused rather than served short. A generating set where none is
+    /// tested is refused for the opposite reason: a claim the service carries and never checks
+    /// reads, to anyone auditing it, as a control that is running.
+    Content { layer: String, detail: String },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
     /// the first edge, because an edge's target must exist before the edge (`annotation-write-cycle.md`
     /// §5.0.4) and a dangling dependency is that ordering constraint already broken.
@@ -93,6 +102,9 @@ impl std::fmt::Display for RegistryError {
                 "{layer} already holds an artifact keyed {key}; publication is append-only, and an \
                  edit is a delete plus a re-publish"
             ),
+            RegistryError::Content { layer, detail } => {
+                write!(f, "{layer}: {detail}")
+            }
             RegistryError::MissingDependency { layer, depends_on } => write!(
                 f,
                 "{layer} declares depends_on {depends_on}, which is not registered — an edge's \
@@ -316,6 +328,64 @@ impl LayerRegistry {
             }
         }
 
+        // **What the layer declares is what every artifact must carry**, checked once here rather
+        // than discovered per request. The three refusals are one rule read three ways: a client
+        // draws what `/v1/meta` says the layer carries, so a served artifact must never lack a
+        // declared kind, must never carry an undeclared one, and must never carry a generating set
+        // nothing will test.
+        let declared = &layer.declaration.content.supplied;
+        let corpus_derived = declared.iter().any(|s| s.corpus_derived);
+        for (i, artifact) in incoming.iter().enumerate() {
+            let refuse = |detail: String| {
+                Err(RegistryError::Content {
+                    layer: layer_name.to_string(),
+                    detail: format!("artifact {i} of this batch: {detail}"),
+                })
+            };
+            if declared.is_empty() && !artifact.variations.is_empty() {
+                return refuse(
+                    "carries supplied content, and this layer declares none — the kinds a client \
+                     may draw come from the layer's declaration, so content under no declared kind \
+                     could never be served"
+                        .to_string(),
+                );
+            }
+            if !declared.is_empty() && artifact.variations.is_empty() {
+                return refuse(format!(
+                    "carries no supplied content, and this layer declares {} kind(s); an artifact \
+                     served without content its layer declares cannot be told apart from one whose \
+                     content was withheld",
+                    declared.len()
+                ));
+            }
+            for (v, variation) in artifact.variations.iter().enumerate() {
+                if variation.values.len() != declared.len() {
+                    return refuse(format!(
+                        "variation {v} supplies {} value(s) for {} declared kind(s); every \
+                         variation is a whole description, and a viewer is served one of them \
+                         entire or no artifact at all",
+                        variation.values.len(),
+                        declared.len()
+                    ));
+                }
+                if !corpus_derived && !variation.generated_from.is_empty() {
+                    return refuse(format!(
+                        "variation {v} declares a generating set, and none of this layer's content \
+                         is corpus-derived; a set that is never tested is a claim the service would \
+                         carry without meaning"
+                    ));
+                }
+                if corpus_derived && variation.generated_from.is_empty() {
+                    return refuse(format!(
+                        "variation {v} declares no generating set, and this layer's content is \
+                         corpus-derived; such content is served only to a viewer who can see \
+                         everything it was generated from, and an empty set is satisfied by \
+                         everyone"
+                    ));
+                }
+            }
+        }
+
         let first_ordinal = store.next_ordinal(layer_name, level) as u64;
         let needed = first_ordinal + incoming.len() as u64;
 
@@ -353,6 +423,14 @@ impl LayerRegistry {
                     entity: EntityId::new(entity),
                     stable_key: artifact.stable_key.clone(),
                     members: serialise_members(&artifact.members),
+                    variations: artifact
+                        .variations
+                        .iter()
+                        .map(|v| crate::wal::PublishedVariation {
+                            values: v.values.clone(),
+                            generated_from: serialise_members(&v.generated_from),
+                        })
+                        .collect(),
                 }
             })
             .collect();
@@ -794,6 +872,7 @@ mod tests {
         IncomingArtifact {
             stable_key: Some(key.into()),
             members: croaring::Bitmap::of(members),
+            variations: Vec::new(),
         }
     }
 

@@ -573,6 +573,13 @@ pub struct ArtifactOut {
     /// it safe beside a gate that may have admitted the artifact on its own terms: such an artifact
     /// is authorised to *exist*, not to describe members the viewer cannot see.
     pub derived: crate::derived::DerivedContent,
+    /// The publisher's supplied content — one value per kind the layer declares, positionally.
+    ///
+    /// **This is one variation, entire.** Where an artifact carries several ranked descriptions,
+    /// this is the first whose generating set the viewer contains completely; a viewer containing
+    /// none receives no artifact at all rather than this list empty. Empty means the layer declares
+    /// no supplied content, and nothing else.
+    pub content: Vec<String>,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -3101,9 +3108,16 @@ impl Engine {
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
         // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
         // fail-closed answer reached by the same call.
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count } =
-            view.verdict(entity, ordinal, None)
+        let crate::artifacts::ArtifactVerdict::Serve {
+            masked_count,
+            variation,
+        } = view.verdict(entity, ordinal, None)
         else {
+            return Ok(None);
+        };
+        // Same resolution as the viewport's, by the same call — an identifier route that served a
+        // different variation would be a second ranking nobody wrote.
+        let Some(content) = self.supplied_content(&name, level, ordinal, variation) else {
             return Ok(None);
         };
         // The same computation the viewport does, from the same composed mask — one route's
@@ -3128,6 +3142,7 @@ impl Engine {
             crate::derived::compute(&declared_derived, &visible, &locator)
         };
         Ok(Some(ArtifactOut {
+            content,
             layer: name.clone(),
             tessera_id: id,
             stable_key: self.write.with_artifacts(|store| {
@@ -3155,6 +3170,35 @@ impl Engine {
     /// a cluster's documents they can see, which does not change as they pan; a per-viewport count
     /// would move with the box and let a viewer difference two boxes for the members in between.
     /// Candidacy is the only per-tile question here.
+    #[allow(clippy::too_many_arguments)]
+    /// The values of the variation the predicate chose, or `None` where it chose one whose content
+    /// cannot be read back.
+    ///
+    /// `Some(vec![])` and `None` are different answers and the difference is the whole point:
+    /// the first is *this layer declares no supplied content*, which is most layers; the second is
+    /// *this artifact should carry content and it is not here*, which withholds the artifact.
+    fn supplied_content(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        variation: Option<u32>,
+    ) -> Option<Vec<String>> {
+        let Some(variation) = variation else {
+            return Some(Vec::new());
+        };
+        self.write.with_artifacts(|store| {
+            store
+                .get(layer, level, ordinal)
+                .and_then(|record| record.variations.get(variation as usize))
+                .and_then(|set| set.values.clone())
+        })
+    }
+
+    // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
+    // of: the session, the generation, the slice and its data, the resolved tile ranges, the
+    // composed mask, and the request's own two artifact parameters. Bundling them into a struct
+    // would name the same nine things one call earlier.
     #[allow(clippy::too_many_arguments)]
     fn serve_artifacts(
         &self,
@@ -3276,8 +3320,18 @@ impl Engine {
                     // per-artifact label arrives with content (Stage 3); until then the flag has
                     // nothing to satisfy, and admitting the artifact instead would make a missing
                     // declaration a grant to everyone.
-                    let crate::artifacts::ArtifactVerdict::Serve { masked_count } =
-                        view.verdict(entity, ordinal, None)
+                    let crate::artifacts::ArtifactVerdict::Serve {
+                        masked_count,
+                        variation,
+                    } = view.verdict(entity, ordinal, None)
+                    else {
+                        continue;
+                    };
+                    // The one variation this viewer contains, entire. ⊘ A variation restored from a
+                    // packed extent carries no values yet (its content belongs in the record blob,
+                    // decision 0077, and that write is unbuilt), and is **withheld** rather than
+                    // served with its description missing.
+                    let Some(content) = self.supplied_content(&name, level, ordinal, variation)
                     else {
                         continue;
                     };
@@ -3303,6 +3357,7 @@ impl Engine {
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     };
                     out.push(ArtifactOut {
+                        content,
                         layer: name.clone(),
                         tessera_id,
                         stable_key: self.write.with_artifacts(|store| {

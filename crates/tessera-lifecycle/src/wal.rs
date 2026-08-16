@@ -362,6 +362,23 @@ pub struct PublishedArtifact {
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
     pub members: Vec<u8>,
+    /// The artifact's supplied content, as ranked variations. Empty on a layer declaring none.
+    pub variations: Vec<PublishedVariation>,
+}
+
+/// One ranked variation inside a [`PublishedArtifact`].
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishedVariation {
+    /// One value per kind the layer declares, positionally. The bytes themselves are re-written to
+    /// the record blob at publication; they ride the log too because the log is what replay has
+    /// before any extent exists.
+    pub values: Vec<String>,
+    /// The entity-space generating set, CRoaring portable. Empty means corpus-independent, which is
+    /// a declaration rather than an omission — a set supplied where none is tested is refused at
+    /// admission.
+    pub generated_from: Vec<u8>,
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
@@ -450,8 +467,10 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// discriminant moves — and the bump is still required, because a version-9 reader meeting a
 /// version-10 log would decode the new variants' bytes as whatever it thinks that index means. A
 /// layer registration decoded as an ingest batch is not a degraded read, it is a corrupt one.
-/// Version 11 adds [`WalRecord::ArtifactPublish`], appended on the same rule.
-const WAL_VERSION: u16 = 11;
+/// Version 11 adds [`WalRecord::ArtifactPublish`], appended on the same rule. Version 12 gives
+/// [`PublishedArtifact`] its `variations` field — an *appended struct field*, which postcard would
+/// otherwise read out of the bytes of whatever record follows, so the bump is the whole guard.
+const WAL_VERSION: u16 = 12;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1752,6 +1771,7 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                     stable_key: Some("c-0017".into()),
                     members: serialise_members(&first),
+                    variations: Vec::new(),
                 },
                 // An artifact whose members have all been deleted is a real state, and an
                 // absent `stable_key` is the other optional field — both under postcard, which
@@ -1761,6 +1781,10 @@ mod tests {
                     entity: EntityId::new(4_294_705_152),
                     stable_key: None,
                     members: serialise_members(&second),
+                    variations: vec![PublishedVariation {
+                        values: vec!["a label".into()],
+                        generated_from: serialise_members(&first),
+                    }],
                 },
             ],
         };

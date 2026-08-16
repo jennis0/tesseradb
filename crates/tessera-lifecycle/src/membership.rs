@@ -48,6 +48,47 @@ pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 pub struct IncomingArtifact {
     pub stable_key: Option<String>,
     pub members: Bitmap,
+    /// The artifact's supplied content, as **ranked variations** — most specific first. Empty on a
+    /// layer that declares no supplied content, which is every layer Stage 2 could publish.
+    ///
+    /// A viewer is served the first variation whose generating set they contain, entire, or the
+    /// artifact is absent ([decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
+    /// The order is the caller's ranking and the service takes no opinion on it
+    /// ([decision 0078](../../../docs/decisions/0078-the-service-takes-no-opinion-on-which-variation.md)).
+    pub variations: Vec<IncomingVariation>,
+}
+
+/// One ranked variation of an artifact's supplied content, as a caller offers it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncomingVariation {
+    /// One value per kind the layer declares, **positionally**. Every declared kind must be
+    /// supplied: `/v1/meta` publishes the kinds so a client knows what to draw, and that is only
+    /// safe because no served artifact ever lacks one its layer declared.
+    pub values: Vec<String>,
+    /// The documents this content was generated from — the set a viewer must contain **entirely**
+    /// to be served it.
+    ///
+    /// Empty exactly where the layer declares no corpus-derived kind, in which case containment is
+    /// vacuous and the content serves unconditionally. A set supplied where none is tested is
+    /// refused rather than stored: a claim the service carries and never checks is worse than no
+    /// claim, because a reader takes its presence for a control.
+    pub generated_from: Bitmap,
+}
+
+impl IncomingVariation {
+    /// Builds one from resolved entities — the constructor exists for
+    /// [`IncomingArtifact::from_entities`]'s reason: `tessera-server` names a set without being
+    /// able to do arithmetic on one.
+    pub fn new(values: Vec<String>, generated_from: impl IntoIterator<Item = EntityId>) -> Self {
+        let mut bitmap = Bitmap::new();
+        for entity in generated_from {
+            bitmap.add(entity.raw() as u32);
+        }
+        IncomingVariation {
+            values,
+            generated_from: bitmap,
+        }
+    }
 }
 
 impl IncomingArtifact {
@@ -69,7 +110,19 @@ impl IncomingArtifact {
         IncomingArtifact {
             stable_key,
             members: bitmap,
+            variations: Vec::new(),
         }
+    }
+
+    /// The same, carrying supplied content.
+    pub fn with_content(
+        stable_key: Option<String>,
+        members: impl IntoIterator<Item = EntityId>,
+        variations: Vec<IncomingVariation>,
+    ) -> Self {
+        let mut artifact = IncomingArtifact::from_entities(stable_key, members);
+        artifact.variations = variations;
+        artifact
     }
 }
 
@@ -84,6 +137,37 @@ pub struct ArtifactRecord {
     pub stable_key: Option<String>,
     /// Entity-space membership — the canonical, slice-invariant record.
     pub members: Bitmap,
+    /// The ranked variations of this artifact's supplied content, most specific first.
+    ///
+    /// **The values are not here.** This carries each variation's *generating set* — the thing the
+    /// serving path does bitmap arithmetic on for every request — while the content bytes live in
+    /// the record blob at this artifact's entity
+    /// ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md)).
+    /// The split follows from what each is for: a generating set is projected into row space once
+    /// per generation and intersected per request, and a form that had to be decompressed to be
+    /// tested would pay that cost on every artifact of every viewport.
+    pub variations: Vec<VariationSet>,
+}
+
+/// One variation's generating set, as the registry holds it, and the content it gates.
+#[derive(Debug, Clone)]
+pub struct VariationSet {
+    /// The content values, positional to the layer's declared kinds.
+    ///
+    /// ⊘ **`None` where the durable copy has not been read back**, which today means *restored
+    /// from a packed extent rather than replayed from the log*: the extent carries generating sets
+    /// and not values, because values belong in the record blob
+    /// ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md))
+    /// and that write is not built. A variation with no values is **not served** — the artifact is
+    /// absent, on the same rule that refuses one whose content its layer declared and which did not
+    /// arrive. Serving the identity and the count with the description missing is the in-between
+    /// state decision 0076 forbids.
+    pub values: Option<Vec<String>>,
+    /// Entity-space, canonical. **Empty means corpus-independent** — containment is vacuous and the
+    /// variation serves to everyone who reaches the layer — and that is a real declaration rather
+    /// than a missing one: a layer whose kinds are all corpus-independent is refused a generating
+    /// set at publish, so an empty set here cannot be an omission.
+    pub generated_from: Bitmap,
 }
 
 impl ArtifactRecord {
@@ -222,6 +306,24 @@ impl ArtifactStore {
                 refused += 1;
                 continue;
             };
+            // Every generating set decodes or the artifact is refused whole. A variation whose set
+            // decoded short is one a viewer may be served without containing what it was generated
+            // from — the disclosure containment exists to prevent — so the failure may not be
+            // localised to the variation and skipped.
+            let sets: Option<Vec<VariationSet>> = published
+                .variations
+                .iter()
+                .map(|v| {
+                    deserialise_members(&v.generated_from).map(|generated_from| VariationSet {
+                        values: Some(v.values.clone()),
+                        generated_from,
+                    })
+                })
+                .collect();
+            let Some(variations) = sets else {
+                refused += 1;
+                continue;
+            };
             self.put(
                 layer,
                 *level,
@@ -230,6 +332,7 @@ impl ArtifactStore {
                     entity: published.entity,
                     stable_key: published.stable_key.clone(),
                     members,
+                    variations,
                 },
             );
         }
@@ -393,11 +496,21 @@ impl ArtifactStore {
     }
 }
 
-/// Encode one artifact for a packed extent: its caller key and its membership, in one blob.
+/// Encode one artifact for a packed extent: its caller key, its membership and its variations'
+/// generating sets, in one blob.
 ///
 /// ```text
-/// blob := u16 LE key_len | key bytes (UTF-8) | membership bytes (portable Roaring)
+/// blob      := u16 LE key_len | key bytes (UTF-8)
+///            | u16 LE variation_count
+///            | u32 LE members_len | membership bytes (portable Roaring)
+///            | variation*
+/// variation := u32 LE set_len | generating-set bytes (portable Roaring)
 /// ```
+///
+/// **Every length is explicit, including the membership's.** The membership used to be the blob's
+/// tail and its length was *"whatever is left"*, which is exactly the shape that decodes a truncated
+/// blob as a shorter membership — an artifact with a low masked count for every viewer, which the
+/// criterion renders as absent with nothing to notice. With a length in front, short is short.
 ///
 /// **The key travels with the membership because nothing else durable carries it.** An artifact's
 /// entity is derivable from its layer's reserved runs and its ordinal, so the extent need not carry
@@ -411,7 +524,13 @@ impl ArtifactStore {
 pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
     let key = record.stable_key.as_deref().unwrap_or_default().as_bytes();
     let members = serialise_members(&record.members);
-    let mut out = Vec::with_capacity(2 + key.len() + members.len());
+    let sets: Vec<Vec<u8>> = record
+        .variations
+        .iter()
+        .map(|v| serialise_members(&v.generated_from))
+        .collect();
+    let mut out =
+        Vec::with_capacity(8 + key.len() + members.len() + sets.iter().map(Vec::len).sum::<usize>());
     // A key longer than a `u16` cannot round-trip, and truncating one would silently rename an
     // artifact. The control plane bounds the request body long before this, so the clamp is a
     // backstop; it refuses at encode rather than writing a key it cannot read back.
@@ -420,7 +539,20 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
     if key_len != u16::MAX {
         out.extend_from_slice(key);
     }
+    // Same argument, one level up: more variations than a `u16` can count is a publication this
+    // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
+    // dropped variation is a viewer served a *different* description from the one the caller
+    // ranked for them.
+    let count = u16::try_from(sets.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&(members.len() as u32).to_le_bytes());
     out.extend_from_slice(&members);
+    if count != u16::MAX {
+        for set in &sets {
+            out.extend_from_slice(&(set.len() as u32).to_le_bytes());
+            out.extend_from_slice(set);
+        }
+    }
     out
 }
 
@@ -431,26 +563,50 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
 /// a low masked count for every viewer — which the existence criterion renders as *absent*, with no
 /// error anywhere to notice. Both must be a decode failure the caller alarms on.
 pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
-    if blob.len() < 2 {
-        return None;
-    }
-    let key_len = u16::from_le_bytes([blob[0], blob[1]]) as usize;
+    let mut at = 0usize;
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let end = at.checked_add(n)?;
+        let slice = blob.get(at..end)?;
+        at = end;
+        Some(slice)
+    };
+    let key_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
     if key_len == u16::MAX as usize {
-        return None;
-    }
-    let members_at = 2usize.checked_add(key_len)?;
-    if blob.len() < members_at {
         return None;
     }
     let stable_key = if key_len == 0 {
         None
     } else {
-        Some(std::str::from_utf8(&blob[2..members_at]).ok()?.to_string())
+        Some(std::str::from_utf8(take(key_len)?).ok()?.to_string())
     };
+    let count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if count == u16::MAX as usize {
+        return None;
+    }
+    let members_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    let members = deserialise_members(take(members_len)?)?;
+    let mut variations = Vec::with_capacity(count);
+    for _ in 0..count {
+        let set_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        variations.push(VariationSet {
+            // ⊘ The extent carries no values — see [`VariationSet::values`]. A restored variation is
+            // therefore unservable until the blob write lands, which is fail-closed and loud rather
+            // than an artifact served with its description missing.
+            values: None,
+            generated_from: deserialise_members(take(set_len)?)?,
+        });
+    }
+    // **Trailing bytes are a decode failure**, not slack to ignore: a blob longer than its own
+    // structure means the writer and this reader disagree about the format, and the half that
+    // decoded cleanly is the more dangerous outcome of the two.
+    if at != blob.len() {
+        return None;
+    }
     Some(ArtifactRecord {
         entity,
         stable_key,
-        members: deserialise_members(&blob[members_at..])?,
+        members,
+        variations,
     })
 }
 
@@ -483,6 +639,7 @@ mod tests {
             entity: EntityId::new(entity),
             stable_key: None,
             members: Bitmap::of(members),
+            variations: Vec::new(),
         }
     }
 
