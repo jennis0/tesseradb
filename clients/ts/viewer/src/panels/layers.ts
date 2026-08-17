@@ -1,7 +1,28 @@
+import type {Artifact} from '@tessera/client';
 import {esc, panel, row} from '../html.js';
 import type {AppState} from '../state.js';
 
 const fmt = (n: number | bigint) => n.toLocaleString('en-GB');
+
+/**
+ * What to call an artifact on screen: its supplied text where the layer publishes any, and its
+ * stable key otherwise.
+ *
+ * **The text is not decoration and it is not the key by another name.** Where an artifact carries
+ * several ranked descriptions, what arrives is the one *this* principal qualifies for under the
+ * containment test — so two viewers can be looking at the same `tesseraId` and correctly reading
+ * different words against it. A panel that showed the key instead would hide the one part of the
+ * annotation that moves with the mask.
+ *
+ * The first value, because content is positional to the layer's `suppliedContent` kinds and a
+ * label layer's first kind is its text. A layer publishing something else first — a polygon, say —
+ * has no name to show here and falls back to the key.
+ */
+function describe(a: Artifact): string {
+  const text = a.content[0];
+  if (text !== undefined && text.length > 0) return text;
+  return a.stableKey ?? `#${a.tesseraId}`;
+}
 
 /**
  * Which annotation layer the map draws — the control, in the left column.
@@ -97,7 +118,7 @@ export function renderArtifacts(state: AppState): string {
   const sorted = [...artifacts].sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : -1));
   const rows = sorted
     .slice(0, 12)
-    .map((a) => row(a.stableKey ?? `#${a.tesseraId}`, fmt(a.maskedCount)))
+    .map((a) => row(describe(a), fmt(a.maskedCount)))
     .join('');
 
   return panel(

@@ -361,6 +361,17 @@ console.log(`published ${published} artifacts`);
  * disjunction over terms — while a viewer holding other terms, however many, generally does not.
  * That is containment's whole claim: what decides is *which* documents, never how many.
  */
+
+/**
+ * Where each published label goes in the sidecar — at the centroid of the cluster it annotates.
+ *
+ * A label has no geometry of its own and never will: it describes its target, so the target's
+ * position is the only one it could sensibly take. Declared out here because the sidecar is
+ * written below, past the end of the block that fills it, and stays empty when no labels were
+ * asked for.
+ */
+let labelPlaces = [];
+
 if (labelLayer) {
   console.log(`sampling as the term-${labelTerm} principal, for the per-term variation`);
   const termToken = await authorise([labelTerm]);
@@ -457,6 +468,13 @@ if (labelLayer) {
   }
   await publishLabels();
   console.log(`published ${labels.length} labels into ${labelLayer}`);
+
+  const centroid = new Map(clusters.map((c) => [c.stableKey, c]));
+  labelPlaces = labels.map((l) => ({
+    stableKey: l.stableKey,
+    x: centroid.get(l.cluster).x,
+    y: centroid.get(l.cluster).y
+  }));
 }
 
 // Merged rather than overwritten, and keyed by layer: publication is append-only and a name is
@@ -470,6 +488,9 @@ try {
   // No file yet, which is the first run.
 }
 sidecar.layers[layerName] = clusters.map((c) => ({stableKey: c.stableKey, x: c.x, y: c.y}));
+// The label layer gets its own entry, or the labels are served and never drawn: placement is by
+// layer, and a label carries no position of its own.
+if (labelLayer) sidecar.layers[labelLayer] = labelPlaces;
 await mkdir(dirname(OUT), {recursive: true});
 await writeFile(OUT, `${JSON.stringify(sidecar, null, 2)}\n`);
 console.log(`wrote ${OUT}`);
