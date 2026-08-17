@@ -8,8 +8,24 @@ or belongs to any trusted computing base.
 | | |
 |---|---|
 | [`arxiv-corpus.ipynb`](arxiv-corpus.ipynb) | the whole corpus, end to end: the arXiv sources, UMAP, two clusterings, TF-IDF labels over each, and the configuration that reads the lot |
+| [`run-corpus.sh`](run-corpus.sh) | builds a bundle from what the notebook wrote and serves it, then prints two principals to compare |
 
-## Running one
+## The short way
+
+```bash
+notebooks/run-corpus.sh --notebook --sample 50000
+```
+
+Runs the notebook, builds the bundle, starts the server, and prints a pair of ready-to-paste
+principals — eight arXiv categories against one of the eight, so both are looking at the same
+clusters and the difference is the count beside each. On a 50 000-paper run the broad principal is
+served 132 clusters and the narrow one 84; on a cluster they both see, 172 members against 66.
+Neither number is the cluster's own size and neither viewer is told what that is.
+
+Without `--notebook` it builds from whatever is already in the output directory; `--build-only`
+stops before serving.
+
+## Setting up, and running the notebook on its own
 
 ```bash
 python3 -m venv notebooks/.venv
