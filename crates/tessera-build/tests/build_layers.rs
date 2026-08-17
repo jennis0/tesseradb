@@ -693,6 +693,56 @@ fn a_child_escaping_its_parent_is_reported_by_name() {
     assert_eq!(violations[0]["escaping_members"], 2);
 }
 
+/// **A split that loses members is named in advance, and named as normal rather than as a fault.**
+///
+/// The stray is what makes a parent visible *alone*, with none of its children, to a principal who
+/// can see those members and nothing else. That is the right answer and a surprising one, so an
+/// operator should meet it in this report rather than in a support question about a cluster that
+/// has no children on the map.
+#[test]
+fn a_split_that_loses_members_is_named_with_its_stray_count() {
+    let (result, out, _tmp) = treed_build(
+        &[("t-root", None), ("t-a", Some("t-root")), ("t-b", Some("t-root"))],
+        &[
+            ("t-root", (0..30).collect()),
+            ("t-a", (0..10).collect()),
+            ("t-b", (10..20).collect()),
+        ],
+    );
+    result.expect("a non-covering split is not a fault");
+    let report = containment_report(&out);
+    assert_eq!(report["violations"].as_array().unwrap().len(), 0);
+
+    let splits = &report["splits"];
+    assert_eq!(splits["total"], 1, "one internal node");
+    assert_eq!(splits["non_covering"], 1);
+    assert_eq!(splits["not_listed"], 0, "a small tree lists every split");
+    let row = &splits["by_stray_members"][0];
+    assert_eq!(row["parent"], "t-root");
+    assert_eq!(row["children"], 2);
+    assert_eq!(row["members"], 30);
+    // 20..30 belong to the root and to neither child.
+    assert_eq!(row["stray_members"], 10);
+}
+
+/// A split whose children exhaust it reports zero stray — the covering case, which is what a
+/// planted tree produces and a real clustering almost never does.
+#[test]
+fn a_covering_split_reports_no_stray() {
+    let (result, out, _tmp) = treed_build(
+        &[("t-root", None), ("t-a", Some("t-root")), ("t-b", Some("t-root"))],
+        &[
+            ("t-root", (0..20).collect()),
+            ("t-a", (0..10).collect()),
+            ("t-b", (10..20).collect()),
+        ],
+    );
+    result.expect("a covering split builds");
+    let splits = &containment_report(&out)["splits"];
+    assert_eq!(splits["non_covering"], 0);
+    assert_eq!(splits["by_stray_members"][0]["stray_members"], 0);
+}
+
 /// A parent key naming an artifact the level does not declare describes no tree at all, so there
 /// is nothing to publish — a refusal, unlike an uncontained edge.
 #[test]

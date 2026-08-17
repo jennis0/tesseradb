@@ -238,11 +238,36 @@ pub struct ContainmentViolation {
     pub escaping_members: u64,
 }
 
+/// How much of one parent's membership its children between them hold.
+///
+/// **The normal case is that they do not hold all of it**, and this is the report that says so in
+/// advance. HDBSCAN loses a fifth to a quarter of a parent's points as noise at each split, so a
+/// parent keeps members no child holds — and those members are the ones that make the parent
+/// visible *alone*, with none of its children, to a principal who can see them and nothing else.
+/// That is a correct answer and a surprising one, and an operator should meet it here rather than
+/// in a support question about why a cluster has no children on the map.
+///
+/// It decides nothing. A split that loses nine tenths of its parent is published exactly as one
+/// that loses none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitCoverage {
+    pub layer: String,
+    pub level: u32,
+    pub parent: String,
+    pub children: u32,
+    /// The parent's own membership size.
+    pub members: u64,
+    /// How many of them no child holds — the stray.
+    pub stray_members: u64,
+}
+
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
     pub layers: Vec<RegisteredLayer>,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
+    /// Per-parent coverage: how much of each split its children hold between them.
+    pub split_coverage: Vec<SplitCoverage>,
     /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
     /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
     /// those, so a mark that lived only there is lost at the first rotation and the next
@@ -260,6 +285,7 @@ impl Default for PublishedLayers {
         PublishedLayers {
             layers: Vec::new(),
             containment_violations: Vec::new(),
+            split_coverage: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
@@ -572,10 +598,12 @@ pub fn publish(
         }
     }
 
+    let (violations, coverage) = verify_hierarchies(plan)?;
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
-        containment_violations: verify_hierarchies(plan)?,
+        containment_violations: violations,
+        split_coverage: coverage,
         low_water: alloc.low_water(),
         ..PublishedLayers::default()
     };
@@ -596,25 +624,31 @@ pub fn publish(
 /// level is a resolution, so the two never carry each other
 /// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
 /// An edge naming a key in another level is therefore an unknown key here, and refuses.
-fn verify_hierarchies(plan: &LayerPlan) -> Result<Vec<ContainmentViolation>> {
-    let mut violations = Vec::new();
+type Address = (String, u32, String);
+
+fn verify_hierarchies(
+    plan: &LayerPlan,
+) -> Result<(Vec<ContainmentViolation>, Vec<SplitCoverage>)> {
     // Which parent has claimed each child, so a second claim is a refusal rather than a silent
     // reparenting: a child with two parents has two lineages, and which one a cut walks would
     // depend on iteration order.
     let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
+    // Children grouped under their parent, so containment and coverage are one pass over each
+    // parent's membership rather than one per edge.
+    let mut children_of: BTreeMap<Address, Vec<&str>> = BTreeMap::new();
 
     for ((layer, level, key), artifact) in &plan.artifacts {
         let Some(parent_key) = artifact.parent_key.as_deref() else {
             continue;
         };
         let parent_address = (layer.clone(), *level, parent_key.to_string());
-        let Some(parent) = plan.artifacts.get(&parent_address) else {
+        if !plan.artifacts.contains_key(&parent_address) {
             return Err(BuildError::Invalid(format!(
                 "{layer} level {level} artifact {key} names parent {parent_key}, which this level \
                  does not declare — an edge relates two artifacts of one level, and a parent that \
                  does not exist would leave the child a root of a tree nobody wrote"
             )));
-        };
+        }
         if parent_key == key {
             return Err(BuildError::Invalid(format!(
                 "{layer} level {level} artifact {key} names itself as its parent"
@@ -626,26 +660,55 @@ fn verify_hierarchies(plan: &LayerPlan) -> Result<Vec<ContainmentViolation>> {
                  a child has one lineage or the cut that walks it depends on iteration order"
             )));
         }
+        children_of.entry(parent_address).or_default().push(key);
+    }
 
-        // Containment: the members the child holds and the parent does not. Reported, not refused.
-        let escaping = artifact
-            .members
-            .iter()
-            .filter(|m| !parent.members.contains(m))
-            .count() as u64;
-        if escaping > 0 {
-            violations.push(ContainmentViolation {
-                layer: layer.clone(),
-                level: *level,
-                child: key.clone(),
-                parent: parent_key.to_string(),
-                escaping_members: escaping,
-            });
+    let mut violations = Vec::new();
+    let mut coverage = Vec::new();
+    for (address, children) in &children_of {
+        let (layer, level, parent_key) = address;
+        let parent = &plan.artifacts[address];
+        // **A set per parent, not a scan per member.** The membership test is the inner loop of
+        // both checks below, and a linear `contains` over a parent holding the whole corpus makes
+        // this pass quadratic in the level's largest artifact.
+        let held: std::collections::HashSet<u64> = parent.members.iter().copied().collect();
+        let mut covered: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(held.len());
+
+        for child_key in children {
+            let child = &plan.artifacts[&(layer.clone(), *level, child_key.to_string())];
+            let mut escaping = 0u64;
+            for member in &child.members {
+                if held.contains(member) {
+                    covered.insert(*member);
+                } else {
+                    // Reported, not refused: the tree is real, its rollup guarantee is not.
+                    escaping += 1;
+                }
+            }
+            if escaping > 0 {
+                violations.push(ContainmentViolation {
+                    layer: layer.clone(),
+                    level: *level,
+                    child: (*child_key).to_string(),
+                    parent: parent_key.clone(),
+                    escaping_members: escaping,
+                });
+            }
         }
+
+        coverage.push(SplitCoverage {
+            layer: layer.clone(),
+            level: *level,
+            parent: parent_key.clone(),
+            children: children.len() as u32,
+            members: held.len() as u64,
+            stray_members: (held.len() - covered.len()) as u64,
+        });
     }
 
     detect_cycles(plan)?;
-    Ok(violations)
+    Ok((violations, coverage))
 }
 
 /// Refuse a hierarchy holding a cycle, which is not a tree and has no root to descend from.

@@ -1325,9 +1325,44 @@ pub(crate) fn write_containment_report(
             })
         })
         .collect();
+
+    // **The splits that lose the most, and how many were not listed.** A tree has one of these per
+    // internal node, which at 10⁷ artifacts is a report nobody opens; naming the worst is what an
+    // operator actually reads, and saying how many were dropped is what keeps the list from
+    // reading as "these are all of them" (`docs/agents/` — no silent caps).
+    const LISTED: usize = 100;
+    let mut splits: Vec<_> = published.split_coverage.iter().collect();
+    splits.sort_by(|a, b| {
+        (b.stray_members, b.members, &b.parent).cmp(&(a.stray_members, a.members, &a.parent))
+    });
+    let non_covering = splits.iter().filter(|s| s.stray_members > 0).count();
+    let listed: Vec<serde_json::Value> = splits
+        .iter()
+        .take(LISTED)
+        .map(|s| {
+            serde_json::json!({
+                "layer": s.layer,
+                "level": s.level,
+                "parent": s.parent,
+                "children": s.children,
+                "members": s.members,
+                "stray_members": s.stray_members,
+            })
+        })
+        .collect();
+
     write_json(
         &dir.join("containment.json"),
-        &serde_json::json!({ "violations": rows }),
+        &serde_json::json!({
+            "violations": rows,
+            "splits": {
+                "total": splits.len(),
+                "non_covering": non_covering,
+                "listed": listed.len(),
+                "not_listed": splits.len().saturating_sub(listed.len()),
+                "by_stray_members": listed,
+            },
+        }),
     )
 }
 
