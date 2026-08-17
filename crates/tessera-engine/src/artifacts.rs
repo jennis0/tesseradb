@@ -233,12 +233,30 @@ impl ArtifactRows {
     /// whole set — O(containers touched) — with no early exit on the first missing member. A
     /// short-circuiting subset test returns sooner the *less* of the set a viewer holds, which
     /// makes response time a function of how close they came.
-    pub fn satisfied_variation(&self, ordinal: u32, mask: &impl MaskedSet) -> Containment {
-        let Some(sets) = self.variations.get(ordinal as usize) else {
-            return Containment::NothingToContain;
-        };
+    pub fn satisfied_variation(
+        &self,
+        ordinal: u32,
+        mask: &impl MaskedSet,
+        layer_declares_content: bool,
+    ) -> Containment {
+        let sets = self
+            .variations
+            .get(ordinal as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if sets.is_empty() {
-            return Containment::NothingToContain;
+            // **Nothing to contain, or nothing left to serve — and the layer's declaration is what
+            // tells them apart.** A layer declaring no supplied content has artifacts that serve on
+            // their other conjuncts; one that *does* declare it has artifacts that must carry it,
+            // and an artifact here with none has had its last variation withdrawn by a fold under
+            // the strict declaration. Serving it would be the identity and the count with the
+            // description missing — the in-between state decision 0076 forbids — so it is absent
+            // until the caller republishes.
+            return if layer_declares_content {
+                Containment::Unsatisfied
+            } else {
+                Containment::NothingToContain
+            };
         }
         for (i, set) in sets.iter().enumerate() {
             // A set that lost members in projection can never be contained — see `ProjectedSet`.
@@ -517,7 +535,11 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         // 6. Containment, last: the first variation whose generating set this viewer holds
         //    **entirely**. A viewer satisfying none receives no artifact — not the artifact with
         //    its description missing, which is the in-between state decision 0076 forbids.
-        let variation = match self.rows.satisfied_variation(ordinal, self.mask) {
+        let variation = match self.rows.satisfied_variation(
+            ordinal,
+            self.mask,
+            !self.declaration.content.supplied.is_empty(),
+        ) {
             Containment::NothingToContain => None,
             Containment::Satisfied(i) => Some(i),
             Containment::Unsatisfied => return ArtifactVerdict::Absent(Withheld::Containment),

@@ -30,7 +30,31 @@
 use std::collections::BTreeMap;
 
 use croaring::{Bitmap, Portable};
+use tessera_types::layer::OnMemberDeletion;
 use tessera_types::EntityId;
+
+/// Execute a layer's `on_member_deletion` declaration against one record, for the members this fold
+/// retired (`annotation-write-cycle.md` §3.2).
+///
+/// **An artifact left with no variations is not an artifact with no content** — it is one the
+/// serving path withholds, because its layer declares supplied content and it has none to serve.
+/// That is [decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)
+/// reached from the write side: the alternative is serving the identity and the count with the
+/// description missing, which is the in-between state the decision forbids.
+fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, policy: OnMemberDeletion) {
+    match policy {
+        OnMemberDeletion::WithdrawContent => {
+            record
+                .variations
+                .retain(|variation| variation.generated_from.and_cardinality(retired) == 0);
+        }
+        OnMemberDeletion::ShrinkGeneratingSet => {
+            for variation in &mut record.variations {
+                variation.generated_from.andnot_inplace(retired);
+            }
+        }
+    }
+}
 
 /// One level's not-yet-published artifacts, ready to pack: `(layer, level, ordinal_lo, blobs)`.
 ///
@@ -613,20 +637,31 @@ impl ArtifactStore {
     /// **`retired` is the fold's executed deletions and nothing else.** A *suppressed* member stays
     /// in the set: a suppression retires only on unsuppress and never touches a stored structure
     /// (Rule S), so dropping its bit here would give it a second retirement route, which is
-    /// fail-open. And a variation's generating set is untouched in both cases — `G` is immutable
-    /// (`annotation-write-cycle.md` §3.2), and what a deleted member does to supplied content is the
-    /// layer's strict/permissive declaration to decide, not this repack's.
+    /// fail-open.
+    ///
+    /// **Generating sets move only where the layer said they may**, which is `policy`
+    /// (`annotation-write-cycle.md` §3.2). Under `WithdrawContent` — the default — a variation that
+    /// lost a source is **dropped whole**, content and set together, because containment is
+    /// all-or-nothing and a set that lost a member fails it for every principal for ever; the caller
+    /// regenerates. Under `ShrinkGeneratingSet` the member leaves the set and the content serves
+    /// again, which is a channel the caller chose for an object whose membership is statistical.
+    /// Neither is a service *behaviour*: both are the declaration executing.
     ///
     /// A level with a hole is reported rather than packed around, exactly as in
     /// [`Self::unpublished`] — but the consequence differs and the caller must not treat it as a
     /// skip: an extent this rewrite omits is a level the new prefix does not carry at all, whose
     /// artifacts come back registered, addressable and served as absent.
-    pub fn repack_all(&self, retired: &Bitmap) -> Vec<PendingExtent> {
+    pub fn repack_all(
+        &self,
+        retired: &Bitmap,
+        policy: &dyn Fn(&str) -> OnMemberDeletion,
+    ) -> Vec<PendingExtent> {
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
             if slots.is_empty() {
                 continue;
             }
+            let on_deletion = policy(layer);
             let blobs: Vec<Vec<u8>> = slots
                 .iter()
                 .map(|slot| {
@@ -652,6 +687,7 @@ impl ArtifactStore {
                     }
                     let mut record = record.clone();
                     record.members.andnot_inplace(retired);
+                    apply_deletion_policy(&mut record, retired, on_deletion);
                     encode_record(&record)
                 })
                 .collect();
@@ -669,11 +705,12 @@ impl ArtifactStore {
     /// **A retired artifact's slot becomes a hole rather than disappearing**, and its stable key
     /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
     /// republication onto the identity of the artifact this fold just removed.
-    pub fn retire(&mut self, retired: &Bitmap) {
+    pub fn retire(&mut self, retired: &Bitmap, policy: &dyn Fn(&str) -> OnMemberDeletion) {
         if retired.is_empty() {
             return;
         }
         for ((layer, level), slots) in self.levels.iter_mut() {
+            let on_deletion = policy(layer);
             for slot in slots.iter_mut() {
                 let Some(record) = slot else { continue };
                 if retired.contains(record.entity.raw() as u32) {
@@ -684,6 +721,7 @@ impl ArtifactStore {
                     continue;
                 }
                 record.members.andnot_inplace(retired);
+                apply_deletion_policy(record, retired, on_deletion);
             }
         }
         // Every row-space projection built from these is now wrong in both directions — memberships

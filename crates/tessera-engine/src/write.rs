@@ -1530,9 +1530,27 @@ impl LiveState {
 
     /// Apply the fold's executed deletions to the resident artifact store — the second half of the
     /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired artifacts
-    /// leave their levels; retired members leave the memberships that survive.
+    /// leave their levels; retired members leave the memberships that survive; and each layer's
+    /// `on_member_deletion` declaration executes against the generating sets that lost a source.
     fn retire_artifacts(&self, retired: &croaring::Bitmap) {
-        lock_recover(&self.artifacts).retire(retired);
+        let policy = self.deletion_policy();
+        lock_recover(&self.artifacts).retire(retired, &policy);
+    }
+
+    /// Each layer's `on_member_deletion` declaration, resolved by name.
+    ///
+    /// **A layer the registry cannot answer for gets the default**, which is `WithdrawContent` —
+    /// the strict one. The case is unreachable (a level exists because its layer was registered),
+    /// and the direction it fails in is the one to pick when it is not: withdrawing content nobody
+    /// asked to withdraw costs a republication, where shrinking a set nobody declared shrinkable
+    /// serves content generated from a deleted document.
+    fn deletion_policy(&self) -> impl Fn(&str) -> tessera_types::layer::OnMemberDeletion + '_ {
+        move |layer: &str| {
+            lock_recover(&self.registry)
+                .get(layer)
+                .map(|registered| registered.declaration.content.on_member_deletion)
+                .unwrap_or_default()
+        }
     }
 
     /// Where an entity sits: `(layer, level, ordinal)`. Addressing only — see
@@ -8295,7 +8313,10 @@ impl Executor {
         n: u64,
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let ready = self.live.with_artifacts(|store| store.repack_all(retired));
+        let policy = self.live.deletion_policy();
+        let ready = self
+            .live
+            .with_artifacts(|store| store.repack_all(retired, &policy));
         if ready.is_empty() {
             return Ok(Vec::new());
         }

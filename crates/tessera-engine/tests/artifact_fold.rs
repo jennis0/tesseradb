@@ -489,6 +489,205 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     );
 }
 
+// ---- the layer's declaration, executed at the fold ----------------------------------------------
+
+/// A layer carrying corpus-derived content under the given deletion declaration.
+fn content_layer(on_deletion: tessera_types::layer::OnMemberDeletion) -> LayerDeclaration {
+    let mut d = declaration("clusters/a");
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        kind: "label_text".into(),
+        corpus_derived: true,
+    }];
+    d.content.on_member_deletion = on_deletion;
+    d
+}
+
+/// Publish one described artifact over `0..300`, generated from `0..30`.
+fn publish_described(fx: &Fixture, engine: &Engine) {
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("c0".into()),
+                fx.members(0..300),
+                vec![IncomingVariation::new(
+                    vec!["shipping and logistics".into()],
+                    fx.members(0..30),
+                )],
+            )],
+        )
+        .unwrap();
+    wait_for_publication(fx, engine, 1);
+}
+
+/// **The test the stage exists for.** Delete a document a label was generated from, watch the label
+/// vanish at the ack, run a fold, and it **stays gone** — served on no set that no longer names what
+/// the text was derived from.
+///
+/// And under the strict declaration the artifact goes with it. Its layer declares supplied content;
+/// the fold withdrew the only variation that had it; so what is left is an identity and a count with
+/// no description, which decision 0076 forbids serving. The caller republishes.
+#[test]
+fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        engine
+            .register_layer(content_layer(
+                tessera_types::layer::OnMemberDeletion::WithdrawContent,
+            ))
+            .unwrap();
+        publish_described(&fx, &engine);
+        assert_eq!(artifacts_of(&engine).len(), 1, "served with its description");
+
+        // Inside the generating sample, so containment fails for everyone from the ack.
+        engine
+            .accept_change(fx.member(7), ChangeOp::Delete)
+            .expect("the delete is accepted");
+        assert!(
+            artifacts_of(&engine).is_empty(),
+            "withheld at the ack — emergent from containment, with nothing stored"
+        );
+
+        fold(&engine);
+        assert!(
+            artifacts_of(&engine).is_empty(),
+            "and still withheld after the fold: the content was withdrawn, not re-based onto a \
+             smaller set"
+        );
+    }
+
+    let engine = fx.open();
+    assert!(
+        artifacts_of(&engine).is_empty(),
+        "the withdrawal is what the prefix says, not something the process was remembering"
+    );
+}
+
+/// **Permissive is the caller's declaration and the service still does not choose.** The fold
+/// removes the deleted source from the set and the description serves again — to viewers who
+/// satisfy the survivors, which is a channel the caller opened for an object whose membership is
+/// statistical (C7).
+#[test]
+fn a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(content_layer(
+            tessera_types::layer::OnMemberDeletion::ShrinkGeneratingSet,
+        ))
+        .unwrap();
+    publish_described(&fx, &engine);
+
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    assert!(
+        artifacts_of(&engine).is_empty(),
+        "withheld at the ack under either declaration — the interim is fail-closed, and the \
+         declaration only decides what the fold does about it"
+    );
+
+    fold(&engine);
+
+    let served = artifacts_of(&engine);
+    assert_eq!(served.len(), 1, "the artifact is back");
+    assert_eq!(
+        served[0].content,
+        vec!["shipping and logistics"],
+        "with its description, now generated from the surviving sources"
+    );
+    assert_eq!(served[0].masked_count, 299, "and one fewer member");
+}
+
+/// **A declared member that is deleted refuses the batch; a suppressed one is accepted.** The two
+/// are not near-neighbours: a deletion is irreversible, so the content would be unservable from
+/// birth and the count short for ever, while a suppression is an operator's reversible action that
+/// must not refuse an unrelated publication.
+#[test]
+fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+
+    let deleted = fx.member(7);
+    let suppressed = fx.member(11);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("the delete is accepted");
+    engine
+        .accept_change(suppressed, ChangeOp::Suppress)
+        .expect("the suppress is accepted");
+
+    let refused = engine.publish_artifacts(
+        "clusters/a".into(),
+        0,
+        vec![IncomingArtifact::from_entities(
+            Some("c0".into()),
+            fx.members(0..300),
+        )],
+    );
+    assert!(
+        refused.is_err(),
+        "a membership naming a deleted document is refused rather than published into silence"
+    );
+
+    // The same batch without the deleted member, and still carrying the suppressed one.
+    let accepted = engine.publish_artifacts(
+        "clusters/a".into(),
+        0,
+        vec![IncomingArtifact::from_entities(
+            Some("c0".into()),
+            fx.members((0..300).filter(|s| *s != 7)),
+        )],
+    );
+    assert!(
+        accepted.is_ok(),
+        "the suppressed member is a live member temporarily outside every mask: {accepted:?}"
+    );
+    assert_eq!(
+        count(&engine),
+        298,
+        "and it is outside this count until the unsuppress — fail-closed, and not a refusal"
+    );
+}
+
+/// The refusal reaches a **generating set** as well as a membership, and for the sharper reason: a
+/// set naming a deleted document fails containment for every principal, so the description could
+/// never be read by anyone.
+#[test]
+fn publication_refuses_a_generating_set_naming_a_deleted_document() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(content_layer(
+            tessera_types::layer::OnMemberDeletion::WithdrawContent,
+        ))
+        .unwrap();
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+
+    let refused = engine.publish_artifacts(
+        "clusters/a".into(),
+        0,
+        vec![IncomingArtifact::with_content(
+            // The membership avoids the deleted document; only the sample names it.
+            Some("c0".into()),
+            fx.members((0..300).filter(|s| *s != 7)),
+            vec![IncomingVariation::new(
+                vec!["shipping and logistics".into()],
+                fx.members(0..30),
+            )],
+        )],
+    );
+    assert!(
+        refused.is_err(),
+        "content generated from a deleted document is unservable from birth"
+    );
+}
+
 // ---- the fold's report -------------------------------------------------------------------------
 
 /// The report the fold wrote for the prefix it published, as the operator would read it off disk.

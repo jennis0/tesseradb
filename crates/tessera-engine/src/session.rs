@@ -2493,8 +2493,46 @@ impl Engine {
             ));
         }
 
-        let entities = self.write.publish_artifacts(layer, level, artifacts)?;
+        // **A declared member that is deleted refuses the batch; a suppressed one is accepted**
+        // (`annotation-write-cycle.md` §3.1). The two are not near-neighbours: a deleted entity can
+        // never contribute to a count again and, inside a generating set, makes the content
+        // unservable from birth — better a loud refusal than a description nobody can read and
+        // nobody was told about. A suppressed entity is a live member temporarily outside every
+        // mask, and both structures behave fail-closed until the unsuppress; refusing it would make
+        // an operator's reversible action refuse a caller's unrelated publication.
+        //
+        // One `verdict` lookup per declared member, on the control plane, against the live overlay
+        // — which cannot go stale in the wrong direction between here and the executor, a deletion
+        // being irreversible.
         let generation = self.generation();
+        let deleted: Vec<u64> = artifacts
+            .iter()
+            .flat_map(|artifact| {
+                artifact.members.iter().chain(
+                    artifact
+                        .variations
+                        .iter()
+                        .flat_map(|variation| variation.generated_from.iter()),
+                )
+            })
+            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+            .map(u64::from)
+            .take(16)
+            .collect();
+        if !deleted.is_empty() {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "this batch names deleted entities {deleted:?} as members or as content \
+                         sources; a deleted member contributes to no count and makes supplied \
+                         content unservable from birth, so the batch is refused rather than \
+                         published into silence"
+                    ),
+                },
+            ));
+        }
+
+        let entities = self.write.publish_artifacts(layer, level, artifacts)?;
         let shard = generation.bundle.manifest.identity.shard_id;
         entities
             .into_iter()

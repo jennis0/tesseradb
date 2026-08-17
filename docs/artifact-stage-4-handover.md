@@ -34,7 +34,7 @@ What `publish_fold` does at step 3a: rewrites every level whole into the prefix 
 one extent per level, dropping the fold's **executed deletions** from each membership and nothing
 else — a suppressed member keeps its bit (Rule S) and no generating set is touched. The content
 extents are carried by hard link beside them, and the row forms are rebuilt inline after the swap
-rather than left to whoever arrives first. Fifteen tests in `artifact_fold.rs`.
+rather than left to whoever arrives first. Nineteen tests in `artifact_fold.rs`.
 
 **Two stale-manifest defects were found in the doing, both of the class below.** The fold took its
 layer registry from the live manifest, which a side-manifest write does not refresh — so it
@@ -142,10 +142,14 @@ that lookup, that is a design question rather than a missing index.
   ruled 2026-08-17. The predicate is unchanged. What it costs is stated there: a label layer over a
   gated cluster layer should declare a criterion at least as strong as its target's, and nothing
   enforces that.
-- **The strict/permissive declaration is this stage's**, strict by default, with publish-time member
-  validation beside it: a declared member that is *deleted* is a 422, one that is *suppressed* is
-  accepted. The second half has no build-plane meaning — a bundle straight out of `tessera build`
-  has no overlay — so the validation belongs to the online route alone.
+- ✔ **The strict/permissive declaration is built**, strict by default. The fold executes it: under
+  `withdraw_content` a variation that lost a source is dropped whole, and an artifact left with no
+  variations on a content-declaring layer is **absent** rather than served bare — decision 0076
+  reached from the write side. Under `shrink_generating_set` the member leaves the set and the
+  description serves again. Publish-time validation is beside it: a declared member or content
+  source that is *deleted* refuses the batch, one that is *suppressed* is accepted. The validation
+  has no build-plane meaning — a bundle straight out of `tessera build` has no overlay — so it lives
+  on the online route alone.
 
 ## Data
 
