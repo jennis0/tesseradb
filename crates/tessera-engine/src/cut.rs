@@ -95,31 +95,66 @@ impl Lineage {
         }
         false
     }
+
+    /// `node` and every ancestor of it, nearest first.
+    fn chain(&self, node: u32) -> Vec<u32> {
+        let mut chain = vec![node];
+        let mut at = node;
+        while let Some(&parent) = self.parent.get(&at) {
+            if chain.len() > self.parent.len() {
+                break;
+            }
+            chain.push(parent);
+            at = parent;
+        }
+        chain
+    }
 }
 
 /// The artifacts of `passing` that a cut at `depth` serves.
 ///
-/// An artifact is served iff it sits at or above `depth` **and** no other passing artifact at or
-/// above `depth` sits beneath it. The second clause is the frontier: where a parent and a child
-/// both passed, the child is the finer statement and the parent would draw over it.
+/// Each node of the frontier — a passing node with no passing node beneath it — is replaced by the
+/// **deepest passing node at or above `depth` in its own lineage**. Where a parent and a child both
+/// passed, that rule keeps the child at a deep cut and the parent at a shallow one; where only the
+/// child passed, it keeps the child at every cut.
 ///
-/// A node whose parent failed is served on its own account — the lineage has a hole, which is the
-/// normal state under a proportional criterion, and no disclosure follows because each node passed
-/// its own test.
+/// **A node with no passing ancestor to climb to is served where it stands.** That is not a
+/// relaxation of the budget, it is the whole reason the climb is expressed over *passing* nodes
+/// rather than over depths: a lineage's ancestors are suppressed, deleted or below their own bar
+/// often enough that a depth-shaped climb would blank the region under every one of them and call
+/// it a smaller map. Serving more than the budget asked is a client's problem; serving nothing
+/// where the viewer is entitled to something is the failure the budget exists around.
 pub fn cut_at(lineage: &Lineage, passing: &[u32], depth: u32) -> Vec<u32> {
     if lineage.is_flat() {
         return passing.to_vec();
     }
-    let within: Vec<u32> = passing
+    let frontier = passing
         .iter()
         .copied()
-        .filter(|&a| lineage.depth(a) <= depth)
+        .filter(|&a| !passing.iter().any(|&b| b != a && lineage.is_ancestor_of(a, b)));
+
+    let mut served: Vec<u32> = frontier
+        .map(|a| {
+            let chain = lineage.chain(a);
+            // Nearest first, so the first that fits is the deepest that fits.
+            chain
+                .iter()
+                .copied()
+                .find(|&n| passing.contains(&n) && lineage.depth(n) <= depth)
+                // No passing ancestor is shallow enough — climb as far as the lineage allows and
+                // stop there rather than dropping the branch.
+                .unwrap_or_else(|| {
+                    chain
+                        .iter()
+                        .copied()
+                        .rfind(|n| passing.contains(n))
+                        .unwrap_or(a)
+                })
+        })
         .collect();
-    within
-        .iter()
-        .copied()
-        .filter(|&a| !within.iter().any(|&b| b != a && lineage.is_ancestor_of(a, b)))
-        .collect()
+    served.sort_unstable();
+    served.dedup();
+    served
 }
 
 /// The cut this request serves: the deepest one that fits `budget`, or the full frontier if none
@@ -274,6 +309,25 @@ mod tests {
     fn a_budget_smaller_than_the_roots_serves_the_roots() {
         let two_roots = Lineage::new([(0, None), (1, None), (2, Some(0)), (3, Some(1))]);
         assert_eq!(cut(&two_roots, &[0, 1, 2, 3], Some(1)), vec![0, 1]);
+    }
+
+    /// **A branch with no passing ancestor is served where it stands rather than blanked.**
+    ///
+    /// This is the defect the integration test caught: the climb was expressed over *depths*, so a
+    /// budget that resolved to depth 0 against a suppressed root served nothing at all — a blank
+    /// map, from a viewer entitled to two artifacts, with no error anywhere. The climb is over
+    /// passing nodes for that reason.
+    #[test]
+    fn a_branch_whose_ancestors_all_failed_is_served_where_it_stands() {
+        let lineage = chain();
+        // 0 and 1 failed — suppressed, deleted, or below their own bar; the cut cannot tell and
+        // does not need to.
+        assert_eq!(cut(&lineage, &[2, 3], Some(1)), vec![2, 3]);
+        assert_eq!(
+            cut(&lineage, &[2, 4], Some(1)),
+            vec![2, 4],
+            "a budget resolving below every passing node still serves them"
+        );
     }
 
     /// Depth is measured from the root, and a node whose ancestors all failed still knows its own.

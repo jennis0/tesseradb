@@ -352,3 +352,136 @@ fn a_flat_layer_is_untouched_by_a_budget() {
         "there is no lineage to climb, so every artifact that passed is served"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// What a lineage survives
+// ---------------------------------------------------------------------------------------------
+
+/// **A suppressed parent withholds itself and nothing else.** Its child is served on its own
+/// account, because a node's verdict has no lineage input (decision 0080).
+///
+/// The alternative — suppressing a parent taking its subtree with it — reads as the cautious
+/// choice and is a different product: it makes a hierarchy's edges into visibility terms, which is
+/// exactly what an attachment is and a parent edge is not. It would also blank a region the viewer
+/// is entitled to see, with nothing reporting why.
+#[test]
+fn a_suppressed_parent_does_not_take_its_child_with_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(treed("clusters/tree", None)).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                node(&fx, "root", None, 0..300),
+                node(&fx, "leaf", Some("root"), 0..100),
+                node(&fx, "other", Some("root"), 100..200),
+            ],
+        )
+        .unwrap();
+
+    let credential = full_coverage_credential();
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, None)),
+        vec!["leaf", "other"]
+    );
+
+    // The root's own entity, which is what a suppression addresses. Two leaves do not fit in a
+    // budget of one, so this cut is the root alone — which is how the test names it without an
+    // ordinal, none of which crosses the boundary.
+    let served = artifacts_of(&engine, &credential, Some(1));
+    assert_eq!(keys(&served), vec!["root"]);
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    let root_entity = engine
+        .resolve_tessera_ids(&[served[0].tessera_id], idset)
+        .unwrap()[0]
+        .expect("it names what was issued");
+    engine
+        .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .expect("the suppress is accepted");
+
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, None)),
+        vec!["leaf", "other"],
+        "the leaves are unmoved: their verdicts never asked their parent anything"
+    );
+    // And with the budget that climbed to the root, the root is now absent and the climb has
+    // nowhere to go — so both leaves are served rather than nothing. Serving *more* than the
+    // budget asked is the sound direction: a blank map is the failure, an overfull one is a
+    // client's problem.
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, Some(1))),
+        vec!["leaf", "other"]
+    );
+}
+
+/// **A deleted parent leaves its child a root, and the fold rewrites nothing to make that true.**
+///
+/// This is the claim that lets the parent direction be the only durable one. An edge into a deleted
+/// artifact resolves to a hole, and a hole is a lineage that ends — so the child is served on its
+/// own account, which is correct because it passed its own test. Nothing has to find the child and
+/// rewrite it, which is the bookkeeping that would have to be right at every fold and is where the
+/// last two stages each found a defect.
+///
+/// Note what this does *not* share with an attachment. A label whose cluster is deleted is
+/// **withheld** — its edge is a visibility term, and dropping it would serve the label of a hidden
+/// cluster. A parent edge is not a visibility term, so the opposite answer is the right one, and
+/// the two rules have to be kept apart by hand.
+#[test]
+fn a_deleted_parent_leaves_its_child_a_root() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.set_background_refresh_for_test(false);
+    engine.register_layer(treed("clusters/tree", None)).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                node(&fx, "root", None, 0..300),
+                node(&fx, "leaf", Some("root"), 0..100),
+                node(&fx, "other", Some("root"), 100..200),
+            ],
+        )
+        .unwrap();
+
+    let credential = full_coverage_credential();
+    let served = artifacts_of(&engine, &credential, Some(1));
+    assert_eq!(keys(&served), vec!["root"]);
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    let root_entity = engine
+        .resolve_tessera_ids(&[served[0].tessera_id], idset)
+        .unwrap()[0]
+        .expect("it names what was issued");
+
+    engine
+        .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .expect("the delete is accepted");
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, None)),
+        vec!["leaf", "other"],
+        "the children stand on their own the moment the deletion is acked"
+    );
+
+    // And across the fold that executes it, where the root's ordinal becomes a hole for good.
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    for _ in 0..2_000 {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, None)),
+        vec!["leaf", "other"],
+        "the fold executed the deletion and the children are unmoved — their parent pointer names \
+         a hole, which is a lineage that ends rather than one that is broken"
+    );
+}
