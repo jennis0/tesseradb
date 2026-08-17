@@ -153,6 +153,14 @@ that lookup, that is a design question rather than a missing index.
 
 ## Data
 
+✔ **The generator's artifact arm and the census are built.** Membership is a keyed interval plus a
+keyed scatter drawn through a keyed bijection, so both directions are closed form — the members of
+an artifact, and the artifacts holding an entity — and `artifact_census.rs` asks the engine both
+questions over every artifact and every entity, before a write, after a deletion, after the fold
+that executes it, and after a restart. What it cannot yet be is a *row of the read battery*: no
+battery exists (`correctness-suite.md` §3 marks the whole thing ⊘), so this is a census standing on
+its own rather than one surface of a suite.
+
 **The seeded generator is the only fixture that can carry this stage** (§5.1): the stage battery
 compares recorded answers across eight stages at sizes where no expectation can be stored, so both
 directions have to be closed-form — the members of an artifact, and the artifacts holding an entity.

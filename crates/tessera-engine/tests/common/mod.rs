@@ -197,6 +197,47 @@ pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
 }
 
+/// Build a bundle over inputs the **corpus generator** wrote, with the generator's own schema.
+///
+/// Separate from [`build_fixture_n`] rather than a parameter on it: that one owns its inputs and
+/// its (empty) schema, and the census owns neither — its points carry the generator's five column
+/// families and its extent is the generator's. What the two share is `BuildArgs`, which is the
+/// point.
+pub fn build_corpus_fixture(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &tessera_corpus::Corpus,
+) {
+    let schema_path = out.with_extension("schema.toml");
+    std::fs::create_dir_all(schema_path.parent().expect("the bundle has a parent")).ok();
+    std::fs::write(&schema_path, corpus.schema_toml()).expect("the generator's schema is writable");
+    let schema = tessera_build::schema::Schema::parse(&schema_path, &Default::default())
+        .expect("the generator's schema parses");
+    let args = BuildArgs {
+        points: points_path.to_path_buf(),
+        pairs: pairs_path.to_path_buf(),
+        out: out.to_path_buf(),
+        extent: corpus.extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: None,
+        artifacts: None,
+        artifact_members: None,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    };
+    build(&args).expect("the census fixture builds");
+}
+
 /// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same
 /// ground truth `tessera-build`'s own smoke test cross-checks against.
 pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {

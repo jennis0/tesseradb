@@ -64,6 +64,12 @@ tracing = { workspace = true }
 tessera-engine = { path = ".", features = ["fault-injection"] }
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
+# **The corpus census, and this edge may only ever be a dev one.** The generator is a second
+# statement of the corpus and stays one only while it cannot read an artefact
+# (`correctness-suite.md` §13) — `check-layers.sh` asserts what *it* may depend on, and a normal
+# edge from here would not trip that rule while still putting the fixture and the system in one
+# dependency graph. It is a test-only edge, exactly as `tessera-build` above is.
+tessera-corpus = { path = "../tessera-corpus" }
 parquet = { workspace = true }
 criterion = "0.5"
 

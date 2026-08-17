@@ -2485,6 +2485,7 @@ dependencies = [
  "tessera-analyse",
  "tessera-authz",
  "tessera-build",
+ "tessera-corpus",
  "tessera-engine",
  "tessera-filter",
  "tessera-filter-write",
