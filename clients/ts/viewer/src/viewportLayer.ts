@@ -457,9 +457,12 @@ function artifactLayers(store: Store): Layer[] {
   const data = placed.map((p) => ({
     id: p.artifact.tesseraId,
     count: Number(p.artifact.maskedCount),
-    // The supplied text where there is any, which for a label layer is the whole point of it: the
-    // description a principal qualifies for moves with the mask, and the stable key does not.
-    label: p.artifact.content[0] || p.artifact.stableKey || `#${p.artifact.tesseraId}`,
+    // **The key, not the supplied text — the text belongs in the panel and was tried here.** Two
+    // things defeat it on the map: twenty-two descriptions at eleven pixels cover the marks they
+    // annotate, in the dense middle where the clusters are; and the text atlas is built over ASCII,
+    // so any character outside it renders as a hole rather than as a glyph. The panel is HTML, has
+    // room to wrap, and needs no atlas.
+    label: p.artifact.stableKey ?? `#${p.artifact.tesseraId}`,
     position: [p.x / CELLS_PER_WORLD_UNIT, p.y / CELLS_PER_WORLD_UNIT] as [number, number]
   }));
   // Against the largest count *in this view for this principal*, so the smallest cluster is still
