@@ -34,16 +34,23 @@
 //! with the same masked count — a client that widens its budget mid-pan never sees a node change
 //! its meaning, only nodes appear beside it.
 
-use std::collections::BTreeMap;
-
 /// One treed level's lineage, as the cut needs it: a parent per ordinal.
 ///
 /// **Built from the parent pointers alone**, which is the only durable direction — the child
 /// direction is this relation read the other way and is derived here, per request, rather than
 /// stored. That is what keeps a deletion from having to rewrite two copies of one fact.
+///
+/// **Indexed by ordinal, because that is how a level is stored.** A level is a dense vector with
+/// holes, so the lineage is one too: building it is a linear fill with a single allocation, and a
+/// lookup is an index rather than a tree descent. This is on the request path for every treed
+/// layer, beside a per-artifact loop that already walks the whole level — so it has to cost a
+/// fraction of that loop rather than a multiple of it, which a per-node map insert would have been.
 pub struct Lineage {
     /// `parent[ordinal]`, `None` at a root and at an ordinal the level does not hold.
-    parent: BTreeMap<u32, u32>,
+    parent: Vec<Option<u32>>,
+    /// How many ordinals name a parent. **The cycle bound**, and tighter than the vector's length:
+    /// a chain cannot be longer than the number of edges that exist.
+    edges: usize,
 }
 
 impl Lineage {
@@ -52,30 +59,43 @@ impl Lineage {
     /// served, but a cut that did not know it was there would mistake its two children for
     /// siblings of a different parent and keep both when one covers the other.
     pub fn new(pairs: impl IntoIterator<Item = (u32, Option<u32>)>) -> Self {
-        Lineage {
-            parent: pairs
-                .into_iter()
-                .filter_map(|(ordinal, parent)| parent.map(|p| (ordinal, p)))
-                .collect(),
+        let mut parent: Vec<Option<u32>> = Vec::new();
+        let mut edges = 0;
+        for (ordinal, of) in pairs {
+            if of.is_none() {
+                continue;
+            }
+            let idx = ordinal as usize;
+            if parent.len() <= idx {
+                parent.resize(idx + 1, None);
+            }
+            parent[idx] = of;
+            edges += 1;
         }
+        Lineage { parent, edges }
+    }
+
+    /// The parent of `ordinal`, or `None` at a root and at an ordinal this level does not hold.
+    fn parent_of(&self, ordinal: u32) -> Option<u32> {
+        self.parent.get(ordinal as usize).copied().flatten()
     }
 
     /// True where no artifact of the level names a parent — the flat case, which every layer
     /// before this stage is, and which the cut short-circuits entirely.
     pub fn is_flat(&self) -> bool {
-        self.parent.is_empty()
+        self.edges == 0
     }
 
     /// The depth of `ordinal`, the root being 0.
     ///
-    /// Bounded by the level's own size, so a cycle that reached durable state — the build refuses
-    /// one, and a hand-written WAL is not a build — terminates rather than hanging a request.
+    /// Bounded by the edge count, so a cycle that reached durable state — the build refuses one,
+    /// and a hand-written WAL is not a build — terminates rather than hanging a request.
     pub fn depth(&self, ordinal: u32) -> u32 {
         let mut depth = 0;
         let mut node = ordinal;
-        while let Some(&parent) = self.parent.get(&node) {
+        while let Some(parent) = self.parent_of(node) {
             depth += 1;
-            if depth as usize > self.parent.len() {
+            if depth as usize > self.edges {
                 break;
             }
             node = parent;
@@ -84,17 +104,83 @@ impl Lineage {
     }
 
     /// `node` and every ancestor of it, nearest first. Bounded for a cycle's sake.
+    ///
+    /// **Only the reference implementation uses this now.** The serving path climbs without
+    /// materialising a chain per node — allocating one was the cost the plan was rewritten to
+    /// remove — but the obvious form the plan is checked against is written with it, and reads the
+    /// way the rule is stated.
+    #[cfg(test)]
     fn chain(&self, node: u32) -> Vec<u32> {
         let mut chain = vec![node];
         let mut at = node;
-        while let Some(&parent) = self.parent.get(&at) {
-            if chain.len() > self.parent.len() {
+        while let Some(parent) = self.parent_of(at) {
+            if chain.len() > self.edges {
                 break;
             }
             chain.push(parent);
             at = parent;
         }
         chain
+    }
+}
+
+/// Depths for one level, resolved on demand and remembered.
+///
+/// **Ancestors are shared, so depth is the quantity most worth memoising.** A balanced tree's
+/// lineages all pass through the same handful of nodes near the root, and computing each node's
+/// depth by walking to the root would re-walk that spine once per descendant — the depth of the
+/// tree multiplied by the number of nodes, for an answer that never changes.
+struct Depths {
+    /// `u32::MAX` where unknown, so a zero depth (a root) is not confused with an absent one.
+    known: Vec<u32>,
+    /// Reused across resolutions so a deep lineage does not allocate per node.
+    stack: Vec<u32>,
+}
+
+impl Depths {
+    fn new(span: usize) -> Self {
+        Depths {
+            known: vec![u32::MAX; span],
+            stack: Vec::new(),
+        }
+    }
+
+    /// The depth of `node`, the root being 0, filling in every node walked on the way.
+    fn of(&mut self, lineage: &Lineage, node: u32) -> u32 {
+        if self.known[node as usize] != u32::MAX {
+            return self.known[node as usize];
+        }
+        self.stack.clear();
+        let mut at = node;
+        // Climb to the first node whose depth is already known, or to a root. The cycle guard is
+        // the edge count, as everywhere else here: the build refuses a cycle, and a hand-written
+        // WAL is not a build.
+        let base = loop {
+            match lineage.parent_of(at) {
+                None => {
+                    self.known[at as usize] = 0;
+                    break 0;
+                }
+                Some(parent) => {
+                    if self.stack.len() > lineage.edges {
+                        self.known[at as usize] = 0;
+                        break 0;
+                    }
+                    self.stack.push(at);
+                    if self.known[parent as usize] != u32::MAX {
+                        break self.known[parent as usize];
+                    }
+                    at = parent;
+                }
+            }
+        };
+        // Unwind, deepest last: each node is one below the one above it.
+        let mut depth = base;
+        for &n in self.stack.iter().rev() {
+            depth += 1;
+            self.known[n as usize] = depth;
+        }
+        self.known[node as usize]
     }
 }
 
@@ -118,55 +204,68 @@ struct Plan {
 
 impl Plan {
     fn new(lineage: &Lineage, passing: &[u32]) -> Self {
-        // Sorted once, so membership is a binary search rather than a scan. Every inner loop below
-        // asks "is this ancestor passing", which was the linear step.
         let mut sorted: Vec<u32> = passing.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        let is_passing = |n: u32| sorted.binary_search(&n).is_ok();
 
-        // Depths, memoised across the whole pass: lineages share ancestors, and recomputing a
-        // shared prefix once per descendant is the other repeated walk.
-        let mut depth_of: BTreeMap<u32, u32> = BTreeMap::new();
-        let mut depth = |node: u32, chain: &[u32]| -> u32 {
-            if let Some(&known) = depth_of.get(&node) {
-                return known;
-            }
-            // `chain` is the node's own lineage, nearest first, so its length past each position
-            // is that position's depth — assign the whole prefix at once.
-            let root_first = chain.len() as u32 - 1;
-            for (i, &n) in chain.iter().enumerate() {
-                depth_of.entry(n).or_insert(root_first - i as u32);
-            }
-            depth_of[&node]
-        };
-
-        // The frontier, in one pass rather than in a pairwise comparison: a passing node is
-        // covered exactly when some *other* passing node names it among its ancestors, so walking
-        // each lineage once and marking what it passes is the whole computation.
-        let mut chains: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        let mut covered: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for &node in &sorted {
-            let chain = lineage.chain(node);
-            for &ancestor in chain.iter().skip(1) {
-                if is_passing(ancestor) {
-                    covered.insert(ancestor);
-                }
-            }
-            chains.insert(node, chain);
+        // **Ordinal-indexed side tables, not sorted lookups.** A level is a dense ordinal space, so
+        // every question this pass asks of a node — is it passing, is it covered, what is its
+        // depth — is an array index. The previous shape asked them through a binary search or a
+        // tree, once per node per ancestor, which is where the cost was.
+        let span = sorted
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .max(lineage.parent.len().saturating_sub(1) as u32) as usize
+            + 1;
+        let mut is_passing = vec![false; span];
+        for &n in &sorted {
+            is_passing[n as usize] = true;
         }
 
+        // The frontier: a passing node is covered exactly when some *other* passing node names it
+        // among its ancestors. Walking up from each passing node marks that in one pass — and the
+        // walk **stops at the first node an earlier walk already climbed through**, because
+        // everything above it was marked then. That is what keeps the total linear in the passing
+        // set rather than multiplying it by the depth: sibling lineages share a spine, and without
+        // the memo every one of them re-walks it to the root.
+        let mut covered = vec![false; span];
+        let mut climbed = vec![false; span];
+        for &node in &sorted {
+            let mut at = node;
+            for _ in 0..=lineage.edges {
+                let Some(parent) = lineage.parent_of(at) else {
+                    break;
+                };
+                if is_passing[parent as usize] {
+                    covered[parent as usize] = true;
+                }
+                if climbed[parent as usize] {
+                    break;
+                }
+                climbed[parent as usize] = true;
+                at = parent;
+            }
+        }
+
+        let mut depths = Depths::new(span);
         let chains = sorted
             .iter()
-            .filter(|n| !covered.contains(n))
-            .map(|&node| {
-                let chain = chains.remove(&node).expect("built for every passing node");
+            .copied()
+            .filter(|&n| !covered[n as usize])
+            .map(|node| {
+                let mut chain = Vec::new();
+                let mut at = node;
+                for _ in 0..=lineage.edges {
+                    if is_passing[at as usize] {
+                        chain.push((depths.of(lineage, at), at));
+                    }
+                    match lineage.parent_of(at) {
+                        Some(parent) => at = parent,
+                        None => break,
+                    }
+                }
                 chain
-                    .iter()
-                    .copied()
-                    .filter(|&n| is_passing(n))
-                    .map(|n| (depth(n, &chain), n))
-                    .collect()
             })
             .collect();
         Plan { chains }

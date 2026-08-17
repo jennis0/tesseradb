@@ -1,0 +1,163 @@
+//! **What does the cut cost per request, and is it a fraction of the walk it rides on?**
+//!
+//! The cut derives a treed level's child direction from its parent pointers on **every request**,
+//! rather than holding a cached index. That is the deliberate choice — a cache costs an
+//! invalidation rule that has to be right whenever the generation moves, and the alternative to it
+//! is not "no work" but "work proportional to something the serving path already walks". The
+//! serving path tests every artifact of the level against its criterion, so the claim being made is
+//! that reading the same level's parent pointers is a fraction of that loop rather than a multiple.
+//!
+//! **This measures the claim.** Two arms, both timed:
+//!
+//! - **flat** — a level with no edges at all, which is every layer published before Stage 5. It is
+//!   the arm that matters most, because a flat layer must not pay for a mechanism it does not use,
+//!   and the whole cost here is one pass reading a field and finding nothing.
+//! - **treed** — a balanced tree over the level, with a share of its artifacts passing the
+//!   criterion, at several budgets.
+//!
+//! Reported per scale: the lineage build, the unbudgeted cut, and a budgeted cut (which bisects
+//! over depths and so evaluates the plan several times). Against these, the figure to compare is
+//! the per-artifact candidacy test the serving loop already performs — a Roaring `and_cardinality`
+//! against the viewer's mask, which `annotation-representation.md` §2 prices in the microseconds
+//! per artifact range at realistic membership sizes. **A lineage pass in the nanoseconds per
+//! artifact range is therefore the answer this probe is looking for**; anything approaching the
+//! candidacy test's own cost would say the derivation wants caching after all.
+//!
+//! # Measured 2026-08-18, WSL2 on this host, release
+//!
+//! | level | arm | lineage | cut, no budget | cut, budgeted | ns/artifact |
+//! |---:|---|---:|---:|---:|---:|
+//! | 10³ | flat | 0.000 ms | 0.003 ms | 0.002 ms | 0.4 |
+//! | 10³ | treed | 0.001 ms | 0.060 ms | 0.059 ms | 1.4 |
+//! | 10⁴ | flat | 0.003 ms | 0.027 ms | 0.026 ms | 0.3 |
+//! | 10⁴ | treed | 0.046 ms | 0.620 ms | 0.678 ms | 4.6 |
+//! | 10⁵ | flat | 0.037 ms | 0.252 ms | 0.250 ms | 0.4 |
+//! | 10⁵ | treed | 0.426 ms | 9.508 ms | 7.975 ms | 4.3 |
+//! | 10⁶ | flat | 1.177 ms | 3.725 ms | 3.066 ms | 1.2 |
+//! | 10⁶ | treed | 5.634 ms | 100.5 ms | 110.9 ms | 5.6 |
+//!
+//! **The lineage build is 0.3–5.6 ns per artifact of the level** — memory-bandwidth work against a
+//! per-artifact candidacy test that does Roaring arithmetic, so the derivation is comfortably a
+//! fraction of the loop it rides on and the cache it replaces would not have paid for itself.
+//!
+//! **The cut proper is ~100 ns per *passing* artifact**, and that is the figure to watch, because
+//! it scales with what the viewer can see rather than with the level. At 10⁴ passing — already
+//! more than a client can draw, and past where `annotation-representation.md` §2.0.0 says a
+//! request is heading for its artifact ceiling anyway — it is 0.6 ms. At 10⁶ it is 100 ms, which
+//! is not an operating point this system serves.
+//!
+//! **These are the figures after the plan was rewritten**, and the rewrite was worth about 8–10×:
+//! the first shape allocated a lineage vector per passing node and answered *is this passing* and
+//! *what is its depth* through a tree, measuring 5.4 ms at 10⁴ and 1 070 ms at 10⁶. Ordinal-indexed
+//! side tables, a frontier pass that stops climbing at the first node an earlier walk covered, and
+//! a memoised depth table are the whole difference.
+//!
+//! Run: `cargo run --release -p tessera-bench --bin artifact_cut_cost`
+
+use std::time::Instant;
+
+use tessera_engine::cut::{cut, Lineage};
+
+/// Children per internal node in the treed arm — three, so the arithmetic never agrees with a bit
+/// shift by accident and the tree gets genuinely deep at scale.
+const BRANCH: u32 = 3;
+
+fn main() {
+    println!("# artifact cut cost\n");
+    println!(
+        "{:>10}  {:>8}  {:>12}  {:>12}  {:>12}  {:>12}",
+        "level", "arm", "lineage", "cut(none)", "cut(budget)", "ns/artifact"
+    );
+
+    for &n in &[1_000u32, 10_000, 100_000, 1_000_000] {
+        flat_arm(n);
+        treed_arm(n);
+    }
+
+    println!(
+        "\nlineage = building the level's parent map; cut = resolving the frontier and, where a \n\
+         budget is given, bisecting over depths. ns/artifact is the lineage build over the level \n\
+         size — the quantity that has to stay far below the per-artifact candidacy test the \n\
+         serving loop already pays."
+    );
+}
+
+/// Every layer before Stage 5: no edges anywhere. The cut must short-circuit and the build must
+/// allocate nothing.
+fn flat_arm(n: u32) {
+    let pairs: Vec<(u32, Option<u32>)> = (0..n).map(|ordinal| (ordinal, None)).collect();
+    let passing: Vec<u32> = (0..n).collect();
+
+    let start = Instant::now();
+    let lineage = Lineage::new(pairs.iter().copied());
+    let build = start.elapsed();
+    assert!(lineage.is_flat());
+
+    let start = Instant::now();
+    let served = cut(&lineage, &passing, None);
+    let unbudgeted = start.elapsed();
+    assert_eq!(served.len(), n as usize);
+
+    let start = Instant::now();
+    let served = cut(&lineage, &passing, Some(100));
+    let budgeted = start.elapsed();
+    assert_eq!(
+        served.len(),
+        n as usize,
+        "a flat level has no lineage to trade, so a budget takes nothing from it"
+    );
+
+    report(n, "flat", build, unbudgeted, budgeted);
+}
+
+/// A balanced tree over the whole level, with two artifacts in three clearing their criterion —
+/// so the passing set is large enough to be the cost driver and holey enough that the frontier is
+/// not simply the leaves.
+fn treed_arm(n: u32) {
+    let pairs: Vec<(u32, Option<u32>)> = (0..n)
+        .map(|ordinal| {
+            (
+                ordinal,
+                (ordinal > 0).then(|| (ordinal - 1) / BRANCH),
+            )
+        })
+        .collect();
+    let passing: Vec<u32> = (0..n).filter(|o| !o.is_multiple_of(3)).collect();
+
+    let start = Instant::now();
+    let lineage = Lineage::new(pairs.iter().copied());
+    let build = start.elapsed();
+    assert!(!lineage.is_flat());
+
+    let start = Instant::now();
+    let full = cut(&lineage, &passing, None);
+    let unbudgeted = start.elapsed();
+
+    let start = Instant::now();
+    let narrow = cut(&lineage, &passing, Some(100));
+    let budgeted = start.elapsed();
+    assert!(
+        narrow.len() <= full.len(),
+        "a budget never serves more than the full frontier"
+    );
+
+    report(n, "treed", build, unbudgeted, budgeted);
+}
+
+fn report(
+    n: u32,
+    arm: &str,
+    build: std::time::Duration,
+    unbudgeted: std::time::Duration,
+    budgeted: std::time::Duration,
+) {
+    println!(
+        "{:>10}  {:>8}  {:>10.3}ms  {:>10.3}ms  {:>10.3}ms  {:>12.1}",
+        n,
+        arm,
+        build.as_secs_f64() * 1e3,
+        unbudgeted.as_secs_f64() * 1e3,
+        budgeted.as_secs_f64() * 1e3,
+        build.as_nanos() as f64 / n as f64,
+    );
+}
