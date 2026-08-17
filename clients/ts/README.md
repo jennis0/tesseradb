@@ -188,6 +188,35 @@ decides is *which* documents the description was generated from. And suppressing
 its label serving on the identifier route as well as in the viewport, which is the route that
 traverses no edge and would otherwise go on describing what was just hidden.
 
+### The write cycle: what a deletion does to a description
+
+```bash
+TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/write-cycle-demo.mjs \
+  --presets .dev/presets/stage3.json            # add --dry-run to see the plan first
+```
+
+The two above are read-only about the corpus. This one changes it: it publishes a small cluster and
+one label over six documents **it picks itself**, deletes one of the three the label was written
+from, and runs a fold. The label goes at the ack — containment is evaluated per request, so nothing
+had to be stored to withdraw it — and the assertion is that it is **still gone after the fold**,
+with the cluster one member lighter. An earlier draft of the design had the fold re-base generating
+sets into row space, which brought the withheld label back, served on a set that no longer named
+what its text was derived from.
+
+It publishes its own pair rather than driving the labels above **because it cannot see a generating
+set** — no client can, which is the design working. Driving somebody else's labels would mean
+deleting documents at random until one landed in a set; publishing its own means exactly one
+document dies.
+
+It leaves two things behind: a deleted document (a delete is not a suppress) and a new prefix, the
+fold having reclaimed the one it replaced — so the bundle needs free disc of about its own size. The
+fold also writes `reports/fold-<prefix>.json` in the bundle root: which artifact lost how many
+members, out of how many it was published with, and which description lost a source. That is the
+notice the publisher is owed, and it is written before anything retires.
+
+Run it with the viewer open over the cluster: the label disappears at step 2, and step 3 changes
+nothing a viewer can see, which is what a fold is supposed to look like from outside.
+
 ## Testing
 
 ```bash
