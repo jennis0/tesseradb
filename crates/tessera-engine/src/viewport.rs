@@ -3296,7 +3296,7 @@ impl Engine {
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
         requested: Option<&[&str]>,
-        _artifact_budget: Option<u32>,
+        artifact_budget: Option<u32>,
     ) -> Result<Vec<ArtifactOut>> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
@@ -3401,6 +3401,11 @@ impl Engine {
                     attachment_gate: &attachment_gate,
                     attachment_resolves: &attachment_resolves,
                 };
+                // **Every candidate is tested before any is cut**, and the two passes are separate
+                // for a reason that is not performance: the verdict is a per-artifact question
+                // with no lineage input (decision 0080), and a loop that decided *and* pruned in
+                // one step would have the shape that lets a node's neighbours reach its verdict.
+                let mut passing = Vec::new();
                 for ordinal in 0..rows.len() as u32 {
                     if !rows.intersects(ordinal, &tile_rows, mask) {
                         continue;
@@ -3420,6 +3425,26 @@ impl Engine {
                     else {
                         continue;
                     };
+                    passing.push((ordinal, entity, masked_count, variation));
+                }
+
+                // The level's lineage, read from the parent pointers of **every** artifact and not
+                // only the passing ones: an ancestor that failed its own criterion is still an
+                // ancestor, and a cut blind to it would keep a node its descendant covers.
+                let lineage = self.write.with_artifacts(|store| {
+                    crate::cut::Lineage::new(
+                        store
+                            .level(&name, level)
+                            .map(|(ordinal, record)| (ordinal, record.parent_ordinal)),
+                    )
+                });
+                let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
+                let served = crate::cut::cut(&lineage, &ordinals, artifact_budget);
+
+                for (ordinal, entity, masked_count, variation) in passing {
+                    if !served.contains(&ordinal) {
+                        continue;
+                    }
                     // The one variation this viewer contains, entire. ⊘ A variation restored from a
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than

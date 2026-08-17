@@ -91,6 +91,13 @@ pub enum RegistryError {
         level: u32,
         key: String,
     },
+    /// A parent/child edge named a parent this level does not hold — in the batch or already
+    /// published. An edge relates two artifacts of one level, so there is nowhere else to look.
+    NoSuchParent {
+        layer: String,
+        level: u32,
+        key: String,
+    },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
 }
@@ -143,6 +150,12 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact attached to {key} in level {level} of {target}, \
                  which holds no such artifact — a target exists before the edge into it, or the \
                  edge names whatever later lands there"
+            ),
+            RegistryError::NoSuchParent { layer, level, key } => write!(
+                f,
+                "{layer} publishes an artifact whose parent is {key}, which level {level} does \
+                 not hold — a hierarchy's edges relate two artifacts of one level, so a parent \
+                 that is neither in this batch nor already published names nothing"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -464,6 +477,41 @@ impl LayerRegistry {
         let first_ordinal = store.next_ordinal(layer_name, level) as u64;
         let needed = first_ordinal + incoming.len() as u64;
 
+        // **Parents, resolved against this batch first and the level second.** A hierarchy's edges
+        // relate artifacts of one level, and a level is normally published in one batch — so a
+        // child's parent is usually a sibling in `incoming` that has no ordinal until this call
+        // assigns one. Resolving the batch by position and falling through to the store is what
+        // lets a level arrive whole or in pieces without the caller having to know which.
+        let batch_ordinal = |key: &str| {
+            incoming
+                .iter()
+                .position(|a| a.stable_key.as_deref() == Some(key))
+                .map(|i| first_ordinal as u32 + i as u32)
+        };
+        let parents: Vec<Option<u32>> = incoming
+            .iter()
+            .map(|artifact| {
+                let Some(key) = artifact.parent_key.as_deref() else {
+                    return Ok(None);
+                };
+                if artifact.stable_key.as_deref() == Some(key) {
+                    return Err(RegistryError::NoSuchParent {
+                        layer: layer_name.to_string(),
+                        level,
+                        key: key.to_string(),
+                    });
+                }
+                batch_ordinal(key)
+                    .or_else(|| store.ordinal_of_key(layer_name, level, key))
+                    .map(Some)
+                    .ok_or_else(|| RegistryError::NoSuchParent {
+                        layer: layer_name.to_string(),
+                        level,
+                        key: key.to_string(),
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+
         // Extend the level's reservation if the batch outgrows it. The runs are a list from the
         // start precisely so this is an append rather than a migration — see `ReservedRuns`.
         let mut extend_runs = Vec::new();
@@ -514,6 +562,7 @@ impl LayerRegistry {
                             entity: a.entity,
                         }
                     }),
+                    parent_ordinal: parents[i],
                 }
             })
             .collect();

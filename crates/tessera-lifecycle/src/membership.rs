@@ -233,6 +233,18 @@ pub struct ArtifactRecord {
     /// target's disposition and reachability as well as on its own conjuncts, on **every** route —
     /// see [`Attachment`].
     pub attached_to: Option<Attachment>,
+    /// This artifact's parent in its own level's hierarchy, by ordinal.
+    ///
+    /// **The opposite of an attachment in the one way that matters**: it is *not* a visibility term.
+    /// A node's verdict is its own masked count against its own criterion, with no input from its
+    /// lineage and none from the viewport
+    /// ([decision 0080](../../../docs/decisions/0080-the-frontier-is-a-per-artifact-test.md)) — so
+    /// a parent that is suppressed, deleted or below its bar withholds itself and nothing else. What
+    /// the edge decides is only which of two artifacts that *both* passed is the one drawn.
+    ///
+    /// A parent whose ordinal is now a hole leaves this node a root, which serves it: correct, since
+    /// it passed its own test, and the reason the fold does not have to rewrite these.
+    pub parent_ordinal: Option<u32>,
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -452,6 +464,7 @@ impl ArtifactStore {
                         ordinal: a.ordinal,
                         entity: a.entity,
                     }),
+                    parent_ordinal: published.parent_ordinal,
                 },
             );
         }
@@ -971,6 +984,17 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
             out.extend_from_slice(&attachment.entity.raw().to_le_bytes());
         }
     }
+    // The parent, on the attachment's discriminant rule: absent is one byte and never zero, so
+    // *this node is a root* and *this reader does not know whether it had a parent* cannot encode
+    // the same. Here the second answer would serve a child beside the ancestor that should have
+    // replaced it — a duplicate on the map rather than a disclosure, but wrong either way.
+    match record.parent_ordinal {
+        None => out.push(0),
+        Some(ordinal) => {
+            out.push(1);
+            out.extend_from_slice(&ordinal.to_le_bytes());
+        }
+    }
     out
 }
 
@@ -1034,6 +1058,11 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
         }
         _ => return None,
     };
+    let parent_ordinal = match take(1)?[0] {
+        0 => None,
+        1 => Some(u32::from_le_bytes(take(4)?.try_into().ok()?)),
+        _ => return None,
+    };
     // **Trailing bytes are a decode failure**, not slack to ignore: a blob longer than its own
     // structure means the writer and this reader disagree about the format, and the half that
     // decoded cleanly is the more dangerous outcome of the two.
@@ -1046,6 +1075,7 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
         members,
         variations,
         attached_to,
+        parent_ordinal,
     })
 }
 
@@ -1080,6 +1110,7 @@ mod tests {
             members: Bitmap::of(members),
             variations: Vec::new(),
             attached_to: None,
+            parent_ordinal: None,
         }
     }
 
