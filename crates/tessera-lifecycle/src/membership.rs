@@ -86,6 +86,10 @@ pub struct IncomingArtifact {
     /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
     /// address for the target beyond the key they published it under.
     pub attached_to: Option<IncomingAttachment>,
+    /// The parent artifact in a hierarchical layer, named by stable key (stage 5).
+    pub parent_key: Option<String>,
+    /// The child artifacts in a hierarchical layer, named by stable keys (stage 5).
+    pub children_keys: Vec<String>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -150,6 +154,8 @@ impl IncomingArtifact {
             members: bitmap,
             variations: Vec::new(),
             attached_to: None,
+            parent_key: None,
+            children_keys: Vec::new(),
         }
     }
 

@@ -59,6 +59,7 @@
 //! the server resolves name the same postings.
 
 pub mod artifacts;
+pub mod hierarchy;
 mod materialise;
 
 use std::collections::HashMap;

@@ -679,6 +679,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         }
     };
 
+    write_containment_report(&args.out, &published_layers)?;
+
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([
         permutation_path,
@@ -1285,6 +1287,48 @@ fn write_external_id_run(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
         .map_err(|e| BuildError::arrow(path, e))?;
     writer.finish().map_err(|e| BuildError::arrow(path, e))?;
     fsync_file(path)
+}
+
+/// Write the hierarchy containment report into the bundle root's `reports/`.
+///
+/// **Beside the prefix, never inside it**, on the fold report's rule: a prefix is reclaimed and a
+/// notice nobody has read yet would go with it. **Written even when empty**, for the same reason
+/// that report is — an operator polling the directory must be able to tell *this build found
+/// nothing* from *this build never looked*, and an absent file says the second.
+///
+/// It decides nothing. A violating edge is published exactly as a clean one is; what the report
+/// buys is that the edge is named before a viewer meets its consequences.
+///
+/// **A build that registered no layers writes nothing at all** — not even the directory. There are
+/// no edges to have checked, so an empty report there would answer a question nobody asked, and
+/// creating `reports/` for it would mean every bundle carries the fold's notice directory before a
+/// fold has ever run.
+pub(crate) fn write_containment_report(
+    root: &Path,
+    published: &crate::layers::PublishedLayers,
+) -> Result<()> {
+    if published.layers.is_empty() {
+        return Ok(());
+    }
+    let violations = &published.containment_violations;
+    let dir = root.join("reports");
+    std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    let rows: Vec<serde_json::Value> = violations
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "layer": v.layer,
+                "level": v.level,
+                "child": v.child,
+                "parent": v.parent,
+                "escaping_members": v.escaping_members,
+            })
+        })
+        .collect();
+    write_json(
+        &dir.join("containment.json"),
+        &serde_json::json!({ "violations": rows }),
+    )
 }
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {

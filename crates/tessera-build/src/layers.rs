@@ -195,6 +195,10 @@ struct PlannedArtifact {
     /// Indexed by variation, dense — a gap would silently renumber the caller's ranking.
     variations: Vec<PlannedVariation>,
     attached_to: Option<IncomingAttachment>,
+    /// Parent artifact in a hierarchy (stage 5).
+    parent_key: Option<String>,
+    /// Child artifacts in a hierarchy (stage 5).
+    children_keys: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -211,9 +215,34 @@ pub struct LayerPlan {
     artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
 }
 
+/// One parent/child edge whose child holds a member its parent does not.
+///
+/// **A report, not a refusal.** Containment is what makes rollup sound under an absolute criterion
+/// — a child's masked count can never exceed its parent's, so a passing child never sits beneath a
+/// failing parent — and an edge that breaks it silently withdraws that guarantee for its branch.
+/// Naming the edge at build time is what lets an operator see it before a viewer does; deciding
+/// what to do about it is theirs, since a corpus may legitimately carry one (an analysis rerun
+/// against a moved corpus, a hand-corrected assignment).
+///
+/// **Not to be confused with a non-covering hierarchy**, which is not a violation at all: HDBSCAN's
+/// children are subsets of their parents and do *not* exhaust them, 20–25% of a parent's members
+/// falling out as noise at each split. Stray members in the parent are the normal case; members in
+/// the child that the parent lacks are this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainmentViolation {
+    pub layer: String,
+    pub level: u32,
+    pub child: String,
+    pub parent: String,
+    /// How many of the child's members its parent does not hold.
+    pub escaping_members: u64,
+}
+
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
     pub layers: Vec<RegisteredLayer>,
+    /// Edges whose child escapes its parent's membership — reported, never acted on.
+    pub containment_violations: Vec<ContainmentViolation>,
     /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
     /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
     /// those, so a mark that lived only there is lost at the first rotation and the next
@@ -230,6 +259,7 @@ impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            containment_violations: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
@@ -308,6 +338,8 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
         let target_layer = optional_utf8(path, &batch, "attached_layer")?;
         let target_level = optional_u32(path, &batch, "attached_level")?;
         let target_key = optional_utf8(path, &batch, "attached_key")?;
+        let parent_key = optional_utf8(path, &batch, "parent_key")?;
+        let children_keys = optional_string_list(path, &batch, "children_keys")?;
 
         for row in 0..batch.num_rows() {
             let address = address(path, layer, &level, key, row)?;
@@ -343,6 +375,32 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
                 )));
             }
             entry.attached_to = attachment;
+
+            // Hierarchical edges (stage 5): parent and children
+            let parent = parent_key.as_ref().and_then(|c| value_at(c, row));
+            let children = children_keys.as_ref()
+                .map(|c| strings_at(path, c, row, &address.2))
+                .transpose()?
+                .unwrap_or_default();
+
+            if seen.contains(&address) {
+                if entry.parent_key != parent {
+                    return Err(BuildError::Invalid(format!(
+                        "{}: artifact {} does not name the same parent on all of its rows",
+                        path.display(),
+                        address.2
+                    )));
+                }
+                if entry.children_keys != children {
+                    return Err(BuildError::Invalid(format!(
+                        "{}: artifact {} does not name the same children on all of its rows",
+                        path.display(),
+                        address.2
+                    )));
+                }
+            }
+            entry.parent_key = parent;
+            entry.children_keys = children;
             seen.insert(address.clone());
 
             let Some(index) = variation.as_ref().and_then(|c| value_index(c, row)) else {
@@ -517,12 +575,114 @@ pub fn publish(
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        containment_violations: verify_hierarchies(plan)?,
         low_water: alloc.low_water(),
         ..PublishedLayers::default()
     };
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     Ok(published)
+}
+
+/// Check every declared parent/child edge, refusing the malformed and reporting the uncontained.
+///
+/// **The split between the two is which one a caller could have meant.** A parent key naming an
+/// artifact that does not exist, a child claimed by two parents, a cycle — none of these describes
+/// a tree at all, so there is nothing to publish and they refuse. A child holding a member its
+/// parent does not is a *tree*, just one whose rollup guarantee does not hold on that branch; the
+/// corpus may legitimately be that way, so it is named and published.
+///
+/// Edges relate artifacts **within one level** — a hierarchy's lineage lives in its edges and a
+/// level is a resolution, so the two never carry each other
+/// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
+/// An edge naming a key in another level is therefore an unknown key here, and refuses.
+fn verify_hierarchies(plan: &LayerPlan) -> Result<Vec<ContainmentViolation>> {
+    let mut violations = Vec::new();
+    // Which parent has claimed each child, so a second claim is a refusal rather than a silent
+    // reparenting: a child with two parents has two lineages, and which one a cut walks would
+    // depend on iteration order.
+    let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
+
+    for ((layer, level, key), artifact) in &plan.artifacts {
+        let Some(parent_key) = artifact.parent_key.as_deref() else {
+            continue;
+        };
+        let parent_address = (layer.clone(), *level, parent_key.to_string());
+        let Some(parent) = plan.artifacts.get(&parent_address) else {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} names parent {parent_key}, which this level \
+                 does not declare — an edge relates two artifacts of one level, and a parent that \
+                 does not exist would leave the child a root of a tree nobody wrote"
+            )));
+        };
+        if parent_key == key {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} names itself as its parent"
+            )));
+        }
+        if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} is claimed by both {first} and {parent_key}; \
+                 a child has one lineage or the cut that walks it depends on iteration order"
+            )));
+        }
+
+        // Containment: the members the child holds and the parent does not. Reported, not refused.
+        let escaping = artifact
+            .members
+            .iter()
+            .filter(|m| !parent.members.contains(m))
+            .count() as u64;
+        if escaping > 0 {
+            violations.push(ContainmentViolation {
+                layer: layer.clone(),
+                level: *level,
+                child: key.clone(),
+                parent: parent_key.to_string(),
+                escaping_members: escaping,
+            });
+        }
+    }
+
+    detect_cycles(plan)?;
+    Ok(violations)
+}
+
+/// Refuse a hierarchy holding a cycle, which is not a tree and has no root to descend from.
+///
+/// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
+/// longer than that has revisited a node, whatever the shape of the loop.
+fn detect_cycles(plan: &LayerPlan) -> Result<()> {
+    for (layer, level, key) in plan.artifacts.keys() {
+        let bound = plan
+            .artifacts
+            .keys()
+            .filter(|(l, v, _)| l == layer && v == level)
+            .count();
+        let mut node = key.clone();
+        for _ in 0..=bound {
+            let Some(artifact) = plan.artifacts.get(&(layer.clone(), *level, node.clone())) else {
+                break;
+            };
+            match artifact.parent_key.as_deref() {
+                None => break,
+                Some(parent) => node = parent.to_string(),
+            }
+        }
+        if plan
+            .artifacts
+            .get(&(layer.clone(), *level, node.clone()))
+            .and_then(|a| a.parent_key.as_deref())
+            .is_some()
+        {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level}: the lineage above {key} does not reach a root within the \
+                 level's own artifact count, so the edges hold a cycle — a tree has a root to \
+                 descend a cut from and a cycle has none"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// One planned artifact with every source id resolved to the entity this build assigned it.
@@ -563,12 +723,15 @@ fn resolved(
         ));
     }
 
-    Ok(match artifact.attached_to.clone() {
+    let mut result = match artifact.attached_to.clone() {
         None => IncomingArtifact::with_content(Some(key.to_string()), members, variations),
         Some(attached_to) => {
             IncomingArtifact::attached(Some(key.to_string()), members, variations, attached_to)
         }
-    })
+    };
+    result.parent_key = artifact.parent_key.clone();
+    result.children_keys = artifact.children_keys.clone();
+    Ok(result)
 }
 
 /// Pack every level's memberships into one extent and fsync it — the same format, one file per

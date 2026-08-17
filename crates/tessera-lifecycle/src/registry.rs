@@ -957,6 +957,8 @@ mod tests {
             members: croaring::Bitmap::of(members),
             variations: Vec::new(),
             attached_to: None,
+            parent_key: None,
+            children_keys: Vec::new(),
         }
     }
 

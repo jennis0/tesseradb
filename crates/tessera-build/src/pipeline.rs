@@ -1283,6 +1283,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     drop(source_ids);
     drop(entity_of_ordinal);
 
+    crate::write_containment_report(&args.out, &published_layers)?;
+
     timer.end(BuildStage::AttributeTail, n);
 
     // ---- 8b. attribute filter postings (filter-index §4) -------------------------------

@@ -110,7 +110,7 @@ corpus_derived = true
 "#;
 
 /// One row per `(artifact, variation)`: two clusters with no content, and one label carrying two
-/// ranked descriptions and hanging from the first cluster.
+/// ranked descriptions and hanging from the first cluster. No parent/child edges in this fixture.
 fn write_artifacts(path: &Path) {
     write_artifacts_named(path, "topics/x")
 }
@@ -129,6 +129,12 @@ fn write_artifacts_named(path: &Path, labels: &str) {
         ),
         Field::new("attached_layer", DataType::Utf8, true),
         Field::new("attached_key", DataType::Utf8, true),
+        Field::new("parent_key", DataType::Utf8, true),
+        Field::new(
+            "children_keys",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ),
     ]));
     let layers = StringArray::from(vec!["clusters/a", "clusters/a", labels, labels]);
     let keys = StringArray::from(vec!["c-0000", "c-0001", "l-0000", "l-0000"]);
@@ -142,6 +148,12 @@ fn write_artifacts_named(path: &Path, labels: &str) {
     values.append(true);
     let attached_layer = StringArray::from(vec![None, None, Some("clusters/a"), Some("clusters/a")]);
     let attached_key = StringArray::from(vec![None, None, Some("c-0000"), Some("c-0000")]);
+    let parent_key: StringArray = vec![None::<&str>, None, None, None].into();
+    let mut children_keys = ListBuilder::new(StringBuilder::new());
+    children_keys.append(false);
+    children_keys.append(false);
+    children_keys.append(false);
+    children_keys.append(false);
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -152,6 +164,8 @@ fn write_artifacts_named(path: &Path, labels: &str) {
             Arc::new(values.finish()),
             Arc::new(attached_layer),
             Arc::new(attached_key),
+            Arc::new(parent_key),
+            Arc::new(children_keys.finish()),
         ],
     )
     .unwrap();
@@ -527,4 +541,178 @@ fn artifacts_without_a_layer_file_are_refused() {
     args.layers = None;
     let err = build(&args).expect_err("artifacts need layers");
     assert!(format!("{err}").contains("--layers"), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hierarchies: the parent/child edges a treed layer publishes, and what the build checks of them
+// ---------------------------------------------------------------------------------------------
+
+/// A treed layer, which declares no levels and sits at level 0 on one reserved run — the shape
+/// [decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)
+/// gives a hierarchy. Its lineage is entirely in its edges.
+const TREED_LAYERS_TOML: &str = r#"
+[[layer]]
+name = "clusters/tree"
+title = "a hierarchy"
+slices = ["s0"]
+membership = "enumerated"
+gate = "0"
+artifacts_carry_own = false
+visible_when = { min_visible = 2 }
+hierarchy = { kind = "nested", prune_children = false }
+content = { derived = ["centroid"] }
+"#;
+
+/// A three-node tree: one root and two children, written with `parent_key` on each child.
+///
+/// `children_keys` is left null throughout. The parent direction is the source of truth and the
+/// child direction is derived from it — a fixture that wrote both would be testing whether two
+/// hand-written columns agree, which is not a property of the system.
+fn write_treed_artifacts(path: &Path, child_parent: &[(&str, Option<&str>)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("parent_key", DataType::Utf8, true),
+    ]));
+    let layers = StringArray::from(vec!["clusters/tree"; child_parent.len()]);
+    let keys = StringArray::from(child_parent.iter().map(|(k, _)| *k).collect::<Vec<_>>());
+    let parents = StringArray::from(child_parent.iter().map(|(_, p)| *p).collect::<Vec<_>>());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(layers) as ArrayRef,
+            Arc::new(keys),
+            Arc::new(parents),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Memberships for a treed level, one row per `(artifact, member)`.
+fn write_treed_members(path: &Path, membership: &[(&str, Vec<u64>)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("member", DataType::UInt64, false),
+    ]));
+    let mut layers = Vec::new();
+    let mut keys = Vec::new();
+    let mut member = Vec::new();
+    for (key, members) in membership {
+        for &m in members {
+            layers.push("clusters/tree".to_string());
+            keys.push(key.to_string());
+            member.push(m);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(layers)) as ArrayRef,
+            Arc::new(StringArray::from(keys)),
+            Arc::new(UInt64Array::from(member)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Build a treed fixture and return the containment report the build wrote.
+fn treed_build(
+    child_parent: &[(&str, Option<&str>)],
+    membership: &[(&str, Vec<u64>)],
+) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+    let inputs = inputs();
+    std::fs::write(&inputs.layers, TREED_LAYERS_TOML).unwrap();
+    write_treed_artifacts(&inputs.artifacts, child_parent);
+    write_treed_members(&inputs.members, membership);
+    let out = inputs.dir.join("bundle");
+    let result = build(&args(&inputs, &out)).map(|_| ());
+    (result, out, inputs._tmp)
+}
+
+fn containment_report(root: &Path) -> serde_json::Value {
+    let bytes = std::fs::read(root.join("reports").join("containment.json"))
+        .expect("every build writes a containment report, empty or not");
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// **The headline for hierarchies: a tree whose children sit inside their parents builds clean**,
+/// and the report says so rather than saying nothing.
+///
+/// The children deliberately do **not** exhaust the root — entities 20–29 are the root's alone.
+/// That is the real condensed tree's defining property (20–25% of a parent's points fall out as
+/// noise at each split), and a build that treated stray members as a violation would report every
+/// real hierarchy it was ever given.
+#[test]
+fn a_tree_whose_children_sit_inside_their_parents_reports_nothing() {
+    let (result, out, _tmp) = treed_build(
+        &[("t-root", None), ("t-a", Some("t-root")), ("t-b", Some("t-root"))],
+        &[
+            ("t-root", (0..30).collect()),
+            ("t-a", (0..10).collect()),
+            ("t-b", (10..20).collect()),
+        ],
+    );
+    result.expect("a well-formed hierarchy builds");
+    assert_eq!(
+        containment_report(&out)["violations"].as_array().unwrap().len(),
+        0,
+        "stray members in the parent are the normal case, not a violation"
+    );
+}
+
+/// **A child holding a member its parent does not is named, and published anyway.**
+///
+/// Containment is what makes rollup sound under an absolute criterion — a child's masked count can
+/// never exceed its parent's — so an edge that breaks it withdraws that guarantee for its branch.
+/// The corpus may legitimately be that way, so the build reports the edge rather than refusing it,
+/// and an operator sees it before a viewer meets its consequences.
+#[test]
+fn a_child_escaping_its_parent_is_reported_by_name() {
+    let (result, out, _tmp) = treed_build(
+        &[("t-root", None), ("t-a", Some("t-root"))],
+        &[
+            ("t-root", (0..10).collect()),
+            // 10 and 11 are the child's and not the root's — the escape.
+            ("t-a", (5..12).collect()),
+        ],
+    );
+    result.expect("an uncontained edge is a report, not a refusal");
+    let report = containment_report(&out);
+    let violations = report["violations"].as_array().unwrap();
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0]["child"], "t-a");
+    assert_eq!(violations[0]["parent"], "t-root");
+    assert_eq!(violations[0]["escaping_members"], 2);
+}
+
+/// A parent key naming an artifact the level does not declare describes no tree at all, so there
+/// is nothing to publish — a refusal, unlike an uncontained edge.
+#[test]
+fn a_parent_key_with_no_artifact_behind_it_is_refused() {
+    let (result, _out, _tmp) = treed_build(
+        &[("t-a", Some("t-nobody"))],
+        &[("t-a", (0..10).collect())],
+    );
+    let err = result.expect_err("a parent that does not exist is a refusal");
+    assert!(format!("{err}").contains("t-nobody"), "{err}");
+}
+
+/// Edges holding a cycle have no root to descend a cut from, so they are refused rather than
+/// published as a tree the serving path would walk forever.
+#[test]
+fn edges_holding_a_cycle_are_refused() {
+    let (result, _out, _tmp) = treed_build(
+        &[("t-a", Some("t-b")), ("t-b", Some("t-a"))],
+        &[("t-a", (0..10).collect()), ("t-b", (0..10).collect())],
+    );
+    let err = result.expect_err("a cycle is a refusal");
+    assert!(format!("{err}").contains("cycle"), "{err}");
 }
