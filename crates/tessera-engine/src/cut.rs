@@ -83,20 +83,7 @@ impl Lineage {
         depth
     }
 
-    /// Whether `ancestor` is a strict ancestor of `node`.
-    fn is_ancestor_of(&self, ancestor: u32, node: u32) -> bool {
-        let mut at = node;
-        for _ in 0..=self.parent.len() {
-            match self.parent.get(&at) {
-                Some(&parent) if parent == ancestor => return true,
-                Some(&parent) => at = parent,
-                None => return false,
-            }
-        }
-        false
-    }
-
-    /// `node` and every ancestor of it, nearest first.
+    /// `node` and every ancestor of it, nearest first. Bounded for a cycle's sake.
     fn chain(&self, node: u32) -> Vec<u32> {
         let mut chain = vec![node];
         let mut at = node;
@@ -108,6 +95,115 @@ impl Lineage {
             at = parent;
         }
         chain
+    }
+}
+
+/// One request's cut, resolved once and then asked for any depth.
+///
+/// **The shape is chosen so that evaluating a candidate depth is cheap**, because the budget search
+/// evaluates several. The expensive half — which nodes are on the frontier, and what each one's
+/// servable lineage is — depends only on the passing set, so it is done once; a depth then picks
+/// one entry out of each already-built chain.
+///
+/// The costs this replaces were all quadratic in the passing set: a frontier computed by testing
+/// every passing node against every other, an `is_ancestor_of` walk inside that, and a linear
+/// `contains` inside the walk. At a level with a few thousand visible artifacts in one viewport
+/// that is the difference between a request and a stall, and none of it bought anything.
+struct Plan {
+    /// One chain per frontier node: `(depth, ordinal)` for each **passing** node in its lineage,
+    /// itself included, **deepest first** — so a cut at depth *d* is the first entry at or above
+    /// *d*, found by binary search rather than by a walk.
+    chains: Vec<Vec<(u32, u32)>>,
+}
+
+impl Plan {
+    fn new(lineage: &Lineage, passing: &[u32]) -> Self {
+        // Sorted once, so membership is a binary search rather than a scan. Every inner loop below
+        // asks "is this ancestor passing", which was the linear step.
+        let mut sorted: Vec<u32> = passing.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let is_passing = |n: u32| sorted.binary_search(&n).is_ok();
+
+        // Depths, memoised across the whole pass: lineages share ancestors, and recomputing a
+        // shared prefix once per descendant is the other repeated walk.
+        let mut depth_of: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut depth = |node: u32, chain: &[u32]| -> u32 {
+            if let Some(&known) = depth_of.get(&node) {
+                return known;
+            }
+            // `chain` is the node's own lineage, nearest first, so its length past each position
+            // is that position's depth — assign the whole prefix at once.
+            let root_first = chain.len() as u32 - 1;
+            for (i, &n) in chain.iter().enumerate() {
+                depth_of.entry(n).or_insert(root_first - i as u32);
+            }
+            depth_of[&node]
+        };
+
+        // The frontier, in one pass rather than in a pairwise comparison: a passing node is
+        // covered exactly when some *other* passing node names it among its ancestors, so walking
+        // each lineage once and marking what it passes is the whole computation.
+        let mut chains: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        let mut covered: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for &node in &sorted {
+            let chain = lineage.chain(node);
+            for &ancestor in chain.iter().skip(1) {
+                if is_passing(ancestor) {
+                    covered.insert(ancestor);
+                }
+            }
+            chains.insert(node, chain);
+        }
+
+        let chains = sorted
+            .iter()
+            .filter(|n| !covered.contains(n))
+            .map(|&node| {
+                let chain = chains.remove(&node).expect("built for every passing node");
+                chain
+                    .iter()
+                    .copied()
+                    .filter(|&n| is_passing(n))
+                    .map(|n| (depth(n, &chain), n))
+                    .collect()
+            })
+            .collect();
+        Plan { chains }
+    }
+
+    /// The deepest depth any frontier node reaches — the top of the budget search's range.
+    fn deepest(&self) -> u32 {
+        self.chains
+            .iter()
+            .filter_map(|chain| chain.first().map(|&(depth, _)| depth))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The artifacts a cut at `depth` serves.
+    ///
+    /// Each frontier node contributes the deepest passing node at or above `depth` in its own
+    /// lineage. **A node with no passing ancestor shallow enough contributes itself**, which is
+    /// what keeps a branch whose ancestors were all suppressed, deleted or below their own bar on
+    /// the map rather than blanking its region.
+    fn serve_at(&self, depth: u32) -> Vec<u32> {
+        let mut served: Vec<u32> = self
+            .chains
+            .iter()
+            .filter_map(|chain| {
+                // Deepest first, so depths descend and the first entry at or above `depth` is the
+                // deepest that fits.
+                let at = chain.partition_point(|&(d, _)| d > depth);
+                chain
+                    .get(at)
+                    .or_else(|| chain.last())
+                    .map(|&(_, ordinal)| ordinal)
+            })
+            .collect();
+        served.sort_unstable();
+        served.dedup();
+        served
     }
 }
 
@@ -124,37 +220,23 @@ impl Lineage {
 /// often enough that a depth-shaped climb would blank the region under every one of them and call
 /// it a smaller map. Serving more than the budget asked is a client's problem; serving nothing
 /// where the viewer is entitled to something is the failure the budget exists around.
+/// **The result is ascending and deduplicated**, on every path including the flat short circuit.
+/// That is a contract rather than an accident: the serving path tests each candidate against the
+/// served set by binary search, and a caller that passed its ordinals in some other order would
+/// otherwise get a silently short response rather than an error.
 pub fn cut_at(lineage: &Lineage, passing: &[u32], depth: u32) -> Vec<u32> {
     if lineage.is_flat() {
-        return passing.to_vec();
+        return ascending(passing);
     }
-    let frontier = passing
-        .iter()
-        .copied()
-        .filter(|&a| !passing.iter().any(|&b| b != a && lineage.is_ancestor_of(a, b)));
+    Plan::new(lineage, passing).serve_at(depth)
+}
 
-    let mut served: Vec<u32> = frontier
-        .map(|a| {
-            let chain = lineage.chain(a);
-            // Nearest first, so the first that fits is the deepest that fits.
-            chain
-                .iter()
-                .copied()
-                .find(|&n| passing.contains(&n) && lineage.depth(n) <= depth)
-                // No passing ancestor is shallow enough — climb as far as the lineage allows and
-                // stop there rather than dropping the branch.
-                .unwrap_or_else(|| {
-                    chain
-                        .iter()
-                        .copied()
-                        .rfind(|n| passing.contains(n))
-                        .unwrap_or(a)
-                })
-        })
-        .collect();
-    served.sort_unstable();
-    served.dedup();
-    served
+/// `passing`, ascending and deduplicated — the flat case's whole answer.
+fn ascending(passing: &[u32]) -> Vec<u32> {
+    let mut out = passing.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The cut this request serves: the deepest one that fits `budget`, or the full frontier if none
@@ -164,27 +246,42 @@ pub fn cut_at(lineage: &Lineage, passing: &[u32], depth: u32) -> Vec<u32> {
 /// makes the budget a resolution knob rather than a selection: every node the cut returns is one
 /// the viewer may see, and the ones it does not return are covered by an ancestor it did.
 ///
+/// **The search is a bisection, which the count's monotonicity licenses.** A deeper cut moves each
+/// frontier node's representative down its own lineage and never up, and two nodes that shared a
+/// representative can only separate — so the served count is non-decreasing in depth and the
+/// deepest depth that fits can be found in `log(depth)` evaluations rather than by walking every
+/// depth. That property is worth stating because the bisection is wrong without it.
+///
 /// **A budget that not even the roots fit is served anyway**, at depth 0. The alternative is
 /// dropping nodes to reach the number, which is the sampling decision 0083 forbids: a map missing
 /// arbitrary roots claims those regions are empty.
+/// Ascending and deduplicated, as [`cut_at`] is and for the same reason.
 pub fn cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>) -> Vec<u32> {
-    let full = cut_at(lineage, passing, u32::MAX);
+    if lineage.is_flat() {
+        return ascending(passing);
+    }
+    let plan = Plan::new(lineage, passing);
+    let full = plan.serve_at(u32::MAX);
     let Some(budget) = budget else {
         return full;
     };
     if full.len() as u32 <= budget {
         return full;
     }
-    let deepest = passing.iter().map(|&a| lineage.depth(a)).max().unwrap_or(0);
-    // Downward from the full depth: the first cut that fits is the deepest one that does, since a
-    // shallower cut serves a subset of a deeper one's *coverage* and never more nodes.
-    for depth in (0..deepest).rev() {
-        let candidate = cut_at(lineage, passing, depth);
-        if candidate.len() as u32 <= budget {
-            return candidate;
+    let mut best = 0;
+    let (mut lo, mut hi) = (0u32, plan.deepest());
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if plan.serve_at(mid).len() as u32 <= budget {
+            best = mid;
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
         }
     }
-    cut_at(lineage, passing, 0)
+    plan.serve_at(best)
 }
 
 #[cfg(test)]
@@ -338,5 +435,200 @@ mod tests {
         assert_eq!(lineage.depth(1), 1);
         assert_eq!(lineage.depth(3), 2);
         assert_eq!(lineage.depth(4), 3);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The optimised plan against an obviously-correct reference
+    // ---------------------------------------------------------------------------------------
+
+    /// The cut, written the slow, obvious way: quadratic frontier, linear membership, a walk per
+    /// lookup. **It is the specification of what [`Plan`] computes**, and it exists because the
+    /// fast form's structure — a prebuilt chain per frontier node, a binary search per depth, a
+    /// bisection over depths — is far enough from the rule it implements that reading it is not a
+    /// proof.
+    fn reference_cut_at(lineage: &Lineage, passing: &[u32], depth: u32) -> Vec<u32> {
+        if lineage.is_flat() {
+            return passing.to_vec();
+        }
+        let is_ancestor = |ancestor: u32, node: u32| {
+            lineage.chain(node).iter().skip(1).any(|&n| n == ancestor)
+        };
+        let mut served: Vec<u32> = passing
+            .iter()
+            .copied()
+            .filter(|&a| !passing.iter().any(|&b| b != a && is_ancestor(a, b)))
+            .map(|a| {
+                let chain = lineage.chain(a);
+                chain
+                    .iter()
+                    .copied()
+                    .find(|&n| passing.contains(&n) && lineage.depth(n) <= depth)
+                    .unwrap_or_else(|| {
+                        chain
+                            .iter()
+                            .copied()
+                            .rfind(|n| passing.contains(n))
+                            .unwrap_or(a)
+                    })
+            })
+            .collect();
+        served.sort_unstable();
+        served.dedup();
+        served
+    }
+
+    /// The budget search, walked rather than bisected.
+    fn reference_cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>) -> Vec<u32> {
+        let full = reference_cut_at(lineage, passing, u32::MAX);
+        let Some(budget) = budget else {
+            return full;
+        };
+        if full.len() as u32 <= budget {
+            return full;
+        }
+        let deepest = passing.iter().map(|&a| lineage.depth(a)).max().unwrap_or(0);
+        for depth in (0..deepest).rev() {
+            let candidate = reference_cut_at(lineage, passing, depth);
+            if candidate.len() as u32 <= budget {
+                return candidate;
+            }
+        }
+        reference_cut_at(lineage, passing, 0)
+    }
+
+    /// A deterministic pseudo-random stream — SplitMix64, the same finaliser the corpus generator
+    /// uses. Deterministic so a failure here is a failure anyone can reproduce from the seed.
+    fn stream(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// A random forest over `n` ordinals: each node's parent is drawn from the nodes before it, or
+    /// it is a root. Ordinal order therefore agrees with lineage order, which is what a level
+    /// published in one batch produces, and roots occur at every position rather than only at
+    /// zero.
+    fn random_lineage(next: &mut impl FnMut() -> u64, n: u32) -> Lineage {
+        let pairs: Vec<(u32, Option<u32>)> = (0..n)
+            .map(|ordinal| {
+                if ordinal == 0 || next().is_multiple_of(4) {
+                    (ordinal, None)
+                } else {
+                    (ordinal, Some((next() % ordinal as u64) as u32))
+                }
+            })
+            .collect();
+        Lineage::new(pairs)
+    }
+
+    /// **The fast plan and the obvious rule agree, over random trees, at every depth and every
+    /// budget.** An optimisation that changed an answer would show up here rather than in the one
+    /// hand-built tree the other tests use.
+    #[test]
+    fn the_plan_agrees_with_the_obvious_rule_over_random_trees() {
+        let mut next = stream(0x5EED);
+        for case in 0..200 {
+            let n = 1 + (next() % 40) as u32;
+            let lineage = random_lineage(&mut next, n);
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            if passing.is_empty() {
+                continue;
+            }
+            for depth in 0..8u32 {
+                assert_eq!(
+                    cut_at(&lineage, &passing, depth),
+                    reference_cut_at(&lineage, &passing, depth),
+                    "case {case}: the plan and the rule disagree at depth {depth}"
+                );
+            }
+            for budget in 1..=8u32 {
+                assert_eq!(
+                    cut(&lineage, &passing, Some(budget)),
+                    reference_cut(&lineage, &passing, Some(budget)),
+                    "case {case}: the bisection and the walk disagree at budget {budget}"
+                );
+            }
+            assert_eq!(
+                cut(&lineage, &passing, None),
+                reference_cut(&lineage, &passing, None),
+                "case {case}: the unbudgeted cuts disagree"
+            );
+        }
+    }
+
+    /// **The served count does not decrease with depth**, which is the property the budget's
+    /// bisection rests on and is false for any rule that let a deeper cut merge two nodes into
+    /// one. Asserted over the same random trees rather than argued.
+    #[test]
+    fn the_served_count_is_monotone_in_depth() {
+        let mut next = stream(0xC0FFEE);
+        for case in 0..200 {
+            let n = 1 + (next() % 40) as u32;
+            let lineage = random_lineage(&mut next, n);
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            if passing.is_empty() {
+                continue;
+            }
+            let mut previous = 0;
+            for depth in 0..10u32 {
+                let count = cut_at(&lineage, &passing, depth).len();
+                assert!(
+                    count >= previous,
+                    "case {case}: the count fell from {previous} to {count} at depth {depth}, so                      the budget's bisection would settle on the wrong cut"
+                );
+                previous = count;
+            }
+        }
+    }
+
+    /// Every artifact a cut serves is one that passed — the property that makes the whole module
+    /// unable to disclose, whatever it gets wrong about which node to draw.
+    #[test]
+    fn a_cut_never_serves_an_artifact_that_did_not_pass() {
+        let mut next = stream(0xBEEF);
+        for _ in 0..200 {
+            let n = 1 + (next() % 40) as u32;
+            let lineage = random_lineage(&mut next, n);
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            if passing.is_empty() {
+                continue;
+            }
+            for budget in [None, Some(1), Some(3), Some(10)] {
+                for served in cut(&lineage, &passing, budget) {
+                    assert!(
+                        passing.contains(&served),
+                        "the cut served {served}, which never passed its own criterion"
+                    );
+                }
+            }
+            // And a cut is never empty while something passed: a blank map is the failure mode
+            // the climb-to-a-passing-ancestor rule exists to prevent.
+            assert!(!cut(&lineage, &passing, Some(1)).is_empty());
+        }
+    }
+
+    /// **Every cut comes back ascending and deduplicated**, including the flat short circuit and
+    /// including a caller who did not sort. The serving path binary-searches this, so an unsorted
+    /// return would drop artifacts from the response with nothing raising an error.
+    #[test]
+    fn every_cut_is_ascending_and_deduplicated() {
+        let unsorted = [4, 2, 2, 0];
+        let flat = Lineage::new([(0, None), (2, None), (4, None)]);
+        assert_eq!(cut(&flat, &unsorted, None), vec![0, 2, 4]);
+        assert_eq!(cut_at(&flat, &unsorted, 0), vec![0, 2, 4]);
+
+        let lineage = chain();
+        for budget in [None, Some(1), Some(2), Some(9)] {
+            let served = cut(&lineage, &unsorted, budget);
+            assert!(
+                served.windows(2).all(|w| w[0] < w[1]),
+                "a cut came back out of order or with a duplicate: {served:?}"
+            );
+        }
     }
 }

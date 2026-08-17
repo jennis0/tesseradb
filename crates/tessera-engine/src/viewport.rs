@@ -3439,10 +3439,13 @@ impl Engine {
                     )
                 });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
+                // Ascending and deduplicated, which the cut guarantees — so the membership test in
+                // the emit loop below is a binary search rather than a scan of the served set once
+                // per candidate.
                 let served = crate::cut::cut(&lineage, &ordinals, artifact_budget);
 
                 for (ordinal, entity, masked_count, variation) in passing {
-                    if !served.contains(&ordinal) {
+                    if served.binary_search(&ordinal).is_err() {
                         continue;
                     }
                     // The one variation this viewer contains, entire. ⊘ A variation restored from a
