@@ -599,7 +599,7 @@ does not resurrect a withheld label.
   one a reader leaves out. The write cycle's base-row rule (§4.1) removes the state the other two
   would operate on: the form holds base rows only, so a flush appends rows it does not hold and a
   merge renumbers rows it does not hold. The fold rebuilds it, inline, and nothing else has to.
-- The fold's artifact pass, in the cheaper of the two constructions (§6 measures which), plus
+- ✔ The fold's artifact pass, in the cheaper of the two constructions (§6 measures which), plus
   **Rule F's artifact arm** — membership file, `artifacts.arrow` slot and every edge naming a
   deleted artifact dropped *before* the overlay entry retires.
 - ✔ The fold's report sweep: one `and_cardinality` per artifact against the deletions the fold
@@ -615,6 +615,15 @@ after every one of the eight stages, judged by the same three mechanisms. The re
 stage exists for: delete a member of a label's generating set, watch the label vanish at the ack,
 run a fold, and **it stays gone**. **Data:** the seeded generator at 10⁶–10⁸ (§5.1) — real data
 cannot carry this, because the check is "nothing is missing or extra" over all *n*.
+
+✔ The regression test is `clients/ts/scripts/write-cycle-demo.mjs`, which drives a live deployment
+over the control and viewer planes rather than the engine's own types, and passes on the 2.4M
+bundle. It publishes the pair it will damage: a generating set never crosses the trust boundary, so
+a driver that followed someone else's labels would have to delete documents at random until one
+landed in a sample. The fold's report is the corroboration — the deleted document belonged to
+clusters in five other published layers, and the report named each of them and the variation each
+one lost. ⊘ The battery itself does not exist, so the census (`artifact_census.rs`) stands alone
+rather than as one of its rows.
 
 ### Stage 5 — Trees, levels and the cut
 
