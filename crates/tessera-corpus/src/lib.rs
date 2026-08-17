@@ -58,6 +58,7 @@
 //! dictionary already derives from the pairs relation, so a [`Grant`] here and the access label
 //! the server resolves name the same postings.
 
+pub mod artifacts;
 mod materialise;
 
 use std::collections::HashMap;
