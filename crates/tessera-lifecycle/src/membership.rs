@@ -833,6 +833,30 @@ impl ArtifactStore {
     /// overlay: every WAL record postdates any state a manifest carries, so seeding afterwards would
     /// overwrite a later publication with an earlier one. Seeded artifacts are published by
     /// definition, so this advances the high-water and never the pin.
+    /// Declare that a seeded level covers `[0, len)` ordinals, holes included.
+    ///
+    /// **A hole at the top of a level is invisible from its records alone**, and that is an identity
+    /// bug rather than an untidiness: a level seeded only from the blobs that decoded ends *shorter*
+    /// than the extent that was written, [`Self::next_ordinal`] regresses onto the hole, and the
+    /// next publication is handed the ordinal — and therefore the entity, which is a function of it
+    /// — that the artifact this fold deleted was published under. Two artifacts, one `tessera_id`,
+    /// with the second answering for the first.
+    ///
+    /// The extent's own `count` is the authority on how far a level reaches, so it is carried here
+    /// rather than inferred. A hole in the *middle* survives without this, which is exactly why it
+    /// has to be explicit: the case that hides is the one at the end.
+    pub fn seed_extent_bound(&mut self, layer: &str, level: u32, len: u32) {
+        let slots = self.levels.entry((layer.to_string(), level)).or_default();
+        if slots.len() < len as usize {
+            slots.resize_with(len as usize, || None);
+        }
+        let entry = self
+            .published_through
+            .entry((layer.to_string(), level))
+            .or_insert(0);
+        *entry = (*entry).max(len);
+    }
+
     pub fn seed(&mut self, layer: &str, level: u32, ordinal: u32, record: ArtifactRecord) {
         self.put(layer, level, ordinal, record);
         let entry = self

@@ -34,7 +34,7 @@ What `publish_fold` does at step 3a: rewrites every level whole into the prefix 
 one extent per level, dropping the fold's **executed deletions** from each membership and nothing
 else — a suppressed member keeps its bit (Rule S) and no generating set is touched. The content
 extents are carried by hard link beside them, and the row forms are rebuilt inline after the swap
-rather than left to whoever arrives first. Nineteen tests in `artifact_fold.rs`.
+rather than left to whoever arrives first. Twenty tests in `artifact_fold.rs`.
 
 **Two stale-manifest defects were found in the doing, both of the class below.** The fold took its
 layer registry from the live manifest, which a side-manifest write does not refresh — so it
@@ -195,6 +195,27 @@ writes all three and is the fastest way to see them.
 **Disk.** Three worktrees at ~40–60 GB of build output each will fill the volume; a link failure
 with `ld terminated with signal 7` is the symptom. Stage 3's debug output was removed when it
 closed, so expect a cold build.
+
+## The review of this stage's work
+
+Reviewed 2026-08-17 over the whole branch, and it found four, all in the fold's publication:
+
+- **A hole at the *top* of a level was not seeded**, so the level came back short, the next ordinal
+  regressed onto it, and the next publication was handed the entity the deleted artifact held —
+  two artifacts, one `tessera_id`. A hole in the middle survives without help, which is why this
+  one hid. The extent's `count` is the authority on a level's length now.
+- **A fail-open window in the swap.** The generation being installed carries an overlay with the
+  deletions already retired, and the resident store was retired *after* the warm — so for the
+  warm's duration a deleted artifact read as *not denied* with its record still present, and would
+  have served with its content. The retire moved ahead of the swap.
+- **The warm was wasted**, keyed to a store version the retire was about to bump: the stall it
+  exists to prevent landed anyway, after paying for the warm. The same reordering fixes both.
+- **The report was written ahead of three discard points**, so an abandoned fold left a notice
+  claiming an obligation it had not discharged. It is the last reversible step now, and the
+  in-memory copy is set after the flip.
+
+Two of the four are the same shape — an ordering that is correct in the steady state and wrong for
+as long as the fold's own work takes. That is the shape to look for in what remains.
 
 ## The reviews behind this
 

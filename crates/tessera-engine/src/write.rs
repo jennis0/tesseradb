@@ -2089,6 +2089,16 @@ impl WritePath {
                     None => undecodable += 1,
                 }
             }
+            // **How far the level reaches comes from the extent, not from the records in it.** A
+            // hole in the middle is implied by the ordinals either side of it; a hole at the *top*
+            // is implied by nothing, so a level seeded from records alone comes back short and the
+            // next publication is handed the ordinal — and the entity derived from it — that the
+            // artifact this fold deleted was published under.
+            artifacts.seed_extent_bound(
+                &extent.layer,
+                extent.level,
+                extent.ordinal_lo.saturating_add(extent.count),
+            );
         }
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             undecodable += artifacts.apply(record, *position);
@@ -5322,16 +5332,12 @@ impl Executor {
         // discarding: the deletions are already in force, and the next fold reports them.
         //
         // The sweep is one `and_cardinality` per artifact against the set the fold already holds.
+        // The sweep runs here, where the store still holds what this fold is about to retire; the
+        // *write* is deferred to the last reversible step before the flip, so an abandoned fold
+        // leaves no notice claiming an obligation it did not discharge.
         let degraded = self
             .live
             .with_artifacts(|store| store.degradations(&executed));
-        if let Err(e) = self.write_fold_report(&completed.prefix, &degraded) {
-            discard(&format!(
-                "its degradation report would not be written ({e}), and a deletion may not retire \
-                 before the caller has been told what it degraded"
-            ));
-            return;
-        }
 
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
@@ -5628,6 +5634,19 @@ impl Executor {
         // it whole — no per-file bookkeeping (correctness-suite §12.3, compaction §7). The fold's
         // manifest writes above deliberately carry no pause site of their own: their crash story
         // is this one's.
+        // **The report is the last reversible step, and that placement is the whole of its
+        // evidential value.** It says an obligation was discharged, so a notice left behind by a
+        // fold that was then abandoned at its link, its manifest or its flip is a false positive:
+        // an operator polling `reports/` reads that a deletion was reported when it is still owed
+        // one. Everything that can still discard is above this line.
+        if let Err(e) = self.write_fold_report(&completed.prefix, &degraded) {
+            discard(&format!(
+                "its degradation report would not be written ({e}), and a deletion may not retire \
+                 before the caller has been told what it degraded"
+            ));
+            return;
+        }
+
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
             tessera_store::write_current(&self.bundle_root, &completed.prefix, &manifest_digest)
@@ -5636,11 +5655,24 @@ impl Executor {
             return;
         }
 
-        // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
+        // **The resident store retires here, before the new generation is installed** — not after
+        // the warm below. The generation this fold is about to publish carries an overlay with the
+        // executed deletions already retired, so between installing it and retiring the store there
+        // is a window in which a deleted artifact's own entity reads *not denied* while its record
+        // is still there: it would be served, with its content, to whoever asked. The warm makes
+        // that window tens of seconds wide at 10⁷ artifacts.
         //
-        // Cloned because the rotation consumes it, and the artifact pass's second half — dropping
-        // the same entities from the resident memberships — runs after the swap below.
+        // Ahead of the swap is safe in the other direction: the generation still being served
+        // carries the deletion in its own overlay, so an artifact this removes was already absent
+        // for every request reaching it.
+        // Cloned rather than moved: the rotation below consumes `executed`.
         let retired = executed.clone();
+        self.live.retire_artifacts(&retired);
+        self.live.mark_memberships_published();
+        self.membership_extents = repacked;
+        *lock_recover(&self.health.last_fold_report) = degraded;
+
+        // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
         let rotation = crate::session::open_rotation(
             &self.bundle_root,
             &completed.prefix,
@@ -5724,22 +5756,12 @@ impl Executor {
         // measured at 32.8 s threaded for 10⁷ artifacts over 10⁹ rows
         // (`probes/2026-08-16-fold-artifact-pass/`).
         //
-        // **After the swap, and that ordering is what makes it a warm rather than a race.** The
-        // projections are keyed by prefix, segments version and store version; building them before
-        // the generation is live would key them to a generation no reader can ask for, and every
-        // one would be rebuilt on first use anyway.
+        // **After the swap, and after the retire above.** Two orderings, both load-bearing: built
+        // before the generation is live, every projection would be keyed to one no reader can ask
+        // for; built before the store retires, every projection would be keyed to a store version
+        // the retire is about to bump, and the whole warm would be discarded on the first request —
+        // paying the stall it exists to prevent, having already paid for the warm.
         self.warm_artifact_projections();
-
-        // **The artifact pass's second half, and it is deliberately after the swap.** The prefix
-        // naming the rewritten extents is live, so the resident memberships may now be brought to
-        // what it says: the executed deletions leave them, every level counts as durable to its
-        // full extent, and the held list is replaced rather than extended — the next online
-        // publication assigns from it, and one that still carried the superseded prefix's paths
-        // would name files nothing contains. The interim is fail-closed in both copies: a retired
-        // entity is denied, so it was already outside every masked count.
-        self.live.retire_artifacts(&retired);
-        self.live.mark_memberships_published();
-        self.membership_extents = repacked;
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -8256,7 +8278,7 @@ impl Executor {
     /// able to tell "this fold degraded nothing" from "this fold never reported", and an absent file
     /// says the second.
     fn write_fold_report(
-        &mut self,
+        &self,
         prefix: &str,
         degraded: &[tessera_lifecycle::membership::Degradation],
     ) -> std::io::Result<()> {
@@ -8289,7 +8311,9 @@ impl Executor {
         tessera_store::write_and_fsync(&path, &bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         tessera_store::fsync_dir(&dir).map_err(|e| std::io::Error::other(e.to_string()))?;
-        *lock_recover(&self.health.last_fold_report) = degraded.to_vec();
+        // **The in-memory copy is set by the caller, after the flip, and not here.** This file is
+        // durable evidence and the accessor is a convenience; publishing the convenience while the
+        // fold can still be discarded would let an operator read a discharge that did not happen.
         Ok(())
     }
 

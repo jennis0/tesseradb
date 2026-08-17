@@ -923,6 +923,64 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
     );
 }
 
+/// **The hole at the *top* of a level is the one that hides**, and losing it reuses an identity.
+///
+/// A hole in the middle is implied by the ordinals either side of it, so a level seeded from its
+/// records alone still comes back the right length. A hole at the end is implied by nothing: the
+/// level comes back short, the next ordinal regresses onto it, and the next publication is handed
+/// the ordinal — and therefore the entity, which is a function of it — that the artifact this fold
+/// deleted was published under. Two artifacts, one `tessera_id`, the second answering for the first.
+#[test]
+fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_publication() {
+    let fx = fixture();
+    // Resolved before the fold: `members` reads the built prefix's external-id run, and the fold
+    // reclaims that prefix. Entities are stable across it, so the set is still the right one.
+    let later_members = fx.members(200..300);
+    let deleted_entity = {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        let ids = engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![
+                    IncomingArtifact::from_entities(Some("c0".into()), fx.members(0..100)),
+                    IncomingArtifact::from_entities(Some("c1".into()), fx.members(100..200)),
+                ],
+            )
+            .unwrap();
+        wait_for_publication(&fx, &engine, 1);
+        // The **last** one, so the hole it leaves is at the top of the level.
+        let entity = artifact_entity(&engine, ids[1]);
+        engine
+            .accept_change(entity, ChangeOp::Delete)
+            .expect("the delete is accepted");
+        fold(&engine);
+        entity
+    };
+
+    // Reopened, so the level is what the extent says rather than what this process remembered.
+    let engine = fx.open();
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(Some("c2".into()), later_members)],
+        )
+        .unwrap();
+    let fresh = artifact_entity(&engine, ids[0]);
+
+    assert_ne!(
+        fresh, deleted_entity,
+        "the new artifact took the deleted one's entity, so one identifier now names two artifacts"
+    );
+    assert_eq!(
+        engine.locate_artifact(fresh).map(|at| at.ordinal),
+        Some(2),
+        "it lands past the hole rather than in it"
+    );
+}
+
 /// **Retirement's precondition, which is what makes the arm a safety property rather than
 /// reclamation.** A deleted artifact has no rows and no postings, so compaction's derivation calls
 /// its deletion executed *vacuously* at the first fold and retires the overlay entry — the only
