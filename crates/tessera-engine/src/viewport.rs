@@ -3442,7 +3442,19 @@ impl Engine {
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in
                 // the emit loop below is a binary search rather than a scan of the served set once
                 // per candidate.
-                let served = crate::cut::cut(&lineage, &ordinals, artifact_budget);
+                //
+                // **`prune_children` is the layer's, and it is a rendering choice rather than a
+                // disclosure one.** Pruned, a passing parent is dropped where a passing child sits
+                // beneath it; unpruned, both are served and the client receives the whole visible
+                // tree — which is what lets it nest what it draws, or filter to one subtree while
+                // still drawing the rest. Every artifact in either set cleared its own criterion,
+                // so neither is the safer answer.
+                let served = crate::cut::cut(
+                    &lineage,
+                    &ordinals,
+                    artifact_budget,
+                    layer.declaration.hierarchy.prune_children,
+                );
 
                 for (ordinal, entity, masked_count, variation) in passing {
                     if served.binary_search(&ordinal).is_err() {

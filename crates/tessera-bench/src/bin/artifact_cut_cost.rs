@@ -62,6 +62,11 @@ use tessera_engine::cut::{cut, Lineage};
 /// shift by accident and the tree gets genuinely deep at scale.
 const BRANCH: u32 = 3;
 
+/// Measured on the frontier, which is the more expensive of the two modes: pruning has to work out
+/// which passing nodes are covered before it can map any of them, where serving the whole tree maps
+/// every one directly. A figure taken unpruned would understate the cost of the mode that does more.
+const PRUNE: bool = true;
+
 fn main() {
     println!("# artifact cut cost\n");
     println!(
@@ -94,12 +99,12 @@ fn flat_arm(n: u32) {
     assert!(lineage.is_flat());
 
     let start = Instant::now();
-    let served = cut(&lineage, &passing, None);
+    let served = cut(&lineage, &passing, None, PRUNE);
     let unbudgeted = start.elapsed();
     assert_eq!(served.len(), n as usize);
 
     let start = Instant::now();
-    let served = cut(&lineage, &passing, Some(100));
+    let served = cut(&lineage, &passing, Some(100), PRUNE);
     let budgeted = start.elapsed();
     assert_eq!(
         served.len(),
@@ -130,11 +135,11 @@ fn treed_arm(n: u32) {
     assert!(!lineage.is_flat());
 
     let start = Instant::now();
-    let full = cut(&lineage, &passing, None);
+    let full = cut(&lineage, &passing, None, PRUNE);
     let unbudgeted = start.elapsed();
 
     let start = Instant::now();
-    let narrow = cut(&lineage, &passing, Some(100));
+    let narrow = cut(&lineage, &passing, Some(100), PRUNE);
     let budgeted = start.elapsed();
     assert!(
         narrow.len() <= full.len(),

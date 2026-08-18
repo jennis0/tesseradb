@@ -26,7 +26,25 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// A treed layer: it declares no levels and its lineage is entirely in its edges
 /// (decision 0082).
+///
+/// **Pruned by default here, which is not the declaration's own default.** Most of these cases are
+/// about the frontier — which of two visible artifacts is the one drawn — and that only exists when
+/// `prune_children` is on. `treed_whole` is the other half.
 fn treed(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
+    declaration(name, criterion, true)
+}
+
+/// The same, serving every passing artifact rather than the frontier — the declaration's own
+/// default, and what a client that wants to nest or filter a subtree asks for.
+fn treed_whole(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
+    declaration(name, criterion, false)
+}
+
+fn declaration(
+    name: &str,
+    criterion: Option<ExistenceCriterion>,
+    prune_children: bool,
+) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
         title: format!("{name} (title)"),
@@ -39,7 +57,7 @@ fn treed(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration 
         visible_when: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
-            prune_children: false,
+            prune_children,
         },
         content: ContentDeclaration {
             derived: vec!["centroid".into()],
@@ -483,5 +501,87 @@ fn a_deleted_parent_leaves_its_child_a_root() {
         vec!["leaf", "other"],
         "the fold executed the deletion and the children are unmoved — their parent pointer names \
          a hole, which is a lineage that ends rather than one that is broken"
+    );
+}
+
+/// **The whole visible tree, when the layer asks for it.** `prune_children` is a layer's rendering
+/// choice, not a disclosure control (decision 0082 says so in as many words), and this is the half
+/// of it a frontier cannot give: the client receives the ancestors as well as the leaves, which is
+/// what lets it nest what it draws or filter to one subtree while still drawing the rest of the
+/// map.
+///
+/// It was silently unavailable until 2026-08-18: the cut pruned unconditionally and never read the
+/// declaration, so a layer asking for its whole tree was served a frontier and had no way to tell.
+#[test]
+fn a_layer_that_declines_pruning_is_served_its_whole_visible_tree() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(treed_whole("clusters/tree", None))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                node(&fx, "root", None, 0..300),
+                node(&fx, "left", Some("root"), 0..100),
+                node(&fx, "right", Some("root"), 100..200),
+            ],
+        )
+        .unwrap();
+
+    let credential = full_coverage_credential();
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, None)),
+        vec!["left", "right", "root"],
+        "the ancestor is served beside its children, which is what a client needs to nest them"
+    );
+
+    // **A budget still bites, and it climbs the same way.** What `prune_children` decides is which
+    // artifacts are candidates to be moved, never what a depth means.
+    assert_eq!(
+        keys(&artifacts_of(&engine, &credential, Some(1))),
+        vec!["root"]
+    );
+}
+
+/// And the counts are the viewer's own on every artifact of that tree, ancestors included — a
+/// parent's count is not the sum of its children's, because the members it keeps away from both
+/// are counted in it and in neither of them.
+#[test]
+fn an_ancestors_count_is_its_own_and_not_the_sum_of_its_children() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(treed_whole("clusters/tree", None))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                // 200..300 are the root's and no child's — the non-covering case.
+                node(&fx, "root", None, 0..300),
+                node(&fx, "left", Some("root"), 0..100),
+                node(&fx, "right", Some("root"), 100..200),
+            ],
+        )
+        .unwrap();
+
+    let served = artifacts_of(&engine, &full_coverage_credential(), None);
+    let count = |key: &str| {
+        served
+            .iter()
+            .find(|a| a.stable_key.as_deref() == Some(key))
+            .expect("served")
+            .masked_count
+    };
+    assert_eq!(count("left"), 100);
+    assert_eq!(count("right"), 100);
+    assert_eq!(
+        count("root"),
+        300,
+        "the root holds 100 members neither child does, so its count exceeds their sum"
     );
 }

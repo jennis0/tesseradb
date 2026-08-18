@@ -203,7 +203,16 @@ struct Plan {
 }
 
 impl Plan {
-    fn new(lineage: &Lineage, passing: &[u32]) -> Self {
+    /// `prune` is the layer's `prune_children`: with it, only the frontier contributes — where a
+    /// parent and a child both pass, the child is the finer statement and the parent would draw
+    /// over it. Without it **every passing artifact contributes**, so a client receives the whole
+    /// visible tree and can nest it, or filter to one subtree while drawing the rest.
+    ///
+    /// **Neither is safer than the other**, which is unusual enough here to state: every artifact
+    /// in `passing` cleared its own criterion independently, so pruning serves strictly less and
+    /// not pruning reveals nothing beyond what each artifact's own presence already does. The
+    /// choice is the layer's, on rendering grounds.
+    fn new(lineage: &Lineage, passing: &[u32], prune: bool) -> Self {
         let mut sorted: Vec<u32> = passing.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
@@ -252,7 +261,7 @@ impl Plan {
         let chains = sorted
             .iter()
             .copied()
-            .filter(|&n| !covered[n as usize])
+            .filter(|&n| !prune || !covered[n as usize])
             .map(|node| {
                 let mut chain = Vec::new();
                 let mut at = node;
@@ -323,11 +332,11 @@ impl Plan {
 /// That is a contract rather than an accident: the serving path tests each candidate against the
 /// served set by binary search, and a caller that passed its ordinals in some other order would
 /// otherwise get a silently short response rather than an error.
-pub fn cut_at(lineage: &Lineage, passing: &[u32], depth: u32) -> Vec<u32> {
+pub fn cut_at(lineage: &Lineage, passing: &[u32], depth: u32, prune: bool) -> Vec<u32> {
     if lineage.is_flat() {
         return ascending(passing);
     }
-    Plan::new(lineage, passing).serve_at(depth)
+    Plan::new(lineage, passing, prune).serve_at(depth)
 }
 
 /// `passing`, ascending and deduplicated — the flat case's whole answer.
@@ -355,11 +364,11 @@ fn ascending(passing: &[u32]) -> Vec<u32> {
 /// dropping nodes to reach the number, which is the sampling decision 0083 forbids: a map missing
 /// arbitrary roots claims those regions are empty.
 /// Ascending and deduplicated, as [`cut_at`] is and for the same reason.
-pub fn cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>) -> Vec<u32> {
+pub fn cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>, prune: bool) -> Vec<u32> {
     if lineage.is_flat() {
         return ascending(passing);
     }
-    let plan = Plan::new(lineage, passing);
+    let plan = Plan::new(lineage, passing, prune);
     let full = plan.serve_at(u32::MAX);
     let Some(budget) = budget else {
         return full;
@@ -409,9 +418,9 @@ mod tests {
     fn a_flat_level_is_served_whole() {
         let flat = Lineage::new([(0, None), (1, None), (2, None)]);
         assert!(flat.is_flat());
-        assert_eq!(cut(&flat, &[0, 1, 2], None), vec![0, 1, 2]);
+        assert_eq!(cut(&flat, &[0, 1, 2], None, true), vec![0, 1, 2]);
         // Even against a budget: there is no lineage to cut along, so there is nothing to trade.
-        assert_eq!(cut(&flat, &[0, 1, 2], Some(1)), vec![0, 1, 2]);
+        assert_eq!(cut(&flat, &[0, 1, 2], Some(1), true), vec![0, 1, 2]);
     }
 
     /// **The frontier: where a parent and a child both pass, the child is what is drawn.** Serving
@@ -420,8 +429,8 @@ mod tests {
     #[test]
     fn a_passing_child_replaces_its_passing_parent() {
         let lineage = chain();
-        assert_eq!(cut(&lineage, &[0, 1, 3], None), vec![3]);
-        assert_eq!(cut(&lineage, &[0, 2], None), vec![2]);
+        assert_eq!(cut(&lineage, &[0, 1, 3], None, true), vec![3]);
+        assert_eq!(cut(&lineage, &[0, 2], None, true), vec![2]);
     }
 
     /// **A hole in the lineage does not stop the child being served**, which is the proportional
@@ -432,8 +441,8 @@ mod tests {
     fn a_child_whose_parent_failed_is_still_served() {
         let lineage = chain();
         // 1 is absent from `passing`: it failed its own criterion. 3 is beneath it and passed.
-        assert_eq!(cut(&lineage, &[0, 3], None), vec![3]);
-        assert_eq!(cut(&lineage, &[3], None), vec![3]);
+        assert_eq!(cut(&lineage, &[0, 3], None, true), vec![3]);
+        assert_eq!(cut(&lineage, &[3], None, true), vec![3]);
     }
 
     /// A budget is met by serving ancestors, and the cut taken is the deepest one that fits.
@@ -442,12 +451,12 @@ mod tests {
         let lineage = chain();
         let passing = [0, 1, 2, 3, 4];
         // No budget: the frontier is the two leaves.
-        assert_eq!(cut(&lineage, &passing, None), vec![2, 4]);
+        assert_eq!(cut(&lineage, &passing, None, true), vec![2, 4]);
         // One artifact: only the root fits.
-        assert_eq!(cut(&lineage, &passing, Some(1)), vec![0]);
+        assert_eq!(cut(&lineage, &passing, Some(1), true), vec![0]);
         // Two: the full frontier already fits, so nothing is traded away — a budget buys depth
         // and never costs it.
-        assert_eq!(cut(&lineage, &passing, Some(2)), vec![2, 4]);
+        assert_eq!(cut(&lineage, &passing, Some(2), true), vec![2, 4]);
     }
 
     /// A wider tree, where the budget genuinely bites and the depth it settles on is visible.
@@ -470,11 +479,11 @@ mod tests {
             (6, Some(2)),
         ]);
         let passing = [0, 1, 2, 3, 4, 5, 6];
-        assert_eq!(cut(&wide, &passing, None), vec![3, 4, 5, 6]);
+        assert_eq!(cut(&wide, &passing, None, true), vec![3, 4, 5, 6]);
         // Four leaves do not fit in three, so the cut climbs to depth 1 and serves two nodes —
         // fewer than the budget, because a depth is what it can trade and not a count.
-        assert_eq!(cut(&wide, &passing, Some(3)), vec![1, 2]);
-        assert_eq!(cut(&wide, &passing, Some(1)), vec![0]);
+        assert_eq!(cut(&wide, &passing, Some(3), true), vec![1, 2]);
+        assert_eq!(cut(&wide, &passing, Some(1), true), vec![0]);
     }
 
     /// **Two budgets agree on every artifact both return** — the property a client widening its
@@ -486,8 +495,8 @@ mod tests {
         let passing = [0, 1, 2, 3, 4];
         for shallow in 1..=5u32 {
             for deep in shallow..=5 {
-                let a = cut(&lineage, &passing, Some(shallow));
-                let b = cut(&lineage, &passing, Some(deep));
+                let a = cut(&lineage, &passing, Some(shallow), true);
+                let b = cut(&lineage, &passing, Some(deep), true);
                 for ordinal in &a {
                     if b.contains(ordinal) {
                         // Present in both, and it is the same artifact: the cut chooses which
@@ -504,7 +513,7 @@ mod tests {
     #[test]
     fn a_budget_smaller_than_the_roots_serves_the_roots() {
         let two_roots = Lineage::new([(0, None), (1, None), (2, Some(0)), (3, Some(1))]);
-        assert_eq!(cut(&two_roots, &[0, 1, 2, 3], Some(1)), vec![0, 1]);
+        assert_eq!(cut(&two_roots, &[0, 1, 2, 3], Some(1), true), vec![0, 1]);
     }
 
     /// **A branch with no passing ancestor is served where it stands rather than blanked.**
@@ -518,9 +527,9 @@ mod tests {
         let lineage = chain();
         // 0 and 1 failed — suppressed, deleted, or below their own bar; the cut cannot tell and
         // does not need to.
-        assert_eq!(cut(&lineage, &[2, 3], Some(1)), vec![2, 3]);
+        assert_eq!(cut(&lineage, &[2, 3], Some(1), true), vec![2, 3]);
         assert_eq!(
-            cut(&lineage, &[2, 4], Some(1)),
+            cut(&lineage, &[2, 4], Some(1), true),
             vec![2, 4],
             "a budget resolving below every passing node still serves them"
         );
@@ -640,20 +649,20 @@ mod tests {
             }
             for depth in 0..8u32 {
                 assert_eq!(
-                    cut_at(&lineage, &passing, depth),
+                    cut_at(&lineage, &passing, depth, true),
                     reference_cut_at(&lineage, &passing, depth),
                     "case {case}: the plan and the rule disagree at depth {depth}"
                 );
             }
             for budget in 1..=8u32 {
                 assert_eq!(
-                    cut(&lineage, &passing, Some(budget)),
+                    cut(&lineage, &passing, Some(budget), true),
                     reference_cut(&lineage, &passing, Some(budget)),
                     "case {case}: the bisection and the walk disagree at budget {budget}"
                 );
             }
             assert_eq!(
-                cut(&lineage, &passing, None),
+                cut(&lineage, &passing, None, true),
                 reference_cut(&lineage, &passing, None),
                 "case {case}: the unbudgeted cuts disagree"
             );
@@ -675,7 +684,7 @@ mod tests {
             }
             let mut previous = 0;
             for depth in 0..10u32 {
-                let count = cut_at(&lineage, &passing, depth).len();
+                let count = cut_at(&lineage, &passing, depth, true).len();
                 assert!(
                     count >= previous,
                     "case {case}: the count fell from {previous} to {count} at depth {depth}, so                      the budget's bisection would settle on the wrong cut"
@@ -698,7 +707,7 @@ mod tests {
                 continue;
             }
             for budget in [None, Some(1), Some(3), Some(10)] {
-                for served in cut(&lineage, &passing, budget) {
+                for served in cut(&lineage, &passing, budget, true) {
                     assert!(
                         passing.contains(&served),
                         "the cut served {served}, which never passed its own criterion"
@@ -707,7 +716,7 @@ mod tests {
             }
             // And a cut is never empty while something passed: a blank map is the failure mode
             // the climb-to-a-passing-ancestor rule exists to prevent.
-            assert!(!cut(&lineage, &passing, Some(1)).is_empty());
+            assert!(!cut(&lineage, &passing, Some(1), true).is_empty());
         }
     }
 
@@ -718,16 +727,105 @@ mod tests {
     fn every_cut_is_ascending_and_deduplicated() {
         let unsorted = [4, 2, 2, 0];
         let flat = Lineage::new([(0, None), (2, None), (4, None)]);
-        assert_eq!(cut(&flat, &unsorted, None), vec![0, 2, 4]);
-        assert_eq!(cut_at(&flat, &unsorted, 0), vec![0, 2, 4]);
+        assert_eq!(cut(&flat, &unsorted, None, true), vec![0, 2, 4]);
+        assert_eq!(cut_at(&flat, &unsorted, 0, true), vec![0, 2, 4]);
 
         let lineage = chain();
         for budget in [None, Some(1), Some(2), Some(9)] {
-            let served = cut(&lineage, &unsorted, budget);
+            let served = cut(&lineage, &unsorted, budget, true);
             assert!(
                 served.windows(2).all(|w| w[0] < w[1]),
                 "a cut came back out of order or with a duplicate: {served:?}"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // `prune_children = false`: the whole visible tree, not its frontier
+    // ---------------------------------------------------------------------------------------
+
+    /// **Unpruned, a passing parent is served beside its passing child**, and that is the default
+    /// the layer declaration carries. It is what lets a client nest what it draws, or filter to one
+    /// subtree while still drawing the rest of the map — neither of which is possible from a
+    /// frontier, where the ancestors have already been dropped.
+    #[test]
+    fn without_pruning_every_passing_artifact_is_served() {
+        let lineage = chain();
+        let passing = [0, 1, 2, 3, 4];
+        assert_eq!(cut(&lineage, &passing, None, false), vec![0, 1, 2, 3, 4]);
+        // Pruned, the same input is the two leaves.
+        assert_eq!(cut(&lineage, &passing, None, true), vec![2, 4]);
+    }
+
+    /// A hole in the lineage does not become a root: an unpruned cut serves what passed and no
+    /// more, so a child whose parent failed is still served and the parent still is not.
+    #[test]
+    fn without_pruning_a_failing_ancestor_is_still_absent() {
+        let lineage = chain();
+        assert_eq!(cut(&lineage, &[2, 3, 4], None, false), vec![2, 3, 4]);
+    }
+
+    /// **A budget still bites without pruning**, and it climbs the same way. The difference is only
+    /// which artifacts are candidates to be moved, not what a depth means.
+    #[test]
+    fn a_budget_climbs_the_same_way_without_pruning() {
+        let lineage = chain();
+        let passing = [0, 1, 2, 3, 4];
+        assert_eq!(cut(&lineage, &passing, Some(1), false), vec![0]);
+        assert_eq!(cut(&lineage, &passing, Some(3), false), vec![0, 1, 2]);
+    }
+
+    /// The unpruned cut is monotone in depth too, which the budget's bisection needs in both modes.
+    #[test]
+    fn the_unpruned_count_is_monotone_in_depth() {
+        let mut next = stream(0xD00D);
+        for case in 0..200 {
+            let n = 1 + (next() % 40) as u32;
+            let lineage = random_lineage(&mut next, n);
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            if passing.is_empty() {
+                continue;
+            }
+            let mut previous = 0;
+            for depth in 0..10u32 {
+                let count = cut_at(&lineage, &passing, depth, false).len();
+                assert!(count >= previous, "case {case}: the count fell at depth {depth}");
+                previous = count;
+            }
+        }
+    }
+
+    /// **At one depth, the pruned cut is a subset of the unpruned one.** That is the safety
+    /// relationship between the two modes: both map a node to the same representative, and pruning
+    /// simply maps fewer of them, so turning it on can never surface something turning it off
+    /// would have withheld.
+    ///
+    /// **Under a budget the two are incomparable, and that is not a defect.** A budget is a count,
+    /// and the unpruned cut spends more nodes per depth — so it settles shallower to fit the same
+    /// number, and the pruned cut can hold a deep node the unpruned one has already replaced with
+    /// an ancestor. Both answers are correct for what was asked; they are answers to different
+    /// questions.
+    #[test]
+    fn at_one_depth_pruning_serves_a_subset_of_not_pruning() {
+        let mut next = stream(0xFEED);
+        for case in 0..200 {
+            let n = 1 + (next() % 40) as u32;
+            let lineage = random_lineage(&mut next, n);
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            if passing.is_empty() {
+                continue;
+            }
+            for depth in [0u32, 1, 3, u32::MAX] {
+                let pruned = cut_at(&lineage, &passing, depth, true);
+                let whole = cut_at(&lineage, &passing, depth, false);
+                for served in &pruned {
+                    assert!(
+                        whole.contains(served),
+                        "case {case}: at depth {depth} pruning served {served}, which the \
+                         unpruned cut did not"
+                    );
+                }
+            }
         }
     }
 }
