@@ -4,6 +4,7 @@
 //! statistics match what was constructed — including the bbox drilldown, whose region excludes
 //! exactly one designed cell.
 
+use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -137,7 +138,7 @@ fn build_bundle(root: &Path) {
     let manifest = Manifest {
         bundle_format: 2,
         created_at: "2026-07-31T00:00:00Z".to_string(),
-        data_plugin_hash: "builtin:passthrough:1".to_string(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],

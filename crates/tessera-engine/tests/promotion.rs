@@ -40,6 +40,9 @@ impl Plugin for CappedTerms {
     fn terms_of_label(&self, access: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
         Passthrough::new().terms_of_label(access)
     }
+    fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
+        Passthrough::new().terms_of_labels(labels)
+    }
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
     }

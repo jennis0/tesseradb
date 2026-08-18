@@ -797,6 +797,36 @@ impl Engine {
     ) -> Result<Engine> {
         let bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
 
+        // **The plugin that serves a bundle must be the plugin that labelled it** (contracts
+        // §2.2). The build records `data_plugin_hash` in `MANIFEST.json`; every posting in the
+        // bundle is the output of *that* implementation's label rule. Serving under a different
+        // one does not fail loudly anywhere downstream — the postings are read as written and the
+        // requests are resolved by the new rule, so every item is mislabelled and the mislabelling
+        // is invisible. This is the only place the two values meet, so it is the only place the
+        // agreement can be checked.
+        //
+        // **Fail closed on an empty or absent manifest hash.** A bundle that does not say what
+        // labelled it cannot be shown to have been labelled by this plugin, and the "unknown"
+        // case is exactly the hand-written or half-migrated manifest the check is for.
+        //
+        // Only the *data* hash is checked. The auth module's hash keys the mask cache
+        // (contracts §4.1) and is not recorded in the manifest, so there is no equivalent
+        // open-time enforcement for it — and no claim here that there is.
+        let served_hash = plugin.data_plugin_hash();
+        if bundle.manifest.data_plugin_hash != served_hash {
+            let recorded = if bundle.manifest.data_plugin_hash.is_empty() {
+                "<empty>"
+            } else {
+                &bundle.manifest.data_plugin_hash
+            };
+            return Err(EngineError::Malformed(format!(
+                "MANIFEST data_plugin_hash is '{recorded}' but this process serves with plugin \
+                 '{served_hash}': the bundle's postings were labelled by a different rule, so \
+                 serving them here would mislabel every one of them. Rebuild the bundle with \
+                 this plugin, or serve it with the plugin that built it."
+            )));
+        }
+
         let current = read_current(bundle_root)?;
         let prefix = current.prefix.clone();
         let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {

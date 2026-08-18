@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 46
+**Status:** Draft for review — revision 47
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -248,7 +248,8 @@ Per view, fixed-width columns of **`tessera_id`**, the position **`residual`**, 
 
 The core knows only this: an item carries a set of opaque **term** IDs; a token carries a set of satisfied term IDs; an item is visible iff those sets intersect. Everything about how terms are derived sits behind two functions supplied by the caller:
 
-- **`terms_of_label(item_label) -> {term descriptor}`** — run once per item at ingest. Must be fast.
+- **`terms_of_label(item_label) -> {term descriptor}`** — run once per item at ingest, where an item's label arrives as one opaque byte string and only the plugin can decompose it. Must be fast.
+- **`terms_of_labels([term], …) -> {term descriptor}`** — the same derivation where the caller's terms are *already* separated, as a build's source column has them. **Exactly one descriptor per element, in order**: the build derives a term's descriptor from the term alone, so this is the property that makes the dictionary pass sound, and the build refuses to run against a plugin that does not honour it. It exists because the alternative — joining an item's terms into one string for the plugin to split apart — makes the separator byte inside a caller's term into two grants.
 - **`terms_of_auth(auth_data) -> {term descriptor}`** — run once per authorisation. May be expensive.
 
 This is a smaller core than it looks. The term index, mask construction's union, label containment, level of detail, filters, partitioning and storage never knew where terms came from; only the derivation did.
@@ -1195,6 +1196,16 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r47** — **the data side of the plugin boundary takes a term list** (2026-08-18). §6.1 gains
+  `terms_of_labels` beside `terms_of_label`: the same derivation for a caller whose terms are
+  already separated, obliged to return exactly one descriptor per element, in order. The build had
+  been joining an item's terms into one comma-separated label for the plugin to split apart, which
+  was harmless while a term was an integer and a widening once a term is the caller's own string —
+  a term containing the separator became two grants. Nothing about the core changes: an item still
+  carries a set of opaque term IDs, and `terms_of_label` remains the only route for an item whose
+  label arrives as one byte string on the wire. `builtin:passthrough` implements the list form as
+  the identity and its plugin hash moves with the change (contracts §4.3 r32).
 
 - **r46** — **C27 and C28 are renamed onto the two visibility axes** (2026-08-18,
   [decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)).

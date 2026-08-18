@@ -8,6 +8,7 @@
 //! result with the real reader — never a hand-parsed assertion of either file's shape, matching
 //! `bundle_read.rs`'s own voice.
 
+use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -142,7 +143,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     let manifest = Manifest {
         bundle_format: 2,
         created_at: created_at.to_string(),
-        data_plugin_hash: "builtin:passthrough:1".to_string(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],

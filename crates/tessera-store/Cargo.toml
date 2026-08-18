@@ -27,6 +27,11 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Fixture manifests carry the *real* `data_plugin_hash` of the plugin they stand for, so that a
+# fixture copied into an engine test opens rather than being refused by the open-time agreement
+# check. A pinned hex literal would need editing on every identity bump, which is how the previous
+# placeholders survived. `tessera-plugin` is a leaf crate with no workspace edges.
+tessera-plugin = { path = "../tessera-plugin" }
 tempfile = { workspace = true }
 rand = { workspace = true }
 proptest = { workspace = true }

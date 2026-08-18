@@ -2,6 +2,7 @@
 //! (contracts §2.6): sort a batch, write
 //! `columns.arrow` / `morton.u32` / `permutation.bin`, and read every byte back.
 
+use tessera_plugin::Plugin;
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
@@ -426,7 +427,7 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
     let json = serde_json::json!({
         "bundle_format": 2,
         "created_at": "2026-07-28T00:00:00Z",
-        "data_plugin_hash": "builtin:passthrough:1",
+        "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
         "small_term_threshold": 32,
         "quantisation": {"x_min": 0.0, "x_max": 1.0, "y_min": 0.0, "y_max": 1.0},
         "entity_id_high_water": 0,

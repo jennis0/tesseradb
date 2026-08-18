@@ -4,6 +4,7 @@
 //! `row_of` loop, and `tile_ranges` against a linear scan of the morton array. Then corrupt
 //! one byte of `columns.arrow` and confirm `open_bundle` fails closed with a digest error.
 
+use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -142,7 +143,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     let manifest = Manifest {
         bundle_format: 2,
         created_at: "2026-07-28T00:00:00Z".to_string(),
-        data_plugin_hash: "builtin:passthrough:1".to_string(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],

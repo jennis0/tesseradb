@@ -256,6 +256,7 @@ impl Generation {
 /// have an opinion about it, and one line at the sites that do not.
 #[cfg(test)]
 pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::ExternalIdIndex>) {
+    use tessera_plugin::Plugin;
     let manifest = tessera_store::manifest::SegmentsManifest {
         watermark: 0,
         entity_id_high_water: 0,
@@ -280,7 +281,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
     let bundle_manifest = tessera_store::manifest::Manifest {
         bundle_format: 2,
         created_at: String::new(),
-        data_plugin_hash: String::new(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],

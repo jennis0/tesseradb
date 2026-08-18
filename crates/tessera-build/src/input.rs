@@ -11,7 +11,7 @@
 //!   [`read_points`].
 //! * **access terms** — either the exploded `(entity_id, term_id)` relation ([`scan_pairs`]) or a
 //!   `list<string>` field of the points source itself ([`scan_access_field`]), which is where the
-//!   trim, the empty rule and the comma refusal live.
+//!   trim and the empty rule live.
 //!
 //! **Every column is named by the declaration, never by this module** ([`crate::config::Fields`]).
 //! A declared field the file does not carry is [`field_index`]'s refusal, and that refusal is the
@@ -737,7 +737,7 @@ impl AccessBatch {
     }
 }
 
-/// Decode one batch of the access column, applying the trim, the empty rule and the comma refusal.
+/// Decode one batch of the access column, applying the trim and the empty rule.
 ///
 /// **A `list<string>`, or a plain `string` where a point carries one term** (`configuration.md`
 /// §1). Any other type is refused rather than coerced: a column of integers or of a nested struct
@@ -751,38 +751,18 @@ fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) 
         terms: Vec::new(),
     };
     batch.bounds.push(0);
-    fn push(batch: &mut AccessBatch, path: &Path, name: &str, value: &str) -> Result<()> {
+    fn push(batch: &mut AccessBatch, value: &str) {
         let term = value.trim();
         if term.is_empty() {
-            return Ok(());
-        }
-        // ⊘ **The delimiter, and the one refusal it forces.** The build joins an item's terms with
-        // commas so `builtin:passthrough` can split them apart again, which was harmless while
-        // terms were integers and is not once they are a caller's strings: a term carrying a comma
-        // would arrive at the plugin as two, and the point would become visible to a holder of
-        // either half. The join disappears when the plugin takes a term *list* (`configuration.md`
-        // §1's next stage); until it does, the refusal is the only answer that does not widen.
-        if term.contains(',') {
-            return Err(BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "the access column '{name}' carries the term '{term}', which contains a \
-                     comma. The build joins an item\'s terms with commas for the plugin to split \
-                     apart, so this term would reach it as two and the point would become visible \
-                     to a holder of either half. Refused rather than split: the delimiter goes \
-                     when the plugin takes a term list, and until then a comma in a term cannot be \
-                     carried"
-                ),
-            });
+            return;
         }
         batch.terms.push(term.to_string());
-        Ok(())
     }
 
     if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
         for i in 0..rows {
             if !values.is_null(i) {
-                push(&mut batch, path, name, values.value(i))?;
+                push(&mut batch, values.value(i));
             }
             batch.bounds.push(batch.terms.len());
         }
@@ -791,7 +771,7 @@ fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) 
     if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
         for i in 0..rows {
             if !values.is_null(i) {
-                push(&mut batch, path, name, values.value(i))?;
+                push(&mut batch, values.value(i));
             }
             batch.bounds.push(batch.terms.len());
         }
@@ -816,7 +796,7 @@ fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) 
                 for j in offsets[i]..offsets[i + 1] {
                     let j = j as usize;
                     if !strings.is_null(j) {
-                        push(&mut batch, path, name, strings.value(j))?;
+                        push(&mut batch, strings.value(j));
                     }
                 }
             }

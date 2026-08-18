@@ -2611,6 +2611,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tessera-plugin",
  "tessera-roaring",
  "tessera-spatial",
  "tessera-types",

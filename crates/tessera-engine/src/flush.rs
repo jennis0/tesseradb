@@ -1300,6 +1300,7 @@ mod tests {
     use tessera_lifecycle::IngestBuffer;
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
+    use tessera_plugin::Plugin;
     use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
     const VIEW: &str = "s0";
@@ -1352,7 +1353,7 @@ mod tests {
         let manifest = Manifest {
             bundle_format: 2,
             created_at: "2026-08-02T00:00:00Z".to_string(),
-            data_plugin_hash: "builtin:passthrough:1".to_string(),
+            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
             vocabularies: vec![],

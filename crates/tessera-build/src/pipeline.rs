@@ -87,10 +87,10 @@
 //! defence's scope.)
 //!
 //! **The labelling plugin is `builtin:passthrough`.** [`build_dictionary`] exploits the fact that
-//! passthrough's label rule is *decomposable*: an item's descriptors are its comma-separated
-//! source terms independently, so a term's descriptor can be derived from the term alone and the
-//! whole item never has to be assembled. That is a property of passthrough, not of the plugin
-//! ABI — a plugin that derived descriptors from the label as a whole would be mislabelled by
+//! passthrough's label rule is *decomposable*: an item's descriptors are its source terms taken
+//! one at a time, so a term's descriptor can be derived from the term alone and the whole item
+//! never has to be assembled. That is a property of passthrough, not of the plugin
+//! ABI — a plugin that derived descriptors from the item's terms as a whole would be mislabelled by
 //! this shortcut, and mislabelled authorisation data is the one failure mode this system exists
 //! to prevent. [`require_decomposable_labelling`] refuses to run against any other plugin rather
 //! than assume it decomposes (I2, fail closed).
@@ -2632,15 +2632,15 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
 /// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
 ///
 /// The dictionary pass derives each term's descriptor from the term id alone, which is only
-/// sound when the plugin's label rule is decomposable — when `terms_of_label` over a
-/// comma-joined list yields exactly the per-element descriptors, in order. `builtin:passthrough`
-/// (R6) is defined that way; nothing in the plugin ABI requires it, and a plugin that derived
-/// descriptors from the label as a whole (a rule engine, a normaliser, anything that folds
-/// terms together) would be silently mislabelled here — every posting would name the wrong term,
-/// which is a disclosure, not a bug in a performance path.
+/// sound when the plugin's label rule is decomposable — when `terms_of_labels` over a term list
+/// yields exactly one descriptor per element, in order. `builtin:passthrough` (R6) is defined
+/// that way; nothing in the plugin ABI requires it, and a plugin that derived descriptors from
+/// the item's terms as a whole (a rule engine, a normaliser, anything that folds terms together)
+/// would be silently mislabelled here — every posting would name the wrong term, which is a
+/// disclosure, not a bug in a performance path.
 ///
 /// So this is checked twice over, and fails closed: the plugin must *be* passthrough by its
-/// declared `data_plugin_hash`, and it must *behave* decomposably on a probe label. The hash
+/// declared `data_plugin_hash`, and it must *behave* decomposably on a probe term list. The hash
 /// check is what will still hold when `build` grows a plugin parameter; the probe is what
 /// catches a passthrough whose rule was changed without its hash being bumped.
 fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
@@ -2655,14 +2655,16 @@ fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
             reference.data_plugin_hash()
         )));
     }
-    let probe: &[u8] = b"11,7,4096";
-    let descriptors = plugin.terms_of_label(probe)?;
-    let expected: Vec<Vec<u8>> = vec![b"11".to_vec(), b"7".to_vec(), b"4096".to_vec()];
-    if descriptors != expected {
+    let probe: Vec<Vec<u8>> = vec![b"11".to_vec(), b"7".to_vec(), b"4096".to_vec()];
+    let descriptors = plugin.terms_of_labels(&probe)?;
+    if descriptors != probe {
         return Err(BuildError::Invalid(format!(
-            "the plugin's label rule is not decomposable: label {:?} yielded {:?}, not one \
-             descriptor per comma-separated term",
-            String::from_utf8_lossy(probe),
+            "the plugin's label rule is not decomposable: the term list {:?} yielded {:?}, not \
+             one descriptor per term, in order",
+            probe
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect::<Vec<_>>(),
             descriptors
                 .iter()
                 .map(|d| String::from_utf8_lossy(d).into_owned())

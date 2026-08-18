@@ -34,13 +34,6 @@ each naming what is absent per
   `layer`, `variation`, `member` and `values` — names this surface does not carry at all — so a
   layer map has nothing to move until those sources are rebuilt on §8's names, and one naming a
   different column is refused rather than read as canonical.
-- **An access term containing a comma**, whether it arrives in a data row or as a declared label.
-  A build joins an item's terms with commas so the plugin can split them apart again; a term
-  carrying one would reach the plugin as two, and the point would be visible to a holder of either
-  half. The delimiter goes when the plugin takes a term **list** — the next stage of
-  [`../evidence/memos/2026-08-18-configuration-surface-plan.md`](../evidence/memos/2026-08-18-configuration-surface-plan.md),
-  which bumps the plugin hash with it; until then the refusal is the only answer that does not
-  widen.
 - **One file per layer.** A layer's `source` is real, but the artifact and member files still carry
   a `layer` column and the build reads one path, so two layers binding *different* files is
   refused; and `[layer.labels]`, a layer's inline `artifacts`, a view's own `visibility` and
@@ -793,6 +786,20 @@ across every view it appears in, and it is what a member row names.
 
 ## Appendix R — review trail
 
+**2026-08-18 — the plugin takes a term list, and the comma stops being a delimiter.** The build no
+longer joins an item's terms into one `access` string for the plugin to split apart: it hands the
+plugin the list it already has, through a second data-side entry point (`terms_of_labels`) that
+`builtin:passthrough` implements as the identity — one descriptor per term, verbatim, in order,
+with an empty element refused because an empty descriptor is not a grant. So **an access term or a
+declared label may contain a comma**, and the two refusals that held that line — one in the access
+column decode, one at the declaration — are deleted along with the paragraph above that recorded
+them; a term is whatever the caller wrote, whole. The wire path is unchanged: an ingest request
+carries one opaque `access` byte string and still goes through `terms_of_label`, which still
+splits on commas, because only the plugin can decompose it. The plugin identity moves to
+`builtin:passthrough:2`, which moves both hashes — the auth side is untouched, but sharing one
+identity string means fragment caches recompute and tokens re-mint, which is the conservative
+direction and is why the hash is in `MANIFEST.json` at all.
+
 **2026-08-18 — the readers take the names, and a point's terms come from a field.** Two changes,
 and only the second moves a request. **Every object but a layer now reads its source under the
 names its `fields` map resolved** — a view's geometry, `[corpus]`'s identity, a vocabulary's
@@ -806,9 +813,7 @@ so all three shapes §1 declares now acquire. Terms are trimmed; a null value an
 mean *no access terms*, which is *visible to no principal* rather than unrestricted, and are what a
 `default` fills; filling never overrides. **`public` is interned at term `0` by every build and
 added to every principal's resolved term set inside the engine** — not by grant and not in the
-plugin. One refusal is new and temporary: a term or a label containing a **comma**, the delimiter
-the build still joins terms with, which would otherwise reach the plugin as two terms and make the
-point visible to a holder of either half. ⊘ The `source` route fills nothing, where the `field`
+plugin. ⊘ The `source` route fills nothing, where the `field`
 route does; that divergence is recorded above and is the narrow half.
 
 **2026-08-18 — the invocation is `tessera build`.** The previous revision made acquisition real and

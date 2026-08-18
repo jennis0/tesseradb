@@ -522,28 +522,20 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut over_bound_items = 0u64;
     for point in &points {
         let source_terms = pairs_by_source.remove(&point.source_id).unwrap_or_default();
-        // ⊘ **The comma join, and the reason a term may not contain one.** The item's `access`
-        // label is its descriptors joined with commas, which `builtin:passthrough` splits apart
-        // again — the shape that has always carried the probe corpus's integer term ids, and the
-        // one a caller's strings now ride. A term carrying a comma would arrive as two, so the
-        // readers refuse one; the join goes when the plugin takes a term list.
-        let mut label = String::new();
-        for (i, t) in source_terms.iter().enumerate() {
-            if i > 0 {
-                label.push(',');
-            }
-            label.push_str(&access.descriptors.descriptor(*t));
-        }
-        let descriptors = plugin.terms_of_label(label.as_bytes())?;
+        let labels: Vec<Vec<u8>> = source_terms
+            .iter()
+            .map(|t| access.descriptors.descriptor(*t).into_owned().into_bytes())
+            .collect();
+        let descriptors = plugin.terms_of_labels(&labels)?;
         if descriptors.len() > bounds.max_terms_per_item as usize {
             // A declared bound is a *declaration*: record it and carry on. Dropping terms here
             // would silently widen the item's visibility (I2/I3).
             //
             // This counts descriptors, and the streaming pipeline counts the item's signature
             // length; the two always agree. `read_pairs` returns each item's source terms sorted
-            // and deduplicated, so the joined label has distinct decimal elements, passthrough
-            // yields one distinct descriptor each, and interning is injective — the descriptor
-            // count *is* the distinct term count, which is what a signature holds.
+            // and deduplicated, so the label list has distinct elements, passthrough yields one
+            // distinct descriptor per element, and interning is injective — the descriptor count
+            // *is* the distinct term count, which is what a signature holds.
             over_bound_items += 1;
         }
         let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();

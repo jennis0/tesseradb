@@ -1480,15 +1480,17 @@ fn a_renamed_layer_field_is_refused_rather_than_disregarded() {
     assert!(message.contains("'cluster_id'"), "{message}");
 }
 
-/// ⊘ An access label carrying a comma is refused at the declaration, for the reason a term
-/// carrying one is refused at the data: the build joins terms with commas for the plugin to split
-/// apart, so the label would arrive as two.
+/// **A comma is an ordinary byte in an access label.** The build hands the plugin a term *list*,
+/// so a declared label spelling `ir:analyst,ir:legal` is one term reaching one principal — the
+/// holder of that whole string, never the holder of either half.
 #[test]
-fn an_access_label_may_not_contain_a_comma() {
+fn an_access_label_may_contain_a_comma_and_is_one_term() {
     let text = ACQUIRED.replace("default = \"public\"", "default = \"ir:analyst,ir:legal\"");
-    let message = bound_err(&text, &[]);
-    assert!(message.contains("contains a comma"), "{message}");
-    assert!(message.contains("either half"), "{message}");
+    let config = bound_ok(&text, &[]);
+    assert_eq!(
+        config.views[0].point_visibility.default, "ir:analyst,ir:legal",
+        "carried whole, not split at the comma"
+    );
 }
 
 /// **A point's label comes from a field or from a source, never both** (§1).

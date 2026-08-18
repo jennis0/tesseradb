@@ -27,7 +27,8 @@ use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_plugin::Passthrough;
+use sha2::Digest;
+use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
@@ -1049,6 +1050,155 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     assert!(
         matches!(err, EngineError::Malformed(ref d) if d.contains("allocator")),
         "expected a typed refusal naming the allocator, got {err:?}"
+    );
+}
+
+/// A `Passthrough` in every respect but the hash it declares — the shape of a plugin whose label
+/// rule was changed and whose identity was bumped with it.
+struct RelabellingPlugin;
+
+impl tessera_plugin::Plugin for RelabellingPlugin {
+    fn terms_of_label(
+        &self,
+        access: &[u8],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        Passthrough::new().terms_of_label(access)
+    }
+
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        Passthrough::new().terms_of_labels(labels)
+    }
+
+    fn terms_of_auth(
+        &self,
+        auth_data: &[u8],
+    ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
+        Passthrough::new().terms_of_auth(auth_data)
+    }
+
+    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
+        Passthrough::new().declared_bounds()
+    }
+
+    fn data_plugin_hash(&self) -> String {
+        // Derived from the real one so this stays a *different* value however the identity moves,
+        // rather than a literal that could one day collide with the passthrough's own.
+        format!("{}ff", &Passthrough::new().data_plugin_hash()[2..])
+    }
+
+    fn auth_plugin_hash(&self) -> String {
+        Passthrough::new().auth_plugin_hash()
+    }
+}
+
+/// Rewrite `MANIFEST.json`'s `data_plugin_hash` to `value` and re-point `CURRENT` at the new
+/// digest, so the bundle still verifies and the hash is the only thing that changed.
+fn rewrite_data_plugin_hash(bundle_root: &Path, value: serde_json::Value) {
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle_root.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().unwrap().to_string();
+
+    let manifest_path = bundle_root.join(&prefix).join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["data_plugin_hash"] = value;
+    let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    std::fs::write(&manifest_path, &bytes).unwrap();
+
+    let digest = sha2::Sha256::digest(&bytes);
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(
+        bundle_root.join("CURRENT"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "prefix": prefix,
+            "manifest_digest": hex,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// **A bundle may only be served by the plugin that labelled it.** `MANIFEST.json` records the
+/// build's `data_plugin_hash` for exactly this check, and nothing downstream of open would notice
+/// its absence: postings written under one label rule are read back intact and resolved against
+/// another, so every item is mislabelled and no error is raised anywhere. `Engine::open` is the
+/// only place the recorded hash and the serving plugin meet.
+///
+/// The check is the *data* hash alone. The auth module's hash keys the mask cache and is not in
+/// the manifest, so there is no equivalent open-time enforcement for it.
+#[test]
+fn engine_open_refuses_a_plugin_whose_data_hash_is_not_the_bundles() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // The same bundle opens under the plugin that built it — without this the case would pass on
+    // a fixture that was broken for some unrelated reason.
+    Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache-ok"),
+        &tmp.path().join("wal-ok.log"),
+        Passthrough::new(),
+        config(),
+    )
+    .expect("the bundle opens under the plugin that built it");
+
+    let opened = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        RelabellingPlugin,
+        config(),
+    );
+    let Err(err) = opened else {
+        panic!("a bundle labelled by another plugin must be refused, not served mislabelled");
+    };
+    let EngineError::Malformed(detail) = err else {
+        panic!("expected a typed Malformed refusal, got {err:?}");
+    };
+    assert!(
+        detail.contains(&Passthrough::new().data_plugin_hash())
+            && detail.contains(&RelabellingPlugin.data_plugin_hash()),
+        "the refusal must name BOTH hashes so an operator can tell which end is wrong: {detail}"
+    );
+}
+
+/// **Fail closed on a manifest that does not say what labelled it.** An empty `data_plugin_hash`
+/// is a mismatch, not a pass: a bundle that names no labelling rule cannot be shown to have been
+/// labelled by this plugin, and treating "unknown" as agreement would exempt exactly the
+/// hand-written or half-migrated manifest the check exists for.
+#[test]
+fn engine_open_refuses_a_manifest_whose_data_plugin_hash_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    rewrite_data_plugin_hash(&bundle_root, serde_json::json!(""));
+
+    let opened = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        config(),
+    );
+    let Err(err) = opened else {
+        panic!("an empty manifest hash must be refused, not treated as agreement");
+    };
+    assert!(
+        matches!(err, EngineError::Malformed(ref d) if d.contains("<empty>")),
+        "the refusal must say the manifest names nothing, not print a blank: {err:?}"
     );
 }
 

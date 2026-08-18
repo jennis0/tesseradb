@@ -26,7 +26,15 @@ use sha2::{Digest, Sha256};
 pub type Descriptor = Vec<u8>;
 
 /// The identity string hashed to produce `builtin:passthrough`'s plugin hashes.
-const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:1";
+///
+/// **One string, both hashes.** The data and auth sides of `builtin:passthrough` are the same
+/// implementation, so a change to either moves both — `:2` names the revision that added
+/// [`Plugin::terms_of_labels`], which is a data-side change the auth side never saw. Moving the
+/// auth hash too is the conservative direction: fragment caches recompute and tokens re-mint,
+/// where the alternative — pinning the auth hash while the data rule moves — would let a cached
+/// fragment outlive the labelling that produced it. The hash is recorded in `MANIFEST.json`
+/// precisely so a bundle cannot be served by a plugin that would label its items differently.
+const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:2";
 
 /// What `terms_of_auth` returns: the credential's descriptors and its optional expiry.
 ///
@@ -72,6 +80,21 @@ pub trait Plugin: Send + Sync {
     /// Deterministic: identical bytes in, identical descriptors out, every time.
     fn terms_of_label(&self, access: &[u8]) -> Result<Vec<Descriptor>, PluginError>;
 
+    /// Map an item's terms, already separated by the caller, to its authorisation descriptors
+    /// (the *data* side, list form).
+    ///
+    /// This is the entry point the build uses: the caller's source column already holds one
+    /// string per term, so there is nothing to parse and nothing a separator could split wrongly.
+    /// [`Plugin::terms_of_label`] remains the wire path — an ingest request carries one opaque
+    /// `access` byte string, which only the plugin can decompose.
+    ///
+    /// Required, deliberately without a default. A default would be a labelling rule a plugin
+    /// author never wrote, silently inherited; a plugin that folds or rewrites terms must say so
+    /// here in its own words or not compile.
+    ///
+    /// Deterministic, on the same terms as [`Plugin::terms_of_label`].
+    fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError>;
+
     /// Map a credential's `auth_data` bytes to the descriptors it authorises (the *auth* side).
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError>;
 
@@ -89,7 +112,9 @@ pub trait Plugin: Send + Sync {
 /// `builtin:passthrough`: the identity plugin, and the only one this build can run. The
 /// conformance oracle implements the same mapping.
 ///
-/// * `access` is a UTF-8 comma-separated descriptor list — split on `,`, trim, drop empties.
+/// * `access` (the wire path) is a UTF-8 comma-separated descriptor list — split on `,`, trim,
+///   drop empties.
+/// * a term *list* (the build path) is taken verbatim, one descriptor per element.
 /// * `auth_data` is JSON `{"terms": ["<descriptor>", …]}`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Passthrough;
@@ -116,6 +141,33 @@ impl Plugin for Passthrough {
             .filter(|s| !s.is_empty())
             .map(|s| s.as_bytes().to_vec())
             .collect())
+    }
+
+    /// The identity — and identity is a *rule*, not the absence of one.
+    ///
+    /// Each label's bytes become exactly one descriptor, verbatim and in the order given: no
+    /// splitting, no trimming, no deduplication, no dropping. Every one of those is load-bearing
+    /// downstream. The build's dictionary pass derives a term's descriptor from its term id
+    /// alone, so it needs one descriptor per source term and the two sequences aligned
+    /// positionally; a rule that dropped or reordered elements would leave every posting naming
+    /// a different term than the item was labelled with, which is a disclosure rather than a
+    /// cosmetic difference.
+    ///
+    /// An empty element is refused. An empty descriptor is not a grant, and silently dropping it
+    /// would shorten the descriptor list below the item's term count — the fail-open direction,
+    /// and the one place identity could quietly stop being one-to-one. An empty *list* is fine:
+    /// an item may legitimately carry zero terms.
+    fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
+        for (i, label) in labels.iter().enumerate() {
+            if label.is_empty() {
+                return Err(PluginError::Malformed(format!(
+                    "term {i} of {} is empty; an empty descriptor is not a grant and dropping it \
+                     would leave the item with fewer terms than it was given",
+                    labels.len()
+                )));
+            }
+        }
+        Ok(labels.to_vec())
     }
 
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
@@ -185,6 +237,26 @@ mod tests {
     }
 
     #[test]
+    fn terms_of_labels_is_the_identity_one_descriptor_per_label() {
+        let p = Passthrough::new();
+        let labels = vec![
+            b" spaced ".to_vec(),
+            b"cs,LG".to_vec(),
+            b"cs.LG".to_vec(),
+            b"cs.LG".to_vec(),
+        ];
+        // Verbatim, in order, one each: no trim, no split on the comma, no dedup.
+        assert_eq!(p.terms_of_labels(&labels).unwrap(), labels);
+    }
+
+    #[test]
+    fn terms_of_labels_accepts_the_empty_list_and_refuses_an_empty_term() {
+        let p = Passthrough::new();
+        assert!(p.terms_of_labels(&[]).unwrap().is_empty());
+        assert!(p.terms_of_labels(&[b"cs.LG".to_vec(), Vec::new()]).is_err());
+    }
+
+    #[test]
     fn terms_of_auth_parses_json_terms() {
         let p = Passthrough::new();
         let got = p.terms_of_auth(br#"{"terms": ["1207", "9"]}"#).unwrap();
@@ -230,7 +302,7 @@ mod tests {
         // behaving plugin.
         assert_eq!(
             p.data_plugin_hash(),
-            hex_lower(&Sha256::digest(b"builtin:passthrough:1"))
+            hex_lower(&Sha256::digest(b"builtin:passthrough:2"))
         );
     }
 

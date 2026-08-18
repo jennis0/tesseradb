@@ -1757,6 +1757,15 @@ impl tessera_plugin::Plugin for ParkingPlugin {
         self.inner.terms_of_label(access)
     }
 
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        // The wire path is the one this fixture parks in; the list form is the build's and is
+        // never reached from `/control/ingest`.
+        self.inner.terms_of_labels(labels)
+    }
+
     fn terms_of_auth(
         &self,
         auth_data: &[u8],

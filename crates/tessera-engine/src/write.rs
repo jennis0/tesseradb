@@ -3486,6 +3486,7 @@ fn write_vocabulary_extensions(
 #[cfg(test)]
 mod segment_schema_tests {
     use super::*;
+    use tessera_plugin::Plugin;
     use tessera_store::manifest::DeclaredScalar;
 
     /// **A segment's writer schema is the render columns, and this guards the one line that makes
@@ -3504,7 +3505,7 @@ mod segment_schema_tests {
         let manifest = tessera_store::manifest::Manifest {
             bundle_format: 2,
             created_at: String::new(),
-            data_plugin_hash: String::new(),
+            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
             vocabularies: vec![],
             small_term_threshold: 32,

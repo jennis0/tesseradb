@@ -737,8 +737,8 @@ const EXTENT_SPELLINGS: &str = "\n  \
 #[derive(Debug, Clone)]
 pub struct AccessInput {
     pub source: AccessSource,
-    /// What a point carrying no terms of its own is given. Never `inherited`, and never containing
-    /// a comma (§1, and the delimiter the plugin still splits on).
+    /// What a point carrying no terms of its own is given. Never `inherited` (§1); any other
+    /// string is a term, commas and all — the plugin is handed a list, so nothing splits it.
     pub default: String,
 }
 
@@ -1653,20 +1653,6 @@ fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
         return Err(declaration_error(format!(
             "'{object}': `{key}` is empty. An access label is a term a principal either holds or \
              does not; write `public` for the one every principal holds"
-        )));
-    }
-    // ⊘ **The delimiter, refused at the declaration as well as at the data.** A build joins an
-    // item's terms with commas so the plugin can split them apart again, so a label carrying one
-    // would reach the plugin as two and the object would be reachable by a holder of either half.
-    // The join goes when the plugin takes a term list; until then a comma in a label cannot be
-    // carried, and refusing it here is one message at the line that wrote it.
-    if label.contains(',') {
-        return Err(declaration_error(format!(
-            "'{object}': `{key} = \"{label}\"` contains a comma. A build joins an item's access \
-             terms with commas for the plugin to split apart, so this label would reach it as two \
-             and the object would be reachable by a holder of either half. Refused rather than \
-             split: the delimiter goes when the plugin takes a term list, and until then a comma \
-             in a label cannot be carried"
         )));
     }
     if label == INHERITED {

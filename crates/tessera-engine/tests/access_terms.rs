@@ -212,11 +212,12 @@ fn a_default_alone_gives_every_point_the_declared_label() {
     assert_eq!(visible(dir.path(), &[]), N);
 }
 
-/// ⊘ A term containing a comma is refused, and the refusal says why and for how long: the build
-/// joins an item's terms with commas for the plugin to split apart, so this one would arrive as
-/// two and the point would be visible to a holder of either half.
+/// **A comma is an ordinary byte in a term.** The build hands the plugin the caller's terms as a
+/// *list*, so a term spelling `ir:analyst,ir:legal` interns as one descriptor and reaches exactly
+/// the principal who holds that whole string — never the holder of either half, which is what a
+/// comma-joined label would have done.
 #[test]
-fn a_term_containing_a_comma_is_refused() {
+fn a_term_containing_a_comma_interns_as_one_term() {
     let dir = tempfile::tempdir().unwrap();
     write_points(&dir.path().join("points.parquet"), |e| {
         if e == 2 {
@@ -225,18 +226,28 @@ fn a_term_containing_a_comma_is_refused() {
             access_of(e)
         }
     });
-    let message = format!(
-        "{}",
-        build(&args(
-            &dir.path().join("points.parquet"),
-            &dir.path().join("bundle"),
-            "public",
-        ))
-        .expect_err("expected a refusal")
+    build(&args(
+        &dir.path().join("points.parquet"),
+        &dir.path().join("bundle"),
+        "public",
+    ))
+    .expect("a term carrying a comma builds");
+
+    // Points 1 (null, filled) and 3 (`public`) and nothing else.
+    assert_eq!(visible(dir.path(), &[]), 2);
+    // Neither half reaches point 2 — the whole of the point.
+    assert_eq!(
+        visible(dir.path(), &["ir:analyst"]),
+        4,
+        "public, point 0 and point 4 — not point 2"
     );
-    assert!(message.contains("ir:analyst,ir:legal"), "{message}");
-    assert!(message.contains("either half"), "{message}");
-    assert!(message.contains("term list"), "{message}");
+    assert_eq!(
+        visible(dir.path(), &["ir:legal"]),
+        3,
+        "public and point 0 — not point 2"
+    );
+    // The whole string is the descriptor, and it reaches its one point.
+    assert_eq!(visible(dir.path(), &["ir:analyst,ir:legal"]), 3);
 }
 
 /// A plain `string` column is the same declaration for a point carrying one term.

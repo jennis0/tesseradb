@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r15 — r14 plus decisions 0058 and 0059 in §6.3 and §9: single-flight waiters park on the build they used to be refused by, and the counters an operator reads on that path are named. r14 was r13 plus decision 0048's deletion applied to §6.6's *evaluate* disposition. **r13's correction is preserved and must stay**: the evaluate deletion arrived on a branch cut before r13, so taking its §6.6 paragraph verbatim would have reinstated both the immediate-postings-subtraction reading and the invented "row tombstone" that r13 removed. r13 was r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
+**Status:** Draft r17 — r16 plus §4.1's refusal paragraph saying what the data-plugin-hash check actually does now that it exists: it runs at open, an absent hash fails closed, and the auth hash has no counterpart. §4.3's ⊘ narrows accordingly — the data hash is enforced, the auth hash is still a field nobody reads. No architectural boundary moves. r16 was r15 plus §4.3's export list naming the plugin ABI's second data-side entry point, `terms_of_labels` (contracts §4.3 r32): the build hands the plugin the terms its source column already holds instead of joining them into one string for the plugin to split apart, which had made a separator byte inside a caller's term into two grants. No architectural boundary moves. r15 was r14 plus decisions 0058 and 0059 in §6.3 and §9: single-flight waiters park on the build they used to be refused by, and the counters an operator reads on that path are named. r14 was r13 plus decision 0048's deletion applied to §6.6's *evaluate* disposition. **r13's correction is preserved and must stay**: the evaluate deletion arrived on a branch cut before r13, so taking its §6.6 paragraph verbatim would have reinstated both the immediate-postings-subtraction reading and the invented "row tombstone" that r13 removed. r13 was r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and the capability epics in this repository's issues (which own sequencing — the phase model they replaced is archived). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -249,7 +249,7 @@ Four things this tree deliberately does **not** contain, each a recorded deviati
 
 > **⊘ Specified, not implemented.** Step-down is built; its time bound is not, and `readyz` does not consult one. A replica that falls arbitrarily far behind therefore serves stale geometry as ready. Safe today only because there is no replica: one process opens one bundle it wrote itself.
 
-**Refusals.** The engine refuses a bundle whose format version is newer than it knows, and refuses to serve when the manifest's data-plugin hash differs from the configured plugin's — that mismatch is a full-reindex event (§6.1), not tolerable drift.
+**Refusals.** The engine refuses a bundle whose format version is newer than it knows, and refuses to serve when the manifest's data-plugin hash differs from the configured plugin's — that mismatch is a full-reindex event (§6.1), not tolerable drift. The comparison happens at open, before anything is served, and a manifest carrying **no** hash is a mismatch too: a bundle that does not say what labelled it cannot be shown to have been labelled by the plugin in hand. Only the *data* hash is checked. The auth module's hash is not in the manifest — it keys the mask cache (§6.1) — so there is no equivalent open-time check on that side, and the asymmetry is deliberate rather than an omission: a rotated auth hash invalidates caches and re-mints tokens, where a changed data hash means every posting on disc was written by a different rule.
 
 **Rollback.** Flipping `CURRENT` backwards abandons segments streamed into the newer prefix; those batches survive in the WAL up to its retention window and replay into the restored prefix. Rollback is an operator action with a bounded data-loss-and-recovery story rather than a silent one.
 
@@ -300,9 +300,9 @@ Plus `/healthz` and `/readyz`. Failure semantics everywhere: **fail closed** —
 
 ### 4.3 The plugin ABI (policy ↔ core)
 
-A module exporting `terms_of_label`, `terms_of_auth` and `declared_bounds`. Descriptors are opaque byte strings; the engine owns interning in the single bundle-level namespace. The module hash keys both blast radii: the auth-function hash enters the fragment cache key, the data-function hash enters the manifest.
+A module exporting `terms_of_label`, `terms_of_labels`, `terms_of_auth` and `declared_bounds` — the data side twice over, once for an item whose label arrives as one opaque byte string (the wire) and once for an item whose terms the caller already separated (a build's source column), the second obliged to return one descriptor per element in order (contracts §4.3). Descriptors are opaque byte strings; the engine owns interning in the single bundle-level namespace. The module hash keys both blast radii: the auth-function hash enters the fragment cache key, the data-function hash enters the manifest.
 
-> **⊘ Partially implemented.** `tessera-plugin` ships the trait and one implementation, `Passthrough` (`builtin:passthrough`), compiled in. There is **no wasmtime dependency and no module loading**: `[plugin] module` accepts exactly `"builtin:passthrough"` and any other value — including `"builtin:access-expressions"` — is refused at startup. So the module-hash blast radii exist as manifest fields rather than as a mechanism, and I5 (the plugin's two functions agree) is trivially true and untestable for passthrough. The streaming build additionally *refuses to run* against any plugin whose labelling is not decomposable, rather than assuming it is (§6.1).
+> **⊘ Partially implemented.** `tessera-plugin` ships the trait and one implementation, `Passthrough` (`builtin:passthrough`), compiled in. There is **no wasmtime dependency and no module loading**: `[plugin] module` accepts exactly `"builtin:passthrough"` and any other value — including `"builtin:access-expressions"` — is refused at startup. So the module-hash blast radii are only half a mechanism: the **data** hash is enforced — `Engine::open` refuses a bundle whose `data_plugin_hash` is not the serving plugin's — but nothing *rotates* a module, because nothing loads one, and the auth hash is a manifest field with no reader. I5 (the plugin's two functions agree) is trivially true and untestable for passthrough. The streaming build additionally *refuses to run* against any plugin whose labelling is not decomposable, rather than assuming it is (§6.1).
 
 Where a WASM host arrives, it runs with no WASI capabilities, and out-of-process-over-a-pipe is the documented fallback for policy engines that cannot target WASM.
 
@@ -587,7 +587,7 @@ The binary and its HTTP surfaces are the product. `tessera serve` under systemd 
 
 > **⊘ Specified, not implemented.** There is no `python/` directory, no wheel, no SDK and no supervisor. Python appears only as the test-only oracle (`reference/`) and the conformance harness (`conformance/`). A reader must not assume `pip install tessera` exists, and the supervisor hygiene an earlier revision specified — port 0, a watchdog pipe, a pidfile — has no implementation to be hygienic about.
 
-**What the integrator owns**, because the service cannot check it: consistent plugin functions (I5), a stable projection across views, stable cluster node identity, honest generating sets (C12), unique external IDs, and a token-refresh policy (I6). `tessera verify` runs what *is* mechanisable — digest verification, manifest and plugin-hash agreement, permutation bijectivity, declared-bounds conformance.
+**What the integrator owns**, because the service cannot check it: consistent plugin functions (I5), a stable projection across views, stable cluster node identity, honest generating sets (C12), unique external IDs, and a token-refresh policy (I6). `tessera verify` runs what *is* mechanisable — digest verification, manifest and plugin-hash agreement, permutation bijectivity, declared-bounds conformance. ⊘ **Plugin-hash agreement is not among them**: `verify` is handed a bundle and no plugin, so it has nothing to compare the manifest's hash against. The check exists only at `Engine::open` (§4.1), which means a bundle can be verified clean and still be one this process must refuse to serve.
 
 ## 9. Observability and failure
 
@@ -632,6 +632,24 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 **Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across views (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
+
+**r17** (2026-08-19) makes §4.1's refusal claim true and then bounds it. The engine had never
+compared the manifest's data-plugin hash against the configured plugin's, so this paragraph and
+contracts §2.2 were both present-tense about machinery that did not exist — the failure mode being a
+disclosure rather than an outage, since postings written under one labelling rule read back intact
+and resolve against another with no error raised. The check now runs in `Engine::open`, an absent or
+empty manifest hash counts as a mismatch, and the paragraph says both. It also says what the check
+does *not* cover: the auth module's hash, which is not in the manifest and has no reader, so §4.3's
+⊘ narrows from "manifest fields rather than a mechanism" to the auth half alone.
+
+**r16** (2026-08-18) names the plugin ABI's second data-side export in §4.3. `terms_of_labels`
+takes an item's terms already separated and must return exactly one descriptor per element, in
+order — the property the streaming build's dictionary pass has always assumed and now probes
+through this entry point rather than through a comma-joined label. `terms_of_label` is unchanged
+and remains the route for an item whose label arrives as one opaque byte string on the wire. The
+⊘ note below it stands unaltered: there is still no wasmtime host, and `builtin:passthrough` —
+whose identity string moves to `:2`, taking both hashes with it — is still the whole of the
+policy surface.
 
 **r15** (2026-08-09) applies decisions
 [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and
