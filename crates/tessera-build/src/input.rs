@@ -453,6 +453,102 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
     })
 }
 
+/// The tightest box holding every point this build would read — `auto`'s input
+/// (`configuration.md` §1), or `None` when the selection is empty.
+///
+/// **A full pass over two columns, not the file's statistics.** Parquet min/max are per row group
+/// and may be absent, so a statistics route would make the extent — and therefore every stored
+/// cell — depend on how the producer happened to lay the file out, and would silently widen the
+/// box for a file that carries none. `auto` is already the spelling that says *fit the data I have*
+/// (`configuration.md` §1); making it also mean *approximately, depending on the writer* is the
+/// kind of quiet dependence a rebuild discovers as moved geometry. One pass over `entity_id`,
+/// `x` and `y` is the price, and it is paid only when a view declares `auto`.
+///
+/// `limit` is honoured, because the extent must frame the rows the build actually places: a
+/// prefix build whose box was computed over the whole file would quantise its rows into a
+/// fraction of the grid.
+///
+/// A Morton points file has no coordinates to bound, and is refused here rather than defaulted
+/// to the grid's own extent: the two Morton branches are exact only against
+/// [`IDENTITY_EXTENT`], so the answer is a line in the config rather than a guess in the reader.
+pub fn data_bounds(path: &Path, limit: Option<u64>) -> Result<Option<Bounds>> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    if schema.column_with_name("x").is_none() || schema.column_with_name("y").is_none() {
+        return Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: if schema.column_with_name("morton").is_some() {
+                "`extent = \"auto\"` fits a box around this view\'s coordinates, and this points \
+                 file stores Morton codes rather than coordinates. Codes are exact only against \
+                 the grid\'s own extent, so write it out: `extent = { min = 0.0, max = 65536.0 }`."
+                    .to_string()
+            } else {
+                "`extent = \"auto\"` needs \'x\' and \'y\' columns to fit a box around".to_string()
+            },
+        });
+    }
+
+    let id_idx_in_file = column_index(path, &schema, "entity_id")?;
+    let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
+    let mut roots = Vec::with_capacity(3);
+    for name in ["entity_id", "x", "y"] {
+        roots.push(column_index(path, &schema, name)?);
+    }
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
+    let reader = builder
+        .with_row_groups(keep)
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let id_idx = column_index(path, &projected, "entity_id")?;
+    let x_idx = column_index(path, &projected, "x")?;
+    let y_idx = column_index(path, &projected, "y")?;
+
+    let mut found = false;
+    let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+        let xs = read_f32_column(path, &batch, x_idx, "x")?;
+        let ys = read_f32_column(path, &batch, y_idx, "y")?;
+        for i in 0..ids.len() {
+            if limit.is_some_and(|l| ids[i] >= l) {
+                continue;
+            }
+            // A non-finite coordinate would poison every comparison below and produce a box the
+            // extent validator then refuses with no mention of the row that caused it. Named
+            // here, where the file and the value are both in hand.
+            let (x, y) = (xs[i] as f64, ys[i] as f64);
+            if !x.is_finite() || !y.is_finite() {
+                return Err(BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "entity_id {} has a non-finite position ({x}, {y}), so no box fits the \
+                         data. `extent = \"auto\"` reads every row it would place",
+                        ids[i]
+                    ),
+                });
+            }
+            found = true;
+            x_min = x_min.min(x);
+            x_max = x_max.max(x);
+            y_min = y_min.min(y);
+            y_max = y_max.max(y);
+        }
+    }
+    Ok(found.then_some(Bounds {
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+    }))
+}
+
 /// The points file's total row count, from parquet metadata alone — no decode.
 ///
 /// Exact for an unfiltered scan: [`scan_points`] visits every row when there is no limit

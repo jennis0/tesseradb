@@ -231,6 +231,7 @@ pub fn run_build(
             let collector = StageCollector::default();
             let args = BuildArgs {
                 points: geometry.clone(),
+                corpus: Some(geometry.clone()),
                 pairs: pairs.clone(),
                 out: out.clone(),
                 extent: Bounds {

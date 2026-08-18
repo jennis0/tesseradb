@@ -175,6 +175,7 @@ fn no_blob_schema() -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
         points: points.to_path_buf(),
+        corpus: Some(points.to_path_buf()),
         pairs: pairs.to_path_buf(),
         out,
         extent: Bounds {

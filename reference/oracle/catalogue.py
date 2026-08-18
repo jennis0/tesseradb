@@ -93,24 +93,35 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .bundle import Bundle
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, read_recipe, write_recipe
+from .harness import (
+    CLI_BIN,
+    REPO_ROOT,
+    build_env,
+    ensure_cli_built,
+    read_recipe,
+    write_deployment,
+    write_recipe,
+)
 
 # Where the corpus and its bundle live between runs. A fixed path, like `/tmp/tessera-250k`, so
 # the build is paid once per machine rather than once per session — `build_catalogue_bundle`
 # reuses whatever is already there if it was built from this module's current inputs.
 DEFAULT_WORK_DIR = Path("/tmp/tessera-catalogue")
 
+#: The view's quantisation frame — the grid's own coordinates, since this catalogue states its
+#: expected answers in cells. Written into the declaration below rather than passed at invocation:
+#: the extent belongs to the view (`configuration.md` §1).
 EXTENT = (0.0, 65536.0, 0.0, 65536.0)
-EXTENT_ARG = "0,65536,0,65536"
 VIEW_ID = "s0"
 SEED = 20260731
 
 POINTS_NAME = "catalogue-points.parquet"
 PAIRS_NAME = "catalogue-pairs.parquet"
 SCHEMA_NAME = "catalogue-config.toml"
+DEPLOYMENT_NAME = "catalogue-tessera.toml"
 
 # The declaration that makes `fx_key` a served column (per-point-attributes §4.2). Written beside
-# the points parquet on the build path and bound with `--config`.
+# the points parquet on the build path, and named by `tessera.toml`'s `build.schema`.
 #
 # **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
 # presentation, and declaring a category would need a value set enumerating every item — the
@@ -176,7 +187,27 @@ SCHEMA_NAME = "catalogue-config.toml"
 # a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
 # block target (an oversized block of its own — records §3's "target, not a cap"), and entities
 # absent from both (absent from has-row entirely).
-SCHEMA_TOML = """\
+#: The acquisition half, built from this module's own constants rather than restated, so that
+#: `EXTENT`, `VIEW_ID` and the two file names stay the single statement of each. One points file
+#: carries identity, geometry and every declared column, so `[corpus]` and the view name one file;
+#: the exploded `(entity_id, term_id)` relation is the other. Both are paths **relative to this
+#: document**, which the generator writes beside them (`configuration.md` §3).
+#:
+#: The extent is the grid's own: the catalogue states its expected answers in cells, so a fitted
+#: box would move every one of them.
+_ACQUISITION_TOML = f"""\
+[corpus]
+source = "{POINTS_NAME}"
+
+[[view]]
+name             = "{VIEW_ID}"
+extent           = {{ x = [{EXTENT[0]}, {EXTENT[1]}], y = [{EXTENT[2]}, {EXTENT[3]}] }}
+source           = "{POINTS_NAME}"
+point_visibility = {{ source = "{PAIRS_NAME}", default = "public" }}
+"""
+
+SCHEMA_TOML = _ACQUISITION_TOML + """\
+
 [[vocabulary]]
 name       = "department"
 width      = "u8"
@@ -1086,25 +1117,20 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
     good reason (contracts §2.4 forbids manufacturing one for an item whose caller supplied none),
     and passing it here is a statement that *this fixture's* items do have caller-supplied ids —
     the source corpus is synthesised by this module, so they do.
+
+    Everything else the build once carried on the command line is in the two documents beside the
+    corpus: the declaration names its own sources and its own extent, and the deployment file names
+    the declaration. The identity key travels in the environment ([`harness.build_env`]), never in
+    an argv a CI log would keep.
     """
     return [
         str(CLI_BIN),
         "build",
-        "--points",
-        str(work_dir / POINTS_NAME),
-        "--pairs",
-        str(work_dir / PAIRS_NAME),
-        "--config",
-        str(work_dir / SCHEMA_NAME),
-        "--extent",
-        EXTENT_ARG,
-        "--view",
-        VIEW_ID,
+        "--deployment",
+        str(work_dir / DEPLOYMENT_NAME),
         "--out",
         str(bundle_root),
         "--mint-external-ids",
-        "--id-key",
-        CATALOGUE_ID_KEY_HEX,
     ]
 
 
@@ -1114,7 +1140,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
 
     The list is the point, so it is written out rather than computed: the corpus is a function of
     `_LAYOUT` (which fixes both the term IDs and the entity ranges), `SEED` (geometry and the
-    planted `fx_key`s), the `ONE_TILE_*` constants, and the CLI arguments — of which `--id-key` is
+    planted `fx_key`s), the `ONE_TILE_*` constants, the declaration, and the CLI arguments — of
+    which the identity key is
     the one that decides `tessera_id`, and therefore §7.2's entire served order. Anything that
     lands here later must be added; a recipe that omits an input is a reuse test that pins the
     suite to the older fixture, which is the failure this replaced.
@@ -1146,7 +1173,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "seed": SEED,
         "fx_seed": _FX_SEED,
         "geometry_seed": _GEOMETRY_SEED,
-        "extent": EXTENT_ARG,
+        "extent": list(EXTENT),
         "view": VIEW_ID,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
         "id_key": CATALOGUE_ID_KEY_HEX,
@@ -1231,7 +1258,15 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     # Written on the build path only, beside the corpus and for the same reason: writing it
     # unconditionally is what let bundle and corpus diverge before.
     (work_dir / SCHEMA_NAME).write_text(SCHEMA_TOML)
-    subprocess.run(_build_argv(work_dir, bundle_root), cwd=REPO_ROOT, check=True)
+    write_deployment(
+        work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
+    )
+    subprocess.run(
+        _build_argv(work_dir, bundle_root),
+        cwd=REPO_ROOT,
+        env=build_env(CATALOGUE_ID_KEY_HEX),
+        check=True,
+    )
     write_recipe(bundle_root, wanted)
     return bundle_root, fx_keys()
 

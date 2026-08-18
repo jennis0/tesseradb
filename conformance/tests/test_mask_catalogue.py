@@ -42,8 +42,8 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     2. the rows are **stored in the order that key implies** — re-derived from `(x, y)` and the
        permutation, never from the stored `morton`/`tessera_id` columns — so `derive_row_order` is
        the identity permutation;
-    3. MANIFEST's identity key is the one `oracle/catalogue.py` passed on the command line, not one
-       the build minted for itself. Without this, 1 and 2 would hold against *any* self-consistent
+    3. MANIFEST's identity key is the one `oracle/catalogue.py` put in the build's environment,
+       not one the build minted for itself. Without this, 1 and 2 would hold against *any* self-consistent
        key, including one the fixture never chose.
 
     `verify_identity_cross_check` and `derive_row_order` already existed but ran only against the
@@ -61,8 +61,9 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     declared = catalogue_bundle.manifest["identity"]["key"]
     assert declared.lower() == cat.CATALOGUE_ID_KEY_HEX.lower(), (
         f"MANIFEST's identity key is {declared!r}, not the {cat.CATALOGUE_ID_KEY_HEX!r} the "
-        "fixture passed with --id-key. The bundle was built by something other than "
-        "`build_catalogue_bundle`, or the build ignored the flag and minted its own key — either "
+        "fixture states through the environment. The bundle was built by something other than "
+        "`build_catalogue_bundle`, or the build ignored the variable and minted its own key — "
+        "either "
         "way every tessera_id in it is a value nobody chose."
     )
 

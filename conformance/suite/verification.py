@@ -100,15 +100,16 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from oracle import morton
-from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built
+from oracle.harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
 from .canonical import Json, Streamed
 
 #: The grid's own coordinates — the extent the conformance fixtures build against (contracts
-#: §2.5), and the one the corpus verbs default to.
+#: §2.5), and the one the corpus verbs default to. The **build** reads it from the generator's own
+#: declaration, which states it as the view's `extent`; this is the oracle's copy, used to derive
+#: expected geometry.
 GRID_EXTENT = (0.0, 65536.0, 0.0, 65536.0)
-GRID_EXTENT_ARG = "0,65536,0,65536"
 
 #: A fixed identity key for the fixture bundle: the lineage decision is "a test fixture, minted
 #: deterministically", stated per the build's own rule rather than circumvented. Nothing may
@@ -255,22 +256,28 @@ def materialise_corpus(
 
 def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
-    (`oracle.catalogue._build_argv`): external ids minted from the source entity id (the denies
-    address items by exactly those bytes), a stated identity-key decision, the grid extent."""
+    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output,
+    external ids minted from the source entity id (the denies address items by exactly those
+    bytes), and the identity-key decision stated through the environment.
+
+    Nothing names a source or an extent here: the generator's own declaration sits beside the two
+    parquet files it names, and carries the grid extent this corpus's expected answers are stated
+    in (`configuration.md` §1, §3). `view_id` is the view that declaration declares.
+    """
     ensure_cli_built()
+    deployment = write_deployment(
+        files.schema.parent / "tessera.toml", bundle=bundle_root, schema=files.schema
+    )
     subprocess.run(
         [
             str(CLI_BIN), "build",
-            "--points", str(files.points),
-            "--pairs", str(files.pairs),
-            "--config", str(files.schema),
-            "--extent", GRID_EXTENT_ARG,
+            "--deployment", str(deployment),
             "--view", view_id,
             "--out", str(bundle_root),
             "--mint-external-ids",
-            "--id-key", FIXTURE_ID_KEY_HEX,
         ],
         cwd=REPO_ROOT,
+        env=build_env(FIXTURE_ID_KEY_HEX),
         check=True,
         capture_output=True,
     )
@@ -774,7 +781,6 @@ __all__ = [
     "Expected",
     "FIXTURE_ID_KEY_HEX",
     "GRID_EXTENT",
-    "GRID_EXTENT_ARG",
     "TotalVerificationFailure",
     "build_bundle",
     "check_categories",

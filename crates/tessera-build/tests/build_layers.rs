@@ -85,6 +85,7 @@ fn write_pairs(path: &Path) {
 const VIEW_TOML: &str = r#"
 [[view]]
 name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
 "#;
 
@@ -264,6 +265,7 @@ fn inputs() -> Inputs {
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
         points: inputs.points.clone(),
+        corpus: Some(inputs.points.clone()),
         pairs: inputs.pairs.clone(),
         out: out.to_path_buf(),
         extent: extent(),

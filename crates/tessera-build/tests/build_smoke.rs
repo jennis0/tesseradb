@@ -184,6 +184,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     let args = BuildArgs {
         points: points.clone(),
+        corpus: Some(points.clone()),
         pairs: pairs.clone(),
         out: out.clone(),
         extent: extent(),
@@ -477,6 +478,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.clone(),
@@ -513,6 +515,7 @@ fn build_rejects_an_empty_selection() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: tmp.path().join("bundle"),
@@ -550,6 +553,7 @@ fn morton_input_requires_the_identity_extent() {
 
     let args = |extent| BuildArgs {
         points: points.clone(),
+        corpus: Some(points.clone()),
         pairs: pairs.clone(),
         out: tmp
             .path()
@@ -596,6 +600,7 @@ fn morton_input_requires_the_identity_extent() {
     };
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.clone(),
@@ -642,6 +647,7 @@ fn build_rejects_an_unsafe_view_id() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: tmp.path().join("bundle"),
@@ -687,6 +693,7 @@ fn limit_filters_the_source_entity_id_prefix() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.clone(),
@@ -726,6 +733,7 @@ fn verify_accepts_a_freshly_built_bundle() {
     write_pairs(&pairs);
 
     build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.clone(),
@@ -768,6 +776,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.clone(),
@@ -1059,6 +1068,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         write_fixture(&points, &pairs);
 
         let args = BuildArgs {
+            corpus: Some(points.clone()),
             points,
             pairs,
             out: out.clone(),

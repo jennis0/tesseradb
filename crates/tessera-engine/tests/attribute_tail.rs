@@ -155,6 +155,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     write_points_with_attributes(&points, n);
     write_pairs_n(&pairs, n);
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.to_path_buf(),
@@ -373,6 +374,7 @@ fn both_build_implementations_write_the_same_tail() {
     write_pairs_n(&pairs, 2_000);
     let args_for = |out: &Path| BuildArgs {
         points: points.clone(),
+        corpus: Some(points.clone()),
         pairs: pairs.clone(),
         out: out.to_path_buf(),
         extent: extent(),
@@ -849,6 +851,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, NON_PREFIX_SCHEMA_TOML).unwrap();
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.to_path_buf(),
@@ -1240,6 +1243,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, RECORD_SCHEMA_TOML).unwrap();
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.to_path_buf(),

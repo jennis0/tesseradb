@@ -174,6 +174,36 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
     validate_cache_bounds(&config)?;
 
+    // **The two serving secrets, read before anything is opened.** They are located in
+    // `tessera.toml` and read here rather than at parse, because `tessera build` reads the same
+    // file and has no business requiring a serving credential to be exported before it will write
+    // a bundle (`configuration.md` §3). Here means *first*, though: a plane that cannot be
+    // credentialed must refuse before the bundle is opened and the WAL is touched, not after.
+    let session_credential = config.session_credential.resolve("session")?;
+    let operator_credential = config.operator_credential.resolve("operator")?;
+
+    // **The addresses, for the same reason and with the same posture.** `[serve]` is optional in
+    // the deployment file because `tessera build` reads it too and a build has nothing to listen
+    // on; what is not optional is a *server* coming up without them. Refused here rather than
+    // defaulted, on SA §7's rule — a default port is a listening socket nobody chose.
+    for (what, declared) in [
+        ("viewer", config.viewer_addr.is_some()),
+        ("session", config.session_addr.is_some()),
+        ("control", config.control_listen.is_some()),
+    ] {
+        if !declared {
+            return Err(format!(
+                "this deployment declares no `{what}` address. `tessera serve` needs all three — \
+                 add them under `[serve]` in the deployment file:\n\n    [serve]\n    \
+                 viewer  = \"127.0.0.1:8080\"\n    session = \"127.0.0.1:8081\"\n    \
+                 control = \"unix:/run/tessera/control.sock\"\n\n`[serve]` is optional because \
+                 `tessera build` reads this same file and has nothing to listen on; it is required \
+                 to serve, and there is no default because a default port is a socket nobody chose"
+            )
+            .into());
+        }
+    }
+
     let engine_config = EngineConfig {
         token_max_lifetime_secs: config.token_max_lifetime_secs,
         max_k: config.max_k,
@@ -292,8 +322,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         stream_flush_bytes: config.stream_flush_bytes,
         stream_write_stall_ms: config.stream_write_stall_ms,
         stream_deadline_ms: config.stream_deadline_ms,
-        session_credential: config.session_credential.clone(),
-        operator_credential: config.operator_credential.clone(),
+        session_credential,
+        operator_credential,
         dev_cors_origins: config.dev_cors_origins.clone(),
         #[cfg(feature = "fault-injection")]
         faults,
@@ -321,8 +351,13 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     let Prepared { state, config } = prepared;
 
-    let viewer_listener = tokio::net::TcpListener::bind(config.viewer_addr).await?;
-    let session_listener = tokio::net::TcpListener::bind(config.session_addr).await?;
+    // `prepare` refused a deployment declaring no addresses, so these are present by construction.
+    let viewer_addr = config.viewer_addr.expect("prepare() refuses a serve with no viewer address");
+    let session_addr = config
+        .session_addr
+        .expect("prepare() refuses a serve with no session address");
+    let viewer_listener = tokio::net::TcpListener::bind(viewer_addr).await?;
+    let session_listener = tokio::net::TcpListener::bind(session_addr).await?;
 
     let viewer_router = viewer::router(Arc::clone(&state));
     let session_router = session::router(Arc::clone(&state));
@@ -333,7 +368,10 @@ pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     let session_task =
         tokio::spawn(async move { axum::serve(session_listener, session_router).await });
 
-    let control_task = match config.control_listen {
+    let control_task = match config
+        .control_listen
+        .expect("prepare() refuses a serve with no control address")
+    {
         ControlListen::Tcp(addr) => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tokio::spawn(async move { axum::serve(listener, control_router).await })

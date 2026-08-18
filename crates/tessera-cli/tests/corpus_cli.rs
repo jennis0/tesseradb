@@ -175,8 +175,19 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, corpus.config_toml()).unwrap();
 
-    let schema = tessera_build::config::Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema)
+    // No bindings: the declaration names its own files, relative to itself, and the generator
+    // writes them beside it (`configuration.md` §3). Nothing here opens them — the schema half of
+    // the parse is what this case is about.
+    let config = tessera_build::config::Config::parse(&path, &Default::default())
         .expect("the corpus schema must parse");
+    // The declaration also has to *acquire*: the suite builds with `--view s0`, so the generator's
+    // view name, its geometry source and its label relation must be the ones the build asks for.
+    // Checked here rather than left to the suite, which cannot run without a corpus on disk.
+    let acquired = config.acquire("s0").expect("the corpus config acquires its own inputs");
+    assert_eq!(acquired.points, dir.path().join("points.parquet"));
+    assert_eq!(acquired.pairs, dir.path().join("pairs.parquet"));
+    assert_eq!(acquired.corpus, Some(dir.path().join("points.parquet")));
+    let schema = config.schema;
     let names: Vec<&str> = schema.attributes.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["fx_key", "weight", "seen_at", "bay", "tag", "blurb"]);
     let fx = &schema.attributes[0];

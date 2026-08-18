@@ -156,6 +156,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let args = BuildArgs {
         points: points.to_path_buf(),
+        corpus: Some(points.to_path_buf()),
         pairs: pairs.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),

@@ -441,9 +441,9 @@ Stage 5, which is now closed; the Stage 3, 4 and 5 handovers are all retired.
     the two never share an entity — artifact ids descend from the ceiling, point ids ascend from
     zero — so which rule governs a row is a range check on its id.
   - ✔ **Layers, levels and their artifacts are definable at build time** *(owner, 2026-08-16;
-    built)*. `tessera build --layers <toml>` registers layers into the manifest, and
-    `--artifacts`/`--artifact-members` publish into them — memberships, ranked content, generating
-    sets and attachment edges — so a bundle is served with its annotations already there and a
+    built)*. `tessera build` registers the corpus declaration's `[[layer]]` blocks into the
+    manifest, and a layer's `source` and its `[layer.members]` source publish into them —
+    memberships, ranked content, generating sets and attachment edges — so a bundle is served with its annotations already there and a
     10⁷-artifact level never rides the trickle path, where every batch is an fsync and the log is
     pinned until a manifest carries it.
     - **One implementation of the rules, not two.** The build calls the same registry, the same

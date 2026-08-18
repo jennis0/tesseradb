@@ -83,14 +83,19 @@ message teaches — *what is missing · the values, spelled out · what each doe
 default* — rather than emitting raw serde text. Two existing messages are wrapped without a
 continuation and print twenty-two spaces mid-sentence; fix both here.
 
-### 3 — Sources, fields and `--file`
+### 3 — Sources, fields and the invocation
 
-`source` (a bare string naming a bound key) and `fields` (an override map) on every object;
-`--file KEY=PATH` replacing `--points`, `--pairs`, `--artifacts`, `--artifact-members` and
-`--values`. Three fail-closed rules: declared-but-unbound, bound-but-undeclared, and **never a
-fall-through to minting**. Field maps say *where*, never *whether* — a field named that the object
-never declared is refused, and a declared field missing from the source is refused, each naming
-both halves. `entity_id` becomes the canonical identity field, declared once on `[corpus]`.
+*Built, and not as written here.* `source` was drafted as a bare key bound by `--file KEY=PATH`,
+which replaced five flags with five more and produced a nine-flag command line beside a detailed
+config. What shipped instead: **`source` is a path relative to the declaring document**, an
+absolute one refused; `--file` survives as an **override keyed by the object** whose source it
+replaces; the **extent moved into `[[view]]`** and `--extent` is deleted; a **`tessera.toml`**
+found by walking up says where the declaration is and where the bundle goes; and the identity key
+comes from the environment, `--id-key` deleted with it. `tessera build` and `tessera serve` are
+the whole invocation. The three fail-closed rules survive in substance — a source with no path from
+anywhere, an override no object declares, and **never a fall-through to minting** — and field maps
+still say *where*, never *whether*. `entity_id` is the canonical identity field, declared once on
+`[corpus]`. See `configuration.md` §3 and §8.
 
 ### 4 — Input readers: named fields, list access terms
 
@@ -140,7 +145,7 @@ could emit the second. Cheap here, and it closes the one ⊘ the split leaves op
 - **`tessera check`** parses the config and reads only Parquet *schemas*: every declared attribute
   against the field that must carry it, every source bound, every layer's view declared, every
   disclosure decision as a table. Seconds, and it is what goes in CI.
-- **`--extent auto`**, plus — mattering more — **a report of how many points clamped to an extent
+- **`extent = "auto"`** — *landed at stage 3, as a `[[view]]` key rather than a flag* — plus — mattering more — **a report of how many points clamped to an extent
   edge, printed with the data's actual bounds beside the extent given**. The notebook shipped a
   degenerate map for exactly this reason and the build said nothing. Without the clamp report,
   `auto` only moves the trap.

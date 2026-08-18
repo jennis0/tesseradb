@@ -243,6 +243,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.to_path_buf(),

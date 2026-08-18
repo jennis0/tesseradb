@@ -103,6 +103,7 @@ fn flushed_bundle(root: &Path) {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.clone(),

@@ -20,62 +20,59 @@ struct Cli {
 #[allow(clippy::large_enum_variant)] // `Build` carries the identity-key flags; the enum is
                                      // parsed once per process invocation, never hot.
 enum Command {
-    /// Build a bundle from a points file and a `(entity_id, term_id)` pairs file.
+    /// Build a bundle from this deployment's corpus declaration and the sources it names.
+    ///
+    /// **`tessera build`, with no flags at all, is the whole invocation.** `tessera.toml` — found
+    /// by walking up from the working directory — says where the declaration is and where the
+    /// bundle goes; the declaration says where the corpus is and what frame it is quantised
+    /// against; the environment carries the identity key. Everything below is an override or a
+    /// performance knob (`configuration.md` §3).
     Build {
-        /// Parquet points file: `entity_id` plus either `x`/`y` or `morton`.
+        /// This deployment's `tessera.toml`, instead of the one found by walking up from the
+        /// working directory.
+        #[arg(long, value_name = "PATH")]
+        deployment: Option<PathBuf>,
+        /// Bundle root to create, overriding `tessera.toml`'s `bundle.path`.
+        ///
+        /// **The same value the server's `bundle_path` is**, seen from the other side, which is
+        /// why it is declared once rather than typed twice: a build and a server naming different
+        /// directories is a server serving whatever was there before.
         #[arg(long)]
-        points: PathBuf,
-        /// Parquet pairs file: `(entity_id, term_id)`.
-        #[arg(long)]
-        pairs: PathBuf,
-        /// Bundle root to create.
-        #[arg(long)]
-        out: PathBuf,
-        /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
-        #[arg(long, value_parser = parse_extent)]
-        extent: Bounds,
-        /// View identifier for this build's segment.
+        out: Option<PathBuf>,
+        /// Which view to materialise. Omit where the declaration has exactly one — the ordinary
+        /// case — and a declaration with several refuses rather than choosing.
         #[arg(long = "view")]
-        view_id: String,
+        view_id: Option<String>,
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
-        /// The configuration file: one TOML document declaring the corpus, its views, its
-        /// vocabularies, its attributes and its layers (configuration.md §1). Omit for a bundle
-        /// with no per-item columns and no layers, which is what every build wrote before this
-        /// flag existed.
+        /// The corpus declaration, overriding `tessera.toml`'s `build.schema`: one TOML document
+        /// declaring the corpus, its views, its vocabularies, its attributes and its layers
+        /// (configuration.md §1).
         ///
-        /// **A build input, never server configuration** (configuration.md §3). It compiles into
+        /// **A build input, never server configuration** (configuration.md §4). It compiles into
         /// MANIFEST.json and the server reads the compiled form, so a server cannot be restarted
-        /// against a bundle whose columns disagree with a schema it holds. It replaces `--schema`
-        /// and `--layers`, which were two documents describing one corpus.
+        /// against a bundle whose columns disagree with a schema it holds.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Bind a closed vocabulary's values to a Parquet file, by the vocabulary's **name**:
-        /// `--values NAME=PATH`, repeatable. The config names a vocabulary and the command line
-        /// binds it to a path, as `--id-key-file` already does — so no environment-specific path
-        /// appears in the config.
-        #[arg(long, value_name = "NAME=PATH", value_parser = parse_values_binding)]
-        values: Vec<(String, PathBuf)>,
-        /// Parquet of one row per `(artifact, variation)`: `layer`, `key`, and optionally
-        /// `level`, `variation`, `values` (a list of the layer's declared content kinds, in
-        /// declared order) and `attached_layer`/`attached_level`/`attached_key`. Needs a config
-        /// declaring the layers it names.
-        #[arg(long, value_name = "PATH")]
-        artifacts: Option<PathBuf>,
-        /// Parquet of one row per `(artifact, member)`: `layer`, `key`, `member` — a **source**
-        /// entity id, as the pairs file uses — and optionally `level` and `variation`, where a
-        /// null variation is the artifact's membership and `k` is variation *k*'s generating set.
-        /// Needs a config declaring the layers it names.
+        /// Read one of the declaration's sources from somewhere else: `--file KEY=PATH`,
+        /// repeatable (configuration.md §8).
         ///
-        /// **Publishing at volume is a build job** for the same reason attaching a view is: the
-        /// control plane's route is one fsync per batch with the log pinned until a manifest
-        /// carries it, which a 10⁷-artifact level must not ride.
+        /// **An override, not a binding.** Every `source` in the declaration is already a path,
+        /// relative to the declaration itself, so the ordinary build names no files here at all.
+        /// This is for the deployment that stages one source elsewhere, and KEY is the *object*
+        /// whose source it replaces — `corpus`, `view:s0`, `view:s0:point_visibility`,
+        /// `vocabulary:severity`, `layer:clusters/a`, `layer:clusters/a:members`.
         ///
-        /// Note the interaction with `--limit`: a member outside the limited prefix names nothing
-        /// this build assigned, and refuses it. Limit the members file with the corpus.
-        #[arg(long, value_name = "PATH")]
-        artifact_members: Option<PathBuf>,
+        /// Fail-closed both ways: a key no object declares is a refusal listing the ones that
+        /// exist, and an override never *creates* a source — so a closed vocabulary cannot be
+        /// opened, nor a view given geometry, from the command line alone.
+        ///
+        /// Note the interaction with `--limit` for a member source: a member outside the limited
+        /// prefix names nothing this build assigned, and refuses it. Limit the members file with
+        /// the corpus.
+        #[arg(long = "file", value_name = "KEY=PATH", value_parser = parse_file_binding)]
+        file: Vec<(String, PathBuf)>,
         /// Mint an external ID for every item from its source entity id, and write the
         /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
         /// manufacturing an external ID for an item whose caller supplied none, and this
@@ -106,17 +103,15 @@ enum Command {
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
         #[arg(long, value_name = "BUNDLE_ROOT")]
         carry_id_key_from: Option<PathBuf>,
-        /// Read the deployment's identity key from a config file named explicitly on the
-        /// command line (owner ruling Q6) — `[identity]\nkey = "<32 lowercase hex>"`, plus an
-        /// optional `idset = <n>`. There is no default search path and no environment variable:
-        /// the path must always be typed.
+        /// Read the deployment's identity key from a file — `[identity]\nkey = "<32 lowercase
+        /// hex>"`, plus an optional `idset = <n>`.
+        ///
+        /// The ordinary route is the environment: `tessera.toml`'s `[identity] env` names the
+        /// variable (default `TESSERA_IDENTITY_KEY`), and a `.env` beside `tessera.toml` may
+        /// supply it. This flag is for the deployment that would rather keep the key in a `0600`
+        /// file, which an environment — readable from `/proc` — is not.
         #[arg(long, value_name = "PATH")]
-        id_key_file: Option<PathBuf>,
-        /// Use the given 32-lowercase-hex-character key directly. Discouraged in practice — a
-        /// key on a command line reaches shell history, process listings and CI logs; prefer
-        /// `--id-key-file`.
-        #[arg(long, value_name = "HEX32")]
-        id_key: Option<String>,
+        identity_file: Option<PathBuf>,
         /// Explicitly mint a fresh 16-byte key from the OS CSPRNG at idset 1 and print it
         /// prominently. **Starts a NEW identity lineage; every `tessera_id` any client holds
         /// becomes wrong.**
@@ -131,8 +126,8 @@ enum Command {
         /// (contracts §2a).
         #[arg(long)]
         bump_idset: bool,
-        /// Set `identity.idset` explicitly. Accompanies **any** key source — `--id-key`,
-        /// `--id-key-file` (whose `[identity].idset`, if present, it overrides) or
+        /// Set `identity.idset` explicitly. Accompanies **any** key source — the environment,
+        /// `--identity-file` (whose `[identity].idset`, if present, it overrides) or
         /// `--carry-id-key-from` (whose carried idset it overrides) — and is the only way to
         /// state an idset for a key source that records none. Default 1.
         #[arg(long)]
@@ -188,10 +183,14 @@ enum Command {
         command: CorpusCommand,
     },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
+    ///
+    /// Takes no required flag: the same `tessera.toml` `tessera build` wrote into names the
+    /// bundle to open (`configuration.md` §3).
     Serve {
-        /// Path to `tessera.toml` (SA §7).
-        #[arg(short = 'c', long = "config")]
-        config: PathBuf,
+        /// This deployment's `tessera.toml`, instead of the one found by walking up from the
+        /// working directory (SA §7).
+        #[arg(long, value_name = "PATH")]
+        deployment: Option<PathBuf>,
     },
 }
 
@@ -283,12 +282,67 @@ struct ResolvedIdentity {
 
 /// The N-1 refusal message (contracts §2.2, plan Critical N-1): named once so the CLI's refusal
 /// and every test asserting it read the same text.
-fn no_key_decision_message() -> String {
-    "no identity key decision: pass --carry-id-key-from <bundle> to keep this deployment's \
-     lineage (the normal rebuild), --id-key-file <path> to read this deployment's key from its \
-     config file, --id-key <32 hex> to restore a recorded key, or --mint-id-key to start a new \
-     lineage — which invalidates every tessera_id any client holds."
-        .to_string()
+///
+/// `env_name` is whatever `tessera.toml`'s `[identity] env` names, because a message telling an
+/// operator to set `TESSERA_IDENTITY_KEY` when their own file named something else is worse than
+/// no message.
+fn no_key_decision_message(env_name: &str) -> String {
+    format!(
+        "no identity key decision: set ${env_name} (or put it in a .env beside tessera.toml) to \
+         this deployment's key, pass --carry-id-key-from <bundle> to keep its lineage from an \
+         existing bundle (the normal rebuild), pass --identity-file <path> to read it from a 0600 \
+         file, or pass --mint-id-key to start a new lineage — which invalidates every tessera_id \
+         any client holds."
+    )
+}
+
+/// The identity key as the environment supplies it: the process environment first, then a `.env`
+/// beside `tessera.toml`.
+///
+/// **The process environment wins.** A `.env` is a convenience for a working copy; an operator who
+/// exported a variable for one invocation has said something more specific than a file checked in
+/// beside the config, and a file quietly overriding them would be the wrong way round.
+///
+/// **The `.env` parse is written out here rather than taken as a dependency.** It is `KEY=VALUE`
+/// per line, `#` comments and blanks skipped, an optional `export ` prefix, and one layer of
+/// matching quotes stripped — which is the whole of what this file is for. A crate would bring
+/// variable interpolation, multi-line values and `.env.local` layering, none of which anything
+/// here reads, into the process that holds the identity key.
+fn identity_from_environment(env_name: &str, deployment: &Path) -> Option<(String, String)> {
+    if let Ok(value) = std::env::var(env_name) {
+        if !value.trim().is_empty() {
+            return Some((value.trim().to_string(), format!("${env_name}")));
+        }
+    }
+    let dotenv = deployment.parent().unwrap_or(Path::new("")).join(".env");
+    let text = std::fs::read_to_string(&dotenv).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != env_name {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        if value.is_empty() {
+            return None;
+        }
+        return Some((
+            value.to_string(),
+            format!("{} ({env_name})", dotenv.display()),
+        ));
+    }
+    None
 }
 
 /// Read `identity.key`, `identity.idset`, `identity.construction` and `identity.rounds`
@@ -325,10 +379,10 @@ fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32
     ))
 }
 
-/// Read `--id-key-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`, plus an
+/// Read `--identity-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`, plus an
 /// **optional** `idset = <u32>`.
 ///
-/// **The idset belongs in this file** (contracts §2.2 designates it as the key's home outside the
+/// **The idset belongs in this file** (contracts §2.2 designates a file as one home for the key
 /// bundle and leaves "the file's wider schema … not specified here", so extending it is
 /// legitimate). Without it, a deployment that advanced to idset 2 for a repartition and then
 /// rebuilt from its key file — the spec's own recommended rebuild path — republished idset 1, and
@@ -341,31 +395,31 @@ fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32
 /// misspelt `kye =` does not fall through to a refusal that reads "no key given". There is no
 /// default search path — the caller always names this path explicitly, which is the only reason
 /// this flag counts as an explicit decision under N-1.
-fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
+fn read_identity_file(path: &Path) -> Result<(String, Option<u32>), String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("--id-key-file {}: {e}", path.display()))?;
+        .map_err(|e| format!("--identity-file {}: {e}", path.display()))?;
     let value: toml::Value = text
         .parse()
-        .map_err(|e| format!("--id-key-file {}: invalid TOML: {e}", path.display()))?;
+        .map_err(|e| format!("--identity-file {}: invalid TOML: {e}", path.display()))?;
     let table = value
         .as_table()
-        .ok_or_else(|| format!("--id-key-file {}: not a TOML table", path.display()))?;
+        .ok_or_else(|| format!("--identity-file {}: not a TOML table", path.display()))?;
     let identity = table.get("identity").ok_or_else(|| {
         format!(
-            "--id-key-file {}: missing [identity] section",
+            "--identity-file {}: missing [identity] section",
             path.display()
         )
     })?;
     let identity_table = identity.as_table().ok_or_else(|| {
         format!(
-            "--id-key-file {}: [identity] must be a table",
+            "--identity-file {}: [identity] must be a table",
             path.display()
         )
     })?;
     for key_name in identity_table.keys() {
         if key_name != "key" && key_name != "idset" {
             return Err(format!(
-                "--id-key-file {}: unknown key '{key_name}' in [identity] (expected 'key' or \
+                "--identity-file {}: unknown key '{key_name}' in [identity] (expected 'key' or \
                  'idset')",
                 path.display()
             ));
@@ -376,7 +430,7 @@ fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             format!(
-                "--id-key-file {}: [identity].key is missing or not a string",
+                "--identity-file {}: [identity].key is missing or not a string",
                 path.display()
             )
         })?;
@@ -385,7 +439,7 @@ fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
         Some(value) => {
             let raw = value.as_integer().ok_or_else(|| {
                 format!(
-                    "--id-key-file {}: [identity].idset must be an integer",
+                    "--identity-file {}: [identity].idset must be an integer",
                     path.display()
                 )
             })?;
@@ -394,13 +448,13 @@ fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
             // anyway — refuse it here, where the operator can still see which file said it.
             let idset = u32::try_from(raw).map_err(|_| {
                 format!(
-                    "--id-key-file {}: [identity].idset {raw} is out of range for a u32",
+                    "--identity-file {}: [identity].idset {raw} is out of range for a u32",
                     path.display()
                 )
             })?;
             if idset == 0 {
                 return Err(format!(
-                    "--id-key-file {}: [identity].idset is 0; conforming writers start at 1 and \
+                    "--identity-file {}: [identity].idset is 0; conforming writers start at 1 and \
                      advance (contracts §2.2)",
                     path.display()
                 ));
@@ -426,10 +480,6 @@ fn mint_identity_key() -> (IdentityKey, String) {
     }
 }
 
-/// Resolve the deployment identity key from the CLI's four sources, applying every refusal rule
-/// contracts §2.2/§2a specifies. Called, and must fail, **before any build work starts** — no
-/// output directory, no input read (plan Critical N-1).
-#[allow(clippy::too_many_arguments)]
 /// The carried bundle's recorded signature-batch size, if its build batched at all (absent
 /// key == one batch — pre-batching manifests never carry it).
 fn read_carried_batch_items(bundle_root: &Path) -> Result<Option<u64>, String> {
@@ -470,16 +520,30 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         .ok_or_else(|| "byte size overflows u64".to_string())
 }
 
+// Eight parameters, and they are eight *decisions*: three key sources, the variable's name for
+// the message, and the four flags that say what to do with what they produce. Grouping them into
+// a struct would hide which of them a given refusal is about, which is the one thing every message
+// in here has to say.
+/// Resolve the deployment identity key from its four sources — the environment (or a `.env`),
+/// `--identity-file`, `--carry-id-key-from`, and `--mint-id-key` — applying every refusal rule
+/// contracts §2.2/§2a specifies. Called, and must fail, **before any build work starts**: no
+/// output directory, no input read (plan Critical N-1).
+///
+/// **There is no flag that takes a key.** One on a command line reaches shell history, process
+/// listings and CI logs, so the ordinary route is a variable `tessera.toml` names and the
+/// alternative is a `0600` file, which an environment — readable from `/proc` — is not.
+#[allow(clippy::too_many_arguments)]
 fn resolve_identity(
     carry_id_key_from: &Option<PathBuf>,
-    id_key_file: &Option<PathBuf>,
-    id_key: &Option<String>,
+    identity_file: &Option<PathBuf>,
+    from_environment: Option<(String, String)>,
+    env_name: &str,
     mint_id_key: bool,
     rotate_id_key: bool,
     bump_idset: bool,
     idset_flag: Option<u32>,
 ) -> Result<ResolvedIdentity, String> {
-    let mut sources: Vec<(&'static str, String)> = Vec::new();
+    let mut sources: Vec<(String, String)> = Vec::new();
     let mut carried_idset: Option<u32> = None;
     let mut file_idset: Option<u32> = None;
 
@@ -494,29 +558,33 @@ fn resolve_identity(
                 root.display()
             ));
         }
-        sources.push(("--carry-id-key-from", hex));
+        sources.push(("--carry-id-key-from".to_string(), hex));
         carried_idset = Some(idset);
     }
-    if let Some(path) = id_key_file {
-        let (hex, idset) = read_id_key_file(path)?;
-        sources.push(("--id-key-file", hex));
+    if let Some(path) = identity_file {
+        let (hex, idset) = read_identity_file(path)?;
+        sources.push(("--identity-file".to_string(), hex));
         file_idset = idset;
     }
-    if let Some(hex) = id_key {
-        sources.push(("--id-key", hex.clone()));
+    // The environment is a *source*, not a fallback: if it disagrees with a carried lineage the
+    // build refuses, exactly as two flags disagreeing would. A key that silently lost to another
+    // source would be the one shape of this flow that produces a bundle nobody chose.
+    let from_environment_hex = from_environment.as_ref().map(|(hex, _)| hex.clone());
+    if let Some((hex, label)) = from_environment {
+        sources.push((label, hex));
     }
 
     if sources.is_empty() && !mint_id_key {
-        return Err(no_key_decision_message());
+        return Err(no_key_decision_message(env_name));
     }
 
     if mint_id_key {
         if !sources.is_empty() {
-            return Err(
-                "--mint-id-key cannot be combined with --carry-id-key-from / --id-key-file / \
-                 --id-key: minting starts a NEW lineage, it does not restore one"
-                    .to_string(),
-            );
+            return Err(format!(
+                "--mint-id-key cannot be combined with --carry-id-key-from, --identity-file or a \
+                 key in ${env_name}: minting starts a NEW lineage, it does not restore one. Unset \
+                 the variable for this invocation if a fresh lineage is what is wanted"
+            ));
         }
         let (key, hex) = mint_identity_key();
         return Ok(ResolvedIdentity {
@@ -528,7 +596,7 @@ fn resolve_identity(
     }
 
     // Validate every source's hex up front (typed errors naming the source), before comparing.
-    let mut parsed: Vec<(&'static str, String)> = Vec::with_capacity(sources.len());
+    let mut parsed: Vec<(String, String)> = Vec::with_capacity(sources.len());
     for (label, hex) in sources {
         IdentityKey::from_hex(&hex).map_err(|e| format!("{label}: {e}"))?;
         parsed.push((label, hex));
@@ -537,11 +605,11 @@ fn resolve_identity(
     let first_hex = parsed[0].1.clone();
     let disagreement = parsed.iter().any(|(_, hex)| *hex != first_hex);
     if disagreement && !rotate_id_key {
-        // Fingerprints, never the keys themselves: this message goes to stderr on a CLI whose own
-        // `--id-key` documentation warns that a key on a command line reaches shell history,
-        // process listings and CI logs — printing both disagreeing keys in full would put them
-        // there through the *refusal* path as well. A fingerprint is enough to tell an operator
-        // which source is the odd one out, which is all the message needs to do.
+        // Fingerprints, never the keys themselves. A key printed in full reaches shell history,
+        // process listings and CI logs — which is exactly why there is no flag that takes one —
+        // and a refusal path that printed both disagreeing keys would put them there anyway. A
+        // fingerprint is enough to tell an operator which source is the odd one out, which is all
+        // the message needs to do.
         let described = parsed
             .iter()
             .map(|(label, hex)| format!("{label}={}", identity_key_fingerprint(hex)))
@@ -554,17 +622,14 @@ fn resolve_identity(
         ));
     }
 
-    // On a confirmed rotation, `--id-key` (the most explicit source) wins if given, else
-    // `--id-key-file`, else the sole remaining source. Agreement makes this choice moot.
+    // On a confirmed rotation, `--identity-file` (the source a person typed a path for) wins if
+    // given, then the environment, then the sole remaining source. Agreement makes this moot.
     let final_hex = if disagreement {
-        id_key
-            .clone()
-            .or_else(|| {
-                id_key_file
-                    .as_ref()
-                    .and_then(|_| parsed.iter().find(|(l, _)| *l == "--id-key-file"))
-                    .map(|(_, hex)| hex.clone())
-            })
+        parsed
+            .iter()
+            .find(|(l, _)| l == "--identity-file")
+            .map(|(_, hex)| hex.clone())
+            .or(from_environment_hex)
             .unwrap_or(first_hex)
     } else {
         first_hex
@@ -574,8 +639,8 @@ fn resolve_identity(
     // Idset resolution, most explicit source first: `--idset`, then the key file's own
     // `[identity].idset`, then the idset carried out of an existing bundle, then 1.
     //
-    // The order matters for the reason `--id-key-file` exists: it is *the* home for a
-    // deployment's key (contracts §2.2), so a normal rebuild from it must not silently republish
+    // The order matters for the reason a key has a home outside the bundle at all (contracts
+    // §2.2): a normal rebuild from that home must not silently republish
     // idset 1 after the deployment advanced to 2 for a repartition — a stale pre-repartition
     // `tessera_id` would then compare equal and be accepted, which is precisely the failure the
     // idset prevents. Two *recorded* idsets that disagree are refused rather than silently
@@ -590,7 +655,7 @@ fn resolve_identity(
             if carried != from_file {
                 return Err(format!(
                     "idset sources disagree (--carry-id-key-from={carried}, \
-                     --id-key-file={from_file}); pass --idset <n> to state which idset this \
+                     --identity-file={from_file}); pass --idset <n> to state which idset this \
                      build publishes — guessing risks republishing a superseded idset, under \
                      which a stale pre-repartition tessera_id compares equal and is accepted"
                 ));
@@ -619,17 +684,54 @@ fn resolve_identity(
     })
 }
 
-/// `--values KEY=PATH`. Split at the **first** `=` so a path may contain one.
-fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
+/// Find and read this deployment's `tessera.toml`, returning the path it was found at beside the
+/// configuration itself (`configuration.md` §3).
+///
+/// The path comes back because two things are relative to it and to nothing else: the `.env` that
+/// may carry the identity key, and the paths inside the file.
+fn load_deployment(
+    explicit: Option<&Path>,
+) -> Result<(PathBuf, tessera_server::config::Config), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let path = tessera_server::config::discover(explicit, &cwd).map_err(|e| e.to_string())?;
+    let config = tessera_server::config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((path, config))
+}
+
+/// The `--file` bindings as one map, refusing a key bound twice.
+///
+/// **Last-one-wins is not available to a binding**: the two paths are two corpora, and a build that
+/// silently took the second would produce a bundle nobody can tell from one built on the first.
+fn collect_bindings(
+    file: Vec<(String, PathBuf)>,
+) -> Result<std::collections::HashMap<String, PathBuf>, String> {
+    let mut bindings: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::with_capacity(file.len());
+    for (key, path) in file {
+        if let Some(already) = bindings.get(&key) {
+            return Err(format!(
+                "--file bound '{key}' twice, to {} and to {}. Which file a source names is not a \
+                 last-one-wins question: the two are two different corpora",
+                already.display(),
+                path.display()
+            ));
+        }
+        bindings.insert(key, path);
+    }
+    Ok(bindings)
+}
+
+/// `--file KEY=PATH`. Split at the **first** `=` so a path may contain one.
+fn parse_file_binding(raw: &str) -> Result<(String, PathBuf), String> {
     let (key, path) = raw.split_once('=').ok_or_else(|| {
         format!(
-            "--values expects NAME=PATH, got '{raw}' (no '=' — the name is the \
-                 `[[vocabulary]]` block's, the path is the vocabulary file)"
+            "--file expects KEY=PATH, got '{raw}' (no '=' — the key is the one a `source` in the \
+             config names, the path is the file it binds to)"
         )
     })?;
     if key.is_empty() || path.is_empty() {
         return Err(format!(
-            "--values '{raw}': both the name and the path must be non-empty"
+            "--file '{raw}': both the key and the path must be non-empty"
         ));
     }
     Ok((key.to_string(), PathBuf::from(path)))
@@ -870,34 +972,44 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Build {
-            points,
-            pairs,
+            deployment,
             out,
-            extent,
             view_id,
             limit,
             config,
-            values,
-            artifacts,
-            artifact_members,
+            file,
             mint_external_ids,
             no_oracle_pairs,
             batch_items,
             memory_budget,
             carry_id_key_from,
-            id_key_file,
-            id_key,
+            identity_file,
             mint_id_key,
             rotate_id_key,
             bump_idset,
             idset,
         } => {
+            // **The deployment file first, because everything else is read through it**: where the
+            // declaration is, where the bundle goes, and which environment variable carries the
+            // key. A missing one is a refusal naming what to create (configuration.md §3) —
+            // never a silent set of defaults, since every path in it is a decision.
+            let (deployment_path, deployment) = match load_deployment(deployment.as_deref()) {
+                Ok(pair) => pair,
+                Err(detail) => {
+                    eprintln!("build refused: {detail}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
+            let out = out.unwrap_or_else(|| deployment.bundle_path.clone());
+
             // CRITICAL N-1: resolved and refused, if it refuses, before any work — before `df`,
             // before reading input, before creating the output directory.
             let identity = match resolve_identity(
                 &carry_id_key_from,
-                &id_key_file,
-                &id_key,
+                &identity_file,
+                identity_from_environment(&deployment.identity_env, &deployment_path),
+                &deployment.identity_env,
                 mint_id_key,
                 rotate_id_key,
                 bump_idset,
@@ -913,8 +1025,8 @@ fn main() -> ExitCode {
                 eprintln!(
                     "minted a new identity key (idset 1): {} — starts a NEW identity lineage; \
                      every tessera_id any client holds becomes wrong. Record this key (e.g. via \
-                     --id-key-file's deployment config) so future rebuilds can carry it forward.",
-                    identity.hex
+                     ${} in a .env beside tessera.toml) so future rebuilds can carry it forward.",
+                    identity.hex, deployment.identity_env
                 );
             }
 
@@ -922,28 +1034,61 @@ fn main() -> ExitCode {
             // refusal is an operator's typo, and discovering it after a multi-minute build has
             // written a bundle prefix costs the whole build. Every rule in
             // `tessera_build::config` fires here, against no data at all.
-            let config = match &config {
-                Some(path) => {
-                    let bindings: std::collections::HashMap<String, PathBuf> =
-                        values.into_iter().collect();
-                    match tessera_build::config::Config::parse(path, &bindings) {
-                        Ok(config) => config,
-                        Err(e) => {
-                            eprintln!("build refused: {e}");
-                            return ExitCode::FAILURE;
-                        }
-                    }
-                }
-                None if !values.is_empty() => {
-                    eprintln!(
-                        "build refused: --values was given without --config. A binding names a \
-                         `[[vocabulary]]` block that only a config can declare, so there is \
-                         nothing for it to bind to"
-                    );
+            let bindings = match collect_bindings(file) {
+                Ok(bindings) => bindings,
+                Err(detail) => {
+                    eprintln!("build refused: {detail}");
                     return ExitCode::FAILURE;
                 }
-                None => tessera_build::config::Config::default(),
             };
+            let config = match tessera_build::config::Config::parse(&schema_path, &bindings) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // **A build materialises one view.** With one declared, naming it is noise; with
+            // several, choosing for the operator would publish a coordinate system nobody asked
+            // for, so `sole_view` refuses and lists them.
+            let view_id = match view_id.map(Ok).unwrap_or_else(|| {
+                config.sole_view().map(str::to_string)
+            }) {
+                Ok(view_id) => view_id,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // The files this build reads, resolved from the declaration and any overrides — and
+            // every absence a refusal here rather than an empty read (configuration.md §8).
+            let acquired = match config.acquire(&view_id) {
+                Ok(acquired) => acquired,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // **The frame, resolved before any work.** `auto` costs a pass over the points file's
+            // two coordinate columns; every other spelling is already the answer. Printed either
+            // way, because the extent is what every stored cell is relative to and a fitted one is
+            // not otherwise visible anywhere.
+            let extent = match tessera_build::config::resolve_extent(
+                &view_id,
+                &acquired.extent,
+                &acquired.points,
+                limit,
+            ) {
+                Ok(extent) => extent,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            eprintln!(
+                "view '{view_id}': quantising against x [{}, {}], y [{}, {}]",
+                extent.x_min, extent.x_max, extent.y_min, extent.y_max
+            );
             let schema = config.schema;
             // §2.3: the cost is reported, never hidden — a hot column is baked into every row and
             // is unalterable without rewriting the corpus, so the operator sees the per-row and
@@ -996,8 +1141,9 @@ fn main() -> ExitCode {
             };
 
             let args = tessera_build::BuildArgs {
-                points,
-                pairs,
+                points: acquired.points,
+                corpus: acquired.corpus,
+                pairs: acquired.pairs,
                 out: out.clone(),
                 extent,
                 view_id,
@@ -1013,8 +1159,8 @@ fn main() -> ExitCode {
                 band_rows: None,
                 schema,
                 layers: config.layers,
-                artifacts,
-                artifact_members,
+                artifacts: acquired.artifacts,
+                artifact_members: acquired.artifact_members,
             };
             match tessera_build::build(&args) {
                 Ok(report) => {
@@ -1125,9 +1271,19 @@ fn main() -> ExitCode {
                 extent,
             } => corpus_census(seed, n, zoom, &grant, extent),
         },
-        Command::Serve { config } => {
+        Command::Serve { deployment } => {
             tracing_subscriber::fmt::init();
-            let prepared = match tessera_server::prepare(&config) {
+            let deployment = match tessera_server::config::discover(
+                deployment.as_deref(),
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("tessera serve: refused to start: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let prepared = match tessera_server::prepare(&deployment) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("tessera serve: refused to start: {e}");

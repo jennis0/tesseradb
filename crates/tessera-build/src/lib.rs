@@ -72,8 +72,19 @@ const SEG_ID: &str = "seg-0";
 #[derive(Clone)]
 pub struct BuildArgs {
     /// Parquet file of points: `entity_id` plus either `x`/`y` or `morton` (see [`input`]).
+    ///
+    /// The built view's own `source` (`configuration.md` §1), bound by `--file KEY=PATH`.
     pub points: PathBuf,
+    /// Parquet file of entity space: `entity_id` and the declared attribute columns.
+    ///
+    /// `[corpus].source`, resolved. **A separate key from the view's**, and usually the
+    /// same file: identity and geometry are per view, attributes are shared by every view, and a
+    /// corpus whose geometry is recomputed does not rewrite its attributes to say so. `None` is
+    /// legal only for an empty [`BuildArgs::schema`], there being no column to read.
+    pub corpus: Option<PathBuf>,
     /// Parquet file of the exploded `(entity_id, term_id)` relation.
+    ///
+    /// The built view's `point_visibility.source`, resolved.
     pub pairs: PathBuf,
     /// Bundle root to create.
     pub out: PathBuf,
@@ -85,7 +96,7 @@ pub struct BuildArgs {
     pub limit: Option<u64>,
     /// The deployment's identity key (contracts §2.2). **Not** per bundle: it must be carried
     /// across rebuilds or every `tessera_id` any client holds silently breaks. Resolved by the
-    /// CLI from `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key`, and
+    /// CLI from the environment / `--identity-file` / `--carry-id-key-from` / `--mint-id-key`, and
     /// passed here already decided so that both build paths see the same bytes.
     pub identity_key: IdentityKey,
     /// `identity_key`'s canonical 32-lowercase-hex-character form, exactly as MANIFEST records
@@ -119,13 +130,14 @@ pub struct BuildArgs {
     /// authority: the declarations run through the same registry and the same allocator the
     /// control plane uses, so both routes refuse the same declarations and place the same ids.
     pub layers: Vec<tessera_types::layer::LayerDeclaration>,
-    /// Parquet of one row per `(artifact, variation)`: `layer`, `stable_key`, and optionally
+    /// Parquet of one row per `(artifact, variation)`: `layer`, `key`, and optionally
     /// `level`, `variation`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
-    /// [`BuildArgs::layers`].
+    /// [`BuildArgs::layers`]. A layer's own `source`, resolved.
     pub artifacts: Option<PathBuf>,
-    /// Parquet of one row per `(artifact, member)`: `layer`, `stable_key`, `member` — a **source**
+    /// Parquet of one row per `(artifact, member)`: `layer`, `key`, `member` — a **source**
     /// entity id — and optionally `level` and `variation`, a null variation being the artifact's
     /// membership and `k` variation *k*'s generating set. Requires [`BuildArgs::layers`].
+    /// `[layer.members].source`, resolved.
     pub artifact_members: Option<PathBuf>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
@@ -157,7 +169,7 @@ pub struct BuildArgs {
     pub band_rows: Option<u64>,
     /// The config's entity-space half: the per-item columns this build writes into
     /// `columns.arrow`'s tail, in declared order, and the vocabularies they draw on (`--config`,
-    /// bound value files via `--values`).
+    /// bound value files via `--file`).
     ///
     /// **Default-empty, and that case must stay byte-identical.** Every bundle built before a
     /// config existed declared no scalar, and an empty schema must go on producing exactly the
@@ -176,6 +188,7 @@ impl std::fmt::Debug for BuildArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuildArgs")
             .field("points", &self.points)
+            .field("corpus", &self.corpus)
             .field("pairs", &self.pairs)
             .field("out", &self.out)
             .field("extent", &self.extent)
@@ -227,6 +240,22 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key
 }
 
+/// Entity space's file: where the declared attribute columns are read from.
+///
+/// Separate from the geometry deliberately (`configuration.md` §1's two `source` keys), and an
+/// error rather than a fall-back to the points file when the schema has columns and nothing is
+/// bound: a silent fall-through is what §7 forbids, and here it would read one file's columns
+/// under another file's identities.
+fn corpus_source(args: &BuildArgs) -> Result<&Path> {
+    args.corpus.as_deref().ok_or_else(|| {
+        BuildError::Invalid(
+            "the schema declares attributes and no corpus source is bound to read them from \
+             ([corpus] in configuration.md §1)"
+                .into(),
+        )
+    })
+}
+
 /// Argument and destination checks shared by both build implementations.
 fn validate_args(args: &BuildArgs) -> Result<()> {
     args.extent
@@ -243,10 +272,21 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     // failed their existence criterion.
     if args.layers.is_empty() && (args.artifacts.is_some() || args.artifact_members.is_some()) {
         return Err(BuildError::Invalid(
-            "--artifacts and --artifact-members name artifacts in layers, and the config declares \
-             no `[[layer]]` block for them to belong to"
+            "an artifact source names artifacts in layers, and the config declares no `[[layer]]` \
+             block for them to belong to"
                 .into(),
         ));
+    }
+    // The config refuses this first, naming `[corpus]` (`config::Config::acquire`); this is the
+    // same rule for the callers that build these arguments directly. Every staged item must
+    // receive a value for every declared column, so a schema with no file to fill it from is a
+    // build that would fail at the segment writer with nothing to say about why.
+    if !args.schema.is_empty() && args.corpus.is_none() {
+        return Err(BuildError::Invalid(format!(
+            "the schema declares {} attribute(s) and no corpus source is bound to read them from \
+             ([corpus] in configuration.md §1)",
+            args.schema.attributes.len()
+        )));
     }
     for (what, value) in [("view id", args.view_id.as_str())] {
         if value.is_empty()
@@ -526,7 +566,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .collect();
         let mut seen = 0usize;
         input::scan_attributes(
-            &args.points,
+            corpus_source(args)?,
             &args.schema,
             &mut minters,
             args.limit,
@@ -1467,6 +1507,7 @@ mod tests {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
             points: PathBuf::from("points.parquet"),
+            corpus: Some(PathBuf::from("points.parquet")),
             pairs: PathBuf::from("pairs.parquet"),
             out: PathBuf::from("out"),
             extent: Bounds {

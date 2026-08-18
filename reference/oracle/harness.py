@@ -123,7 +123,61 @@ def ensure_cli_built() -> None:
 
 
 
-def run_build(args: list[str]) -> subprocess.CompletedProcess:
+def write_deployment(path: Path, *, bundle: Path, schema: Path) -> Path:
+    """Write the `tessera.toml` a build is invoked against, and hand back its path.
+
+    **Every harness here names it with `--deployment` rather than letting the search find one.**
+    `tessera build` walks up from the working directory looking for this file (`configuration.md`
+    §3); a test run's working directory is the repository, which has none, and whatever the search
+    found above it would not be the fixture's. Naming it is the deterministic half.
+
+    The `[serve]` section is here because the file describes a whole deployment; nothing in a build
+    reads it, and the serving *secrets* are read at startup rather than at parse, so a build needs
+    none of them exported.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""
+[bundle]
+path  = "{bundle}"
+cache = "{bundle}.cache"
+wal   = "{bundle}.wal"
+
+[build]
+schema = "{schema}"
+
+[plugin]
+module = "builtin:passthrough"
+
+[disclosure]
+token_max_lifetime = 3600
+
+[serve]
+viewer  = "127.0.0.1:37585"
+session = "127.0.0.1:49303"
+control = "127.0.0.1:45721"
+"""
+    )
+    return path
+
+
+#: The environment variable `tessera.toml` names by default, and the one every fixture build here
+#: passes its identity key through. A key on a command line reaches shell history, process
+#: listings and CI logs, so there is no flag that takes one.
+IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
+
+
+def build_env(key_hex: str | None = None) -> dict:
+    """The environment a `tessera build` subprocess runs in: this process's, plus the identity key
+    where the caller has one to state. `--mint-id-key` builds pass `None`."""
+    env = dict(os.environ)
+    env.pop(IDENTITY_ENV, None)
+    if key_hex is not None:
+        env[IDENTITY_ENV] = key_hex
+    return env
+
+
+def run_build(args: list[str], *, key_hex: str | None = None) -> subprocess.CompletedProcess:
     """Run `tessera build` and hand back the completed process, refusal or not.
 
     The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
@@ -137,6 +191,7 @@ def run_build(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         [str(CLI_BIN), "build", *args],
         cwd=REPO_ROOT,
+        env=build_env(key_hex),
         capture_output=True,
         text=True,
         check=False,
@@ -192,7 +247,8 @@ def ensure_fixture_bundle(
     surfaces as an opaque fixture-setup error rather than "your fixture is stale".
 
     The build is given `--mint-id-key` explicitly. r6 requires a build to refuse unless one of
-    `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key` is named, precisely so
+    `--carry-id-key-from` / `--identity-file` / the environment / `--mint-id-key` is named,
+    precisely so
     a human decides the key's lineage rather than a tool inventing one silently. A test fixture is
     a genuinely new lineage each time it is built, so minting is the correct answer here — and
     stating it satisfies the rule rather than circumventing it. Note that this makes the fixture's
@@ -215,7 +271,7 @@ def ensure_fixture_bundle(
     args = _fixture_build_argv(
         bundle_root, points=points, pairs=pairs, limit=limit, extent=extent, view_id=view_id
     )
-    wanted = fixture_recipe(args)
+    wanted = fixture_recipe(args, declaration=_fixture_config_text(view_id, extent))
     if _fixture_bundle_is_usable(bundle_root, wanted):
         return
     if bundle_root.exists():
@@ -227,8 +283,58 @@ def ensure_fixture_bundle(
     write_recipe(bundle_root, None)
     if bundle_root.exists():
         shutil.rmtree(bundle_root)
-    subprocess.run(args, cwd=REPO_ROOT, check=True)
+    _write_fixture_config(bundle_root, view_id, extent)
+    write_deployment(
+        _fixture_deployment_path(bundle_root),
+        bundle=bundle_root,
+        schema=_fixture_config_path(bundle_root),
+    )
+    subprocess.run(args, cwd=REPO_ROOT, env=build_env(), check=True)
     write_recipe(bundle_root, wanted)
+
+
+def _fixture_config_path(bundle_root: Path) -> Path:
+    """Where this fixture's declaration is written — beside the bundle, since the corpus it names
+    lives at absolute paths only `--file` may carry (configuration.md §3, §8)."""
+    return bundle_root.parent / f"{bundle_root.name}.config.toml"
+
+
+def _fixture_deployment_path(bundle_root: Path) -> Path:
+    return bundle_root.parent / f"{bundle_root.name}.tessera.toml"
+
+
+def _extent_toml(extent: str) -> str:
+    """`x_min,x_max,y_min,y_max` — the shape every caller here already had — as the view's own
+    `extent` key. The frame belongs to the view now, not to the invocation (configuration.md §1)."""
+    x_min, x_max, y_min, y_max = (part.strip() for part in extent.split(","))
+    return f"extent = {{ x = [{x_min}, {x_max}], y = [{y_min}, {y_max}] }}"
+
+
+def _fixture_config_text(view_id: str, extent: str) -> str:
+    """One view, its frame, its geometry, and the relation its points' labels are in. No
+    attributes: this fixture's corpus is the scaled geometry file, which carries none.
+
+    The two sources are named relatively **and overridden on the command line**: the files live
+    under `data/scaled/`, which is a path this document may not carry (§3), and an override is
+    what a deployment staging a source elsewhere reaches for.
+
+    A pure function of the two things it varies with, because the **declaration is part of the
+    recipe**: the extent moved out of the invocation and into this document, so a receipt that
+    stamped only the argv would reuse a bundle quantised against a different frame — every stored
+    cell wrong, and the bundle well-formed.
+    """
+    return (
+        f'[[view]]\nname = "{view_id}"\n{_extent_toml(extent)}\n'
+        'source = "points.parquet"\n'
+        'point_visibility = { source = "pairs.parquet", default = "public" }\n'
+    )
+
+
+def _write_fixture_config(bundle_root: Path, view_id: str, extent: str) -> Path:
+    path = _fixture_config_path(bundle_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_fixture_config_text(view_id, extent))
+    return path
 
 
 def _fixture_build_argv(
@@ -243,14 +349,12 @@ def _fixture_build_argv(
     args = [
         str(CLI_BIN),
         "build",
-        "--points",
-        points,
-        "--pairs",
-        pairs,
-        "--extent",
-        extent,
-        "--view",
-        view_id,
+        "--deployment",
+        str(_fixture_deployment_path(bundle_root)),
+        "--file",
+        f"view:{view_id}={points}",
+        "--file",
+        f"view:{view_id}:point_visibility={pairs}",
         "--out",
         str(bundle_root),
     ]
@@ -261,9 +365,9 @@ def _fixture_build_argv(
 
 
 def _input_stamp(argv: list[str]) -> dict:
-    """`(size, mtime_ns)` of every input file the build reads, keyed by flag.
+    """`(size, mtime_ns)` of every input file the build reads, keyed by its `--file` binding.
 
-    **The argv alone is not the recipe.** `--points` and `--pairs` name paths, and a probe script
+    **The argv alone is not the recipe.** A binding names a path, and a probe script
     that regenerates a corpus *in place* leaves both paths identical while changing every byte
     behind them — which is not hypothetical: `data/scaled/geometry.parquet` was regenerated on
     2026-08-02 to carry sub-cell residuals and to correct an axis transposition, and an argv-only
@@ -277,28 +381,32 @@ def _input_stamp(argv: list[str]) -> dict:
     line against damage a receipt cannot observe.
     """
     stamp = {}
-    for flag in ("--points", "--pairs"):
-        if flag not in argv:
+    for i, arg in enumerate(argv):
+        if arg != "--file" or i + 1 >= len(argv):
             continue
-        path = Path(argv[argv.index(flag) + 1])
+        key, _, raw = argv[i + 1].partition("=")
+        path = Path(raw)
         try:
             st = path.stat()
-            stamp[flag] = [st.st_size, st.st_mtime_ns]
+            stamp[key] = [st.st_size, st.st_mtime_ns]
         except OSError:
             # An input that cannot be stat'd is recorded as absent rather than raised on: the
             # build itself is about to fail on it and will say so far better than this would.
-            stamp[flag] = None
+            stamp[key] = None
     return stamp
 
 
-def fixture_recipe(argv: list[str]) -> dict:
+def fixture_recipe(argv: list[str], *, declaration: str = "") -> dict:
     """The stamped input set for [`ensure_fixture_bundle`]: the whole `tessera build` invocation,
     plus a stamp of the input *files* it names ([`_input_stamp`]).
 
-    Everything this fixture is a function of is either an argument to that command or a file that
-    command reads — there is no synthesised corpus here, unlike the mask catalogue's.
-    The binary's path and the `--out` path are dropped: neither is a property of the
-    fixture, and including them would force a rebuild per worktree.
+    Everything this fixture is a function of is an argument to that command, a file that command
+    reads, or a line of the **declaration** it reads them through — there is no synthesised corpus
+    here, unlike the mask catalogue's. The declaration is stamped whole because the extent lives
+    in it now rather than in the invocation, and a bundle quantised against a different frame has
+    every stored cell wrong while remaining perfectly well-formed. The binary's path, the `--out`
+    path and the `--deployment` path are dropped: none is a property of the fixture, and including
+    them would force a rebuild per worktree.
 
     Note what the recipe cannot pin, and why that is correct: `--mint-id-key` mints a fresh
     identity key per build, so two bundles from an identical recipe have different `tessera_id`s.
@@ -306,9 +414,15 @@ def fixture_recipe(argv: list[str]) -> dict:
     this fixture across runs — the docstring above says so for the same reason.
     """
     argv = argv[1:]
-    out = argv.index("--out")
-    argv = argv[:out] + argv[out + 2 :]
-    return {"recipe_version": 2, "build_argv": argv, "inputs": _input_stamp(argv)}
+    for flag in ("--out", "--deployment"):
+        at = argv.index(flag)
+        argv = argv[:at] + argv[at + 2 :]
+    return {
+        "recipe_version": 3,
+        "build_argv": argv,
+        "declaration": declaration,
+        "inputs": _input_stamp(argv),
+    }
 
 
 def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:

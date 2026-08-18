@@ -65,19 +65,56 @@
 //! a previous build's manifest yet, so **reordering a bare key list today reassigns its codes**.
 //! Pin the codes to hold them still.
 //!
-//! ## What this module does not read
+//! ## Acquisition: sources, fields and the override
 //!
-//! ⊘ **Acquisition is not here yet.** `source`, `fields`, a layer's inline `artifacts` and an
-//! attribute's `field` are `configuration.md` §7's, bound by `--file KEY=PATH`; the build still
-//! acquires through `--points`, `--pairs`, `--values`, `--artifacts` and `--artifact-members`. Each
-//! of those keys is therefore **refused at parse rather than accepted and ignored**: a `source` that
-//! binds nothing is a file an author believes is being read.
+//! **Every object that has data names its own file, as a path relative to this document**
+//! (`configuration.md` §3, §8). A relative path travels in git with the file describing it and is
+//! exactly as reproducible as the declaration around it, which an invocation naming five files was
+//! not. What must not appear is an **absolute or machine-specific** path, so an absolute `source`
+//! is refused here and `--file KEY=PATH` is where one goes instead.
+//!
+//! **`--file` is an override, never a binding.** Its key is the *object* whose source it replaces
+//! — `corpus`, `view:s0`, `view:s0:point_visibility`, `vocabulary:severity`, `layer:clusters/a`,
+//! `layer:clusters/a:members` — and every one of them is registered by the declaration that owns
+//! it, in [`Sources`]. Three rules, all fail-closed and unchanged in substance:
+//!
+//! - a source with **no path from anywhere** is a refusal naming the object;
+//! - an override **no object declares** is a refusal too, listing the keys that exist — otherwise
+//!   a typo in the key leaves the config's own path quietly in force under a command line that
+//!   says otherwise;
+//! - an override **never creates** a source. It replaces one the declaration already made, so a
+//!   closed vocabulary cannot be opened, and a view cannot acquire geometry, from the command line
+//!   alone.
+//!
+//! ## The extent is a property of the view
+//!
+//! A coordinate is quantised across the view's extent into 32 bits, and quantisation **clamps** —
+//! so two bundles built from one corpus under different extents place the same point in different
+//! cells and both are well-formed. That is why it is declared here and not passed at invocation.
+//! [`Extent::Auto`] is the one value this module cannot resolve on its own: [`resolve_extent`]
+//! reads the view's points source to fit the box, which is legitimate precisely because the
+//! alternative is an operator guessing a frame their data has already decided.
+//!
+//! **A `fields` map says *where*, never *whether*.** The object's own keys assert that a field
+//! exists — `hierarchy` that there are parent edges, `depends_on` that there are attachment edges,
+//! `content.supplied` that there is content — and the map only locates what is already declared. So
+//! a name the object never declared is refused, and so is a name that is not one of that object's
+//! fields at all: both would otherwise read as *this file has one*, which is a claim the map is not
+//! allowed to make.
+//!
+//! ⊘ **A field map may not yet *rename* anything.** The readers resolve the canonical names
+//! (`input`'s `entity_id`, `x`/`y` or `morton`/`residual`, `term_id`, `key`/`code`/`title`), so a
+//! map naming a different column is **refused rather than accepted and disregarded** — an entry
+//! that parses and does nothing is a column an author believes is being read. What is built is the
+//! validation above; the reader half is [`configuration.md`](../../../docs/design/configuration.md)
+//! §7's and lands with the input readers.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tessera_spatial::tiler::ScalarType;
+use tessera_spatial::Bounds;
 use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
@@ -106,6 +143,10 @@ const PUBLIC: &str = "public";
 /// The word that means *the container's gate is the whole of it*. It occupies a slot that otherwise
 /// takes a caller's label, so a label spelled this way is refused (§4).
 const INHERITED: &str = "inherited";
+/// **The identity field, declared once on `[corpus]` and defaulting to that name**
+/// (`configuration.md` §7). It is entity-space and shared: a point has one identity across every
+/// view it appears in, and it is what a member row names.
+const ENTITY_ID: &str = "entity_id";
 
 // ---------------------------------------------------------------------------------------------
 // The file, as written
@@ -128,8 +169,9 @@ struct ConfigFile {
 
 /// `[corpus]` — entity space: identity and attributes, shared by every view.
 ///
-/// Both its keys are acquisition, so the block is legal and empty this stage; the two are parsed
-/// only so their refusal can name what replaces them.
+/// Its source is where the declared attribute columns are read from, joined to the view's geometry
+/// by the identity field. The two are separate keys and may bind one file: that is the shape every
+/// fixture here uses, and it is why the attribute pass is a second pass over the same rows.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CorpusBlock {
@@ -150,19 +192,72 @@ struct ViewBlock {
     source: Option<String>,
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
+    /// The quantisation frame, in any of §1's four spellings. Held as a `toml::Value` and
+    /// resolved by [`compile_extent`] rather than typed here, because an untagged enum over a
+    /// string and a table reports every mistake inside the table as *matched no variant* — and
+    /// this key's mistakes (a `margin` beside a `min`, an `x` without a `y`) are exactly the ones
+    /// worth naming. The table form is still a `deny_unknown_fields` struct, so its key set is
+    /// closed and readable out of serde's own message.
     #[serde(default)]
-    point_visibility: Option<MemberVisibilityBlock>,
+    extent: Option<toml::Value>,
+    #[serde(default)]
+    point_visibility: Option<PointVisibilityBlock>,
     #[serde(default)]
     visibility: Option<String>,
 }
 
-/// `{ field, default }` — where each member's own label is, and what one carrying none gets.
+/// `{ field, default }` or `{ source, default }` — where each point's own label is, and what one
+/// carrying none gets.
 ///
-/// **The presence of `field` is the declaration that members carry their own labels** (C27), which
-/// is why it is one table rather than a flag beside a fallback: the two cannot be declared apart.
+/// **A point's label comes from a field or from a source, never both** (`configuration.md` §1).
+/// `field` names a column of the view's own source; `source` names a separate exploded
+/// `(entity_id, term_id)` relation, which is the shape the probe generators produce natively at
+/// 10⁹ and the one the build writes as oracle output regardless. `default` alone is legal and is
+/// the corpus with no permission model.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MemberVisibilityBlock {
+struct PointVisibilityBlock {
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    default: Option<String>,
+}
+
+/// `extent`'s table form, in one struct with every key optional and the combinations checked by
+/// hand ([`compile_extent`]).
+///
+/// One struct rather than three, because the three shapes overlap in exactly the ways a caller
+/// gets wrong — `margin` beside `min`, an `x` without a `y`, `auto` beside a stated box — and
+/// three variants would report each of those as *no variant matched*. The key set stays closed
+/// under `deny_unknown_fields`, which is what `configuration.md` §1's table is asserted against.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtentTable {
+    #[serde(default)]
+    auto: Option<bool>,
+    #[serde(default)]
+    margin: Option<f64>,
+    #[serde(default)]
+    min: Option<f64>,
+    #[serde(default)]
+    max: Option<f64>,
+    #[serde(default)]
+    x: Option<[f64; 2]>,
+    #[serde(default)]
+    y: Option<[f64; 2]>,
+}
+
+/// `{ field, default }` — where each artifact's own label is, and what one carrying none gets.
+///
+/// **The presence of `field` is the declaration that artifacts carry their own labels** (C27),
+/// which is why it is one table rather than a flag beside a fallback: the two cannot be declared
+/// apart. It takes no `source`: an artifact's label rides its own row, there being one row per
+/// artifact, where a point's label is one of many terms and needs a relation of its own.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactVisibilityBlock {
     #[serde(default)]
     field: Option<String>,
     #[serde(default)]
@@ -237,12 +332,14 @@ struct LayerBlock {
     name: String,
     #[serde(default)]
     title: Option<String>,
-    /// ⊘ Declared so the refusal can *name* what is absent (decision 0013). Without these two
-    /// fields the blocks fall to `deny_unknown_fields`, whose "unknown field `members`" reads as a
-    /// typo rather than as machinery that is specified and not yet built — and a caller who wrote
-    /// one had every reason to expect it to work, `configuration.md` §1 listing both.
+    /// `[layer.members]` — membership as its own source, one row per `(artifact, entity)`, for a
+    /// membership no single cell should hold.
     #[serde(default)]
-    members: Option<toml::Value>,
+    members: Option<MembersBlock>,
+    /// ⊘ Declared so the refusal can *name* what is absent (decision 0013). Without this field the
+    /// block falls to `deny_unknown_fields`, whose "unknown field `labels`" reads as a typo rather
+    /// than as machinery that is specified and not yet built — and a caller who wrote one had every
+    /// reason to expect it to work, `configuration.md` §1 listing it.
     #[serde(default)]
     labels: Option<toml::Value>,
     #[serde(default)]
@@ -260,7 +357,7 @@ struct LayerBlock {
     #[serde(default)]
     visibility: Option<String>,
     #[serde(default)]
-    artifact_visibility: Option<MemberVisibilityBlock>,
+    artifact_visibility: Option<ArtifactVisibilityBlock>,
     #[serde(default)]
     require_member_visibility: Option<toml::Value>,
     #[serde(default)]
@@ -271,6 +368,17 @@ struct LayerBlock {
     levels: Vec<LevelBlock>,
     #[serde(default)]
     content: Option<ContentBlock>,
+}
+
+/// `[layer.members]` — membership as its own source, instead of a list field on the artifact row.
+/// Declaring both is refused (`configuration.md` §7).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembersBlock {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    fields: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -326,10 +434,39 @@ struct SuppliedBlock {
 pub struct Config {
     /// Entity space: the attributes and the vocabularies they draw on.
     pub schema: Schema,
+    /// `[corpus]`: where the declared attribute columns are read from, once bound.
+    pub corpus: Corpus,
     pub views: Vec<View>,
     /// In declaration order, which is registration order: a layer must be declared after every
     /// layer it names in `depends_on`.
     pub layers: Vec<LayerDeclaration>,
+    /// Each layer's bound sources, parallel to [`Config::layers`] and by the same name.
+    ///
+    /// **Beside the declarations rather than inside them.** A [`LayerDeclaration`] is exactly what
+    /// `PUT /control/layers` takes (`configuration.md` §2), and a deployment writing through the
+    /// service omits acquisition entirely — so a source living on the declaration would be a build
+    /// input the control plane would have to carry and ignore.
+    pub layer_sources: Vec<LayerSources>,
+}
+
+/// `[corpus]` — entity space, once its source is bound.
+#[derive(Debug, Clone, Default)]
+pub struct Corpus {
+    /// The file the declared attribute columns are read from, joined to the view's geometry by the
+    /// identity field. `None` when the config declares no source, which is legal and means the
+    /// object is declared and empty (`configuration.md` §2) — refused at a build that has
+    /// attributes to fill.
+    pub source: Option<PathBuf>,
+}
+
+/// One layer's bound acquisition keys.
+#[derive(Debug, Clone)]
+pub struct LayerSources {
+    pub name: String,
+    /// `[[layer]].source` — one row per artifact.
+    pub artifacts: Option<PathBuf>,
+    /// `[layer.members].source` — one row per `(artifact, entity)`.
+    pub members: Option<PathBuf>,
 }
 
 /// One declared coordinate system.
@@ -342,16 +479,237 @@ pub struct View {
     /// three is a contracts change rather than a declaration one. A **level's** title is published
     /// today, and a **layer's** is.
     pub title: Option<String>,
-    /// Where each point's own access label is, and what a point carrying none gets. Recorded and
-    /// ⊘ not yet read: the label column lands with acquisition (`configuration.md` §7), and today
-    /// the access relation arrives through `--pairs`.
+    /// This view's geometry: `entity_id` with either `x`/`y` or `morton`/`residual`. `None` when
+    /// the view declares no source, which is legal to *declare* and refused at a build that would
+    /// have to read it.
+    pub source: Option<PathBuf>,
+    /// The frame every position in this view is quantised across (`configuration.md` §1).
+    /// [`Extent::Auto`] still needs the data: [`resolve_extent`] turns it into [`Bounds`].
+    pub extent: Extent,
+    /// Where each point's own access label is, and what a point carrying none gets.
     pub point_visibility: PointVisibility,
 }
 
-/// A view's `point_visibility = { field, default }`.
+/// A view's quantisation frame, as declared (`configuration.md` §1).
+///
+/// **Declared on the view rather than passed at invocation**, because a coordinate is quantised
+/// across it into 32 bits and quantisation *clamps*: two bundles built from one corpus under
+/// different extents place the same point in different cells, and both are well-formed with the
+/// geometry wrong. There is deliberately **no constant for the full float range** — spanning
+/// ±3.4×10³⁸ over 65,536 cells makes each cell 10³⁴ wide, so every real dataset lands in one of
+/// them; it avoids clamping by destroying all resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Extent {
+    /// `"auto"`, or `{ auto = true, margin = f }` — the **square** box around this build's own
+    /// data, with `margin` of the data span added on each side. Resolved by [`resolve_extent`].
+    Auto { margin: f64 },
+    /// `{ min, max }` or `{ x = [a, b], y = [c, d] }` — stated outright, and the only form a
+    /// corpus that will be written to should rely on.
+    Fixed(Bounds),
+}
+
+/// `auto`'s margin when none is written: 1% of the data span on each side.
+///
+/// **Not zero**, and the reason is arithmetic rather than taste: the extent is a half-open
+/// interval, so a point sitting exactly at the maximum quantises to the clamp. One percent is
+/// small enough that a caller who wanted a tight fit has still got one and large enough that the
+/// boundary point is inside it. A corpus that will *grow* needs a real margin, and says so.
+pub const DEFAULT_AUTO_MARGIN: f64 = 0.01;
+
+/// Turn a declared [`Extent`] into the [`Bounds`] this build quantises against.
+///
+/// `Fixed` is already the answer. `Auto` reads `points` — the view's own geometry source — and
+/// fits a **square** box around it: fitting each axis tightly would use the grid better and
+/// silently stretch the map, which is a rendering decision a build has no business making. The
+/// margin is a fraction of that square's span, added on each side.
+///
+/// The refusals here are the ones `auto` cannot answer for itself: an empty selection frames
+/// nothing, and a Morton points file carries no coordinates to frame (that one is refused by
+/// [`crate::input::data_bounds`], naming the extent to write instead).
+pub fn resolve_extent(
+    view: &str,
+    extent: &Extent,
+    points: &Path,
+    limit: Option<u64>,
+) -> Result<Bounds> {
+    let margin = match extent {
+        Extent::Fixed(bounds) => return Ok(*bounds),
+        Extent::Auto { margin } => *margin,
+    };
+    let data = crate::input::data_bounds(points, limit)?.ok_or_else(|| {
+        declaration_error(format!(
+            "view '{view}': `extent` is `auto` and the points source selects no rows, so there is \
+             no data to fit a box around. Either the source is empty or `--limit` excludes every \
+             row; state the frame instead — `extent = {{ min = <a>, max = <b>}}` — if this corpus \
+             is meant to start empty and be written to"
+        ))
+    })?;
+    // Square, then margin: a circle in the data stays a circle on the grid. `span` is the larger
+    // of the two axes, and a corpus whose points are all at one position has no span at all — a
+    // unit box is the only non-degenerate frame available, and it is centred on the point.
+    let span_x = data.x_max - data.x_min;
+    let span_y = data.y_max - data.y_min;
+    let span = span_x.max(span_y);
+    let span = if span > 0.0 { span } else { 1.0 };
+    let half = span / 2.0 + span * margin;
+    let (cx, cy) = (
+        (data.x_min + data.x_max) / 2.0,
+        (data.y_min + data.y_max) / 2.0,
+    );
+    let bounds = Bounds {
+        x_min: cx - half,
+        x_max: cx + half,
+        y_min: cy - half,
+        y_max: cy + half,
+    };
+    bounds.validate().map_err(|detail| {
+        declaration_error(format!(
+            "view '{view}': `extent = \"auto\"` fitted no usable box around the data \
+             ({detail}). The data spans x [{}, {}], y [{}, {}]; state the frame outright if that \
+             is not what this corpus is",
+            data.x_min, data.x_max, data.y_min, data.y_max
+        ))
+    })?;
+    Ok(bounds)
+}
+
+/// Compile a view's `extent`, in any of `configuration.md` §1's four spellings.
+///
+/// Every refusal names all four, because the key has no default and the value an absent line
+/// would supply is a decision about where every stored point lands.
+fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
+    let Some(value) = value else {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent` is required and has no default (configuration.md §1). It is \
+             the frame every stored position is quantised across, and quantisation clamps — so a \
+             guessed frame is a bundle that is well-formed with the geometry wrong. Four \
+             spellings:{}",
+            EXTENT_SPELLINGS
+        )));
+    };
+    if let Some(word) = value.as_str() {
+        if word == "auto" {
+            return Ok(Extent::Auto {
+                margin: DEFAULT_AUTO_MARGIN,
+            });
+        }
+        return Err(declaration_error(format!(
+            "view '{view}': `extent = \"{word}\"` is not a value this key takes. The only word \
+             it takes is `auto`; every other spelling is a table:{}",
+            EXTENT_SPELLINGS
+        )));
+    }
+    let Some(table) = value.as_table() else {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent` is neither the word `auto` nor a table:{}",
+            EXTENT_SPELLINGS
+        )));
+    };
+    let table: ExtentTable = ExtentTable::deserialize(toml::Value::Table(table.clone()))
+        .map_err(|e| declaration_error(format!("view '{view}': `extent`: {e}")))?;
+
+    let stated = table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some();
+    if let Some(auto) = table.auto {
+        if !auto {
+            return Err(declaration_error(format!(
+                "view '{view}': `extent = {{ auto = false }}` says what the frame is not. Write \
+                 the frame:{}",
+                EXTENT_SPELLINGS
+            )));
+        }
+        if stated {
+            return Err(declaration_error(format!(
+                "view '{view}': `extent` declares `auto` and a stated box together. `auto` fits \
+                 the box to the data this build reads; `min`/`max` and `x`/`y` state it outright. \
+                 One or the other:{}",
+                EXTENT_SPELLINGS
+            )));
+        }
+        let margin = match table.margin {
+            None => DEFAULT_AUTO_MARGIN,
+            Some(margin) => {
+                if !margin.is_finite() || margin < 0.0 {
+                    return Err(declaration_error(format!(
+                        "view '{view}': `extent.margin = {margin}` is not a fraction of the data \
+                         span. It is headroom added on each side, so it is finite and at least 0 \
+                         — a negative margin would shrink the box inside the data and clamp the \
+                         points it excluded"
+                    )));
+                }
+                margin
+            }
+        };
+        return Ok(Extent::Auto { margin });
+    }
+    if table.margin.is_some() {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent.margin` without `auto = true`. A margin is headroom around a \
+             box that was fitted to data; a box stated outright already includes whatever headroom \
+             its author wanted:{}",
+            EXTENT_SPELLINGS
+        )));
+    }
+    let bounds = match (table.min, table.max, table.x, table.y) {
+        (Some(min), Some(max), None, None) => Bounds {
+            x_min: min,
+            x_max: max,
+            y_min: min,
+            y_max: max,
+        },
+        (None, None, Some([x_min, x_max]), Some([y_min, y_max])) => Bounds {
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        },
+        (None, None, None, None) => {
+            return Err(declaration_error(format!(
+                "view '{view}': `extent` is an empty table, so it declares no frame at all:{}",
+                EXTENT_SPELLINGS
+            )))
+        }
+        (min, max, x, y) => {
+            let named = [
+                min.map(|_| "min"),
+                max.map(|_| "max"),
+                x.map(|_| "x"),
+                y.map(|_| "y"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+            return Err(declaration_error(format!(
+                "view '{view}': `extent` names {named}, which is half a frame. `min` and `max` \
+                 give one range to both axes and preserve the aspect ratio; `x` and `y` give a \
+                 range each, where stretching is meant. Neither half stands alone:{}",
+                EXTENT_SPELLINGS
+            )));
+        }
+    };
+    bounds
+        .validate()
+        .map_err(|detail| declaration_error(format!("view '{view}': `extent`: {detail}")))?;
+    Ok(Extent::Fixed(bounds))
+}
+
+/// The four spellings, appended to every `extent` refusal. A caller who got this key wrong is
+/// choosing between four shapes, not correcting a typo, so the whole set travels with the message.
+const EXTENT_SPELLINGS: &str = "\n  \
+     extent = \"auto\"                          # the square box around the data, small margin\n  \
+     extent = { auto = true, margin = 0.25 }  # a quarter of the data span as headroom each side\n  \
+     extent = { min = -25.0, max = 25.0 }     # one range, both axes — preserves aspect ratio\n  \
+     extent = { x = [-18, 19], y = [-22, 24] }  # per axis, where stretching is meant";
+
+/// A view's `point_visibility = { field, default }` or `{ source, default }`.
 #[derive(Debug, Clone)]
 pub struct PointVisibility {
+    /// ⊘ A column of the view's own source, carrying one label or a list per point. Recorded and
+    /// not yet read — the list-valued access column lands with the input readers
+    /// (`configuration.md` §7), and a build acquiring labels names a `source` instead.
     pub field: Option<String>,
+    /// The exploded `(entity_id, term_id)` relation, bound.
+    pub source: Option<PathBuf>,
     /// **Never `inherited`.** A point carrying no terms is in no posting list and so in no
     /// principal's mask, and a gate narrows rather than widens — so there is nothing for a point to
     /// inherit, and the word is refused at parse for points where it is legal for artifacts.
@@ -492,39 +850,202 @@ impl Vocabulary {
 }
 
 impl Config {
-    /// Parse `path`, with `values` binding each closed vocabulary that sources its values from a
-    /// file, by **name**.
+    /// Parse `path`. Every `source` it declares resolves **relative to `path`'s own directory**,
+    /// and `overrides` — the `--file KEY=PATH` pairs, keyed by object — replaces one at a time
+    /// (`configuration.md` §3, §8).
     ///
-    /// ⊘ Binding by name is the stage's stand-in for `source` + `--file KEY=PATH`
-    /// (`configuration.md` §7): a vocabulary's name is already its identity, so `--values
-    /// severity=…` names the same object `source = "severity"` will. The three fail-closed rules
-    /// are the ones §7 states, minus the one that needs `source` to exist: a bound key no
-    /// vocabulary declares is an error, and an unbound vocabulary is **never** a silent
-    /// fall-through to minting.
-    pub fn parse(path: &Path, values: &HashMap<String, PathBuf>) -> Result<Config> {
+    /// The fail-closed rules are §8's: a source with no path from anywhere is a refusal naming
+    /// the object, an override no object declares is a refusal too, and an override never
+    /// *creates* a source — so a closed vocabulary cannot be opened from the command line.
+    pub fn parse(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
         let text = std::fs::read_to_string(path).map_err(|e| BuildError::io(path, e))?;
         let file: ConfigFile = toml::from_str(&text)
             .map_err(|e| declaration_error(format!("{}: {e}", path.display())))?;
 
-        if let Some(corpus) = &file.corpus {
-            refuse_acquisition("[corpus]", "source", corpus.source.is_some())?;
-            refuse_acquisition("[corpus]", "fields", corpus.fields.is_some())?;
-        }
-
-        let views = compile_views(&file.view)?;
-        let vocabularies = compile_vocabularies(&file.vocabulary, values)?;
+        // `path` has a parent unless it is a bare file name, where the document's own directory is
+        // the working directory — which is what `Path::new("")` joins to.
+        let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        let mut sources = Sources::new(base, overrides);
+        let corpus = compile_corpus(file.corpus.as_ref(), &mut sources)?;
+        let views = compile_views(&file.view, &mut sources)?;
+        let vocabularies = compile_vocabularies(&file.vocabulary, &mut sources)?;
         let attributes = compile_attributes(&file.attribute, &vocabularies)?;
-        let layers = compile_layers(&file.layer, &views)?;
+        let (layers, layer_sources) = compile_layers(&file.layer, &views, &mut sources)?;
+        sources.every_override_is_claimed()?;
 
         Ok(Config {
             schema: Schema {
                 attributes,
                 vocabularies,
             },
+            corpus,
             views,
             layers,
+            layer_sources,
         })
     }
+
+    /// The view a build materialises when the invocation names none.
+    ///
+    /// **One declared view is not a default; it is the only answer.** With several, choosing would
+    /// publish a coordinate system nobody asked for — and since two views quantise the same corpus
+    /// differently, the bundle would be well-formed and wrong. With none, there is nothing to
+    /// build at all.
+    pub fn sole_view(&self) -> Result<&str> {
+        match self.views.as_slice() {
+            [only] => Ok(&only.name),
+            [] => Err(declaration_error(
+                "the declaration has no `[[view]]` block, so this build has no coordinate system                  to materialise. A view names the geometry source and the frame it is quantised                  against (configuration.md §1)",
+            )),
+            several => Err(declaration_error(format!(
+                "the declaration has {} views and `--view` names none. A build materialises one                  coordinate system: {}. Two views quantise the same corpus differently, so                  choosing one here would produce a bundle that is well-formed and not the one                  asked for",
+                several.len(),
+                names(several.iter().map(|v| v.name.as_str()))
+            ))),
+        }
+    }
+
+    /// The files this build reads, for the one view it materialises.
+    ///
+    /// **Where the declaration meets the invocation.** Everything above is route-independent: the
+    /// same blocks describe a deployment that never builds (`configuration.md` §2), and a config
+    /// declaring no source at all is legal and declares an empty corpus. This is the method that
+    /// asks for the files, so it is where *this* build's absences become refusals — and where the
+    /// two acquisition routes that are specified and not built say so rather than reading nothing.
+    pub fn acquire(&self, view: &str) -> Result<Acquisition> {
+        let declared = self.views.iter().find(|v| v.name == view).ok_or_else(|| {
+            declaration_error(format!(
+                "--view '{view}' names no `[[view]]` block. Declared: {}. The build materialises \
+                 one coordinate system and reads its `source`, so a view it cannot find is a build \
+                 with no geometry rather than a default one",
+                names(self.views.iter().map(|v| v.name.as_str()))
+            ))
+        })?;
+        let points = declared.source.clone().ok_or_else(|| {
+            declaration_error(format!(
+                "view '{view}': `source` is required to build from a file (configuration.md §1). \
+                 It is the path — relative to this config — of this view's geometry: `entity_id` \
+                 with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
+                 means the view is declared and empty, which is a bundle with no rows in it (§2) \
+                 and is not built"
+            ))
+        })?;
+        let pairs = match (
+            &declared.point_visibility.source,
+            &declared.point_visibility.field,
+        ) {
+            (Some(path), _) => path.clone(),
+            // ⊘ Both remaining routes need the reader half. Refused rather than built with no
+            // labels at all: a corpus whose every point carries no term is in no principal's mask,
+            // so the bundle would come up empty for everyone and say nothing about why.
+            (None, Some(field)) => {
+                return Err(declaration_error(format!(
+                    "view '{view}': `point_visibility.field = \"{field}\"` is specified and not \
+                     built (configuration.md §8). A label column of the points source is read as a \
+                     list per point, which the input readers do not yet do. Write \
+                     `point_visibility = {{ source = \"<path>\", default = … }}`, naming the \
+                     exploded `(entity_id, term_id)` relation. Refused rather than ignored: with \
+                     no relation read, every point would carry no term and so sit in no \
+                     principal's mask"
+                )))
+            }
+            (None, None) => {
+                return Err(declaration_error(format!(
+                    "view '{view}': `point_visibility` declares only a `default`, which is \
+                     specified and not built (configuration.md §1, §7). Every point taking the \
+                     default needs the reserved term the default resolves to, which nothing writes \
+                     yet. Name the exploded `(entity_id, term_id)` relation — \
+                     `point_visibility = {{ source = \"<path>\", default = … }}`"
+                )))
+            }
+        };
+        if !self.schema.is_empty() && self.corpus.source.is_none() {
+            return Err(declaration_error(format!(
+                "{} attribute(s) are declared and `[corpus]` names no `source`. The attribute pass \
+                 reads its columns from entity space, joined to the view's geometry by \
+                 `entity_id`, so there is no file for it to read. Write `[corpus]` with \
+                 `source = \"<path>\"` — usually the view's own file, where one file carries \
+                 identity, geometry and attributes together",
+                self.schema.attributes.len()
+            )));
+        }
+        Ok(Acquisition {
+            corpus: self.corpus.source.clone(),
+            extent: declared.extent,
+            points,
+            pairs,
+            artifacts: one_source(&self.layer_sources, |s| &s.artifacts, "[[layer]]", "source")?,
+            artifact_members: one_source(
+                &self.layer_sources,
+                |s| &s.members,
+                "[layer.members]",
+                "source",
+            )?,
+        })
+    }
+}
+
+/// The files one build reads, resolved from the config and any `--file` overrides, plus the
+/// frame it quantises against.
+#[derive(Debug, Clone)]
+pub struct Acquisition {
+    /// The built view's `extent`, as declared. [`resolve_extent`] turns [`Extent::Auto`] into
+    /// [`Bounds`] by reading [`Acquisition::points`]; every other spelling is already the answer.
+    pub extent: Extent,
+    /// `[corpus].source`: identity and the declared attribute columns. `None` where the config
+    /// declares no corpus source, which is legal only for an empty schema — a declared attribute
+    /// with no file to read it from is refused above.
+    pub corpus: Option<PathBuf>,
+    /// The built view's `source`: identity and geometry.
+    pub points: PathBuf,
+    /// The built view's `point_visibility.source`: the exploded `(entity_id, term_id)` relation.
+    pub pairs: PathBuf,
+    /// The layers' `source`, and the memberships beside it.
+    pub artifacts: Option<PathBuf>,
+    pub artifact_members: Option<PathBuf>,
+}
+
+/// The one path every layer declaring this key binds, or a refusal naming the two that disagree.
+///
+/// ⊘ **One file per layer is not built.** Today's artifact and member files carry a `layer`
+/// discriminator column and the reader takes a single path, so two layers naming different keys
+/// would have one of the two files silently unread. Refused until the reader is per layer
+/// (`configuration.md` §7).
+fn one_source(
+    sources: &[LayerSources],
+    pick: impl Fn(&LayerSources) -> &Option<PathBuf>,
+    block: &str,
+    key: &str,
+) -> Result<Option<PathBuf>> {
+    let mut chosen: Option<(&str, &PathBuf)> = None;
+    for source in sources {
+        let Some(path) = pick(source) else { continue };
+        match chosen {
+            None => chosen = Some((&source.name, path)),
+            Some((first, already)) if already != path => {
+                return Err(declaration_error(format!(
+                    "layers '{first}' and '{}' bind different files to `{block}`'s `{key}`, and \
+                     one file per layer is specified and not built (configuration.md §8). The \
+                     artifact and member files carry a `layer` column and the build reads one \
+                     path, so the second would go unread. Bind both layers to one key until the \
+                     reader is per layer",
+                    source.name
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(chosen.map(|(_, path)| path.clone()))
+}
+
+/// A comma-separated list for a refusal, or `none`.
+fn names<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut names: Vec<&str> = values.collect();
+    names.sort_unstable();
+    if names.is_empty() {
+        return "none".to_string();
+    }
+    names.join(", ")
 }
 
 impl Schema {
@@ -591,56 +1112,239 @@ impl Schema {
 // Acquisition, refused rather than ignored
 // ---------------------------------------------------------------------------------------------
 
-/// ⊘ Refuse one acquisition key, naming what does the job today and what will replace it.
+/// Every source in the document, resolved against the directory that declares them, with
+/// `--file KEY=PATH` overriding one at a time (`configuration.md` §3, §8).
 ///
-/// Accepting it and reading nothing is the failure this whole surface exists to prevent: a
-/// `source` that binds no file is a build silently reading none, with the author's declaration
-/// sitting in the config saying otherwise (decision 0013).
-fn refuse_acquisition(block: &str, key: &str, present: bool) -> Result<()> {
-    if !present {
+/// **A path relative to the config, not a logical key.** The rule the earlier binding-only shape
+/// was protecting is narrower than it was written: what must not appear is an **absolute or
+/// machine-specific** path, and a relative one is neither — it travels in git with the file that
+/// describes it. So the ordinary invocation names no files at all, and `--file` is what a
+/// deployment staging one source elsewhere reaches for.
+///
+/// **The override key is the object, not the file.** `corpus`, `view:s0`,
+/// `view:s0:point_visibility`, `vocabulary:severity`, `layer:clusters/a`,
+/// `layer:clusters/a:members` — registered by whichever declaration owns the source, which is
+/// what makes an override naming nothing detectable. Without that check a mistyped key would
+/// leave the config's own path quietly in force under a command line that says otherwise, which
+/// is the one failure an override must not have.
+struct Sources<'a> {
+    /// The declaring document's directory. Every relative `source` resolves against it, so the
+    /// same config describes the same corpus from any working directory.
+    base: PathBuf,
+    /// `--file KEY=PATH`, keyed by object.
+    overrides: &'a HashMap<String, PathBuf>,
+    /// Which override key each declared source registered, and the object that declared it — the
+    /// second half is the message when an override names nothing.
+    claimed: BTreeMap<String, String>,
+}
+
+impl<'a> Sources<'a> {
+    fn new(base: PathBuf, overrides: &'a HashMap<String, PathBuf>) -> Self {
+        Sources {
+            base,
+            overrides,
+            claimed: BTreeMap::new(),
+        }
+    }
+
+    /// Resolve one declared `source`. `key` is the override key this object registers; `object`
+    /// is how the object is named in a refusal.
+    fn resolve(&mut self, key: &str, object: &str, source: &str) -> Result<PathBuf> {
+        if source.trim().is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: `source` is empty. It is a path to this object's data, relative to \
+                 this config; omit it to declare the object with no data"
+            )));
+        }
+        let declared = Path::new(source);
+        // **An absolute path is refused rather than honoured** (`configuration.md` §3, §4). It is
+        // the one shape that cannot travel with the document: a config carrying `/mnt/scratch/…`
+        // describes a corpus that exists on one machine, and the next reader of the repository
+        // gets a refusal from the file reader rather than from the declaration. `--file` is where
+        // a machine-specific path belongs, on the command line that knows about the machine.
+        if declared.is_absolute() {
+            return Err(declaration_error(format!(
+                "{object}: `source = \"{source}\"` is an absolute path. A source is written \
+                 relative to this config so it travels in git with the declaration around it. \
+                 Move the file beside the config and name it relatively, or override this one on \
+                 the command line: `--file {key}={source}`"
+            )));
+        }
+        if let Some(already) = self.claimed.insert(key.to_string(), object.to_string()) {
+            // Reachable only if two objects would answer to one override key — a view literally
+            // named `s0:point_visibility` beside a view named `s0`. Refused rather than resolved
+            // by order: `--file` would otherwise replace whichever of the two registered last.
+            return Err(declaration_error(format!(
+                "{object} and {already} would both answer to the override key '{key}', so \
+                 `--file {key}=<path>` could not say which source it replaces. Rename one of them"
+            )));
+        }
+        if let Some(path) = self.overrides.get(key) {
+            return Ok(path.clone());
+        }
+        Ok(self.base.join(declared))
+    }
+
+    /// Every `--file` override replaces a source some object declares.
+    ///
+    /// **The check that makes an override safe.** A binding that matches nothing would otherwise
+    /// leave the declaration's own path in force — the build would read the file the config names
+    /// and report success, under a command line asking for a different corpus.
+    fn every_override_is_claimed(&self) -> Result<()> {
+        for key in self.overrides.keys() {
+            if !self.claimed.contains_key(key) {
+                return Err(declaration_error(format!(
+                    "--file '{key}=…' names no source in this config. `--file` overrides a source \
+                     an object already declares, keyed by the object: {}. It never creates one — \
+                     a source that exists only on the command line would be a corpus the \
+                     declaration does not describe",
+                    names(self.claimed.keys().map(String::as_str))
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One field an object's `fields` map may name.
+///
+/// **The map says *where*, never *whether*** (`configuration.md` §7): the object's own keys assert
+/// that a field exists, and the map only locates it. So a field is *known* by being in this table
+/// and *declared* by whatever key asserts it — and naming an undeclared one is refused rather than
+/// read as the declaration it is not.
+struct KnownField {
+    name: &'static str,
+    /// `None` when this object always has the field; `Some(why)` when it does not have it here,
+    /// `why` naming the key that would declare one.
+    undeclared: Option<String>,
+}
+
+impl KnownField {
+    /// A field the object always has.
+    fn always(name: &'static str) -> KnownField {
+        KnownField {
+            name,
+            undeclared: None,
+        }
+    }
+
+    /// A field another key asserts the existence of: present when `declared`, and refused with
+    /// `why` when it is not.
+    fn asserted_by(name: &'static str, declared: bool, why: &str) -> KnownField {
+        KnownField {
+            name,
+            undeclared: (!declared).then(|| why.to_string()),
+        }
+    }
+}
+
+/// Check one object's `fields` map: every name known, every name declared, and — ⊘ until the
+/// readers take names — no name actually moved.
+fn check_fields(
+    object: &str,
+    source: Option<&PathBuf>,
+    known: &[KnownField],
+    map: Option<&BTreeMap<String, String>>,
+) -> Result<()> {
+    let Some(map) = map else { return Ok(()) };
+    // A map with no source names the fields of nothing. Refused rather than kept for a source that
+    // may arrive later: the object reads no file at all, so every entry in it is inert.
+    if source.is_none() {
+        return Err(declaration_error(format!(
+            "{object}: `fields` without a `source`. The map locates this object's fields in the \
+             file its source names, and this object names none — so there is no file for the names \
+             to be read out of"
+        )));
+    }
+    for (canonical, actual) in map {
+        let Some(field) = known.iter().find(|f| f.name == canonical.as_str()) else {
+            return Err(declaration_error(format!(
+                "{object}: `fields.{canonical}` is not one of this object's fields. They are: {}. \
+                 The map says where a field is and never whether there is one, so a name outside \
+                 the set is refused rather than passed to the reader",
+                names(known.iter().map(|f| f.name))
+            )));
+        };
+        if let Some(why) = &field.undeclared {
+            return Err(declaration_error(format!(
+                "{object}: `fields.{canonical}` names a field this object never declared — {why}. \
+                 `fields` says *where* a field is, never *whether* there is one, so locating one \
+                 nothing declared is refused rather than read as the declaration"
+            )));
+        }
+        refuse_rename(object, canonical, actual)?;
+    }
+    Ok(())
+}
+
+/// ⊘ A field name that differs from the canonical one, refused rather than accepted and
+/// disregarded.
+///
+/// The input readers resolve the canonical names, so an entry moving one would parse, validate and
+/// do nothing — a column its author believes is being read. What is built is the validation around
+/// it: which names exist, and which of them this object declared.
+fn refuse_rename(object: &str, canonical: &str, actual: &str) -> Result<()> {
+    if canonical == actual {
         return Ok(());
     }
     Err(declaration_error(format!(
-        "{block}: `{key}` is specified and not built (configuration.md §7 — a source names a \
-         logical key and `--file KEY=PATH` binds it). Acquisition still runs on `--points`, \
-         `--pairs`, `--values KEY=PATH`, `--artifacts` and `--artifact-members`, so a `{key}` here \
-         would name a file nothing opens. Refused rather than ignored: an unread source is one its \
-         author believes is being read"
+        "{object}: the field map reads `{canonical}` from a column named '{actual}', which is \
+         specified and not built (configuration.md §8). The readers resolve the canonical names, so \
+         the column read would be `{canonical}` whatever the map said. Refused rather than ignored: \
+         a rename that parses and does nothing is a column its author believes is being read. Name \
+         the column `{canonical}` in the source until the readers take the map"
     )))
 }
 
-/// The two sub-blocks `configuration.md` §1 declares and no stage has built.
+/// The one sub-block `configuration.md` §1 declares and no stage has built.
 ///
-/// Separate from [`refuse_acquisition`] because the reason differs: an acquisition key names a file
-/// nothing opens, where these name *machinery* — a member source of its own, and the label sugar
-/// that expands to a second layer. Both land with later stages, and until then a caller who wrote
-/// one must be told which it is rather than left reading a typo message.
-fn refuse_unbuilt_block(layer: &str, block: &str, present: bool) -> Result<()> {
+/// Separate from the acquisition keys because the reason differs: a source names a file, where this
+/// names *machinery* — the label sugar that expands to a second layer. Until it lands, a caller who
+/// wrote one must be told which it is rather than left reading a typo message.
+fn refuse_unbuilt_labels(layer: &str, present: bool) -> Result<()> {
     if !present {
         return Ok(());
     }
-    let (what, lands) = match block {
-        "members" => (
-            "membership in its own source, one row per (artifact, entity)",
-            "`annotation-write-cycle.md` §6.1's artifact and member grains",
-        ),
-        _ => (
-            "the label sugar, expanding to a layer of its own",
-            "`annotation-write-cycle.md` §6.1's `[layer.labels]`",
-        ),
-    };
     Err(declaration_error(format!(
-        "layer '{layer}': `[layer.{block}]` is specified and not built — {what} ({lands}). \
-         Declared in configuration.md §1 and refused here rather than ignored, because a block \
-         that parses and does nothing is a declaration its author believes is in effect"
+        "layer '{layer}': `[layer.labels]` is specified and not built — the label sugar, expanding \
+         to a layer of its own (`annotation-write-cycle.md` §6.1). Declared in configuration.md §1 \
+         and refused here rather than ignored, because a block that parses and does nothing is a \
+         declaration its author believes is in effect"
     )))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The corpus
+// ---------------------------------------------------------------------------------------------
+
+/// `[corpus]` — entity space: identity and the declared attribute columns.
+///
+/// **One identity field, declared once and shared by every view** (`configuration.md` §7). Not
+/// `entity`, which names the object rather than the value, and not `id`, which collides with
+/// `tessera_id` and with an external id. A point has one identity across every view it appears in,
+/// and it is what a member row names.
+fn compile_corpus(block: Option<&CorpusBlock>, sources: &mut Sources) -> Result<Corpus> {
+    let Some(block) = block else {
+        return Ok(Corpus::default());
+    };
+    let source = match &block.source {
+        Some(declared) => Some(sources.resolve("corpus", "[corpus]", declared)?),
+        None => None,
+    };
+    check_fields(
+        "[corpus]",
+        source.as_ref(),
+        &[KnownField::always(ENTITY_ID)],
+        block.fields.as_ref(),
+    )?;
+    Ok(Corpus { source })
 }
 
 // ---------------------------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------------------------
 
-fn compile_views(blocks: &[ViewBlock]) -> Result<Vec<View>> {
+fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View>> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut views = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -655,8 +1359,49 @@ fn compile_views(blocks: &[ViewBlock]) -> Result<Vec<View>> {
                 block.name
             )));
         }
-        refuse_acquisition("[[view]]", "source", block.source.is_some())?;
-        refuse_acquisition("[[view]]", "fields", block.fields.is_some())?;
+        let object = format!("view '{}'", block.name);
+        let key = format!("view:{}", block.name);
+        let source = match &block.source {
+            Some(declared) => Some(sources.resolve(&key, &object, declared)?),
+            None => None,
+        };
+        // **The two geometry shapes are mutually exclusive** (§1): a row carries `x`/`y` or
+        // `morton`/`residual`, and a map naming one of each says the file carries both — which the
+        // reader would resolve by preferring one, silently, over a declaration that asked for the
+        // other.
+        check_fields(
+            &object,
+            source.as_ref(),
+            &[
+                KnownField::always(ENTITY_ID),
+                KnownField::always("x"),
+                KnownField::always("y"),
+                KnownField::always("morton"),
+                KnownField::always("residual"),
+            ],
+            block.fields.as_ref(),
+        )?;
+        if let Some(fields) = &block.fields {
+            let quantised = fields.contains_key("x") || fields.contains_key("y");
+            let coded = fields.contains_key("morton") || fields.contains_key("residual");
+            if quantised && coded {
+                return Err(declaration_error(format!(
+                    "view '{}': `fields` names both an `x`/`y` pair and a `morton` code, and the \
+                     two geometry shapes are mutually exclusive (configuration.md §1). A row \
+                     carries coordinates or a code, so naming both says the source has two \
+                     geometries and leaves the reader to pick",
+                    block.name
+                )));
+            }
+            if fields.contains_key("residual") && !fields.contains_key("morton") {
+                return Err(declaration_error(format!(
+                    "view '{}': `fields.residual` without `fields.morton`. A residual is the \
+                     sub-cell remainder of a Morton code and is read only beside one",
+                    block.name
+                )));
+            }
+        }
+        let extent = compile_extent(&block.name, block.extent.as_ref())?;
         if block.visibility.is_some() {
             return Err(declaration_error(format!(
                 "view '{}': `visibility` is specified and not built (views §3 — a view's own \
@@ -687,6 +1432,27 @@ fn compile_views(blocks: &[ViewBlock]) -> Result<Vec<View>> {
                 )));
             }
         }
+        // **A point's label comes from a field or from a source, never both** (§1). They are two
+        // shapes of one relation — a list per point, or a row per `(point, term)` — so a view
+        // declaring both has said the labels are in two places and left the build to choose.
+        if point.field.is_some() && point.source.is_some() {
+            return Err(declaration_error(format!(
+                "view '{}': `point_visibility` declares both a `field` and a `source`, and a \
+                 point's label comes from one or the other (configuration.md §1). `field` is a \
+                 column of this view's own source, one value or a list per point; `source` is a \
+                 separate exploded `(entity_id, term_id)` relation. Declaring both leaves which \
+                 one carries a point's terms to the reader",
+                block.name
+            )));
+        }
+        let labels = match &point.source {
+            Some(declared) => Some(sources.resolve(
+                &format!("{key}:point_visibility"),
+                &format!("{object} point_visibility"),
+                declared,
+            )?),
+            None => None,
+        };
         let default = point.default.as_deref().ok_or_else(|| {
             declaration_error(format!(
                 "view '{}': `point_visibility.default` is required and has no default. It is what \
@@ -712,8 +1478,11 @@ fn compile_views(blocks: &[ViewBlock]) -> Result<Vec<View>> {
         views.push(View {
             name: block.name.clone(),
             title: block.title.clone(),
+            source,
+            extent,
             point_visibility: PointVisibility {
                 field: point.field.clone(),
+                source: labels,
                 default: default.to_string(),
             },
         });
@@ -747,7 +1516,7 @@ fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
 
 fn compile_vocabularies(
     blocks: &[VocabularyBlock],
-    values: &HashMap<String, PathBuf>,
+    sources: &mut Sources,
 ) -> Result<HashMap<String, Vocabulary>> {
     let mut compiled: HashMap<String, Vocabulary> = HashMap::new();
     for block in blocks {
@@ -763,8 +1532,28 @@ fn compile_vocabularies(
                 block.name
             )));
         }
-        refuse_acquisition("[[vocabulary]]", "source", block.source.is_some())?;
-        refuse_acquisition("[[vocabulary]]", "fields", block.fields.is_some())?;
+        let object = format!("vocabulary '{}'", block.name);
+        let source = match &block.source {
+            Some(declared) => Some(sources.resolve(
+                &format!("vocabulary:{}", block.name),
+                &object,
+                declared,
+            )?),
+            None => None,
+        };
+        // A `code` field pins the codes and its absence assigns them, which is why it is *always*
+        // available rather than asserted by another key: which of the two a file does is the file's
+        // to say, and §1 makes that the one difference between the two spellings.
+        check_fields(
+            &object,
+            source.as_ref(),
+            &[
+                KnownField::always("key"),
+                KnownField::always("code"),
+                KnownField::always("title"),
+            ],
+            block.fields.as_ref(),
+        )?;
 
         let width_name = block.width.as_deref().ok_or_else(|| {
             declaration_error(format!(
@@ -852,12 +1641,12 @@ fn compile_vocabularies(
         }
 
         let reserved = compile_reserved(block)?;
-        let mut declared = match (&block.values, values.get(&block.name)) {
+        let mut declared = match (&block.values, source.as_ref()) {
             (Some(_), Some(_)) => {
                 return Err(declaration_error(format!(
-                    "vocabulary '{}' declares values inline and is also bound to a file by \
-                     `--values`. They are spellings of one thing, so declaring both is a parse \
-                     error rather than a precedence question",
+                    "vocabulary '{}' declares values inline and names a `source`. They are \
+                     spellings of one thing — a value set is inline *or* sourced — so declaring \
+                     both is a parse error rather than a precedence question",
                     block.name
                 )));
             }
@@ -869,9 +1658,10 @@ fn compile_vocabularies(
                      is authored, and an authored set of nothing refuses every ingest and costs \
                      its width in every row for ever. Declare `values = [\"a\", \"b\"]` (codes \
                      assigned in the order given), or a `[vocabulary.values]` table pinning them, \
-                     or bind a file with `--values {}=<path>`. An unbound source is never a silent \
-                     fall-through to minting, which would open the set with nobody deciding to",
-                    block.name, block.name
+                     or name a `source` and bind it with `--file`. An unbound source is never a \
+                     silent fall-through to minting, which would open the set with nobody deciding \
+                     to",
+                    block.name
                 )));
             }
             // Open, and no values given: starts empty rather than closing the set, and the build
@@ -910,18 +1700,6 @@ fn compile_vocabularies(
                 reserved,
             },
         );
-    }
-
-    // Every bound `--values` key must be claimed by some vocabulary, or the unbound-source rule
-    // above merely relocates the typo (configuration.md §7).
-    for key in values.keys() {
-        if !compiled.contains_key(key) {
-            return Err(declaration_error(format!(
-                "--values bound the key '{key}', which no `[[vocabulary]]` block declares as its \
-                 name. Refused rather than ignored: a typo in a binding would otherwise leave the \
-                 intended vocabulary unbound and fail elsewhere"
-            )));
-        }
     }
     Ok(compiled)
 }
@@ -1118,7 +1896,12 @@ fn compile_attributes(
                 decl.name
             )));
         }
-        refuse_acquisition("[[attribute]]", "field", decl.field.is_some())?;
+        // The attribute's own one-field map: `field` locates the column when it differs from the
+        // served name. ⊘ A differing name is refused for [`refuse_rename`]'s reason — the
+        // attribute pass reads the column named by `name`.
+        if let Some(field) = &decl.field {
+            refuse_rename(&format!("attribute '{}'", decl.name), &decl.name, field)?;
+        }
         // `render` + `multi` before bare `multi`: the first is a permanent fence (0039) and the
         // second an unbuilt stage, and a caller who set both must hear the fence — it survives the
         // epic that lifts the other refusal.
@@ -1377,8 +2160,13 @@ fn check_column_name(name: &str) -> Result<()> {
 // Layers
 // ---------------------------------------------------------------------------------------------
 
-fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDeclaration>> {
+fn compile_layers(
+    blocks: &[LayerBlock],
+    views: &[View],
+    sources: &mut Sources,
+) -> Result<(Vec<LayerDeclaration>, Vec<LayerSources>)> {
     let mut layers = Vec::with_capacity(blocks.len());
+    let mut per_layer = Vec::with_capacity(blocks.len());
     let mut seen: HashSet<&str> = HashSet::new();
     for block in blocks {
         if !seen.insert(block.name.as_str()) {
@@ -1388,11 +2176,18 @@ fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDecl
                 block.name
             )));
         }
-        refuse_acquisition("[[layer]]", "source", block.source.is_some())?;
-        refuse_acquisition("[[layer]]", "fields", block.fields.is_some())?;
-        refuse_acquisition("[[layer]]", "artifacts", block.artifacts.is_some())?;
-        refuse_unbuilt_block(&block.name, "members", block.members.is_some())?;
-        refuse_unbuilt_block(&block.name, "labels", block.labels.is_some())?;
+        refuse_unbuilt_labels(&block.name, block.labels.is_some())?;
+        let object = format!("layer '{}'", block.name);
+        if block.artifacts.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: an inline `artifacts` list is specified and not built \
+                 (`annotation-write-cycle.md` §6.1). An authored layer's artifacts are read from \
+                 the file `source` names, and nothing yet reads a \
+                 layer's artifacts out of the config document. Refused rather than ignored: an \
+                 authored artifact that parses and is never published is a layer its author \
+                 believes is populated"
+            )));
+        }
 
         // **Refused here, before the artifacts file is opened**: a layer appears only in the views
         // it declares, so a mistyped view name would produce a bundle whose layer is registered,
@@ -1531,6 +2326,134 @@ fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDecl
             )));
         }
 
+        let content = compile_content(block)?;
+
+        // ---- acquisition ---------------------------------------------------------------------
+        // Read after the declaration is compiled, because the field map is checked *against* it:
+        // `hierarchy` is what says there are parent edges, `depends_on` that there are attachment
+        // edges, `content.supplied` that there is content, and `membership` that there are members
+        // — so each of those keys decides whether the map may name the field that carries it.
+        let source = match &block.source {
+            Some(declared) => {
+                Some(sources.resolve(&format!("layer:{}", block.name), &object, declared)?)
+            }
+            None => None,
+        };
+        let members_block = block.members.as_ref();
+        let carries_members = block
+            .fields
+            .as_ref()
+            .is_some_and(|f| f.contains_key("members") || f.contains_key("excluding"));
+        // **A layer's membership has two shapes, and it names whichever it uses** (§7). A list
+        // field on the artifact row, or a source of its own, one row per `(artifact, entity)` —
+        // for a membership no single cell should hold. Declaring both leaves two answers to what
+        // an artifact's members are, and every masked count and every criterion divides by one of
+        // them.
+        if carries_members && members_block.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: membership is declared twice — a `members` (or `excluding`) field on \
+                 the artifact row, and a `[layer.members]` source of its own. They are two shapes \
+                 of one thing, so declaring both is a parse error rather than a precedence \
+                 question"
+            )));
+        }
+        let enumerated = membership == MembershipSource::Enumerated;
+        check_fields(
+            &object,
+            source.as_ref(),
+            &[
+                KnownField::always("key"),
+                KnownField::asserted_by(
+                    "contents",
+                    !content.supplied.is_empty(),
+                    "`[[layer.content.supplied]]` is what declares this layer's artifacts carry \
+                     content",
+                ),
+                KnownField::asserted_by(
+                    "parent",
+                    matches!(hierarchy.kind, HierarchyKind::Nested | HierarchyKind::Tiered),
+                    "`hierarchy.kind` is `flat` or `stacked`, neither of which has lineage in its \
+                     edges",
+                ),
+                KnownField::asserted_by(
+                    "attached_layer",
+                    !block.depends_on.is_empty(),
+                    "`depends_on` is what names the layers this one's edges point into",
+                ),
+                KnownField::asserted_by(
+                    "attached_key",
+                    !block.depends_on.is_empty(),
+                    "`depends_on` is what names the layers this one's edges point into",
+                ),
+                KnownField::asserted_by(
+                    "members",
+                    enumerated,
+                    "`membership` is not `enumerated`, so this layer's members are computed \
+                     rather than stored per artifact",
+                ),
+                KnownField::asserted_by(
+                    "excluding",
+                    enumerated,
+                    "`membership` is not `enumerated`, so this layer's members are computed \
+                     rather than stored per artifact",
+                ),
+            ],
+            block.fields.as_ref(),
+        )?;
+
+        let members = match members_block {
+            None => None,
+            Some(members) => {
+                let object = format!("{object} `[layer.members]`");
+                if !enumerated {
+                    return Err(declaration_error(format!(
+                        "{object}: a member source names one row per (artifact, entity), and this \
+                         layer's `membership` is not `enumerated` — its members are computed from a \
+                         shape or a predicate, so there is no stored set for the file to carry"
+                    )));
+                }
+                let path = match &members.source {
+                    Some(declared) => Some(sources.resolve(
+                        &format!("layer:{}:members", block.name),
+                        &object,
+                        declared,
+                    )?),
+                    None => None,
+                };
+                // **The artifacts file is the roster** (`layers`): a member row names an artifact,
+                // and without the layer's own source there is nothing for the name to resolve
+                // against — a mistyped key would publish a phantom artifact rather than fail.
+                if path.is_some() && source.is_none() {
+                    return Err(declaration_error(format!(
+                        "{object}: a member source without the layer's own `source`. The layer's \
+                         file is the roster of artifacts a member row names, so members with no \
+                         roster would make every key its own artifact rather than a refusal"
+                    )));
+                }
+                check_fields(
+                    &object,
+                    path.as_ref(),
+                    &[
+                        KnownField::always("key"),
+                        KnownField::always("entity"),
+                        KnownField::asserted_by(
+                            "rank",
+                            !content.supplied.is_empty(),
+                            "a rank names the generating set of `contents[k]`, and \
+                             `[[layer.content.supplied]]` is what declares there is content",
+                        ),
+                    ],
+                    members.fields.as_ref(),
+                )?;
+                path
+            }
+        };
+        per_layer.push(LayerSources {
+            name: block.name.clone(),
+            artifacts: source,
+            members,
+        });
+
         let declaration = LayerDeclaration {
             name: block.name.clone(),
             title: block.title.clone(),
@@ -1540,7 +2463,7 @@ fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDecl
             artifact_visibility,
             require_member_visibility,
             hierarchy,
-            content: compile_content(block)?,
+            content,
             depends_on: block.depends_on.clone(),
             levels: compile_levels(block)?,
         };
@@ -1552,7 +2475,7 @@ fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDecl
         })?;
         layers.push(declaration);
     }
-    Ok(layers)
+    Ok((layers, per_layer))
 }
 
 fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {

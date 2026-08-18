@@ -170,6 +170,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         points: points_path.to_path_buf(),
+        corpus: Some(points_path.to_path_buf()),
         pairs: pairs_path.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),
@@ -209,13 +210,17 @@ pub fn build_corpus_fixture(
     pairs_path: &Path,
     corpus: &tessera_corpus::Corpus,
 ) {
-    let config_path = out.with_extension("config.toml");
-    std::fs::create_dir_all(config_path.parent().expect("the bundle has a parent")).ok();
+    // **Beside the sources, not beside the bundle.** A `source` is a path relative to the
+    // document that declares it (`configuration.md` §3), and the generator's declaration names
+    // `points.parquet` and `pairs.parquet` — so the document has to sit where they do.
+    let config_path = points_path.with_file_name("corpus-config.toml");
+    std::fs::create_dir_all(config_path.parent().expect("the sources have a parent")).ok();
     std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the generator's config parses");
     let args = BuildArgs {
         points: points_path.to_path_buf(),
+        corpus: Some(points_path.to_path_buf()),
         pairs: pairs_path.to_path_buf(),
         out: out.to_path_buf(),
         extent: corpus.extent(),

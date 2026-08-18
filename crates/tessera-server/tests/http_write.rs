@@ -4398,6 +4398,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
     let schema_path = tmp.join("scalar-tail-schema.toml");
     std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.to_path_buf(),

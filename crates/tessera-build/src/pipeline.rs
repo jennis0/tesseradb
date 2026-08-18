@@ -1699,7 +1699,7 @@ fn read_attributes_by_entity(
     };
 
     input::scan_attributes(
-        &args.points,
+        crate::corpus_source(args)?,
         &args.schema,
         minters,
         args.limit,

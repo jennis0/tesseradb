@@ -66,6 +66,7 @@ fn ensure_bundle() -> PathBuf {
         let root = workspace_root();
         let args = BuildArgs {
             points: root.join("data/scaled/geometry.parquet"),
+            corpus: Some(root.join("data/scaled/geometry.parquet")),
             pairs: root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
             out: bundle_root.clone(),
             extent: extent(),

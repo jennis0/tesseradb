@@ -138,6 +138,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     build(&BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: out.to_path_buf(),

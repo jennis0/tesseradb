@@ -56,7 +56,7 @@ flowchart TB
 
 | Mode | What runs | For whom |
 |---|---|---|
-| `tessera serve -c tessera.toml` | the binary, three planes | deployments |
+| `tessera serve` | the binary, three planes, per the `tessera.toml` it walks up to find | deployments |
 | `tessera build` | the binary, batch mode | anyone producing bundles (§6.1) |
 | `tessera verify` | the binary, read protocol + structural checks | operators, CI |
 | `tessera-engine` (crate) | the engine linked into a Rust host | embedders with their own shell |
@@ -505,7 +505,9 @@ The bundle plus the WAL is the recovery story: immutable-once-retired prefixes m
 
 ## 7. Configuration
 
-One file, `tessera.toml`. The philosophy has a security edge: **performance knobs default; disclosure controls do not.** A config missing a disclosure control fails to start, naming the design section that explains the knob — the config file doubles as the deployment's disclosure-review checklist.
+One file, `tessera.toml`, **found by walking up from the working directory** as `Cargo.toml` is (`--deployment <path>` names one outright), and read by `tessera build` as well as by `tessera serve`: a build's output path and a server's `bundle.path` are one value seen from two sides, so they are declared once. Its build-side keys — `[build].schema`, naming the corpus declaration, and `[identity].env`, naming the environment variable that carries the identity key — are [`configuration.md`](configuration.md) §3's, along with the rule that every path in this file resolves against the file's own directory. A missing `tessera.toml` is a refusal naming what to create, never a set of defaults.
+
+The philosophy has a security edge: **performance knobs default; disclosure controls do not.** A config missing a disclosure control fails to start, naming the design section that explains the knob — the config file doubles as the deployment's disclosure-review checklist.
 
 Two properties reinforce it. Every section but `[disclosure]` is `deny_unknown_fields`, so a typo'd key or section header is a startup error rather than a silent default: an operator who sets a knob and gets the default has no signal at all that they did. `[disclosure]` is the exception, and in the direction that costs most: it is parsed as a generic TOML value and hand-validated, so it rejects a *missing* required key and silently ignores an *unknown* one — a misspelling alongside a correct key passes. That is the one section whose keys are disclosure controls. And every check **refuses rather than clamps** — `k_min = 0` would silently disable the I7 floor clause, a zero `theta_target_marks` would blank the density signal, a zero `compute_admission` would shed everything, and each is a typed error naming its own silent failure. The cost is that a config carrying a key from a newer build is refused rather than ignored; that is the right direction for a fail-closed config, because a downgrade that silently drops half an operator's tuning is the worse outcome.
 
@@ -529,7 +531,8 @@ token_max_lifetime  = 3600            # seconds, integer. Required: there is no 
 viewer  = "127.0.0.1:7407"            # loopback by default; binding wider is an explicit act
 session = "127.0.0.1:7408"            # authorise/revoke only; the app tier's surface
 control = "unix:/run/tessera/control.sock"   # loopback TCP + credential on Windows
-# credentials: by file or by env var, never inline
+# credentials: by file or by env var, never inline. The locator is checked here; the secret is
+# read at startup, so `tessera build` — which reads this same file — needs neither exported
 session_credential_file  = "/etc/tessera/session.cred"
 operator_credential_file = "/etc/tessera/operator.cred"
 # selection clause (§7.2) — refused, never clamped, if inconsistent
@@ -574,7 +577,7 @@ Two things that do **not** belong here: the prompt-sample-versus-full-membership
 
 ## 8. Consumption and packaging
 
-The binary and its HTTP surfaces are the product. `tessera serve -c tessera.toml` under systemd or a container, `POST /session/authorise` from the integrating backend's session middleware (session credential only — the app tier never holds operator), and the viewer plane behind the organisation's TLS termination. No Docker requirement, no JVM, no external services; the object store is optional, since a bundle is a directory.
+The binary and its HTTP surfaces are the product. `tessera serve` under systemd or a container, `POST /session/authorise` from the integrating backend's session middleware (session credential only — the app tier never holds operator), and the viewer plane behind the organisation's TLS termination. No Docker requirement, no JVM, no external services; the object store is optional, since a bundle is a directory.
 
 **Bounding the number of concurrent connections is the deployment's job, and the reason is worth stating rather than leaving to be discovered.** The process bounds what each request costs — the compute gate bounds in-flight viewer requests, the ingest admission bound bounds concurrent ingest handlers, and startup refuses a per-connection body cap above 64 MiB — but it accepts connections without limit. `/control/ingest` in particular is buffer-the-whole-body shaped: the Arrow batch is decoded in one piece, so the body is resident in full before the handler runs and before any admission bound sees it. A caller holding the operator credential can therefore pin one batch cap per connection. The control plane defaults to a unix socket precisely so this is an admin-network question; where any plane is exposed beyond a trusted network, a reverse proxy is what bounds the connection count, and it is a deployment requirement rather than a recommendation. The in-process alternatives — a concurrency-limit layer, a listener-level accept cap — were both assessed and declined, because each converts a prompt refusal into a wait: the first queues where the ingest bound sheds, and the second leaves callers in the kernel's accept backlog with no status code at all. Streaming the upload is the real fix and belongs with the flush work.
 

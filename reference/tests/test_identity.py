@@ -196,7 +196,7 @@ def test_trailing_newline_is_rejected_not_normalised(vectors):
     """Finding 2 (task-5 review): `$` matches immediately before a trailing `\\n`, and
     `bytes.fromhex` then silently tolerates ASCII whitespace, so the old
     `^[0-9a-f]{32}$` regex accepted a key with a trailing newline as the canonical key --
-    exactly the shape a key read from `--id-key-file` arrives in. Memo §1.2's rule is
+    exactly the shape a key read from the environment or `--identity-file` arrives in. Memo §1.2's rule is
     reject, not normalise; `\\Z` (not `$`) is what makes that true."""
     canonical = "000102030405060708090a0b0c0d0e0f"
     assert ident.IdentityKey.from_hex(canonical) is not None  # sanity: valid on its own

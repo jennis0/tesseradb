@@ -39,13 +39,15 @@ revises that.
 
 ## Running it
 
-Write a `dev-server.toml` in this directory (untracked):
+Write a `tessera.toml` in this directory (untracked). **Every path in it resolves against the file
+itself**, and `tessera serve` finds it by walking up from wherever you run it — so the paths below
+are relative to `clients/ts/`:
 
 ```toml
 [bundle]
-path = "data/bench-fixtures/2m4"
-cache = "clients/ts/.dev/cache"
-wal = "clients/ts/.dev/wal.log"
+path = "../../data/bench-fixtures/2m4"
+cache = ".dev/cache"
+wal = ".dev/wal.log"
 
 [plugin]
 module = "builtin:passthrough"
@@ -79,7 +81,7 @@ cargo build --release
 mkdir -p clients/ts/.dev
 export TESSERA_SESSION_CRED=dev-session-credential
 export TESSERA_OPERATOR_CRED=dev-operator-credential
-./target/release/tessera serve -c clients/ts/dev-server.toml &
+./target/release/tessera serve --deployment clients/ts/tessera.toml &
 
 cd clients/ts && npm install
 node scripts/measure-principals.mjs --terms 0..200   # writes viewer/presets.json

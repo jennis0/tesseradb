@@ -65,7 +65,12 @@ Then, depending on what you are after:
 - **How a build is declared.** [`configuration.md`](configuration.md) — one file declaring the
   corpus, its views, its vocabularies, its attributes and its layers, compiled into the manifest.
   Its §1 enumerates the whole surface, which is a **closed** set: a key it does not name does not
-  exist. ⊘ Not built — the parsers still read the two-file surface it replaces.
+  exist. Its §3 is the three-file split: the declaration, the deployment's own `tessera.toml` (found
+  by walking up, read by `build` and `serve` alike), and the identity key in the environment — so
+  `tessera build` and `tessera serve` are the whole invocation and every flag is an override. ⊘ Two
+  gaps, both refused rather than ignored: a `fields` map is validated and cannot yet *move* a field,
+  the input readers resolving the canonical names; and a point's labels must come from a `source`,
+  the list-valued access column and the reserved term a `default` resolves to being unwritten.
 - **How filtering works.** [`filter-index.md`](filter-index.md) for the attribute artefact the
   operands read, and [`filter-surface.md`](filter-surface.md) for what a query does with it. Both are
   provisional, and **every shipped family is built** end to end — value column and masked scan for

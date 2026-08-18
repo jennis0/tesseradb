@@ -273,6 +273,7 @@ fn fixture() -> Fixture {
 
     build(&BuildArgs {
         points: points.clone(),
+        corpus: Some(points.clone()),
         pairs: pairs.clone(),
         out: bundle.clone(),
         extent: extent(),

@@ -128,6 +128,7 @@ fn write_points_with_absent_category(path: &Path, n: u64, column: &str) {
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     BuildArgs {
         points: points.to_path_buf(),
+        corpus: Some(points.to_path_buf()),
         pairs: pairs.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),

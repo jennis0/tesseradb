@@ -128,6 +128,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         points: points_path.to_path_buf(),
+        corpus: Some(points_path.to_path_buf()),
         pairs: pairs_path.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),

@@ -120,6 +120,7 @@ fn parse_schema(text: &str, values: &HashMap<String, PathBuf>) -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
         points: points.to_path_buf(),
+        corpus: Some(points.to_path_buf()),
         pairs: pairs.to_path_buf(),
         out,
         extent: extent(),
@@ -370,6 +371,7 @@ name       = "dept_seed"
 width      = "u16"
 value_set  = "open"
 visibility = "derived"
+source     = "dept-seed.parquet"
 
 [[attribute]]
 name = "department"
@@ -377,8 +379,10 @@ type = "category"
 render = true
 vocabulary = "dept_seed"
 "#;
+    // The seed file is staged outside the schema's own directory, which is exactly what
+    // `--file` is for: an override keyed by the object whose source it replaces.
     let mut values = HashMap::new();
-    values.insert("dept_seed".to_string(), seed_path);
+    values.insert("vocabulary:dept_seed".to_string(), seed_path);
     let schema = parse_schema(text, &values);
     build(&args(&points, &pairs, out.clone(), schema)).expect("build succeeds");
 

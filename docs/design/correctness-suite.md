@@ -1109,7 +1109,7 @@ them would have stopped a builder outright.
   two routes and **rules neither** — it is an owner decision, and build-order row 8 is marked as the
   one row that cannot start on a reading of this document.
 - **The prerequisite this document was built around had already landed**, a week before it was
-  written: `tessera build --config` exists, the fixtures declare `fx_key`, the points batch serves
+  written: the corpus declaration exists, the fixtures declare `fx_key`, the points batch serves
   it, and the strict xfail was removed on 2026-08-07 — behaving exactly as a strict marker should.
   Total verification is unblocked now, the planted column *is* `fx_key` rather than a second name
   for it, and `conformance.md` is stale about this as it was about the fold.

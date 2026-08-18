@@ -32,6 +32,7 @@ const MEMBERS: std::ops::Range<u64> = 0..150;
 const CONFIG_TOML: &str = r#"
 [[view]]
 name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
 
 [[layer]]
@@ -164,6 +165,7 @@ fn fixture() -> Fixture {
     write_members(&members);
 
     let args = BuildArgs {
+        corpus: Some(points.clone()),
         points,
         pairs,
         out: root.clone(),

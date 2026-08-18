@@ -128,7 +128,7 @@ class IdentityKey:
         `0-9a-f` characters, no `0x` prefix, no whitespace, no separator -- and, since
         `_HEX_KEY_RE` is anchored with `\\Z` rather than `$`, no trailing newline either
         (`$` matches immediately before a trailing `\\n`, which `bytes.fromhex` then
-        silently tolerates -- exactly the shape a key read from `--id-key-file` arrives
+        silently tolerates -- exactly the shape a key read from the environment arrives
         in). Uppercase is rejected outright, not case-folded. `k0`/`k1` are then read
         little-endian **over the decoded bytes**, not the text: `key_bytes[0]` is the
         first two characters of the string, `k0` covers bytes 0..8, `k1` covers bytes

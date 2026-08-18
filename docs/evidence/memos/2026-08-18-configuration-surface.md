@@ -448,9 +448,10 @@ minted the way an open vocabulary is minted. A grant is then written in category
 integers, and `terms.parquet` — which the build never reads, and which exists so a human can
 translate a grant back — is replaced by a real build output (§8.2).
 
-The exploded `(entity_id, term_id)` file stays as a **source**, bound with `--pairs`, not as a
-second concept: the build writes that shape as oracle output regardless and the probe generators
-produce it natively at 10⁹, so the reader exists either way. Declaring both is refused.
+The exploded `(entity_id, term_id)` file stays as a **source**, named by
+`point_visibility.source` like every other, not as a second concept: the build writes that shape as
+oracle output regardless and the probe generators produce it natively at 10⁹, so the reader exists
+either way. Declaring both is refused.
 
 Three rules for §6.1:
 

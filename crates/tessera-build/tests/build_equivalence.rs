@@ -28,7 +28,7 @@
 //! `both_implementations_agree_on_keys_though_fresh_codes_differ`. Threading a seeded RNG in to
 //! close that gap is the thing that module's header exists to refuse.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -183,12 +183,14 @@ width      = "u8"
 value_set  = "closed"
 # `public` is only what a closed set can safely publish (§3.8), so this fixture covers both.
 visibility = "public"
+source     = "archive-values.parquet"
 
 [[vocabulary]]
 name       = "department"
 width      = "u16"
 value_set  = "open"
 visibility = "derived"
+source     = "department-values.parquet"
 
 [[attribute]]
 name       = "archive"
@@ -266,17 +268,15 @@ fn write_values(path: &Path, values: &[(&str, u32)]) {
 /// fixture byte-reproducible: a seeded key returns its pinned code without touching the draw, so
 /// nothing here consumes entropy.
 fn attributed_schema(dir: &Path) -> tessera_build::config::Schema {
-    let archive = dir.join("archive-values.parquet");
-    let department = dir.join("department-values.parquet");
-    write_values(&archive, ARCHIVE_VALUES);
-    write_values(&department, DEPARTMENT_VALUES);
+    write_values(&dir.join("archive-values.parquet"), ARCHIVE_VALUES);
+    write_values(&dir.join("department-values.parquet"), DEPARTMENT_VALUES);
     let schema_path = dir.join("config.toml");
     std::fs::write(&schema_path, ATTRIBUTED_SCHEMA).unwrap();
-    let values = HashMap::from([
-        ("archive".to_string(), archive),
-        ("department".to_string(), department),
-    ]);
-    tessera_build::config::Config::parse(&schema_path, &values).expect("the fixture schema parses").schema
+    // Each vocabulary names its own file, relative to this document (`configuration.md` §3), so
+    // the fixture needs no bindings at all.
+    tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .expect("the fixture schema parses")
+        .schema
 }
 
 /// `write_points`'s geometry with `ATTRIBUTED_SCHEMA`'s six columns beside it.
@@ -353,6 +353,7 @@ fn write_attributed_points(path: &Path) {
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
         points: points.to_path_buf(),
+        corpus: Some(points.to_path_buf()),
         pairs: pairs.to_path_buf(),
         out,
         extent: extent(),
@@ -908,6 +909,7 @@ fn reference_build_at_scale() {
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
         points: PathBuf::from("data/scaled/geometry.parquet"),
+        corpus: Some(PathBuf::from("data/scaled/geometry.parquet")),
         pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
         out,
         extent: Bounds {
