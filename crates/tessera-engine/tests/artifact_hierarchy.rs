@@ -872,3 +872,42 @@ fn a_pruned_response_carries_no_parent_links() {
         "the root was dropped by the frontier, so there is nothing in this response to name"
     );
 }
+
+/// **The same key at two levels is a taxonomy, not a cycle.** A stable key is unique per
+/// `(layer, level)`, so an arXiv archive with no subject class is `hep-ph` at level 0 and `hep-ph`
+/// at level 1, the second naming the first as its parent. Refusing that would make a caller rename
+/// half their taxonomy to satisfy a check written for a tree, where an artifact naming its own key
+/// really is naming itself.
+#[test]
+fn a_levelled_layer_may_carry_one_key_at_two_levels() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(administrative("taxonomy/arxiv", 2)).unwrap();
+    engine
+        .publish_artifacts(
+            "taxonomy/arxiv".into(),
+            0,
+            vec![node(&fx, "hep-ph", None, 0..200)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "taxonomy/arxiv".into(),
+            1,
+            // The archive has no subclass, so the class carries the archive's own name.
+            vec![node(&fx, "hep-ph", Some("hep-ph"), 0..200)],
+        )
+        .expect("a level-1 artifact may name the level-0 artifact of the same key");
+
+    let served = levelled_artifacts_of(&engine, &full_coverage_credential(), None, "taxonomy/arxiv");
+    assert_eq!(served.len(), 2, "both levels are served");
+    let child = served
+        .iter()
+        .find(|a| a.parent_id.is_some())
+        .expect("the level-1 artifact names its parent");
+    let parent = served
+        .iter()
+        .find(|a| a.tessera_id == child.parent_id.unwrap())
+        .expect("and the parent is in the response");
+    assert_ne!(child.tessera_id, parent.tessera_id, "two artifacts, one name");
+}

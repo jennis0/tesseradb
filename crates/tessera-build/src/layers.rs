@@ -708,7 +708,11 @@ fn verify_hierarchies(
             }
             address
         };
-        if parent_key == key {
+        // **Only a within-level edge can name itself.** A stable key is unique per `(layer,
+        // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
+        // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
+        // the level-0 one of the same name.
+        if !cross_level && parent_key == key {
             return Err(BuildError::Invalid(format!(
                 "{layer} level {level} artifact {key} names itself as its parent"
             )));
@@ -772,7 +776,7 @@ fn verify_hierarchies(
         });
     }
 
-    detect_cycles(plan)?;
+    detect_cycles(plan, &kind_of)?;
     Ok((violations, coverage))
 }
 
@@ -781,12 +785,26 @@ fn verify_hierarchies(
 /// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
 /// longer than that has revisited a node, whatever the shape of the loop.
 ///
-/// **Only a nested layer can hold one, so only its edges are walked.** An administrative layer's
+/// **Only a nested layer can hold one, and only its edges are walked.** An administrative layer's
 /// edges each step to a strictly coarser level, and the levels are finite and bounded below by
-/// zero, so a cycle is not expressible — the same-level lookup here simply finds nothing and the
-/// walk ends, which is the right answer rather than a gap.
-fn detect_cycles(plan: &LayerPlan) -> Result<()> {
+/// zero, so a cycle is not expressible there.
+///
+/// **Skipping such a layer is required, not an optimisation.** Its keys are unique per level and
+/// may legitimately repeat across them — an arXiv archive with no subclass is `hep-ph` at both —
+/// so the same-level walk below would follow `hep-ph` at level 1 back to itself and report the
+/// taxonomy as a cycle. That is exactly what it did before this guard existed, and the demo corpus
+/// is what found it.
+fn detect_cycles(
+    plan: &LayerPlan,
+    kind_of: &BTreeMap<&str, tessera_types::layer::HierarchyKind>,
+) -> Result<()> {
     for (layer, level, key) in plan.artifacts.keys() {
+        if !matches!(
+            kind_of.get(layer.as_str()),
+            Some(tessera_types::layer::HierarchyKind::Nested)
+        ) {
+            continue;
+        }
         let bound = plan
             .artifacts
             .keys()

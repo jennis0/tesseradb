@@ -543,7 +543,12 @@ impl LayerRegistry {
                         kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
                     });
                 }
-                if artifact.stable_key.as_deref() == Some(key) {
+                // **Only a within-level edge can name itself.** A stable key is unique per
+                // `(layer, level)`, so a levelled taxonomy legitimately carries the same key at two
+                // levels — an arXiv archive with no subclass is `hep-ph` at both, and the level-1
+                // artifact's parent is the level-0 one of the same name. Refusing that would force
+                // a caller to rename half their taxonomy to satisfy a check meant for a tree.
+                if !cross_level && artifact.stable_key.as_deref() == Some(key) {
                     return Err(missing());
                 }
 

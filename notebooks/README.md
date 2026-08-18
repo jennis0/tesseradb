@@ -7,7 +7,7 @@ or belongs to any trusted computing base.
 
 | | |
 |---|---|
-| [`arxiv-corpus.ipynb`](arxiv-corpus.ipynb) | the whole corpus, end to end: the arXiv sources, UMAP, two clusterings, TF-IDF labels over each, and the configuration that reads the lot |
+| [`arxiv-corpus.ipynb`](arxiv-corpus.ipynb) | the whole corpus, end to end: the arXiv sources, UMAP, two clusterings, arXiv's own taxonomy, TF-IDF labels, and the configuration that reads the lot |
 | [`run-corpus.sh`](run-corpus.sh) | builds a bundle from what the notebook wrote and serves it, then prints two principals to compare |
 
 ## The short way
@@ -42,6 +42,23 @@ TESSERA_DATA=… TESSERA_NOTEBOOK_SAMPLE=50000 \
   notebooks/.venv/bin/jupyter nbconvert --to notebook --execute \
   --output /tmp/executed.ipynb notebooks/arxiv-corpus.ipynb
 ```
+
+## Three shapes over one corpus
+
+The point of publishing all three is that they behave differently, and the differences are the
+system's subject rather than the clustering's:
+
+| Layer | Shape | A coarser view is | A budget |
+|---|---|---|---|
+| `clusters/kmeans` | flat | nothing — every cluster is a peer | inert |
+| `clusters/hdbscan` | a tree, edges within one level | an **ancestor**, and the cut climbs to it | trades depth for count |
+| `taxonomy/arxiv` | two levels, edges **between** them | **another level**, which the client picks | inert |
+
+The two hierarchies differ in a way worth seeing on a 50 000-paper run. The clustering's splits
+lose members — **124 of its 131** keep points that none of their children hold, because HDBSCAN
+sheds noise at every split. The taxonomy's **32 splits lose none**: every paper's primary category
+sits in exactly one archive, so an archive is exactly the union of its classes. A rollup that
+summed children would be right about arXiv's taxonomy and wrong about the clustering beside it.
 
 ## The knobs
 
