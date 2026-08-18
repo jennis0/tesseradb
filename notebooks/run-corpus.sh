@@ -20,16 +20,23 @@
 #
 # ## What you get
 #
-# Four layers over the corpus, and the pair of them is the point:
+# Five layers over the corpus, and the three shapes among them are the point:
 #
-#   clusters/kmeans    flat, `min_visible = 50`      — the control
-#   clusters/hdbscan   a tree, `min_fraction = 0.05` — the condensed tree, whose children do not
-#                                                      exhaust their parents
+#   clusters/kmeans    flat, min_visible = 50       — the control: every cluster a peer
+#   clusters/hdbscan   nested, min_fraction = 0.05  — the condensed tree, whose children do not
+#                                                     exhaust their parents
+#   taxonomy/arxiv     tiered, two levels           — arXiv's own classification, with containment
+#                                                     edges running between the levels
 #   topics/kmeans      labels attached to the first
 #   topics/hdbscan     labels attached to the second
 #
-# A viewport against the treed layer returns a **cut**: where a parent and a child are both visible
-# to you, the child is what you get. Pass `artifact_budget` to trade depth for count.
+# A viewport against the nested layer returns a **cut**: pass artifact_budget to trade depth for
+# count, and where a parent and a child both clear the bar the layer's prune_children decides which
+# you get. A budget does not climb the tiered layer's edges — its resolution is the client choosing
+# a level, and its edges are structure to draw with rather than a ladder to coarsen along.
+#
+# Every artifact carries the identifier of its parent **where that parent is in the same response**,
+# so the viewer nests what it lists and lights a subtree when you open one.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -139,7 +146,7 @@ control = "127.0.0.1:$CONTROL_PORT"
 max_k = 5000
 session_credential_env = "TESSERA_SESSION_CRED"
 operator_credential_env = "TESSERA_OPERATOR_CRED"
-# Development-only, exactly as `run_demo.sh` says of its own: the browser bundle talks to the two
+# Development-only, exactly as run_demo.sh says of its own: the browser bundle talks to the two
 # planes directly, so the dev origin is named here. Nothing to copy into an integration.
 dev_cors_origins = ["http://localhost:$VITE_PORT"]
 EOF
@@ -373,12 +380,18 @@ EOF
 
 say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop everything"
 cat <<'EOF'
-In the layer panel, switch between clusters/kmeans and clusters/hdbscan. The k-means layer is flat
-and every cluster is a peer; the HDBSCAN layer is a tree, so what you are shown is a cut through it
-and a cluster you can see may have coarser ones above it that you are not shown.
+In the layer panel, switch between the three clustering shapes. k-means is flat and every cluster
+is a peer. HDBSCAN is a tree: the panel indents each cluster under the one that contains it, and
+clicking a cluster lights its whole subtree on the map while the rest stays drawn. The arXiv
+taxonomy is levelled, and its indentation crosses a level — a subject class under its archive.
 
-Then change principal. Watch a cluster's count change without its identifier changing, and watch
-clusters leave the panel entirely when your share of them drops under the layer's 5% floor — which
-is indistinguishable, from here, from their never having been published.
+Then change principal, and watch two things move. A cluster's count changes without its identifier
+changing, and clusters leave the panel entirely when your share of them drops under the layer's 5%
+floor — indistinguishable, from here, from their never having been published.
+
+**The tree changes shape too.** A narrow principal's clusters hang off several tops where a broad
+one's hang off a single root: a share does not shrink downward, so a child can clear a bar its
+parent misses, and what is left is pieces. A piece's top is drawn flush left, exactly as a cluster
+with no parent at all is — nothing tells you a coarser one exists above it.
 EOF
 npm run dev -w @tessera/viewer

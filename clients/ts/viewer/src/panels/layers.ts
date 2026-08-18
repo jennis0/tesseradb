@@ -1,4 +1,5 @@
 import type {Artifact} from '@tessera/client';
+import {servedLineage, type ServedLineage} from '../artifacts.js';
 import {esc, panel, row} from '../html.js';
 import type {AppState} from '../state.js';
 
@@ -115,20 +116,74 @@ export function renderArtifacts(state: AppState): string {
     );
   }
 
-  const sorted = [...artifacts].sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : -1));
-  const rows = sorted
-    .slice(0, 12)
-    .map((a) => row(describe(a), fmt(a.maskedCount)))
+  const lineage = servedLineage(artifacts);
+  const listed = flatten(lineage);
+  const rows = listed
+    .slice(0, ROWS)
+    .map(({artifact, depth}) => nested(describe(artifact), fmt(artifact.maskedCount), depth))
     .join('');
 
   return panel(
     'Clusters in view',
-    `<div class="headline">${fmt(artifacts.length)} served</div>
+    `<div class="headline">${fmt(artifacts.length)} served${
+      lineage.linked ? `, ${fmt(lineage.roots.length)} of them at the top` : ''
+    }</div>
      ${rows}
-     ${sorted.length > 12 ? `<div class="muted">…and ${fmt(sorted.length - 12)} more</div>` : ''}
+     ${listed.length > ROWS ? `<div class="muted">…and ${fmt(listed.length - ROWS)} more</div>` : ''}
+     ${
+       lineage.linked
+         ? `<div class="muted">indented under what contains it. A cluster shown flush left is one
+             whose parent this principal was not served — which is also what having no parent looks
+             like, and the response does not say which.</div>`
+         : ''
+     }
      <div class="muted">members visible to this principal, over the whole cluster — not over the
        viewport, so it holds steady as you pan. Never the cluster's size.</div>`
   );
+}
+
+/** How many rows the panel will show before it stops and says how many it did not. */
+const ROWS = 14;
+
+/**
+ * The served tree as a list, parents immediately above their own children, largest count first at
+ * every level.
+ *
+ * **Depth-first rather than sorted flat, and the difference is the whole point of the panel.** A
+ * global sort by count puts a small child pages away from the parent it sits inside, which is the
+ * reading the flat list already gave. Here a row's position says what contains it.
+ *
+ * Ordering within a level is still by count, so the truncation at {@link ROWS} drops the smallest
+ * branches rather than an arbitrary tail.
+ */
+function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
+  const out: {artifact: Artifact; depth: number}[] = [];
+  const bigger = (a: Artifact, b: Artifact) => (a.maskedCount < b.maskedCount ? 1 : -1);
+  // Iterative, and with a visited set, for the reason `subtreeOf` gives: this walks data from
+  // outside the program, and a malformed response must not take the panel with it.
+  const seen = new Set<bigint>();
+  // Reversed on the way in, because the stack pops from the end: pushed largest-first, the panel
+  // would list every level smallest-first.
+  const push = (into: {artifact: Artifact; depth: number}[], of: Artifact[], depth: number) => {
+    for (const artifact of [...of].sort(bigger).reverse()) into.push({artifact, depth});
+  };
+  const stack: {artifact: Artifact; depth: number}[] = [];
+  push(stack, lineage.roots, 0);
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (seen.has(node.artifact.tesseraId)) continue;
+    seen.add(node.artifact.tesseraId);
+    out.push(node);
+    push(stack, lineage.childrenOf.get(node.artifact.tesseraId) ?? [], node.depth + 1);
+  }
+  return out;
+}
+
+/** A label/value row indented to its depth in the served tree. */
+function nested(label: string, value: string, depth: number): string {
+  return `<div class="row"><span class="muted nest" style="--depth: ${depth}">${esc(
+    label
+  )}</span><span class="v">${esc(value)}</span></div>`;
 }
 
 /** The opened cluster: the same count, from the same predicate, by identifier. */
@@ -146,12 +201,27 @@ export function renderArtifactDetail(state: AppState): string {
   }
   const opened = state.selectedArtifact;
   if (!opened) return panel('Cluster', '<div class="muted">click a cluster</div>');
+  // **Its place in the tree comes from the served set, not from the drill-down.** Opening an
+  // artifact by identifier answers about that artifact alone; the parent link is a property of a
+  // *response*, since a parent is named only where it was served alongside. So this reads the
+  // artifacts the current view holds — and where the opened cluster is not among them, because the
+  // map has moved since, there is no place to report and none is invented.
+  const served = state.artifacts.find((a) => a.tesseraId === opened.id);
+  const parent =
+    served && served.parentId !== null
+      ? state.artifacts.find((a) => a.tesseraId === served.parentId)
+      : undefined;
+  const children = state.artifacts.filter((a) => a.parentId === opened.id).length;
   return panel(
     'Cluster',
     `${row('layer', opened.layer)}
      ${row('stable key', opened.stableKey ?? '— none supplied —')}
      ${row('tessera_id', opened.id.toString())}
-     <div class="headline">${fmt(opened.maskedCount)} members you can see</div>
+     ${served ? row('inside', parent ? describe(parent) : '— nothing you were served —') : ''}
+     ${served && children > 0 ? row('holds', `${fmt(children)} served below it`) : ''}
+     <div class="headline">${fmt(opened.maskedCount)} member${
+       opened.maskedCount === 1n ? '' : 's'
+     } you can see</div>
      <div class="muted">the number the map already carried, from the same predicate. There is no
        membership and no declared size behind it.</div>`
   );

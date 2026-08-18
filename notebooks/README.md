@@ -16,11 +16,19 @@ or belongs to any trusted computing base.
 notebooks/run-corpus.sh --notebook --sample 50000
 ```
 
-Runs the notebook, builds the bundle, starts the server, and prints a pair of ready-to-paste
-principals — eight arXiv categories against one of the eight, so both are looking at the same
-clusters and the difference is the count beside each. On a 50 000-paper run the broad principal is
-served 132 clusters and the narrow one 84; on a cluster they both see, 172 members against 66.
-Neither number is the cluster's own size and neither viewer is told what that is.
+Runs the notebook, builds the bundle, starts the server, opens the viewer, and prints a pair of
+ready-to-paste principals — eight arXiv categories against one of the eight, so both are looking at
+the same clusters and the difference is the count beside each. On a 50 000-paper run the broad
+principal is served 263 HDBSCAN clusters and the narrow one 178; on the largest cluster they both
+see, 18 389 members against 3 760. Neither number is the cluster's own size and neither viewer is
+told what that is.
+
+**The tree they are shown differs too, and that is the more interesting half.** The broad
+principal's 263 clusters hang off **one** root; the narrow principal's 178 hang off **eleven**. A
+proportional criterion does not shrink downward — a small child can clear a bar its parent misses —
+so a narrow viewer's tree comes apart into pieces whose tops are the highest clusters they qualify
+for. The viewer draws exactly that, and no more: a piece's top is indented flush left, identically
+to a cluster that has no parent at all, and nothing says a coarser one exists above it.
 
 Without `--notebook` it builds from whatever is already in the output directory; `--build-only`
 stops before serving.

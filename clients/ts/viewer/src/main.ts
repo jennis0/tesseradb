@@ -864,7 +864,9 @@ store.subscribe(
       view.assembled?.depth ?? -1
     }|${markSlab.drawn}|${view.assembled?.provisional ?? 0}|${encodingSignature(store)}|${
       view.selectedWorldXY?.join(',') ?? ''
-    }|${view.artifactVersion}|${view.artifactLayer ?? ''}`;
+    }|${view.artifactVersion}|${view.artifactLayer ?? ''}|${
+      view.selectedArtifact?.id ?? ''
+    }`;
     if (drawing === painted) return;
     painted = drawing;
 

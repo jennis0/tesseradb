@@ -44,7 +44,7 @@ delete.
 | **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
 | **3** Content — derived, supplied, containment | **done** 2026-08-16 (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. Layers, levels and bulk publication are definable at build time as well as online |
 | **4** The write cycle | **done** 2026-08-17 (`artifacts/stage-4`, merged to `main`) | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | **met on the 2.4M corpus**, driven over the control and viewer planes of a running server: a label published from three documents goes absent the moment one of them is deleted and is still absent after the fold, and the fold's report named the five *other* published layers the same document degraded. **The fold's artifact pass is measured and built** — a node holding artifacts folds, its memberships are rewritten into the new prefix minus what the fold retired, its content is carried, and the row forms are rebuilt inside the fold ([the probe](../probes/2026-08-16-fold-artifact-pass/README.md); nineteen tests). Two stale-manifest defects found in the doing, both of the class that has bitten twice. `plan_fold` prices the pass at the measured 90 B per container, counted from the resident store. **Rule F's artifact arm** is built with it: a deleted artifact's record leaves its level in the publication that retires its overlay entry, its ordinal held open as a hole, and its labels stay withheld because an attachment must now resolve. **The row form covers base rows**, which deletes the flush-union and merge-rebase arms rather than deferring them, and the **report sweep** discharges the notification obligation before anything retires. The **strict/permissive declaration** executes at the fold, with publish-time validation beside it. The generator has its **artifact arm** — closed form in both directions — and the **census** runs the whole surface against it, before a write, after a deletion, after the fold and after a restart. Open: content reclamation, and the read battery this census should eventually be a row of (⊘ no battery exists) |
-| **5** Trees, levels and the cut | trees and the cut **done** 2026-08-18 (`artifacts/stage-4`); levels open | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | **all three checks met, the third on the real condensed tree** ([the probe](../probes/2026-08-18-condensed-tree/README.md)): a principal holding only the term covering a parent's stray members is served that parent alone, masked count exactly the 687 members they can see, none of its children, at every budget — and the build's report named the split in advance. **124 of the tree's 131 splits are non-covering**, so that case is the majority rather than the edge. A hierarchy's edges are inline on the artifact record — the parent direction durable, the child direction built per level at serve time, so no deletion has to keep two copies of one fact agreeing. The cut runs after the verdicts and can only serve fewer: where a parent and a child both pass the child is drawn, and a budget is met by climbing to a **passing** ancestor rather than to a depth — the defect an integration test caught, where a suppressed root blanked its children's regions. The proportional gap is proved rather than assumed: the first version of that test passed vacuously, the parent being covered by the frontier rather than failing its bar. The generator has its **edge arm** and the build a **coverage report**; the cut is measured ([`artifact_cut_cost`](../crates/tessera-bench/src/bin/artifact_cut_cost.rs)) at 0.6 ms per ten thousand visible artifacts. The corpus is re-derivable end to end from [the notebook](../notebooks/README.md). **Open: levels** — the administrative case (a levelled layer that also carries edges) is built but untested, and the ⊘ per-branch depth stays unspecified |
+| **5** Trees, levels and the cut | **done** 2026-08-18 (`artifacts/stage-4`) | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | **all three checks met, the third on the real condensed tree** ([the probe](../probes/2026-08-18-condensed-tree/README.md)): a principal holding only the term covering a parent's stray members is served that parent alone, masked count exactly the 687 members they can see, none of its children, at every budget — and the build's report named the split in advance. **124 of the tree's 131 splits are non-covering**, so that case is the majority rather than the edge. A hierarchy's edges are inline on the artifact record — the parent direction durable, the child direction built per level at serve time, so no deletion has to keep two copies of one fact agreeing. The cut runs after the verdicts and can only serve fewer: where a parent and a child both pass the child is drawn, and a budget is met by climbing to a **passing** ancestor rather than to a depth — the defect an integration test caught, where a suppressed root blanked its children's regions. The proportional gap is proved rather than assumed: the first version of that test passed vacuously, the parent being covered by the frontier rather than failing its bar. The generator has its **edge arm** and the build a **coverage report**; the cut is measured ([`artifact_cut_cost`](../crates/tessera-bench/src/bin/artifact_cut_cost.rs)) at 0.6 ms per ten thousand visible artifacts. The corpus is re-derivable end to end from [the notebook](../notebooks/README.md). **Levels are closed too:** a layer's edges are now declared to run either within a level or between them and may not mix, the second shape being the missing declaration value `tiered` ([decision 0087](decisions/0087-cross-level-edges-are-information-not-rollup.md)) — and a budget does not climb a between-levels edge, because substituting a state for its counties is not the honest coarsening substituting a parent cluster for its children is. What those edges carry instead is **structure on the wire**: each artifact names its parent where that parent is in the same response (**C29**), and the viewer nests what it lists and lights a subtree when one is opened. The demo corpus publishes all three shapes — flat, nested and tiered — over the same points. ⊘ Per-branch depth stays unspecified |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
 | **8** Filters, search, scale | not started | an invisible artifact and a nonexistent one cost the same; 10⁹ points with ~10⁷ artifacts serves and folds inside budget | — |
@@ -402,8 +402,8 @@ bound it. No code changed.
 
 ### Stage 3 — Content: derived, supplied, and the containment test
 
-**Done on `artifacts/stage-3`.** The traps this machinery carries are carried forward by
-[the Stage 5 handover](artifact-stage-5-handover.md); the Stage 3 and Stage 4 handovers are retired.
+**Done on `artifacts/stage-3`.** The traps this machinery carries were carried forward into
+Stage 5, which is now closed; the Stage 3, 4 and 5 handovers are all retired.
 
 **Capability:** a label is served only to a viewer who can see everything it was generated from.
 
@@ -586,8 +586,8 @@ principal. Fixture note: bench bundles predating a manifest field refuse to open
 
 ### Stage 4 — The write cycle
 
-**Done on `artifacts/stage-4`, merged to `main` 2026-08-17.** What this machinery carries forward is
-in [the Stage 5 handover](artifact-stage-5-handover.md); the Stage 4 handover is retired.
+**Done on `artifacts/stage-4`, merged to `main` 2026-08-17.** What it carries forward went into
+Stage 5, which is now closed; the Stage 4 handover is retired.
 
 **Capability:** ingest, delete, suppress and the fold leave every artifact correct, and the fold
 does not resurrect a withheld label.
@@ -625,38 +625,67 @@ rather than as one of its rows.
 
 ### Stage 5 — Trees, levels and the cut
 
-**What is owed and what will bite whoever picks it up is in
-[the Stage 5 handover](artifact-stage-5-handover.md)**, which is deleted when the stage closes. It
-supersedes the Stage 4 handover, now retired.
+**Done on `artifacts/stage-4` 2026-08-18.** The handover is retired, and with it the Stage 3 and
+Stage 4 handovers it superseded.
 
 **Capability:** a layer's lineage lives in its edges, its levels are declared resolutions, and a
 viewport returns a cut through the tree that fits what the client can draw.
 
-- Parent/child edges as the hierarchy, with per-artifact criterion testing and no walk
-  (decision 0080). A treed layer declares **no levels** and sits at level 0 on one reserved run; a
-  levelled layer declares them, and may carry edges as well, which is the administrative case
-  (decision 0082).
-- The **request-time artifact budget** (decision 0083), in the shape of the mark budget a viewport
-  already carries, met by serving ancestors instead of their descendants and never by sampling.
-  `prune_children` becomes the layer's default rather than its only setting. ⊘ One depth for the
-  whole tree is what this stage builds; a budget resolving to different depths in different branches
-  is the honest general case and is unspecified.
-- Display pruning as a declared policy per layer, with a per-level override on levelled layers that
-  may only **raise** the criterion.
-- Build-time containment verification that **reports** violating edges rather than deciding
-  anything.
-- **A level is served partially and never withheld because part of it is suppressed.**
+- ✔ Parent/child edges as the hierarchy, with per-artifact criterion testing and no walk
+  (decision 0080). The parent direction is durable on the artifact record and the child direction is
+  built per level at serve time, so **no deletion has to keep two copies of one fact agreeing**.
+- ✔ **A layer's edges all run within a level or all run between them, and the two are used for
+  different things** ([decision 0087](decisions/0087-cross-level-edges-are-information-not-rollup.md)).
+  `nested` is the clustering case, lineage entirely in the edges at level 0. `tiered` — the
+  declaration value that was missing, and the reason the third shape could not be expressed —
+  is a levelled layer whose edges run from a strictly coarser level to a finer one; administrative
+  boundaries are its motivating example and a subject taxonomy is the first one published. Which
+  shape a layer has follows from its declaration and is never inferred from its edges: an edge on a
+  layer declaring no lineage is refused, one running against the levels is refused, and a parent key
+  resolving in two coarser levels is refused rather than settled by search order.
+- ✔ The **request-time artifact budget** (decision 0083), in the shape of the mark budget a viewport
+  already carries, met by climbing to a **passing** ancestor and never by sampling — the defect an
+  integration test caught, where a suppressed root blanked its children's regions. A budget takes
+  nothing on a tiered layer, exactly as on a flat one: there is no depth to trade, because the
+  resolution is the client's choice of level. ⊘ One depth for the whole tree is what this stage
+  built; a budget resolving to different depths in different branches is the honest general case and
+  is unspecified.
+- ✔ Display pruning as a declared policy per layer (`prune_children`), threaded through to the cut
+  rather than assumed — it was hard-coded to prune for one round, which is what made a parent link
+  look as though it would mostly be null.
+- ✔ Build-time containment verification that **reports** violating edges rather than deciding
+  anything, plus a coverage report naming every split that keeps members none of its children hold.
+- ✔ **A level is served partially and never withheld because part of it is suppressed.**
+- ✔ **The structure reaches the client.** Each served artifact carries the identifier of its parent
+  where that parent is in the same response, on the artifacts frame (contracts §3.2) under leak
+  register **C29**. A parent that exists but was withheld reads as **null, identically to a root** —
+  distinguishing them would disclose that a coarser artifact exists which the viewer may not see.
+  The viewer indents each artifact under what contains it, names that parent in the drill-down, and
+  draws the links on the map, lighting a whole subtree when one is opened. Rendering the structure
+  is what the between-levels edges are for; an earlier draft answered containment as a *predicate*
+  the client would ask about pairs, and that is declined — a client drawing two hundred features
+  would issue forty thousand calls to reconstruct a tree it should have been handed.
 
-**The check** has three parts, and the middle one is the reason this stage is not just plumbing.
-*The non-covering case on real data:* HDBSCAN's children are subsets of their parents but do not
-exhaust them, so a principal holding only the term covering a parent's stray members sees that parent
-and no child, and the build's report named the edge in advance. *The criterion's two forms, which
-diverge here and nowhere else:* under `min_visible` a passing child never sits beneath a failing
-parent, and under `min_fraction` one does — a run that fails to reproduce that gap has not exercised
-the proportional form at all. *The budget:* a cut at one depth and a cut at a deeper one agree on
-every artifact both return, and neither reveals an artifact that failed its own test. **Data:** the
-real clustering's condensed tree, whose non-exhausting splits are a property of HDBSCAN rather than
-something planted (§5.2).
+**The check** had three parts, and the middle one is the reason this stage was not just plumbing.
+*The non-covering case on real data:* a principal holding only the term covering a parent's stray
+members is served that parent alone, masked count exactly the 687 members they can see, none of its
+children, at every budget — and the build's report named the split in advance
+([the probe](../probes/2026-08-18-condensed-tree/README.md)). **124 of the tree's 131 splits are
+non-covering**, so that case is the majority rather than the edge. *The criterion's two forms:*
+under `min_visible` a passing child never sits beneath a failing parent, and under `min_fraction`
+one does — proved rather than assumed, the first version of that test having passed vacuously with
+the parent covered by the frontier rather than failing its bar. *The budget:* a cut at one depth and
+a cut at a deeper one agree on every artifact both return, and neither reveals an artifact that
+failed its own test.
+
+The cut is measured ([`artifact_cut_cost`](../crates/tessera-bench/src/bin/artifact_cut_cost.rs)) at
+0.6 ms per ten thousand visible artifacts, after ordinal-indexed side tables and a memoised depth
+replaced tree lookups. The corpus is re-derivable end to end from
+[the notebook](../notebooks/README.md), which publishes all three shapes over the same points —
+k-means flat, HDBSCAN's condensed tree nested, and arXiv's own classification tiered across two
+levels. The last of those is also the **covering** counterpart to the first: every paper's primary
+category sits in exactly one archive, so an archive is exactly the union of its classes, and its
+32 splits lose nothing where HDBSCAN's 124 do.
 
 ### Stage 6 — Predicate membership
 
@@ -761,7 +790,7 @@ something. Six layers, each earning its place by being the case some stage canno
 | `clusters/hdbscan-2026-08` | ~10⁴ nodes | **a tree in its edges**, no levels | enumerated | no own terms; criterion | count, centroid, hull | the baseline. 20–25% noise means children are subsets of their parents but never exhaust them, which is exactly the shape per-node testing exists for, and the tree the budget cuts |
 | `topics/ctfidf-2026-08` | ~3 per cluster, plus per-term variants | attached by edge | enumerated (the sample) | no own terms; no criterion — containment decides | label text from real titles | the containment result that surprises: broad and narrow viewers fail the *same* label |
 | `centroids/kmeans-2026-08` | 4,000 | flat | enumerated | no own terms; criterion | **supplied** centre+radius fitted over full membership | model §8.6's trap — supplied geometry that looks derived; a viewer failing its containment sees no artifact (decision 0076), and the everyone-visible remedy is a last-ranked variation |
-| `regions/synthetic-geo` | ~2,000 over three scales | **levels *and* lineage** — they agree | spatial predicate | own terms `public`; no criterion | authored polygons and names | the administrative case decision 0082 names, where a level number and a tree depth mean the same thing — the only shape in which reading one as the other is safe. Also the perimeter cost and §5.1's "draw all boundaries or gate them" trap |
+| `regions/synthetic-geo` | ~2,000 over three scales | **levels *and* lineage** — they agree | spatial predicate | own terms `public`; no criterion | authored polygons and names | the tiered case decisions 0082 and 0087 name, where a level number and a tree depth mean the same thing — the only shape in which reading one as the other is safe. Also the perimeter cost and §5.1's "draw all boundaries or gate them" trap |
 | `programmes/portfolio` | ~30 | flat | **attribute predicate**, and an enumerated twin built from the same rule | own terms: any principal; no criterion | authored name, **derived** extent | Stage 6's equality check — the same layer by rule and by list must return identical masked counts — and model §8.5's programme with a **zero** count and no hull |
 | `selections/analyst-*` | ~50 | flat | enumerated, scattered | own terms: per-analyst; no criterion | none | model §8.3 — the set of ten that shows seven |
 

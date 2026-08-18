@@ -1,7 +1,12 @@
 import {OrthographicView, type BinaryAttribute as DeckBinaryAttribute, type Layer} from '@deck.gl/core';
-import {ScatterplotLayer, TextLayer} from '@deck.gl/layers';
+import {LineLayer, ScatterplotLayer, TextLayer} from '@deck.gl/layers';
 import {CELLS_PER_WORLD_UNIT, MAX_DEPTH, WORLD_SIZE} from '@tessera/client';
-import {placedArtifacts, type ArtifactPlaces} from './artifacts.js';
+import {
+  placedArtifacts,
+  servedLineage,
+  subtreeOf,
+  type ArtifactPlaces
+} from './artifacts.js';
 import {assertAssemblyMatchesServed, type Assembled} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
 import {readConfig} from './config.js';
@@ -444,7 +449,7 @@ export function buildViewportLayers(store: Store, slab: MarkSlab): Layer[] {
  * cluster's size, which is not a number this client is ever given.
  */
 function artifactLayers(store: Store): Layer[] {
-  const {artifacts, artifactPlaces, artifactLayer} = store.state;
+  const {artifacts, artifactPlaces, artifactLayer, selectedArtifact} = store.state;
   if (!artifactLayer || artifacts.length === 0) return [];
   // No sidecar for this layer means no position for any of its artifacts. They are still listed
   // with their counts in the panel — the count came from the service, and only the position did
@@ -454,9 +459,26 @@ function artifactLayers(store: Store): Layer[] {
   const placed = placedArtifacts(artifacts, places);
   if (placed.length === 0) return [];
 
+  // **The tree, from what this response carried.** A link is drawn only where both ends are on
+  // screen: the parent identifier names a served artifact or is null, and the sidecar may have no
+  // position for either. An unplaced end is no line rather than a line to somewhere guessed.
+  const lineage = servedLineage(artifacts);
+  const at = new Map(placed.map((p) => [p.artifact.tesseraId, p]));
+  // The opened cluster and everything served beneath it — a subtree picked out while the wider map
+  // stays drawn, which is what the parent link is on the wire for.
+  const highlit =
+    selectedArtifact && at.has(selectedArtifact.id)
+      ? subtreeOf(lineage, selectedArtifact.id)
+      : new Set<bigint>();
+  // What deck compares to decide the accessors are stale. The subtree's *size* was wrong here:
+  // opening a different cluster with an equally large subtree changes every colour and moves no
+  // number, so the emphasis would stay on the cluster the user had left.
+  const opened = String(selectedArtifact?.id ?? '');
+
   const data = placed.map((p) => ({
     id: p.artifact.tesseraId,
     count: Number(p.artifact.maskedCount),
+    inSubtree: highlit.has(p.artifact.tesseraId),
     // **The key, not the supplied text — the text belongs in the panel and was tried here.** Two
     // things defeat it on the map: twenty-two descriptions at eleven pixels cover the marks they
     // annotate, in the dense middle where the clusters are; and the text atlas is built over ASCII,
@@ -476,7 +498,46 @@ function artifactLayers(store: Store): Layer[] {
   // with a number beside it claims only what it can.
   const radiusOf = (count: number) => 3 + 5 * Math.sqrt(count / largest);
 
+  const links = placed.flatMap((p) => {
+    const parent = p.artifact.parentId === null ? undefined : at.get(p.artifact.parentId);
+    if (!parent) return [];
+    // **A link to the same point is not drawn.** The sidecar places by stable key, and a levelled
+    // layer may legitimately carry one key at two levels — an arXiv archive with no subject class
+    // beneath it is its own only child — so parent and child land on the same position and the
+    // line is a dot under the marker. A limit of the development scaffolding, not of the tree.
+    if (parent.x === p.x && parent.y === p.y) return [];
+    return [
+      {
+        from: [p.x / CELLS_PER_WORLD_UNIT, p.y / CELLS_PER_WORLD_UNIT] as [number, number],
+        to: [parent.x / CELLS_PER_WORLD_UNIT, parent.y / CELLS_PER_WORLD_UNIT] as [number, number],
+        inSubtree: highlit.has(p.artifact.tesseraId)
+      }
+    ];
+  });
+  // The selection's own amber, and the panels' grey otherwise. Amber already means *the thing you
+  // opened* on this map, and a subtree is that thing extended rather than a second kind of
+  // emphasis needing a second hue.
+  const AMBER: [number, number, number, number] = [255, 210, 90, 255];
+
   return [
+    new LineLayer({
+      id: 'artifact-links',
+      visible: links.length > 0,
+      data: links,
+      getSourcePosition: (d: (typeof links)[number]) => d.from,
+      getTargetPosition: (d: (typeof links)[number]) => d.to,
+      // Faint by default: containment is context for the counts, not the subject, and a hundred
+      // bright lines over the marks would be. It lifts to amber where it is what you asked about.
+      getColor: (d: (typeof links)[number]) =>
+        d.inSubtree ? AMBER : ([234, 238, 243, 70] as [number, number, number, number]),
+      widthUnits: 'pixels' as const,
+      getWidth: (d: (typeof links)[number]) => (d.inSubtree ? 1.6 : 1),
+      // Not pickable: the dots at its ends answer clicks, and a line crossing the map would take
+      // picks a long way from anything it names.
+      pickable: false,
+      parameters: {depthCompare: 'always' as const},
+      updateTriggers: {getColor: opened, getWidth: opened}
+    }),
     new ScatterplotLayer({
       id: 'artifact-rings',
       data,
@@ -491,9 +552,10 @@ function artifactLayers(store: Store): Layer[] {
       filled: true,
       getFillColor: [234, 238, 243, 240],
       stroked: true,
-      getLineColor: [13, 15, 18, 235],
+      getLineColor: (d: (typeof data)[number]) =>
+        d.inSubtree ? AMBER : ([13, 15, 18, 235] as [number, number, number, number]),
       lineWidthUnits: 'pixels' as const,
-      getLineWidth: 1.5,
+      getLineWidth: (d: (typeof data)[number]) => (d.inSubtree ? 2.5 : 1.5),
       // Comfortably clickable however small the count: the dot can be three pixels across, and a
       // cluster that cannot be hit is a cluster that cannot be opened.
       pickable: true,
@@ -504,7 +566,7 @@ function artifactLayers(store: Store): Layer[] {
       // names from the shape of the reply.
       artifactIds: data.map((d) => d.id),
       parameters: {depthCompare: 'always' as const},
-      updateTriggers: {getRadius: largest}
+      updateTriggers: {getRadius: largest, getLineColor: opened, getLineWidth: opened}
     }),
     new TextLayer({
       id: 'artifact-counts',
