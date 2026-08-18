@@ -136,13 +136,13 @@ pub struct BuildArgs {
     /// authority: the declarations run through the same registry and the same allocator the
     /// control plane uses, so both routes refuse the same declarations and place the same ids.
     pub layers: Vec<tessera_types::layer::LayerDeclaration>,
-    /// Parquet of one row per `(artifact, variation)`: `layer`, `key`, and optionally
-    /// `level`, `variation`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
+    /// Parquet of one row per `(artifact, rank)`: `layer`, `key`, and optionally
+    /// `level`, `rank`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
     /// [`BuildArgs::layers`]. A layer's own `source`, resolved.
     pub artifacts: Option<PathBuf>,
-    /// Parquet of one row per `(artifact, member)`: `layer`, `key`, `member` — a **source**
-    /// entity id — and optionally `level` and `variation`, a null variation being the artifact's
-    /// membership and `k` variation *k*'s generating set. Requires [`BuildArgs::layers`].
+    /// Parquet of one row per `(artifact, entity)`: `layer`, `key`, `entity` — a **source**
+    /// entity id — and optionally `level` and `rank`, a null rank being the artifact's
+    /// membership and `k` the generating set of `contents[k]`. Requires [`BuildArgs::layers`].
     /// `[layer.members].source`, resolved.
     pub artifact_members: Option<PathBuf>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.

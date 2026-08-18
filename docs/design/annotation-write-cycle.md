@@ -227,9 +227,9 @@ the deleted member is outside every mask and containment fails for everyone — 
 identical under both declarations. They diverge only at the fold, where strict makes the withholding
 permanent by dropping the content and permissive ends it. **And what the interim withholds is the
 artifact's service, not merely its text**
-([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): the variation
+([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): the content
 whose generating set lost the member is unservable, so the **artifact** is absent to any viewer no
-other variation covers. Fail-closed and deliberate — the artifact's *identity* is never destroyed
+other entry of the ranked contents covers. Fail-closed and deliberate — the artifact's *identity* is never destroyed
 by a point event; its service resumes at the fold under either declaration. ⊘ **A caller reading
 "permissive" as "nothing changes" will be surprised by that gap**, which is up to one fold long.
 
@@ -287,16 +287,16 @@ unsuppress) × membership source (rep §2.0: enumerated, spatial predicate, attr
 content kind (model §4.1: derived; supplied corpus-derived with `G`; supplied corpus-independent) ×
 the two gate controls (model §5: the own-terms flag and the existence criterion, independent
 conjuncts — [decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)).
-**Variations are a fifth axis and
-they change exactly one cell** (§3.2's delete row): each variation carries its own generating set, so
-a deletion consumes the variations it touches and a viewer falls through the ranking — to the next
-variation they satisfy, or to no artifact at all
+**Ranked contents are a fifth axis and
+they change exactly one cell** (§3.2's delete row): each entry carries its own generating set, so
+a deletion consumes the entries it touches and a viewer falls through the ranking — to the next
+entry they satisfy, or to no artifact at all
 ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). Content kind is
 orthogonal to
 membership source: `G` is always an enumerated entity set, whatever the membership is.
 
 The vocabulary of answers: **nothing** (and why nothing is safe), **recompute** (per request, by
-construction), **withdraw the artifact from viewers the surviving variations do not cover**,
+construction), **withdraw the artifact from viewers the surviving contents do not cover**,
 **refuse the write**, **notify the caller**. No cell destroys an artifact's identity: a point event
 may withhold an artifact's service, never end the object.
 
@@ -329,7 +329,7 @@ Two rules the enumerated column rests on, stated because each is one slip from a
 | Event | Derived (count, centroid, hull, extractive terms) | Supplied, corpus-derived (`G` declared) | Supplied, corpus-independent (`G` empty) |
 |---|---|---|---|
 | **Ingest** | **recompute per request** — nothing stored, so nothing to do; the new member (predicate sources) or non-member (enumerated) is simply in or out of `membership ∩ M_auth` | **nothing** — later arrivals are never in `G` (I8); the content is stale, not unsafe (§7.6) | **nothing** — the content asserts nothing about the corpus |
-| **Delete** of a member | correct at accept via the mask; nothing stored | withheld at accept — emergent from containment, no stored state. Then the layer's declaration decides (spec §2.1): **strict** *(default)* drops that content and its set at the fold, **permissive** removes the member and resumes serving. **Where the artifact carries ranked variations** (model §2.3), the withholding applies to the variation whose set lost the member and the viewer **falls through to the next variation they satisfy**; a viewer no surviving variation covers sees **no artifact** until the fold ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). **Notify the caller at the fold** either way (spec §4.2) | **nothing** — an empty `G` intersects nothing |
+| **Delete** of a member | correct at accept via the mask; nothing stored | withheld at accept — emergent from containment, no stored state. Then the layer's declaration decides (spec §2.1): **strict** *(default)* drops that content and its set at the fold, **permissive** removes the member and resumes serving. **Where the artifact carries ranked contents** (model §2.3), the withholding applies to the entry whose set lost the member and the viewer **falls through to the next entry they satisfy**; a viewer no surviving entry covers sees **no artifact** until the fold ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). **Notify the caller at the fold** either way (spec §4.2) | **nothing** — an empty `G` intersects nothing |
 | **Suppress** of a member | correct at accept | **withhold content while the suppression stands** — containment fails for every principal; resumes on unsuppress. No stored change (Rule S) | **nothing** |
 | **Unsuppress** | correct at accept | content serves again, to exactly those satisfying `G` — every source visible again | **nothing** |
 | **Update** of a member — *not an operation; delete + an unrelated ingest* | correct at accept / at the new life's flush | **exactly the delete row**, because that is all the write path performs (spec §2.1). Under **strict** the content is dropped at the fold; under **permissive** the member leaves `G`. Notified at the fold | **nothing** |
@@ -400,7 +400,7 @@ not move.
 The fold already holds `D₀` (the plan's tombstone clone) in entity space, and `G` is now entity
 space, so *which supplied content lost a member* is one small `and_cardinality(G, D₀)` per
 `G`-bearing artifact — no traversal coupling, no inverted index (superseding rep §5.0.3's by-product
-construction, which needed the artifact pass to visit every pair). The report — artifact stable key
+construction, which needed the artifact pass to visit every pair). The report — artifact key
 or address, per lost-member content — is written as part of the fold's own publication, which is
 what discharges write-path §5.8's rule that a deletion is not retired before the notification
 obligation is; it is the first concrete content of §2.5's label-invalidation feed (⊘ the feed
@@ -471,7 +471,7 @@ in this document.
 
 | Operation | Route | Atomic unit | Durable record | Caller told | Refused when |
 |---|---|---|---|---|---|
-| **Create** (runtime — a selection, a correction) | its own control verb (rep §5.1; ⊘ contracts work): `(layer, membership, gate, content, stable key?)`, members named by `external_id` or `tessera_id`+idset, resolved to entities at admission exactly as `/control/changes` resolves (write-path §5.1) | one artifact | WAL record carrying the resolved entity forms | 200 with the artifact's `tessera_id` — a durability receipt that is also **eligibility at ack**: an artifact has no geometry of its own, so no flush stands between it and visibility; when a given session first surfaces it is bounded by the resolved set's refresh (spec §4.4), fail-closed | member validation (spec §3.1); layer gate unevaluable; corpus-derived supplied content without a `G`; corpus-independent content declaring one; edge target absent (rep §5.0.4); the level's reserved entity run exhausted — extended by appending the next block **downward**, which cannot interleave with point segments ([decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md)), refused only if allocation fails |
+| **Create** (runtime — a selection, a correction) | its own control verb (rep §5.1; ⊘ contracts work): `(layer, membership, gate, content, key?)`, members named by `external_id` or `tessera_id`+idset, resolved to entities at admission exactly as `/control/changes` resolves (write-path §5.1) | one artifact | WAL record carrying the resolved entity forms | 200 with the artifact's `tessera_id` — a durability receipt that is also **eligibility at ack**: an artifact has no geometry of its own, so no flush stands between it and visibility; when a given session first surfaces it is bounded by the resolved set's refresh (spec §4.4), fail-closed | member validation (spec §3.1); layer gate unevaluable; corpus-derived supplied content without a `G`; corpus-independent content declaring one; edge target absent (rep §5.0.4); the level's reserved entity run exhausted — extended by appending the next block **downward**, which cannot interleave with point segments ([decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md)), refused only if allocation fails |
 | **Edit** — ⊘ **deferred to its own design pass** ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)); until it lands the routes here are create, suppress, delete and layer replacement, and the shape below is what the pass inherits | rep §5.0.1's table: content in place (content and `G` together — spec §2.3); membership in place + version bump; gate widening in place + bump; gate narrowing = suppress, re-grant, unsuppress | one artifact | WAL record; **the version bump rides the same record** — a replayed edit without its bump would leave sessions on stale resolutions, so the two are one durable fact | 200 after fsync | a `G` edit without a content edit; membership edits fail spec §3.1's validation |
 | **Suppress / unsuppress** | `/control/changes`, by the artifact's entity — no new API | the deny window | `ChangeByEntity`, snapshot at rotation — all existing | write-path §5.7's table verbatim | never for load (the lane's rule) |
 | **Delete** | `/control/changes` | the deny window | as above; **Rule F's artifact arm** at the fold: membership file, `artifacts.arrow` slot, and every edge naming it are dropped (rep §5.0.3) | as above | — |
@@ -523,9 +523,9 @@ layer to ingest another's rows.
 ⊘ **A layer's `fields` map does not yet move a field**, and the example below's
 `parent = "parent_id"` is therefore refused at parse rather than read. Every other object's map
 reaches its reader — a view's geometry, `[corpus]`'s identity, a vocabulary's `key`/`code`/`title`,
-an attribute's `field` — but the artifact and member readers still read `layer`, `variation`,
-`member` and `values`, names this surface does not carry at all, so there is nothing for a map to
-move until those sources are rebuilt on the names above.
+an attribute's `field` — but the artifact and member readers take `rank` and `entity` while still
+reading a `layer` discriminator, a per-row `values` and a `parent_key`, none of which this surface
+names, so there is nothing for a map to move until those sources are rebuilt on the names above.
 
 ```toml
 [[layer]]
@@ -553,10 +553,10 @@ tree's root holds the whole corpus and one cell carrying it can neither stream n
 by a producer.
 
 Collapsing the artifact source to one row each is what retires the agreement refusal the old
-`(artifact, variation)` grain needed: `key`, `parent` and the attachment were repeated on every
-variation row so that a single column could differ, and the build had to check the copies matched.
-`variation` becomes **`rank`** and `member` becomes **`entity`**, a column named `member` on a long
-source reading as though it should hold the whole membership.
+`(artifact, rank)` grain needed: `key`, `parent` and the attachment were repeated on every row of
+one artifact so that a single column could differ, and the build had to check the copies matched.
+The member source's entity column is `entity` rather than `member`, a column named `member` on a
+long source reading as though it should hold the whole membership.
 
 **Membership by exclusion is an input spelling.** `fields = { excluding = … }` names the entities a
 membership leaves out; the build complements once against the view's entity set and materialises
@@ -753,6 +753,11 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r6 — 2026-08-19. Vocabulary only.** The renames §6.1 announced are performed workspace-wide:
+`rank` and `entity` are what the artifact and member readers spell, and an artifact's caller-supplied
+name is `key` rather than `stable_key`. Prose that called a ranked content a *variation* names it as
+what it is — an entry of the artifact's `contents`. No operation table row changed.
 
 **r5 — 2026-08-18.** §6.1 is rebuilt on
 [decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)'s two

@@ -145,7 +145,7 @@ fn the_count_beside_a_cluster_is_the_viewers_own() {
     // Same cluster, same identity, two answers. The identifier is stable across principals by
     // construction (C17); only the number beside it moves.
     assert_eq!(broad[0].tessera_id, narrow[0].tessera_id);
-    assert_eq!(broad[0].stable_key.as_deref(), Some("c0"));
+    assert_eq!(broad[0].key.as_deref(), Some("c0"));
 }
 
 /// A cluster below its criterion is **absent**, and absent in a way that carries no reason — the
@@ -343,7 +343,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
 
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
-    assert_eq!(after[0].stable_key.as_deref(), Some("c1"));
+    assert_eq!(after[0].key.as_deref(), Some("c1"));
     assert!(engine
         .artifact(&session, served[0].tessera_id, None, "s0")
         .unwrap()

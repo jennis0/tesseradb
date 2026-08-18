@@ -280,20 +280,20 @@ xy = {e: (x, y) for e, x, y in zip(points["entity_id"], points["x"], points["y"]
 members = pq.read_table(out / "members.parquet").to_pydict()
 
 # The centroid of an artifact's **declared** membership, which is the publisher's own knowledge and
-# not a served quantity. Variation rows are generating sets, not memberships, and are skipped.
+# not a served quantity. Rows carrying a rank are generating sets, not memberships, and are skipped.
 acc = collections.defaultdict(lambda: [0.0, 0.0, 0])
-for layer, key, variation, member in zip(
-    members["layer"], members["stable_key"], members["variation"], members["member"]
+for layer, key, rank, entity in zip(
+    members["layer"], members["key"], members["rank"], members["entity"]
 ):
-    if variation is not None:
+    if rank is not None:
         continue
-    x, y = xy[member]
+    x, y = xy[entity]
     a = acc[(layer, key)]
     a[0] += x; a[1] += y; a[2] += 1
 
 layers = collections.defaultdict(list)
 for (layer, key), (sx, sy, n) in acc.items():
-    layers[layer].append({"stableKey": key, "x": sx / n, "y": sy / n})
+    layers[layer].append({"key": key, "x": sx / n, "y": sy / n})
 dest.parent.mkdir(parents=True, exist_ok=True)
 dest.write_text(json.dumps({"layers": layers}))
 print(f"  {sum(len(v) for v in layers.values())} positions across {len(layers)} layers")

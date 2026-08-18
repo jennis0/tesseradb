@@ -223,10 +223,10 @@ export async function loadArtifactPlaces(): Promise<Map<string, ArtifactPlaces>>
     const response = await fetch('/clusters.json', {cache: 'no-store'});
     if (!response.ok) return byLayer;
     const body = (await response.json()) as {
-      layers?: Record<string, {stableKey: string; x: number; y: number}[]>;
+      layers?: Record<string, {key: string; x: number; y: number}[]>;
     };
     for (const [layer, clusters] of Object.entries(body.layers ?? {})) {
-      byLayer.set(layer, new Map(clusters.map((c) => [c.stableKey, {x: c.x, y: c.y}])));
+      byLayer.set(layer, new Map(clusters.map((c) => [c.key, {x: c.x, y: c.y}])));
     }
   } catch {
     // Left empty on a parse failure, for the same reason.
@@ -248,7 +248,7 @@ export function placedArtifacts(
 ): {artifact: Artifact; x: number; y: number}[] {
   const placed: {artifact: Artifact; x: number; y: number}[] = [];
   for (const artifact of artifacts) {
-    const at = artifact.stableKey === null ? undefined : places.get(artifact.stableKey);
+    const at = artifact.key === null ? undefined : places.get(artifact.key);
     if (!at) continue;
     placed.push({artifact, x: at.x, y: at.y});
   }

@@ -50,19 +50,19 @@ flowchart TB
   A -->|"edge"| A2
   A -->|"membership"| P["Points"]
   A2 -->|"membership"| P
-  A --> V["<b>Variations</b> of its content — ranked,<br/>each gated; first satisfied is served"]
+  A --> V["<b>Contents</b> — ranked,<br/>each gated; first satisfied is served"]
 ```
 
 *Configuration lives on the layer, resolution on the level, membership on the artifact; structure is
-edges. An artifact may carry ranked variations at different gatings (§2.3). Nothing is configured per
+edges. An artifact may carry ranked contents at different gatings (§2.3). Nothing is configured per
 artifact, and an artifact is addressed `(layer, level, ordinal)` — internally only: on the wire an
 artifact is its `tessera_id` and nothing else, the ordinal never leaving the server (ruled;
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §5).*
 
 **An artifact** is an identity, a membership set over points, zero or more edges to other artifacts,
 and content. Content is either **supplied** — authored, corpus-independent or declared — or
-**derived**, recomputed per viewer from masked members. Its content may exist in several ranked
-**variations** at different gatings — the same artifact, one identity, the first variation a viewer
+**derived**, recomputed per viewer from masked members. Its content may be a ranked list of
+**contents** at different gatings — the same artifact, one identity, the first entry a viewer
 satisfies being the one served (§2.3).
 
 **A layer** is the unit of declaration, configuration and reachability: one clustering, one label
@@ -126,7 +126,7 @@ level, where artifact selection is the server's.
 **A label layer is a layer, not a level of the clustering it names.** It has its own gate, its own
 lifecycle and its own artifacts, and its edges name a target `(layer, level, ordinal)` — so it is
 republished when the naming step re-runs without the clustering moving. Its artifacts are gated individually,
-and may carry ranked **variations** resolved first-available (§2.3).
+and may carry ranked **contents** resolved first-available (§2.3).
 
 ### 2.2 The vocabulary is the map industry's
 
@@ -169,37 +169,38 @@ generated from — its own gate, and an edge to the cluster it names. §2.3 reco
 visibility does not follow from its cluster's, a synthesis can be more sensitive than its sources,
 and a label that leaks must be suppressible *now*, which addresses an entity.
 
-**Several labels for one cluster are either variations or separate artifacts, and the caller decides
-which.** Variations are one label described at several clearances, resolved first-available; separate
+**Several labels for one cluster are either ranked contents of one artifact or separate artifacts,
+and the caller decides which.** Ranked contents are one label described at several clearances,
+resolved first-available; separate
 labels are different statements, all served to whoever satisfies them. §2.3 implements only the
 first, because only the first is a question about access.
 
-### 2.3 Variations: one artifact, one identity, several gatings
+### 2.3 Ranked contents: one artifact, one identity, several gatings
 
-**An artifact may carry several variations of its content. Each variation has its own gate. They are
+**An artifact's content is a ranked list, and each entry has its own gate. The list is
 ranked by the caller, and a viewer is served the first they satisfy — entire — or nothing at all**
 (decisions [0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md),
 [0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). That is the whole
 mechanism, and nothing else about choosing what to show belongs in the service: the ordering is
-supplied, never derived, because only the caller knows why one variation precedes another.
+supplied, never derived, because only the caller knows why one entry precedes another.
 
-**They are the same artifact.** One identity, one membership, one entity — a variation sets *which
+**They are the same artifact.** One identity, one membership, one entity — an entry sets *which
 content this viewer sees*, not which object they are looking at. An earlier revision made each
 candidate its own artifact with its own entity; that was wrong, and the identity question the owner
 asked twice is what it was wrong about.
 
-**Which means variations need nothing new.** §4 already gates content by containment on its generating
-set. A variation is a `(content, gate, rank)` triple on an artifact that already exists, and resolution
-is that same test run down a ranked list. No variation entities, no variation ordinals, no variation
-identifiers, and nothing added to the deny lane.
+**Which means ranked contents need nothing new.** §4 already gates content by containment on its
+generating set. An entry is a `(content, gate, rank)` triple on an artifact that already exists, and
+resolution is that same test run down the list. No per-entry entities, no per-entry ordinals, no
+per-entry identifiers, and nothing added to the deny lane.
 
 **Why this belongs in the service when the label ladder did not.** A ladder asks *which of these
-different things is best* — quality, preference, product judgement, the caller's throughout. Variations
-ask *how is this same thing described to someone with this clearance*, which is a permission-masked
+different things is best* — quality, preference, product judgement, the caller's throughout. Ranked
+contents ask *how is this same thing described to someone with this clearance*, which is a permission-masked
 service's entire subject. The first is presentation and was three revisions of machinery this document
 should never have grown. The second is access control and is one rule.
 
-| | Variations of one artifact | Separate artifacts |
+| | Ranked contents of one artifact | Separate artifacts |
 |---|---|---|
 | What they are | one thing, described at different clearances | different things |
 | Identity | **one** | one each |
@@ -207,13 +208,13 @@ should never have grown. The second is access control and is one rule.
 | Chosen by | the declared rank | nobody — the caller decides what to do with them |
 
 **The caller decides which they have**, and that is the *"driven by the user"* half. Toponymy's
-candidates modelled as variations of one label get first-available; modelled as separate labels they all
+candidates modelled as ranked contents of one label get first-available; modelled as separate labels they all
 arrive and the caller's interface picks. Neither is more correct; the service implements only the
 first, because only the first is a question about access.
 
 **Emergency withdrawal uses what exists, which was the objection to a shared identity and does not
-survive.** If one variation turns out to disclose, suppress the **artifact** — immediate under Rule S,
-fail-closed, and the intermediate state is the safe one — then edit the bad variation out and
+survive.** If one entry turns out to disclose, suppress the **artifact** — immediate under Rule S,
+fail-closed, and the intermediate state is the safe one — then edit the bad entry out and
 unsuppress. **⊘ The edit step is deferred to a design pass of its own** *(owner, 2026-08-15;
 [decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md))*, so the path as
 written does not exist yet and the withdrawal that does is **suppress,
@@ -231,25 +232,25 @@ be done is writing the edit as an additional record layer: the stack takes the f
 and rests on layers being disjoint, so a second layer for the same entity serves the **pre-edit text,
 silently** — the trap this paragraph originally mistook for a prohibition.
 
-**A viewer who satisfies no variation receives nothing for that artifact**
+**A viewer who satisfies no entry receives nothing for that artifact**
 ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): no shell, no
 announcement, and **C3** holds as written. Derived content — a hull, a centroid, a count — is
-recomputed from `membership ∩ M_auth` whatever variation resolved, because it was never a variation
-of anything (§4).
+recomputed from `membership ∩ M_auth` whatever entry resolved, because it was never one of the
+ranked contents (§4).
 
 **One membership, several samples.** An artifact declares one membership, and the number beside it
-is that membership's masked count, unmodified, whatever variation resolved
-([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)). A variation's
-sample lives in its generating set, where it governs that variation's containment — the count never
+is that membership's masked count, unmodified, whatever entry resolved
+([decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md)). An entry's
+sample lives in its generating set, where it governs that entry's containment — the count never
 describes the sample and never claimed to. A caller for whom the membership *is* the sample (§2.2's
-labels) declares one that stands for the artifact as a whole, knowing each variation still gates on
+labels) declares one that stands for the artifact as a whole, knowing each entry still gates on
 its own set.
 
 **This reduces §7.7 from a mechanism to guidance**
 ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md); ⊘ the
 amendment to §7.7 is owed at promotion). Its five tiers remain what §7.8 uses them for — advice on
 which generating sets to produce. A caller wanting the ladder's behaviour expresses it as ranked
-variations; the service neither knows nor needs to know that is what they are doing.
+contents; the service neither knows nor needs to know that is what they are doing.
 
 **The check that would have saved three revisions:** *does this decide something about **access**, or
 about **presentation**?* Access is Tessera's. Presentation is the caller's. A design that finds itself
@@ -260,24 +261,24 @@ ranking things by **quality** has crossed the line; ranking them by **clearance*
 **An artifact is served to a principal entire, or it is absent — indistinguishable from one that
 never existed** ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
 There are no levels of restriction within a single artifact: no state in which a viewer may know a
-label exists but not read it, and no artifact present with some of its content missing. Variations
-(§2.3) are the shape that rule takes, not an exception to it — a viewer is served exactly one,
+label exists but not read it, and no artifact present with some of its content missing. Ranked
+contents (§2.3) are the shape that rule takes, not an exception to it — a viewer is served exactly one,
 entire, or nothing.
 
 ```mermaid
 flowchart TB
-  E{"gate passes ∧ existence criterion passes ∧<br/>some variation's contents are all contained?"}
+  E{"gate passes ∧ existence criterion passes ∧<br/>some entry's generating set is all contained?"}
   E -->|no| X["absent — indistinguishable<br/>from never having existed"]
-  E -->|yes| S["serve the first variation<br/>the viewer satisfies, entire"]
+  E -->|yes| S["serve the first entry<br/>the viewer satisfies, entire"]
   S --> N["the number beside it is always<br/>|membership ∩ M_auth|"]
 ```
 
 *Resolving one artifact for one viewer: one conjunction, evaluated once. Containment failures fall
-through the variation ranking; a viewer who satisfies none sees no artifact.*
+through the ranking; a viewer who satisfies none sees no artifact.*
 
 **Existence** is one conjunction: the layer gate, the artifact's own terms if it carries them (§5),
 the existence criterion if one is declared (§5), and containment of every corpus-derived content the
-resolved variation carries (§4). Derived content is contained by construction; corpus-independent
+resolved entry carries (§4). Derived content is contained by construction; corpus-independent
 content has an empty generating set and constrains nothing. This restores the corpus's own position:
 §7.6's normative rule is that a principal never learns of the existence of a label they cannot see,
 and it now holds for the general object — **C3** holds as written, because nothing is ever withheld
@@ -706,7 +707,7 @@ A 40M-document corpus. Two layers:
 | Supplied | none | the label text, generating set declared |
 
 *The topics layer declares no criterion, so a label's existence rides entirely on containment: a
-viewer for whom no variation's generating set is contained sees no label
+viewer for whom no entry's generating set is contained sees no label
 ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)) — which is what
 the normative label rule (§7.6) already does. No fourth gate mode is needed; the containment
 conjunct is part of §3's one existence test.*
@@ -879,7 +880,7 @@ Which yields the behaviour worth noticing: **a viewer who fails containment on t
 sees no cluster at all** ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
 The circle is corpus-derived, so failing its containment fails the artifact — there is no state in
 which the existence, count and a recomputed centroid are served while the authored circle is
-withheld. A caller who wants those viewers to see something declares it: a last-ranked **variation**
+withheld. A caller who wants those viewers to see something declares it: a last-ranked **entry**
 carrying no corpus-derived supplied content (§2.3), whose containment is vacuous and which serves
 entire — existence, masked count, derived centroid — to everyone the gate admits.
 
@@ -939,7 +940,7 @@ affordable and is not on any request path.
 |---|---|
 | `derived-artifact-gating.md` | **Retired at promotion.** Its taxonomy collapses into §4's one test plus §5's flag and criterion; what existed nowhere else — the point-scale edge argument, the edge gate's structural form, the induced-subgraph sampling problem — is carried at §5 and §11. Its advice that cluster identifiers are ephemeral per rebuild dies with it: identity survives an edit ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) |
 | §7.5 | The frontier is a per-artifact test, not a tree walk (spec §6). Ruled ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)); ⊘ **the amendment is owed at promotion** |
-| §7.6, §7.7 | A label is an artifact. The ladder reduces to caller guidance (§2.3): the service resolves ranked *variations* of one artifact by clearance and chooses between separate artifacts never. Ruled ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)); ⊘ **the §7.7 amendment is owed at promotion** |
+| §7.6, §7.7 | A label is an artifact. The ladder reduces to caller guidance (§2.3): the service resolves an artifact's ranked *contents* by clearance and chooses between separate artifacts never. Ruled ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)); ⊘ **the §7.7 amendment is owed at promotion** |
 | §7.8 | Add: rollup terminates only if the caller supplies a covering level; a contrastive labeller's generating set includes the contrast material |
 | [Decision 0006](../decisions/0006-per-session-handles-retired.md) | Its node-handle carve-out is withdrawn |
 | `records-and-search.md`, `filter-index.md` | The artifact population is its own population, named by the request ([`annotation-representation.md`](annotation-representation.md) §7–§8); search over it has **no containment gate as specified** — the route is withdrawn until the review's ruling 5 lands, the one ruling still open |
@@ -1015,6 +1016,13 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r5 — 2026-08-19. Vocabulary only.** What §2.3 called a *variation* is an entry in the artifact's
+ranked **`contents`**, and its position in that list is its **rank** — the names
+[`configuration.md`](configuration.md) §1 and [`annotation-write-cycle.md`](annotation-write-cycle.md)
+§6.1 already carry. No rule of §2.3, §3 or §4 moved: one artifact, one identity, each entry gated on
+its own generating set, the first the viewer satisfies served entire or nothing. The old word said
+nothing about what the thing was and left the caller's ranking unnamed.
 
 **r4 — 2026-08-16. Promoted to normative.** The two rulings taken after r3 are folded in: a layer's
 lineage is its **edges** and its levels are declared resolutions, independent structures neither of

@@ -124,7 +124,7 @@ fn declaration(name: &str) -> LayerDeclaration {
     }
 }
 
-/// The engine's answer: every served artifact's masked count, by stable key.
+/// The engine's answer: every served artifact's masked count, by key.
 ///
 /// **Read through the viewport**, which is the surface a viewer actually gets, rather than through
 /// a store accessor: a census against the store would agree with itself about a projection that
@@ -139,7 +139,7 @@ fn served_counts(engine: &Engine) -> BTreeMap<String, u64> {
         .expect("a viewport over the whole map")
         .artifacts
         .into_iter()
-        .map(|a| (a.stable_key.expect("the census publishes keyed artifacts"), a.masked_count))
+        .map(|a| (a.key.expect("the census publishes keyed artifacts"), a.masked_count))
         .collect()
 }
 

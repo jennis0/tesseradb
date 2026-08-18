@@ -35,7 +35,7 @@ use tessera_types::EntityId;
 /// Execute a layer's `withdraw_on_member_deletion` declaration against one record, for the members
 /// this fold retired (`annotation-write-cycle.md` §3.2).
 ///
-/// **An artifact left with no variations is not an artifact with no content** — it is one the
+/// **An artifact left with no contents is not an artifact with no content** — it is one the
 /// serving path withholds, because its layer declares supplied content and it has none to serve.
 /// That is [decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)
 /// reached from the write side: the alternative is serving the identity and the count with the
@@ -44,12 +44,12 @@ fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw
     match withdraw {
         true => {
             record
-                .variations
-                .retain(|variation| variation.generated_from.and_cardinality(retired) == 0);
+                .contents
+                .retain(|content| content.generated_from.and_cardinality(retired) == 0);
         }
         false => {
-            for variation in &mut record.variations {
-                variation.generated_from.andnot_inplace(retired);
+            for content in &mut record.contents {
+                content.generated_from.andnot_inplace(retired);
             }
         }
     }
@@ -74,17 +74,17 @@ pub struct IncomingArtifact {
     /// no `tessera_id` for it.
     pub key: Option<String>,
     pub members: Bitmap,
-    /// The artifact's supplied content, as **ranked variations** — most specific first. Empty on a
+    /// The artifact's supplied content, as **ranked contents** — most specific first. Empty on a
     /// layer that declares no supplied content, which is every layer Stage 2 could publish.
     ///
-    /// A viewer is served the first variation whose generating set they contain, entire, or the
+    /// A viewer is served the first content whose generating set they contain, entire, or the
     /// artifact is absent ([decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
     /// The order is the caller's ranking and the service takes no opinion on it
     /// ([decision 0078](../../../docs/decisions/0078-the-service-takes-no-opinion-on-which-variation.md)).
-    pub variations: Vec<IncomingVariation>,
+    pub contents: Vec<IncomingContent>,
     /// The artifact this one exists only as an attachment to — a toponymy label on a cluster.
     ///
-    /// **Named by the target's own stable key, because an ordinal is never disclosed.** A response
+    /// **Named by the target's own key, because an ordinal is never disclosed.** A response
     /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
     /// address for the target beyond the key they published it under.
     pub attached_to: Option<IncomingAttachment>,
@@ -104,12 +104,13 @@ pub struct IncomingArtifact {
 pub struct IncomingAttachment {
     pub layer: String,
     pub level: u32,
-    pub stable_key: String,
+    pub key: String,
 }
 
-/// One ranked variation of an artifact's supplied content, as a caller offers it.
+/// One entry in an artifact's ranked `contents`, as a caller offers it. Its position in that
+/// list is its **rank**.
 #[derive(Debug, Clone, PartialEq)]
-pub struct IncomingVariation {
+pub struct IncomingContent {
     /// One value per kind the layer declares, **positionally**. Every declared kind must be
     /// supplied: `/v1/meta` publishes the kinds so a client knows what to draw, and that is only
     /// safe because no served artifact ever lacks one its layer declared.
@@ -124,7 +125,7 @@ pub struct IncomingVariation {
     pub generated_from: Bitmap,
 }
 
-impl IncomingVariation {
+impl IncomingContent {
     /// Builds one from resolved entities — the constructor exists for
     /// [`IncomingArtifact::from_entities`]'s reason: `tessera-server` names a set without being
     /// able to do arithmetic on one.
@@ -133,7 +134,7 @@ impl IncomingVariation {
         for entity in generated_from {
             bitmap.add(entity.raw() as u32);
         }
-        IncomingVariation {
+        IncomingContent {
             values,
             generated_from: bitmap,
         }
@@ -159,7 +160,7 @@ impl IncomingArtifact {
         IncomingArtifact {
             key,
             members: bitmap,
-            variations: Vec::new(),
+            contents: Vec::new(),
             attached_to: None,
             parent_key: None,
         }
@@ -169,10 +170,10 @@ impl IncomingArtifact {
     pub fn attached(
         key: Option<String>,
         members: impl IntoIterator<Item = EntityId>,
-        variations: Vec<IncomingVariation>,
+        contents: Vec<IncomingContent>,
         attached_to: IncomingAttachment,
     ) -> Self {
-        let mut artifact = IncomingArtifact::with_content(key, members, variations);
+        let mut artifact = IncomingArtifact::with_content(key, members, contents);
         artifact.attached_to = Some(attached_to);
         artifact
     }
@@ -181,10 +182,10 @@ impl IncomingArtifact {
     pub fn with_content(
         key: Option<String>,
         members: impl IntoIterator<Item = EntityId>,
-        variations: Vec<IncomingVariation>,
+        contents: Vec<IncomingContent>,
     ) -> Self {
         let mut artifact = IncomingArtifact::from_entities(key, members);
-        artifact.variations = variations;
+        artifact.contents = contents;
         artifact
     }
 }
@@ -200,16 +201,16 @@ pub struct Degradation {
     pub layer: String,
     pub level: u32,
     pub ordinal: u32,
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// How many of this artifact's members the fold retired. Zero where only its content lost
     /// sources — the two losses are independent.
     pub members_lost: u64,
     /// What the membership held before this fold, so a caller can see the proportion rather than
     /// having to hold the previous number themselves.
     pub declared_members: u64,
-    /// `(variation index, members of that generating set the fold retired)`, for the variations
+    /// `(rank, members of that generating set the fold retired)`, for the contents
     /// that lost any. Empty on a layer that declares no supplied content.
-    pub variations_lost: Vec<(u32, u64)>,
+    pub contents_lost: Vec<(u32, u64)>,
 }
 
 /// One artifact's durable state, as the registry holds it.
@@ -220,19 +221,19 @@ pub struct ArtifactRecord {
     /// The caller's own key, if they supplied one. **Effectively mandatory for a layer another
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
     /// no `tessera_id` for it.
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// Entity-space membership — the canonical, view-invariant record.
     pub members: Bitmap,
-    /// The ranked variations of this artifact's supplied content, most specific first.
+    /// The ranked contents of this artifact's supplied content, most specific first.
     ///
-    /// **The values are not here.** This carries each variation's *generating set* — the thing the
+    /// **The values are not here.** This carries each content's *generating set* — the thing the
     /// serving path does bitmap arithmetic on for every request — while the content bytes live in
     /// the record blob at this artifact's entity
     /// ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md)).
     /// The split follows from what each is for: a generating set is projected into row space once
     /// per generation and intersected per request, and a form that had to be decompressed to be
     /// tested would pay that cost on every artifact of every viewport.
-    pub variations: Vec<VariationSet>,
+    pub contents: Vec<ContentSet>,
     /// What this artifact exists as an attachment to, resolved at publication.
     ///
     /// **A visibility term, not a navigation aid.** An artifact carrying one is tested on its
@@ -283,9 +284,10 @@ pub struct Attachment {
     pub entity: EntityId,
 }
 
-/// One variation's generating set, as the registry holds it, and the content it gates.
+/// One entry of an artifact's ranked `contents`, as the registry holds it: the generating set,
+/// and the content it gates.
 #[derive(Debug, Clone)]
-pub struct VariationSet {
+pub struct ContentSet {
     /// The content values, positional to the layer's declared kinds.
     ///
     /// **`None` where this copy does not carry them**, which means *restored from a packed extent
@@ -300,7 +302,7 @@ pub struct VariationSet {
     /// forbids.
     pub values: Option<Vec<String>>,
     /// Entity-space, canonical. **Empty means corpus-independent** — containment is vacuous and the
-    /// variation serves to everyone who reaches the layer — and that is a real declaration rather
+    /// content serves to everyone who reaches the layer — and that is a real declaration rather
     /// than a missing one: a layer whose kinds are all corpus-independent is refused a generating
     /// set at publish, so an empty set here cannot be an omission.
     pub generated_from: Bitmap,
@@ -328,7 +330,7 @@ impl ArtifactRecord {
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
     levels: BTreeMap<(String, u32), Vec<Option<ArtifactRecord>>>,
-    /// `(layer, level, stable_key) → ordinal`. **An index, not a second copy of the truth**: it
+    /// `(layer, level, key) → ordinal`. **An index, not a second copy of the truth**: it
     /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
     /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
     /// at the sizes this stage publishes.
@@ -354,7 +356,7 @@ impl ArtifactStore {
     /// Insert or replace one artifact. Growing the level's vector to fit is what makes a
     /// publication that arrives out of ordinal order land correctly.
     pub fn put(&mut self, layer: &str, level: u32, ordinal: u32, record: ArtifactRecord) {
-        if let Some(key) = &record.stable_key {
+        if let Some(key) = &record.key {
             self.keys
                 .insert((layer.to_string(), level, key.clone()), ordinal);
         }
@@ -442,21 +444,21 @@ impl ArtifactStore {
                 refused += 1;
                 continue;
             };
-            // Every generating set decodes or the artifact is refused whole. A variation whose set
+            // Every generating set decodes or the artifact is refused whole. A content whose set
             // decoded short is one a viewer may be served without containing what it was generated
             // from — the disclosure containment exists to prevent — so the failure may not be
-            // localised to the variation and skipped.
-            let sets: Option<Vec<VariationSet>> = published
-                .variations
+            // localised to the one content and skipped.
+            let sets: Option<Vec<ContentSet>> = published
+                .contents
                 .iter()
                 .map(|v| {
-                    deserialise_members(&v.generated_from).map(|generated_from| VariationSet {
+                    deserialise_members(&v.generated_from).map(|generated_from| ContentSet {
                         values: Some(v.values.clone()),
                         generated_from,
                     })
                 })
                 .collect();
-            let Some(variations) = sets else {
+            let Some(contents) = sets else {
                 refused += 1;
                 continue;
             };
@@ -466,9 +468,9 @@ impl ArtifactStore {
                 published.ordinal,
                 ArtifactRecord {
                     entity: published.entity,
-                    stable_key: published.stable_key.clone(),
+                    key: published.key.clone(),
                     members,
-                    variations,
+                    contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
                         layer: a.layer,
                         level: a.level,
@@ -605,24 +607,24 @@ impl ArtifactStore {
                     continue;
                 }
                 let members_lost = record.members.and_cardinality(retired);
-                let mut variations_lost = Vec::new();
-                for (index, variation) in record.variations.iter().enumerate() {
-                    let lost = variation.generated_from.and_cardinality(retired);
+                let mut contents_lost = Vec::new();
+                for (rank, content) in record.contents.iter().enumerate() {
+                    let lost = content.generated_from.and_cardinality(retired);
                     if lost > 0 {
-                        variations_lost.push((index as u32, lost));
+                        contents_lost.push((rank as u32, lost));
                     }
                 }
-                if members_lost == 0 && variations_lost.is_empty() {
+                if members_lost == 0 && contents_lost.is_empty() {
                     continue;
                 }
                 out.push(Degradation {
                     layer: layer.clone(),
                     level: *level,
                     ordinal: ordinal as u32,
-                    stable_key: record.stable_key.clone(),
+                    key: record.key.clone(),
                     members_lost,
                     declared_members: record.declared_size(),
-                    variations_lost,
+                    contents_lost,
                 });
             }
         }
@@ -670,7 +672,7 @@ impl ArtifactStore {
     /// fail-open.
     ///
     /// **Generating sets move only where the layer said they may**, which is `policy`
-    /// (`annotation-write-cycle.md` §3.2). Under `WithdrawContent` — the default — a variation that
+    /// (`annotation-write-cycle.md` §3.2). Under `WithdrawContent` — the default — a content that
     /// lost a source is **dropped whole**, content and set together, because containment is
     /// all-or-nothing and a set that lost a member fails it for every principal for ever; the caller
     /// regenerates. Under `ShrinkGeneratingSet` the member leaves the set and the content serves
@@ -732,7 +734,7 @@ impl ArtifactStore {
     /// [`Self::mark_published`] is: until the manifest naming the rewritten extents is durable, the
     /// old prefix is what a restart opens.
     ///
-    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its stable key
+    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its key
     /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
     /// republication onto the identity of the artifact this fold just removed.
     pub fn retire(&mut self, retired: &Bitmap, policy: &dyn Fn(&str) -> bool) {
@@ -744,7 +746,7 @@ impl ArtifactStore {
             for slot in slots.iter_mut() {
                 let Some(record) = slot else { continue };
                 if retired.contains(record.entity.raw() as u32) {
-                    if let Some(key) = &record.stable_key {
+                    if let Some(key) = &record.key {
                         self.keys.remove(&(layer.clone(), *level, key.clone()));
                     }
                     *slot = None;
@@ -761,14 +763,14 @@ impl ArtifactStore {
 
     /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
     ///
-    /// **Tags are `variation × kinds + kind`, positions in the artifact's own layer declaration** —
+    /// **Tags are `rank × kinds + kind`, positions in the artifact's own layer declaration** —
     /// the same idiom a point row's tags follow, where a tag is a position in the manifest's
     /// declared scalars. Artifact rows and point rows therefore share one store and one reader
     /// while each reads its tags against its own declaration, which is safe because the two never
     /// share an entity: the allocator issues artifact ids downward from the ceiling and point ids
     /// upward from zero, so which declaration governs a row is a range check on its entity.
     ///
-    /// Every variation of one artifact carries a value for every declared kind — refused at
+    /// Every content of one artifact carries a value for every declared kind — refused at
     /// publication otherwise — so the stride is the same for all of them and is recoverable from
     /// the layer's declaration alone.
     pub fn unpublished_content(&self) -> Vec<(EntityId, Vec<(u16, String)>)> {
@@ -781,13 +783,13 @@ impl ArtifactStore {
             for slot in &slots[from..] {
                 let Some(record) = slot else { continue };
                 let mut fields = Vec::new();
-                for (v, variation) in record.variations.iter().enumerate() {
-                    let Some(values) = &variation.values else {
+                for (v, content) in record.contents.iter().enumerate() {
+                    let Some(values) = &content.values else {
                         continue;
                     };
                     for (k, value) in values.iter().enumerate() {
                         let tag = v * values.len() + k;
-                        // A layer whose kinds and variations multiply past the tag space cannot be
+                        // A layer whose kinds and contents multiply past the tag space cannot be
                         // written back. **The whole artifact's row is abandoned, not the one
                         // field**: the reader requires every declared kind or none, so a row
                         // missing one withholds the artifact — while the *in-memory* copy, tried
@@ -803,9 +805,9 @@ impl ArtifactStore {
                         };
                         fields.push((tag, value.clone()));
                     }
-                    if fields.is_empty() && !variation.values.as_ref().is_none_or(Vec::is_empty) {
+                    if fields.is_empty() && !content.values.as_ref().is_none_or(Vec::is_empty) {
                         // The break above cleared it: abandon this artifact entirely rather than
-                        // writing the variations that happened to fit.
+                        // writing the contents that happened to fit.
                         break;
                     }
                 }
@@ -911,16 +913,16 @@ impl ArtifactStore {
     }
 }
 
-/// Encode one artifact for a packed extent: its caller key, its membership and its variations'
+/// Encode one artifact for a packed extent: its caller key, its membership and its contents'
 /// generating sets, in one blob.
 ///
 /// ```text
 /// blob       := u16 LE key_len | key bytes (UTF-8)
-///             | u16 LE variation_count
+///             | u16 LE content_count
 ///             | u32 LE members_len | membership bytes (portable Roaring)
-///             | variation*
+///             | content*
 ///             | attachment
-/// variation  := u32 LE set_len | generating-set bytes (portable Roaring)
+/// content    := u32 LE set_len | generating-set bytes (portable Roaring)
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
@@ -937,7 +939,7 @@ impl ArtifactStore {
 ///
 /// **The key travels with the membership because nothing else durable carries it.** An artifact's
 /// entity is derivable from its layer's reserved runs and its ordinal, so the extent need not carry
-/// it; a caller's stable key is derivable from nothing. Putting it in the manifest instead would put
+/// it; a caller's key is derivable from nothing. Putting it in the manifest instead would put
 /// one JSON string per artifact in a document parsed at every open — the entry-count problem the
 /// packing exists to solve, in another guise.
 ///
@@ -945,10 +947,10 @@ impl ArtifactStore {
 /// layering**: the store owns which bytes belong to which artifact, this crate owns what the bytes
 /// mean, and the bitmap library stays on one side of the boundary.
 pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
-    let key = record.stable_key.as_deref().unwrap_or_default().as_bytes();
+    let key = record.key.as_deref().unwrap_or_default().as_bytes();
     let members = serialise_members(&record.members);
     let sets: Vec<Vec<u8>> = record
-        .variations
+        .contents
         .iter()
         .map(|v| serialise_members(&v.generated_from))
         .collect();
@@ -962,9 +964,9 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
     if key_len != u16::MAX {
         out.extend_from_slice(key);
     }
-    // Same argument, one level up: more variations than a `u16` can count is a publication this
+    // Same argument, one level up: more contents than a `u16` can count is a publication this
     // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
-    // dropped variation is a viewer served a *different* description from the one the caller
+    // dropped content is a viewer served a *different* description from the one the caller
     // ranked for them.
     let count = u16::try_from(sets.len()).unwrap_or(u16::MAX);
     out.extend_from_slice(&count.to_le_bytes());
@@ -1028,7 +1030,7 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
     if key_len == u16::MAX as usize {
         return None;
     }
-    let stable_key = if key_len == 0 {
+    let key = if key_len == 0 {
         None
     } else {
         Some(std::str::from_utf8(take(key_len)?).ok()?.to_string())
@@ -1039,11 +1041,11 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
     }
     let members_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
     let members = deserialise_members(take(members_len)?)?;
-    let mut variations = Vec::with_capacity(count);
+    let mut contents = Vec::with_capacity(count);
     for _ in 0..count {
         let set_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-        variations.push(VariationSet {
-            // ⊘ The extent carries no values — see [`VariationSet::values`]. A restored variation is
+        contents.push(ContentSet {
+            // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
             // therefore unservable until the blob write lands, which is fail-closed and loud rather
             // than an artifact served with its description missing.
             values: None,
@@ -1086,9 +1088,9 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
     }
     Some(ArtifactRecord {
         entity,
-        stable_key,
+        key,
         members,
-        variations,
+        contents,
         attached_to,
         parent,
     })
@@ -1121,9 +1123,9 @@ mod tests {
     fn record(entity: u64, members: &[u32]) -> ArtifactRecord {
         ArtifactRecord {
             entity: EntityId::new(entity),
-            stable_key: None,
+            key: None,
             members: Bitmap::of(members),
-            variations: Vec::new(),
+            contents: Vec::new(),
             attached_to: None,
             parent: None,
         }
@@ -1187,8 +1189,8 @@ mod tests {
     #[test]
     fn an_attachment_round_trips_and_a_truncated_one_is_refused() {
         let mut r = record(100, &[1, 2, 3]);
-        r.stable_key = Some("l0".into());
-        r.variations = vec![VariationSet {
+        r.key = Some("l0".into());
+        r.contents = vec![ContentSet {
             values: Some(vec!["a label".into()]),
             generated_from: Bitmap::of(&[1, 2]),
         }];
@@ -1202,7 +1204,7 @@ mod tests {
         let blob = encode_record(&r);
         let back = decode_record(r.entity, &blob).expect("a whole blob decodes");
         assert_eq!(back.attached_to, r.attached_to);
-        assert_eq!(back.stable_key, r.stable_key);
+        assert_eq!(back.key, r.key);
 
         // An unattached artifact round-trips too, carrying its one absence byte — *unattached* and
         // *this reader could not tell* must not encode the same.
@@ -1213,7 +1215,7 @@ mod tests {
         assert_eq!(restored.attached_to, None);
         assert_eq!(restored.members, plain.members);
 
-        // Every truncation from the end of the variations onwards refuses. The one that matters is
+        // Every truncation from the end of the contents onwards refuses. The one that matters is
         // the shortest: it is byte-for-byte the unattached artifact's blob without its absence
         // byte, and a reader that shrugged at a missing tail would decode it as unattached.
         for len in (plain_blob.len() - 1)..blob.len() {

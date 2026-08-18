@@ -81,7 +81,7 @@ export type AppState = {
   sessionWarm: boolean;
   lastError: {code: string; detail: string} | null;
   /** The depth the budget chose for the current view. */
-  view: (DepthChoice & {requestedAt: number}) | null;
+  depthChoice: (DepthChoice & {requestedAt: number}) | null;
   /** Target marks on screen. */
   budget: number;
   /** Calibrated marks-per-tile; seeded from `theta_target_marks` and corrected downward only. */

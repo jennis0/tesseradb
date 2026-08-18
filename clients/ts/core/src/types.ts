@@ -294,7 +294,7 @@ export type Artifact = {
   /** Wire identity, u64 — never narrowed to a number. Stable across principals and sessions. */
   tesseraId: bigint;
   /** The publisher's own key, when they supplied one. */
-  stableKey: string | null;
+  key: string | null;
   maskedCount: bigint;
   /**
    * Derived geometry, recomputed **for this principal** from the members they can see — in the
@@ -314,7 +314,8 @@ export type Artifact = {
   hull: [number, number][] | null;
   /**
    * The publisher's supplied content — label text, an authored name, a polygon — as **one
-   * variation, entire**, positional to the layer's `suppliedContent` kinds from `/v1/meta`.
+   * entry of the artifact's ranked contents, entire**, positional to the layer's `suppliedContent`
+   * kinds from `/v1/meta`.
    *
    * Empty means the layer declares none. It never means *withheld*: a viewer who may not read an
    * artifact's content is not served the artifact, so there is no state to render as "label
@@ -483,4 +484,4 @@ export type ItemDetail = {fields: Record<string, unknown>; externalId: string | 
  * declared size**: what a drill-down adds over the wire's own row is a name for the layer, not a
  * way behind the count.
  */
-export type ArtifactDetail = {layer: string; stableKey: string | null; maskedCount: bigint};
+export type ArtifactDetail = {layer: string; key: string | null; maskedCount: bigint};

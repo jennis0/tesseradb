@@ -30,10 +30,10 @@ each naming what is absent per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
 
 - **A `fields` map on a `[[layer]]` or a `[layer.members]`.** Every other object's map moves its
-  field and the reader takes the name it moved it to. The artifact and member readers still read
-  `layer`, `variation`, `member` and `values` — names this surface does not carry at all — so a
-  layer map has nothing to move until those sources are rebuilt on §8's names, and one naming a
-  different column is refused rather than read as canonical.
+  field and the reader takes the name it moved it to. The artifact and member readers take `rank`
+  and `entity`, but still read a `layer` discriminator, a per-row `values` and a `parent_key` —
+  none of which this surface names — so a layer map has nothing to move until those sources are
+  rebuilt on §8's names, and one naming a different column is refused rather than read as canonical.
 - **One file per layer.** A layer's `source` is real, but the artifact and member files still carry
   a `layer` column and the build reads one path, so two layers binding *different* files is
   refused; and `[layer.labels]`, a layer's inline `artifacts`, a view's own `visibility` and
@@ -786,6 +786,13 @@ across every view it appears in, and it is what a member row names.
 
 ## Appendix R — review trail
 
+**2026-08-19 — the artifact and member readers take `rank` and `entity`.** §1's field tables were
+already written on these names; the readers now use them, so §8's unbuilt note narrows: what still
+keeps a layer's `fields` map refused is the `layer` discriminator column, the per-row `values` and
+`parent_key`, not the membership grain's own columns. The caller's key is `key` throughout — the
+qualifier in `stable_key` said nothing the type did not. Names only; no refusal, no default and no
+disclosure control moved.
+
 **2026-08-18 — the plugin takes a term list, and the comma stops being a delimiter.** The build no
 longer joins an item's terms into one `access` string for the plugin to split apart: it hands the
 plugin the list it already has, through a second data-side entry point (`terms_of_labels`) that
@@ -806,7 +813,7 @@ names its `fields` map resolved** — a view's geometry, `[corpus]`'s identity, 
 `key`/`code`/`title`, an attribute's `field` — so §8's third refusal exists at last: a declared
 field the file does not carry is a build failure naming the object, the field, the column looked
 for and the columns the file has, where before it would have read an empty column and said nothing.
-A layer's map stays refused, its readers still spelling `layer`, `variation`, `member` and `values`.
+A layer's map stays refused, its readers still spelling `layer`, `values` and `parent_key`.
 **`point_visibility = { field }` reads each point's access terms from a `list<string>` (or a plain
 `string`) column of the view's own source**, and `{ default }` alone gives every point one label —
 so all three shapes §1 declares now acquire. Terms are trimmed; a null value and an empty list both

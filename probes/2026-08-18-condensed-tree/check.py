@@ -51,20 +51,20 @@ artifacts = pq.read_table(SRC / "artifacts.parquet").to_pydict()
 members = pq.read_table(SRC / "members.parquet").to_pydict()
 
 parent_of = {}
-for layer, key, parent in zip(artifacts["layer"], artifacts["stable_key"], artifacts["parent_key"]):
+for layer, key, parent in zip(artifacts["layer"], artifacts["key"], artifacts["parent_key"]):
     if layer == LAYER and parent is not None:
         parent_of[key] = parent
 children_of = {}
 for child, parent in parent_of.items():
     children_of.setdefault(parent, []).append(child)
 
-# Membership, for the clusters only — a variation row is a generating set, not a membership.
+# Membership, for the clusters only — a row carrying a rank is a generating set, not a membership.
 by_key = {}
-for layer, key, variation, member in zip(
-    members["layer"], members["stable_key"], members["variation"], members["member"]
+for layer, key, rank, entity in zip(
+    members["layer"], members["key"], members["rank"], members["entity"]
 ):
-    if layer == LAYER and variation is None:
-        by_key.setdefault(key, set()).add(int(member))
+    if layer == LAYER and rank is None:
+        by_key.setdefault(key, set()).add(int(entity))
 
 # The layer's own existence criterion, read from the declaration rather than assumed — the two
 # would otherwise drift, and this probe would then be testing a configuration nobody ships.
@@ -236,7 +236,7 @@ try:
             at += 5 + length
             if kind == 5:
                 table = ipc.open_stream(io.BytesIO(payload)).read_all().to_pydict()
-                out = list(zip(table["layer"], table["stable_key"], table["masked_count"]))
+                out = list(zip(table["layer"], table["key"], table["masked_count"]))
         return out
 
     log("asking as a principal holding only the stray term")

@@ -409,7 +409,7 @@ impl LayerRegistry {
                     detail: format!("artifact {i} of this batch: {detail}"),
                 })
             };
-            if declared.is_empty() && !artifact.variations.is_empty() {
+            if declared.is_empty() && !artifact.contents.is_empty() {
                 return refuse(
                     "carries supplied content, and this layer declares none — the kinds a client \
                      may draw come from the layer's declaration, so content under no declared kind \
@@ -417,7 +417,7 @@ impl LayerRegistry {
                         .to_string(),
                 );
             }
-            if !declared.is_empty() && artifact.variations.is_empty() {
+            if !declared.is_empty() && artifact.contents.is_empty() {
                 return refuse(format!(
                     "carries no supplied content, and this layer declares {} kind(s); an artifact \
                      served without content its layer declares cannot be told apart from one whose \
@@ -425,26 +425,26 @@ impl LayerRegistry {
                     declared.len()
                 ));
             }
-            for (v, variation) in artifact.variations.iter().enumerate() {
-                if variation.values.len() != declared.len() {
+            for (rank, content) in artifact.contents.iter().enumerate() {
+                if content.values.len() != declared.len() {
                     return refuse(format!(
-                        "variation {v} supplies {} value(s) for {} declared kind(s); every \
-                         variation is a whole description, and a viewer is served one of them \
+                        "contents[{rank}] supplies {} value(s) for {} declared kind(s); every \
+                         entry is a whole description, and a viewer is served one of them \
                          entire or no artifact at all",
-                        variation.values.len(),
+                        content.values.len(),
                         declared.len()
                     ));
                 }
-                if !corpus_derived && !variation.generated_from.is_empty() {
+                if !corpus_derived && !content.generated_from.is_empty() {
                     return refuse(format!(
-                        "variation {v} declares a generating set, and none of this layer's content \
-                         is corpus-derived; a set that is never tested is a claim the service would \
-                         carry without meaning"
+                        "contents[{rank}] declares a generating set, and none of this layer's \
+                         content is corpus-derived; a set that is never tested is a claim the \
+                         service would carry without meaning"
                     ));
                 }
-                if corpus_derived && variation.generated_from.is_empty() {
+                if corpus_derived && content.generated_from.is_empty() {
                     return refuse(format!(
-                        "variation {v} declares no generating set, and this layer's content is \
+                        "contents[{rank}] declares no generating set, and this layer's content is \
                          corpus-derived; such content is served only to a viewer who can see \
                          everything it was generated from, and an empty set is satisfied by \
                          everyone"
@@ -454,7 +454,7 @@ impl LayerRegistry {
         }
 
         // **Attachments, resolved before anything is allocated.** The caller names a target by the
-        // stable key they published it under — an ordinal is never disclosed (C8), so a key is the
+        // key they published it under — an ordinal is never disclosed (C8), so a key is the
         // only address they hold — and what is stored is the resolved `(level, ordinal, entity)`.
         // Resolving once here rather than per request is what makes the extra predicate term one
         // `verdict` lookup instead of a registry walk.
@@ -474,11 +474,11 @@ impl LayerRegistry {
                     layer: layer_name.to_string(),
                     target: wanted.layer.clone(),
                     level: wanted.level,
-                    key: wanted.stable_key.clone(),
+                    key: wanted.key.clone(),
                 };
                 let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
                 let ordinal = store
-                    .ordinal_of_key(&wanted.layer, wanted.level, &wanted.stable_key)
+                    .ordinal_of_key(&wanted.layer, wanted.level, &wanted.key)
                     .ok_or_else(missing)?;
                 let entity = target
                     .runs
@@ -545,7 +545,7 @@ impl LayerRegistry {
                         kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
                     });
                 }
-                // **Only a within-level edge can name itself.** A stable key is unique per
+                // **Only a within-level edge can name itself.** A key is unique per
                 // `(layer, level)`, so a levelled taxonomy legitimately carries the same key at two
                 // levels — an arXiv archive with no subclass is `hep-ph` at both, and the level-1
                 // artifact's parent is the level-0 one of the same name. Refusing that would force
@@ -620,12 +620,12 @@ impl LayerRegistry {
                 PublishedArtifact {
                     ordinal: ordinal as u32,
                     entity: EntityId::new(entity),
-                    stable_key: artifact.key.clone(),
+                    key: artifact.key.clone(),
                     members: serialise_members(&artifact.members),
-                    variations: artifact
-                        .variations
+                    contents: artifact
+                        .contents
                         .iter()
-                        .map(|v| crate::wal::PublishedVariation {
+                        .map(|v| crate::wal::PublishedContent {
                             values: v.values.clone(),
                             generated_from: serialise_members(&v.generated_from),
                         })
@@ -1078,7 +1078,7 @@ mod tests {
         IncomingArtifact {
             key: Some(key.into()),
             members: croaring::Bitmap::of(members),
-            variations: Vec::new(),
+            contents: Vec::new(),
             attached_to: None,
             parent_key: None,
         }
@@ -1116,7 +1116,7 @@ mod tests {
             artifact.attached_to = Some(crate::membership::IncomingAttachment {
                 layer: "clusters/a".into(),
                 level: 0,
-                stable_key: target.into(),
+                key: target.into(),
             });
             artifact
         };
@@ -1180,7 +1180,7 @@ mod tests {
         artifact.attached_to = Some(crate::membership::IncomingAttachment {
             layer: "clusters/a".into(),
             level: 0,
-            stable_key: "c0".into(),
+            key: "c0".into(),
         });
         assert_eq!(
             publish(&mut reg, &mut store, &mut alloc, "topics/x", &[artifact]),

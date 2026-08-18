@@ -58,7 +58,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::membership::{
-    ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingVariation,
+    ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
@@ -72,15 +72,15 @@ use crate::error::{BuildError, Result};
 #[derive(Debug, Default)]
 struct PlannedArtifact {
     members: Vec<u64>,
-    /// Indexed by variation, dense — a gap would silently renumber the caller's ranking.
-    variations: Vec<PlannedVariation>,
+    /// Indexed by rank, dense — a gap would silently renumber the caller's ranking.
+    contents: Vec<PlannedContent>,
     attached_to: Option<IncomingAttachment>,
     /// Parent artifact in a hierarchy, named by the parent's own key.
     parent_key: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
-struct PlannedVariation {
+struct PlannedContent {
     values: Vec<String>,
     generated_from: Vec<u64>,
 }
@@ -206,11 +206,12 @@ pub fn read(
     Ok(plan)
 }
 
-/// One row per `(artifact, variation)`: the artifact's scalars, its content values, and the edge it
+/// One row per `(artifact, rank)`: the artifact's scalars, its content values, and the edge it
 /// hangs from.
 ///
-/// An artifact with no supplied content is one row with a null `variation` and no `values`; an
-/// artifact with content is one row per variation. The attachment repeats on each of an artifact's
+/// An artifact with no supplied content is one row with a null `rank` and no `values`; an
+/// artifact with content is one row per entry of its ranked `contents`. The attachment repeats on
+/// each of an artifact's
 /// rows and must agree across them — a caller writing two different targets for one artifact has
 /// written something nobody can act on, so it is a refusal rather than a last-row-wins.
 fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
@@ -222,7 +223,7 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
         let layer = utf8(path, &batch, "layer")?;
         let level = optional_u32(path, &batch, "level")?;
         let key = utf8(path, &batch, "key")?;
-        let variation = optional_u32(path, &batch, "variation")?;
+        let rank = optional_u32(path, &batch, "rank")?;
         let values = optional_string_list(path, &batch, "values")?;
         let target_layer = optional_utf8(path, &batch, "attached_layer")?;
         let target_level = optional_u32(path, &batch, "attached_level")?;
@@ -240,7 +241,7 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
                 (Some(layer), Some(key)) => Some(IncomingAttachment {
                     layer,
                     level: target_level.as_ref().map_or(0, |c| number_at(c, row)),
-                    stable_key: key,
+                    key,
                 }),
                 (None, None) => None,
                 _ => {
@@ -280,10 +281,10 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
             entry.parent_key = parent;
             seen.insert(address.clone());
 
-            let Some(index) = variation.as_ref().and_then(|c| value_index(c, row)) else {
+            let Some(index) = rank.as_ref().and_then(|c| value_index(c, row)) else {
                 continue;
             };
-            let slot = variation_slot(entry, index);
+            let slot = content_at_rank(entry, index);
             slot.values = match values.as_ref() {
                 None => Vec::new(),
                 Some(column) => strings_at(path, column, row, &address.2)?,
@@ -293,9 +294,9 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
     Ok(())
 }
 
-/// One row per `(artifact, member)`: the memberships, and the generating sets beside them.
+/// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
 ///
-/// A null `variation` is the artifact's **membership**; `variation = k` is variation *k*'s
+/// A null `rank` is the artifact's **membership**; `rank = k` is `contents[k]`'s
 /// generating set — the documents a viewer must be able to see *entirely* before that description
 /// is served to them. One file rather than two because the two are the same shape and the same
 /// scale, and a build at 10⁷ artifacts reads whichever is larger the same way.
@@ -305,8 +306,8 @@ fn read_members(path: &Path, plan: &mut LayerPlan) -> Result<()> {
         let layer = utf8(path, &batch, "layer")?;
         let level = optional_u32(path, &batch, "level")?;
         let key = utf8(path, &batch, "key")?;
-        let variation = optional_u32(path, &batch, "variation")?;
-        let member = u64s(path, &batch, "member")?;
+        let rank = optional_u32(path, &batch, "rank")?;
+        let entity = u64s(path, &batch, "entity")?;
 
         for row in 0..batch.num_rows() {
             let address = address(path, layer, &level, key, row)?;
@@ -324,45 +325,45 @@ fn read_members(path: &Path, plan: &mut LayerPlan) -> Result<()> {
                     address.0
                 )));
             };
-            // **A null member is a refusal, not entity zero.** Arrow's `value` reads the values
+            // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the values
             // buffer whatever the validity bitmap says, and a Parquet writer leaves a zero
             // there — so a producer whose join missed a row would publish the corpus's
             // lowest-numbered document into the cluster, moving its masked count for every
             // viewer who can see that one document.
-            if member.is_null(row) {
+            if entity.is_null(row) {
                 return Err(BuildError::Invalid(format!(
-                    "{}: {} has a null member; a null is not entity zero, and publishing it as \
+                    "{}: {} has a null entity; a null is not entity zero, and publishing it as \
                      one puts a document nobody named into the artifact",
                     path.display(),
                     address.2
                 )));
             }
-            let source = member.value(row);
-            match variation.as_ref().and_then(|c| value_index(c, row)) {
+            let source = entity.value(row);
+            match rank.as_ref().and_then(|c| value_index(c, row)) {
                 None => entry.members.push(source),
-                Some(index) => variation_slot(entry, index).generated_from.push(source),
+                Some(index) => content_at_rank(entry, index).generated_from.push(source),
             }
         }
     }
     Ok(())
 }
 
-/// The variation at `index`, growing the ranking to reach it.
+/// The content at `rank`, growing the ranking to reach it.
 ///
 /// **Dense, and a gap is refused.** A ranking is the caller's ordering and the service takes no
-/// opinion on it (decision 0078), so a missing variation 1 under a present variation 2 would either
+/// opinion on it (decision 0078), so a missing rank 1 under a present rank 2 would either
 /// renumber the caller's ranking or publish an empty description; both are answers nobody wrote.
-fn variation_slot(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedVariation {
+fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedContent {
     let index = index as usize;
-    if index >= artifact.variations.len() {
-        // Grown rather than refused here: rows arrive in file order, so a variation 2 seen before
-        // a variation 1 is ordinary. A gap that is still a gap when the artifact is published is
-        // caught there, over the whole ranking, by the empty-variation refusal.
+    if index >= artifact.contents.len() {
+        // Grown rather than refused here: rows arrive in file order, so a rank 2 seen before
+        // a rank 1 is ordinary. A gap that is still a gap when the artifact is published is
+        // caught there, over the whole ranking, by the empty-content refusal.
         artifact
-            .variations
-            .resize_with(index + 1, PlannedVariation::default);
+            .contents
+            .resize_with(index + 1, PlannedContent::default);
     }
-    &mut artifact.variations[index]
+    &mut artifact.contents[index]
 }
 
 /// Register every declaration, publish every artifact, and write the extents that carry them.
@@ -401,7 +402,7 @@ pub fn publish(
         registry.apply(&record);
     }
 
-    // Grouped by `(layer, level)`, each level's artifacts in stable-key order — so a level's
+    // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
     // row order.
     let mut batched: BTreeMap<(&str, u32), Vec<(&str, &PlannedArtifact)>> = BTreeMap::new();
@@ -561,7 +562,7 @@ fn verify_hierarchies(
             }
             address
         };
-        // **Only a within-level edge can name itself.** A stable key is unique per `(layer,
+        // **Only a within-level edge can name itself.** A key is unique per `(layer,
         // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
         // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
         // the level-0 one of the same name.
@@ -713,24 +714,24 @@ fn resolved(
     };
 
     let members = entities(&artifact.members, "membership")?;
-    let mut variations = Vec::with_capacity(artifact.variations.len());
-    for (index, variation) in artifact.variations.iter().enumerate() {
-        if variation.values.is_empty() && variation.generated_from.is_empty() {
+    let mut contents = Vec::with_capacity(artifact.contents.len());
+    for (rank, content) in artifact.contents.iter().enumerate() {
+        if content.values.is_empty() && content.generated_from.is_empty() {
             return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key}: variation {index} is empty, so the ranking \
+                "{layer} level {level} artifact {key}: contents[{rank}] is empty, so the ranking \
                  above it names a description that was never supplied"
             )));
         }
-        variations.push(IncomingVariation::new(
-            variation.values.clone(),
-            entities(&variation.generated_from, &format!("variation {index}"))?,
+        contents.push(IncomingContent::new(
+            content.values.clone(),
+            entities(&content.generated_from, &format!("contents[{rank}]"))?,
         ));
     }
 
     let mut result = match artifact.attached_to.clone() {
-        None => IncomingArtifact::with_content(Some(key.to_string()), members, variations),
+        None => IncomingArtifact::with_content(Some(key.to_string()), members, contents),
         Some(attached_to) => {
-            IncomingArtifact::attached(Some(key.to_string()), members, variations, attached_to)
+            IncomingArtifact::attached(Some(key.to_string()), members, contents, attached_to)
         }
     };
     result.parent_key = artifact.parent_key.clone();

@@ -67,7 +67,7 @@ fn write_artifacts(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("variation", DataType::UInt32, true),
+        Field::new("rank", DataType::UInt32, true),
         Field::new(
             "values",
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
@@ -103,22 +103,22 @@ fn write_members(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("variation", DataType::UInt32, true),
-        Field::new("member", DataType::UInt64, false),
+        Field::new("rank", DataType::UInt32, true),
+        Field::new("entity", DataType::UInt64, false),
     ]));
-    let (mut layers, mut keys, mut variation, mut member) =
+    let (mut layers, mut keys, mut rank, mut entity) =
         (Vec::new(), Vec::new(), Vec::<Option<u32>>::new(), Vec::new());
     let mut row = |layer: &str, key: &str, v: Option<u32>, m: u64| {
         layers.push(layer.to_string());
         keys.push(key.to_string());
-        variation.push(v);
-        member.push(m);
+        rank.push(v);
+        entity.push(m);
     };
     for m in MEMBERS {
         row(CLUSTERS, "c-0000", None, m);
         row(LABELS, "l-0000", None, m);
-        // Variation 0 is generated from the whole cluster — no principal below contains it —
-        // and variation 1 from the documents the subset term grants, which the subset principal
+        // Rank 0 is generated from the whole cluster — no principal below contains it —
+        // and rank 1 from the documents the subset term grants, which the subset principal
         // contains entirely.
         row(LABELS, "l-0000", Some(0), m);
         if terms_of(m).contains(&SUBSET_TERM) {
@@ -130,8 +130,8 @@ fn write_members(path: &Path) {
         vec![
             Arc::new(StringArray::from(layers)) as ArrayRef,
             Arc::new(StringArray::from(keys)),
-            Arc::new(UInt32Array::from(variation)),
-            Arc::new(UInt64Array::from(member)),
+            Arc::new(UInt32Array::from(rank)),
+            Arc::new(UInt64Array::from(entity)),
         ],
     )
     .unwrap();
@@ -233,7 +233,7 @@ fn a_built_layer_serves_with_masked_counts_and_contained_content() {
     let broad = artifacts_of(&engine, &full_coverage_credential());
     let cluster = of_layer(&broad, CLUSTERS);
     assert_eq!(cluster.len(), 1, "the built clustering is served");
-    assert_eq!(cluster[0].stable_key.as_deref(), Some("c-0000"));
+    assert_eq!(cluster[0].key.as_deref(), Some("c-0000"));
     assert_eq!(cluster[0].masked_count, MEMBERS.count() as u64);
     assert!(
         cluster[0].derived.centroid.is_some(),
@@ -314,7 +314,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
     let served = artifacts_of(&engine, &full_coverage_credential());
     let keys: Vec<&str> = served
         .iter()
-        .filter_map(|a| a.stable_key.as_deref())
+        .filter_map(|a| a.key.as_deref())
         .collect();
     for expected in ["c-0000", "l-0000", "c-online"] {
         assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
@@ -323,7 +323,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
     // online publication would show up here as a count from the wrong membership.
     let built = served
         .iter()
-        .find(|a| a.stable_key.as_deref() == Some("c-0000"))
+        .find(|a| a.key.as_deref() == Some("c-0000"))
         .unwrap();
     assert_eq!(built.masked_count, MEMBERS.count() as u64);
     let session = engine.authorise(&full_coverage_credential()).unwrap();

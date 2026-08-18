@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 47
+**Status:** Draft for review — revision 48
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -460,9 +460,9 @@ The assumption this section rests on is that a typical node draws on a modest nu
 
 ### 7.7 The fallback ladder
 
-**The ladder is guidance to the caller, not a mechanism in the service** *(r43 — [decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md), with [0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md) fixing what happens when none of it is satisfied)*. What the service holds is a caller-supplied **ranking** of `(content, gate, rank)` variations on one artifact, and it serves the first whose contents are all contained in `M_auth` — one identity, one membership, one masked count, whatever variation resolves. It takes no view on which content is *better*: only the caller knows why one precedes another, and a service that chose would be ranking content by how much of the corpus a viewer can see. This is also why ranked variations are a property of **any** artifact and not of labels alone.
+**The ladder is guidance to the caller, not a mechanism in the service** *(r43 — [decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md), with [0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md) fixing what happens when none of it is satisfied)*. What the service holds is a caller-supplied **ranking** of `(content, gate, rank)` entries on one artifact, and it serves the first whose generating set is contained in `M_auth` — one identity, one membership, one masked count, whatever entry resolves. It takes no view on which content is *better*: only the caller knows why one precedes another, and a service that chose would be ranking content by how much of the corpus a viewer can see. This is also why ranked contents are a property of **any** artifact and not of labels alone.
 
-**A viewer satisfying no variation receives no artifact, not a shell** — there are no levels of restriction within a single artifact. The tiers below are therefore a construction a caller may adopt, and the ordering is theirs to declare:
+**A viewer satisfying no entry receives no artifact, not a shell** — there are no levels of restriction within a single artifact. The tiers below are therefore a construction a caller may adopt, and the ordering is theirs to declare:
 
 | Rank | Generating set | Source |
 |---|---|---|
@@ -1197,6 +1197,12 @@ Both were checked exhaustively against explicit quantification over all well-for
 
 ## Appendix G — Revision history
 
+- **r48** — **the ranked-content vocabulary is settled** (2026-08-19). §7.7's *variations* are
+  entries of an artifact's ranked `contents`, each identified by its **rank**; the caller's own name
+  for an artifact is its `key`. Names only — the ladder is still guidance, the service still resolves
+  a caller-supplied ranking by containment and chooses nothing itself, and a viewer satisfying no
+  entry still receives no artifact rather than a shell.
+
 - **r47** — **the data side of the plugin boundary takes a term list** (2026-08-18). §6.1 gains
   `terms_of_labels` beside `terms_of_label`: the same derivation for a caller whose terms are
   already separated, obliged to return exactly one descriptor per element, in order. The build had
@@ -1250,7 +1256,7 @@ Both were checked exhaustively against explicit quantification over all well-for
   claim. What bounds a response becomes a **request-time artifact budget** rather than a depth — and
   a budget is not a disclosure control, which §8.4's maximum depth was. The per-node bounding box is
   deleted: a box over full membership discloses the unmasked extent by panning. **§7.7's ladder
-  becomes guidance**, the service resolving a caller-supplied ranking of variations by containment
+  becomes guidance**, the service resolving a caller-supplied ranking of contents by containment
   and choosing nothing itself; a viewer satisfying none receives no artifact rather than a shell, and
   extractive terms leave the ladder for the derived vocabulary they always belonged to.
   **§8.4 loses its second threshold** — the display bar evaluated against `M_sel` inside the descent

@@ -126,7 +126,7 @@ fn a_published_batch_takes_one_entity_per_artifact_and_none_of_them_is_the_layer
         assert_eq!(at.layer, "clusters/a");
         assert_eq!(at.level, 0);
         assert_eq!(at.ordinal, i as u32);
-        assert_eq!(at.stable_key.as_deref(), Some(["c0", "c1", "c2"][i]));
+        assert_eq!(at.key.as_deref(), Some(["c0", "c1", "c2"][i]));
     }
 
     // The layer's own entity is not one of them, which is what keeps suppressing the layer from
@@ -246,7 +246,7 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
             .locate_artifact(artifact_entity(&engine, *id))
             .expect("the identifier the caller holds still names this artifact");
         assert_eq!(at.ordinal, i as u32);
-        assert_eq!(at.stable_key.as_deref(), Some(["c0", "c1"][i]));
+        assert_eq!(at.key.as_deref(), Some(["c0", "c1"][i]));
     }
 
     // A fresh registration after the restart must not land on an entity an artifact holds.
@@ -353,7 +353,7 @@ fn a_published_membership_survives_the_loss_of_the_whole_log() {
             .expect("the identifier the caller holds still names this artifact");
         assert_eq!(at.ordinal, i as u32);
         assert_eq!(
-            at.stable_key.as_deref(),
+            at.key.as_deref(),
             Some(["c0", "c1"][i]),
             "the caller's key travels in the extent — nothing else durable carries it"
         );

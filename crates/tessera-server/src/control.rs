@@ -1803,18 +1803,18 @@ struct IncomingArtifactBody {
     /// **Effectively mandatory for a layer another layer's edges will point into**: an edge names
     /// its target, and at publish time the caller holds no `tessera_id` for it.
     #[serde(default)]
-    stable_key: Option<String>,
+    key: Option<String>,
     /// Base64 external ids, or base-10 `tessera_id` strings, according to the batch's `addressing`.
     /// External ids are base64 on the same rule `/control/changes` follows — they are bytes, not
     /// text — and identifiers are strings because a bare JSON number loses a `u64` past 2⁵³ in
     /// every JavaScript client, silently.
     members: Vec<String>,
-    /// The artifact's supplied content, as **ranked variations**, most specific first. Absent on a
+    /// The artifact's supplied content, as **ranked contents**, most specific first. Absent on a
     /// layer that declares no supplied content; required on one that does, and refused on one that
     /// does not — the engine decides that, since the declaration is its state and not this
     /// handler's.
     #[serde(default)]
-    content: Vec<IncomingVariationBody>,
+    content: Vec<IncomingContentBody>,
     /// The artifact this one exists only as an attachment to — a label on a cluster.
     ///
     /// An attached artifact is withheld wherever its target is: suppress the cluster and its labels
@@ -1825,7 +1825,7 @@ struct IncomingArtifactBody {
 
 /// How a caller names an attachment's target.
 ///
-/// **By the target's own stable key, because an ordinal never crosses the boundary** — a
+/// **By the target's own key, because an ordinal never crosses the boundary** — a
 /// publication answers with a `tessera_id` per artifact and no position in a level (C8), so a key
 /// is the only address a caller holds. Refused if the target does not exist yet: an edge names a
 /// position in a dense level, and one written first would name whatever later landed there.
@@ -1836,12 +1836,12 @@ struct AttachmentBody {
     /// Defaults to the target layer's only level, as `level` does for the batch itself.
     #[serde(default)]
     level: u32,
-    stable_key: String,
+    key: String,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IncomingVariationBody {
+struct IncomingContentBody {
     /// One value per kind the layer declares, **positionally** — the order of its
     /// `content.supplied` list.
     values: Vec<String>,
@@ -1895,7 +1895,7 @@ async fn publish_artifacts(
     // Flattened once, so each address form is resolved in a single batched call whatever the shape
     // of the batch: the external half opens each bundle extent at most once regardless of N, and
     // the tessera half takes one generation snapshot for the idset check and every inversion.
-    // **Members first, then each variation's generating set**, per artifact — one flat list, one
+    // **Members first, then each content's generating set**, per artifact — one flat list, one
     // resolution pass, whatever the shape. A generating set is resolved by the same route and at
     // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
     // would be reinterpreted by the next key rotation, and a containment test over a set that names
@@ -1968,46 +1968,46 @@ async fn publish_artifacts(
         let (artifact, member) = position_in_batch(&widths, position);
         return Err(ApiError::Unknown(format!(
             "id {member} of artifact {artifact} names nothing this deployment holds — its members \
-             first, then each variation's generating set. The batch was refused rather than \
+             first, then each content's generating set. The batch was refused rather than \
              published without it: a dropped member moves both the count a viewer is shown and the \
              size its existence criterion divides by, and a dropped generating-set entry widens \
              who may read the content"
         )));
     }
 
-    // Walked back in exactly the order it was flattened: members, then each variation's set.
+    // Walked back in exactly the order it was flattened: members, then each content's set.
     let mut entities = resolved.into_iter().flatten();
     let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
         .into_iter()
         .map(|artifact| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
-            let variations: Vec<tessera_lifecycle::membership::IncomingVariation> = artifact
+            let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
                 .content
                 .into_iter()
                 .map(|v| {
                     let set: Vec<tessera_types::EntityId> =
                         entities.by_ref().take(v.generated_from.len()).collect();
-                    tessera_lifecycle::membership::IncomingVariation::new(v.values, set)
+                    tessera_lifecycle::membership::IncomingContent::new(v.values, set)
                 })
                 .collect();
             let attached_to = artifact.attached_to.map(|a| {
                 tessera_lifecycle::membership::IncomingAttachment {
                     layer: a.layer,
                     level: a.level,
-                    stable_key: a.stable_key,
+                    key: a.key,
                 }
             });
             match attached_to {
                 None => tessera_lifecycle::IncomingArtifact::with_content(
-                    artifact.stable_key,
+                    artifact.key,
                     members,
-                    variations,
+                    contents,
                 ),
                 Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
-                    artifact.stable_key,
+                    artifact.key,
                     members,
-                    variations,
+                    contents,
                     attached_to,
                 ),
             }
@@ -2027,7 +2027,7 @@ async fn publish_artifacts(
     let published: Vec<serde_json::Value> = ids
         .iter()
         .zip(keys)
-        .map(|(id, key)| serde_json::json!({ "stable_key": key, "tessera_id": id.raw().to_string() }))
+        .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
         .collect();
     Ok((
         StatusCode::CREATED,

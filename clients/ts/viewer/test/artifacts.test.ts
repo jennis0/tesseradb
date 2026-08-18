@@ -17,10 +17,10 @@ import {
  * scaffolding must not be able to cause.
  */
 
-const artifact = (stableKey: string | null, maskedCount: bigint, id = 1n): Artifact => ({
+const artifact = (key: string | null, maskedCount: bigint, id = 1n): Artifact => ({
   layer: 'clusters/x',
   tesseraId: id,
-  stableKey,
+  key,
   maskedCount
 });
 
@@ -33,7 +33,7 @@ const places: ArtifactPlaces = new Map([
 describe('placedArtifacts', () => {
   it('draws only what the response carried, whatever else the sidecar knows about', () => {
     const placed = placedArtifacts([artifact('c-0001', 42n)], places);
-    expect(placed.map((p) => p.artifact.stableKey)).toEqual(['c-0001']);
+    expect(placed.map((p) => p.artifact.key)).toEqual(['c-0001']);
     expect(placed[0]!).toMatchObject({x: 300, y: 400});
   });
 

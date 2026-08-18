@@ -272,7 +272,7 @@ for (let c = 0; c < CLUSTERS; c++) {
   // count of zero for everyone, which is a row on every wire that can never be anything but noise.
   if (members[c].length === 0) continue;
   clusters.push({
-    stableKey: `c-${String(c).padStart(4, '0')}`,
+    key: `c-${String(c).padStart(4, '0')}`,
     // Cell space, `[0, 65536)` per axis — the same units the points frame decodes into, so the
     // viewer places a cluster with the transform it already applies to every mark.
     x: cx[c],
@@ -332,7 +332,7 @@ const publish = async () => {
       addressing: 'tessera',
       idset: meta.idset,
       artifacts: batch.map((c) => ({
-        stable_key: c.stableKey,
+        key: c.key,
         members: c.members.map((id) => id.toString())
       }))
     })
@@ -420,12 +420,12 @@ if (labelLayer) {
     // variation would serve to nobody, which is a row on the wire that can never be anything else.
     if (seen.length === 0) continue;
     labels.push({
-      stableKey: `l-${cluster.stableKey}`,
-      cluster: cluster.stableKey,
+      key: `l-${cluster.key}`,
+      cluster: cluster.key,
       members: cluster.members,
       variations: [
-        {values: [`${cluster.stableKey} · whole cluster`], generated_from: cluster.members},
-        {values: [`${cluster.stableKey} · term ${labelTerm}`], generated_from: seen}
+        {values: [`${cluster.key} · whole cluster`], generated_from: cluster.members},
+        {values: [`${cluster.key} · term ${labelTerm}`], generated_from: seen}
       ]
     });
   }
@@ -444,7 +444,7 @@ if (labelLayer) {
         addressing: 'tessera',
         idset: meta.idset,
         artifacts: pending.map((l) => ({
-          stable_key: l.stableKey,
+          key: l.key,
           members: l.members.map((id) => id.toString()),
           content: l.variations.map((v) => ({
             values: v.values,
@@ -452,7 +452,7 @@ if (labelLayer) {
           })),
           // The target is named by its own stable key: an ordinal never crosses the boundary, so a
           // key is the only address a caller holds for it.
-          attached_to: {layer: layerName, level: 0, stable_key: l.cluster}
+          attached_to: {layer: layerName, level: 0, key: l.cluster}
         }))
       })
     });
@@ -469,9 +469,9 @@ if (labelLayer) {
   await publishLabels();
   console.log(`published ${labels.length} labels into ${labelLayer}`);
 
-  const centroid = new Map(clusters.map((c) => [c.stableKey, c]));
+  const centroid = new Map(clusters.map((c) => [c.key, c]));
   labelPlaces = labels.map((l) => ({
-    stableKey: l.stableKey,
+    key: l.key,
     x: centroid.get(l.cluster).x,
     y: centroid.get(l.cluster).y
   }));
@@ -487,7 +487,7 @@ try {
 } catch {
   // No file yet, which is the first run.
 }
-sidecar.layers[layerName] = clusters.map((c) => ({stableKey: c.stableKey, x: c.x, y: c.y}));
+sidecar.layers[layerName] = clusters.map((c) => ({key: c.key, x: c.x, y: c.y}));
 // The label layer gets its own entry, or the labels are served and never drawn: placement is by
 // layer, and a label carries no position of its own.
 if (labelLayer) sidecar.layers[labelLayer] = labelPlaces;
@@ -506,9 +506,9 @@ console.log(`wrote ${OUT}`);
  * nothing in the response saying why.
  */
 if (presets) {
-  const declaredSize = new Map(clusters.map((c) => [c.stableKey, c.members.length]));
+  const declaredSize = new Map(clusters.map((c) => [c.key, c.members.length]));
   /** One cluster followed across every principal — the largest, so it survives a criterion longest. */
-  const WITNESS = clusters.reduce((a, b) => (a.members.length >= b.members.length ? a : b)).stableKey;
+  const WITNESS = clusters.reduce((a, b) => (a.members.length >= b.members.length ? a : b)).key;
   const rows = [];
   for (const preset of presets) {
     const t = await authorise(preset.terms);
@@ -524,7 +524,7 @@ if (presets) {
     if (frame) {
       const table = tableFromIPC(frame.payload);
       const masked = table.getChild('masked_count').toArray();
-      const keys = table.getChild('stable_key');
+      const keys = table.getChild('key');
       for (let i = 0; i < masked.length; i++) counts.set(String(keys.get(i)), Number(masked[i]));
     }
     const shown = [...counts.values()].sort((a, b) => a - b);

@@ -668,7 +668,7 @@ impl ViewportSink for WireSink {
             .map(|a| ArtifactRow {
                 layer: a.layer.as_str(),
                 tessera_id: a.tessera_id.raw(),
-                stable_key: a.stable_key.as_deref(),
+                key: a.key.as_deref(),
                 masked_count: a.masked_count,
                 centroid: a.derived.centroid,
                 bbox: a.derived.bbox,
@@ -1335,7 +1335,7 @@ struct ArtifactResp {
     layer: String,
     /// The publisher's own key, if they supplied one. Absent rather than `null` when they did not.
     #[serde(skip_serializing_if = "Option::is_none")]
-    stable_key: Option<String>,
+    key: Option<String>,
     /// **How many of this artifact's members the asking principal can see** — never how many it
     /// has. There is deliberately no ordinal, no membership and no declared size here; see
     /// `tessera_engine::ArtifactOut`.
@@ -1349,7 +1349,7 @@ struct ArtifactResp {
     r#box: Option<[u32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hull: Option<Vec<[u32; 2]>>,
-    /// The publisher's supplied content — one variation, entire, positional to the layer's declared
+    /// The publisher's supplied content — one entry of the ranked `contents`, entire, positional to the layer's declared
     /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
     /// this principal may not read is a `404`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1398,7 +1398,7 @@ async fn artifact(
     let served = served.ok_or_else(|| ApiError::Unknown("unknown artifact".to_string()))?;
     Ok(Json(ArtifactResp {
         layer: served.layer,
-        stable_key: served.stable_key,
+        key: served.key,
         masked_count: served.masked_count,
         centroid: served.derived.centroid,
         r#box: served.derived.bbox,

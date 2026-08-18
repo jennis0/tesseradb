@@ -484,7 +484,7 @@ function artifactLayers(store: Store): Layer[] {
     // annotate, in the dense middle where the clusters are; and the text atlas is built over ASCII,
     // so any character outside it renders as a hole rather than as a glyph. The panel is HTML, has
     // room to wrap, and needs no atlas.
-    label: p.artifact.stableKey ?? `#${p.artifact.tesseraId}`,
+    label: p.artifact.key ?? `#${p.artifact.tesseraId}`,
     position: [p.x / CELLS_PER_WORLD_UNIT, p.y / CELLS_PER_WORLD_UNIT] as [number, number]
   }));
   // Against the largest count *in this view for this principal*, so the smallest cluster is still

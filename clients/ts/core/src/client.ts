@@ -346,13 +346,13 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const served = (await response.json()) as {
       layer: string;
-      stable_key?: string;
+      key?: string;
       masked_count: number;
     };
     return {
       layer: served.layer,
       // Absent rather than null when the publisher supplied none.
-      stableKey: served.stable_key ?? null,
+      key: served.key ?? null,
       // JSON carries it as a number, and a count is not an identifier: it is bounded by the
       // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
       // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.

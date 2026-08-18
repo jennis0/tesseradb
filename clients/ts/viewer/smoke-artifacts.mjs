@@ -93,7 +93,7 @@ const detailPanel = async () =>
     const key = /\n(c-\d+)\n/.exec(`\n${section}`);
     const count = /([\d,]+) members you can see/.exec(section);
     return {
-      stableKey: key ? key[1] : null,
+      key: key ? key[1] : null,
       maskedCount: count ? Number(count[1].replaceAll(',', '')) : null
     };
   });
@@ -210,7 +210,7 @@ for (const [layer, rows] of byLayer) {
 console.log('--- drill-down ---');
 console.log(
   opened
-    ? `  a cluster is open: ${opened.stableKey} = ${opened.maskedCount?.toLocaleString()}`
+    ? `  a cluster is open: ${opened.key} = ${opened.maskedCount?.toLocaleString()}`
     : '  not exercised — deck.gl picking does not fire headless; see client.live.test.ts'
 );
 console.log('--- screenshots ---');

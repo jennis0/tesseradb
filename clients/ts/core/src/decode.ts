@@ -272,7 +272,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   if (parts.artifacts) {
     const t = tableFromIPC(parts.artifacts);
     const layer = t.getChild('layer')!;
-    const stableKey = t.getChild('stable_key')!;
+    const key = t.getChild('key')!;
     const tesseraId = u64Column(t, 'tessera_id');
     const maskedCount = u64Column(t, 'masked_count');
     // Derived geometry, in the same grid units as `codes` — no extent needed to draw it. A null is
@@ -286,7 +286,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const boxMaxY = t.getChild('box_max_y')!;
     const hullX = t.getChild('hull_x')!;
     const hullY = t.getChild('hull_y')!;
-    // One variation, entire, positional to the layer's declared kinds. Empty means the layer
+    // One content, entire, positional to the layer's declared kinds. Empty means the layer
     // declares no supplied content — never that content was withheld, because an artifact whose
     // content this principal may not read does not appear at all.
     const content = t.getChild('content')!;
@@ -309,7 +309,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
         layer: String(layer.get(i)),
         tesseraId: tesseraId[i]!,
         // A publisher need not supply a key.
-        stableKey: stableKey.get(i) === null ? null : String(stableKey.get(i)),
+        key: key.get(i) === null ? null : String(key.get(i)),
         maskedCount: maskedCount[i]!,
         centroid: cx === null ? null : [Number(cx), Number(centroidY.get(i))],
         box:

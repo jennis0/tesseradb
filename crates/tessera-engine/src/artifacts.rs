@@ -85,8 +85,9 @@ use crate::compose::MaskedSet;
 pub struct ArtifactRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership.
     rows: Vec<Option<Bitmap>>,
-    /// Per ordinal, per ranked variation: that variation's **generating set** in row space, beside
-    /// the size it had in entity space.
+    /// Per ordinal, per rank: that content's **generating set** in row space, beside
+    /// the size it had in entity space. **Rank here is the position in the artifact's ranked
+    /// `contents`** — not a Morton rank and not a rank within a bitmap.
     ///
     /// **Both, because a projection that lost a member must not read as containment.** A generating
     /// set is entity-space and permanent; row space holds only what this view has folded in, so a
@@ -94,7 +95,7 @@ pub struct ArtifactRows {
     /// a viewer contained in a *smaller* set than the caller declared, which is the whole
     /// disclosure. Carrying the declared size makes the loss detectable, and a lossy projection
     /// fails containment for everybody rather than passing it for somebody.
-    variations: Vec<Vec<ProjectedSet>>,
+    contents: Vec<Vec<ProjectedSet>>,
     /// Per ordinal, what this artifact is an attachment to — `None` for an ordinary artifact.
     ///
     /// **Entity space, and deliberately not projected.** A target is tested on its disposition and
@@ -115,13 +116,13 @@ pub struct ArtifactRows {
 pub enum Containment {
     /// The artifact carries no supplied content.
     NothingToContain,
-    /// The viewer contains this variation's generating set entirely, and is served it whole.
+    /// The viewer contains the generating set at this rank entirely, and is served it whole.
     Satisfied(u32),
-    /// The viewer contains no variation's generating set.
+    /// The viewer contains no content's generating set.
     Unsatisfied,
 }
 
-/// One variation's generating set, projected, with what it should have projected to.
+/// One content's generating set, projected, with what it should have projected to.
 #[derive(Debug, Clone)]
 struct ProjectedSet {
     rows: Bitmap,
@@ -140,19 +141,19 @@ impl ArtifactRows {
         space: &RowSpace,
     ) -> Self {
         let mut rows: Vec<Option<Bitmap>> = Vec::new();
-        let mut variations: Vec<Vec<ProjectedSet>> = Vec::new();
+        let mut contents: Vec<Vec<ProjectedSet>> = Vec::new();
         let mut attachments: Vec<Option<Attachment>> = Vec::new();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             if rows.len() <= idx {
                 rows.resize_with(idx + 1, || None);
-                variations.resize_with(idx + 1, Vec::new);
+                contents.resize_with(idx + 1, Vec::new);
                 attachments.resize_with(idx + 1, || None);
             }
             rows[idx] = Some(space.project_base(&record.members));
             attachments[idx] = record.attached_to.clone();
-            variations[idx] = record
-                .variations
+            contents[idx] = record
+                .contents
                 .iter()
                 .map(|v| ProjectedSet {
                     // Base rows here too, and here the consequence is sharper than a low count: a
@@ -168,7 +169,7 @@ impl ArtifactRows {
         }
         ArtifactRows {
             rows,
-            variations,
+            contents,
             attachments,
         }
     }
@@ -217,12 +218,12 @@ impl ArtifactRows {
         !in_tiles.is_empty() && mask.intersects_set(&in_tiles)
     }
 
-    /// The first variation this viewer is served — the containment test
+    /// The rank of the first content this viewer is served — the containment test
     /// (`annotations.md` §4).
     ///
-    /// `Ok(None)` where the artifact carries no variations at all, which is every artifact on a
+    /// `Ok(None)` where the artifact carries no contents at all, which is every artifact on a
     /// layer declaring no supplied content: there is nothing to contain, and the artifact serves on
-    /// its other conjuncts alone. `Err(())` where it carries variations and the viewer satisfies
+    /// its other conjuncts alone. `Err(())` where it carries contents and the viewer satisfies
     /// none — the artifact is then **absent**, not served without its content.
     ///
     /// **Containment is `|G ∩ M| == |G|`, and it is not a coverage fraction.** A viewer seeing 60%
@@ -233,14 +234,14 @@ impl ArtifactRows {
     /// whole set — O(containers touched) — with no early exit on the first missing member. A
     /// short-circuiting subset test returns sooner the *less* of the set a viewer holds, which
     /// makes response time a function of how close they came.
-    pub fn satisfied_variation(
+    pub fn satisfied_rank(
         &self,
         ordinal: u32,
         mask: &impl MaskedSet,
         layer_declares_content: bool,
     ) -> Containment {
         let sets = self
-            .variations
+            .contents
             .get(ordinal as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
@@ -248,7 +249,7 @@ impl ArtifactRows {
             // **Nothing to contain, or nothing left to serve — and the layer's declaration is what
             // tells them apart.** A layer declaring no supplied content has artifacts that serve on
             // their other conjuncts; one that *does* declare it has artifacts that must carry it,
-            // and an artifact here with none has had its last variation withdrawn by a fold under
+            // and an artifact here with none has had its last content withdrawn by a fold under
             // the strict declaration. Serving it would be the identity and the count with the
             // description missing — the in-between state decision 0076 forbids — so it is absent
             // until the caller republishes.
@@ -380,8 +381,8 @@ pub enum Withheld {
     /// The artifact is an attachment, and what it attaches to is suppressed, deleted, or in a layer
     /// this viewer does not reach. **A label does not outlive the thing it labels.**
     Attachment,
-    /// The artifact carries supplied content and this viewer contains no variation's generating
-    /// set — or the variation they would have been served has no readable content.
+    /// The artifact carries supplied content and this viewer contains no content's generating
+    /// set — or the content they would have been served is not readable.
     Containment,
 }
 
@@ -389,10 +390,10 @@ pub enum Withheld {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactVerdict {
     /// Served, with this masked count beside it, and — where the layer declares supplied content —
-    /// the index of the one variation this viewer gets, **entire**.
+    /// the rank of the one content this viewer gets, **entire**.
     Serve {
         masked_count: u64,
-        variation: Option<u32>,
+        rank: Option<u32>,
     },
     /// Absent. See [`Withheld`] on why the reason never reaches a caller.
     Absent(Withheld),
@@ -532,10 +533,10 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             }
         }
 
-        // 6. Containment, last: the first variation whose generating set this viewer holds
+        // 6. Containment, last: the first content whose generating set this viewer holds
         //    **entirely**. A viewer satisfying none receives no artifact — not the artifact with
         //    its description missing, which is the in-between state decision 0076 forbids.
-        let variation = match self.rows.satisfied_variation(
+        let rank = match self.rows.satisfied_rank(
             ordinal,
             self.mask,
             !self.declaration.content.supplied.is_empty(),
@@ -547,7 +548,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
 
         ArtifactVerdict::Serve {
             masked_count,
-            variation,
+            rank,
         }
     }
 
@@ -599,7 +600,7 @@ mod tests {
     fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
         ArtifactRows {
             rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
-            variations: vec![Vec::new(); sets.len()],
+            contents: vec![Vec::new(); sets.len()],
             attachments: vec![None; sets.len()],
         }
     }
@@ -622,13 +623,13 @@ mod tests {
         false
     }
 
-    /// One artifact, with ranked variations given as `(generating set, declared size)` — the
+    /// One artifact, with ranked contents given as `(generating set, declared size)` — the
     /// declared size separate so a test can build the *lossy projection* case, where row space
     /// holds fewer members than the entity-space set the caller published.
-    fn rows_with_variations(members: &[u32], variations: &[(&[u32], u64)]) -> ArtifactRows {
+    fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) -> ArtifactRows {
         ArtifactRows {
             rows: vec![Some(Bitmap::of(members))],
-            variations: vec![variations
+            contents: vec![contents
                 .iter()
                 .map(|(set, declared)| ProjectedSet {
                     rows: Bitmap::of(set),
@@ -712,7 +713,7 @@ mod tests {
             fx.view(&d, true).verdict(EntityId::new(999), 0, None),
             ArtifactVerdict::Serve {
                 masked_count: 6,
-                variation: None
+                rank: None
             }
         );
 
@@ -857,9 +858,9 @@ mod tests {
     fn a_viewer_missing_one_member_of_the_generating_set_is_served_nothing() {
         let d = declaration(false, None);
         let generating: &[u32] = &[10, 11, 12, 13];
-        let rows = rows_with_variations(&[1, 2, 3, 10, 11, 12, 13], &[(generating, 4)]);
+        let rows = rows_with_contents(&[1, 2, 3, 10, 11, 12, 13], &[(generating, 4)]);
 
-        // Holds all four: served, and told which variation.
+        // Holds all four: served, and told which content.
         let all = Bitmap::of(&[1, 2, 3, 10, 11, 12, 13]);
         let view = ArtifactView {
             declaration: &d,
@@ -875,7 +876,7 @@ mod tests {
             view.verdict(EntityId::new(999), 0, None),
             ArtifactVerdict::Serve {
                 masked_count: 7,
-                variation: Some(0)
+                rank: Some(0)
             }
         );
 
@@ -899,14 +900,14 @@ mod tests {
     }
 
     /// **The ranking is the caller's and the service takes no opinion on it** (decision 0078): the
-    /// first variation the viewer contains is the one they get, entire. This is the worked example
+    /// first content the viewer contains is the one they get, entire. This is the worked example
     /// the design turns on — a broad viewer and a narrow viewer failing the *same* full-sample
     /// label, and both satisfying a narrower one.
     #[test]
-    fn the_first_variation_the_viewer_contains_is_the_one_they_get() {
+    fn the_first_content_the_viewer_contains_is_the_one_they_get() {
         let d = declaration(false, None);
-        // Variation 0 was generated from the whole sample; variation 1 from a single term's worth.
-        let rows = rows_with_variations(
+        // Rank 0 was generated from the whole sample; rank 1 from a single term's worth.
+        let rows = rows_with_contents(
             &[1, 2, 3, 4, 5, 6],
             &[(&[1, 2, 3, 4, 5, 6], 6), (&[1, 2], 2)],
         );
@@ -925,17 +926,17 @@ mod tests {
         };
 
         // Two viewers with nothing in common beyond the narrow set, and neither holds the whole
-        // sample: both fail variation 0 and both are served variation 1.
+        // sample: both fail rank 0 and both are served rank 1.
         for mask in [Bitmap::of(&[1, 2, 3, 4]), Bitmap::of(&[1, 2, 5, 6])] {
             match verdict(&mask) {
-                ArtifactVerdict::Serve { variation, .. } => assert_eq!(variation, Some(1)),
-                other => panic!("expected the narrow variation, got {other:?}"),
+                ArtifactVerdict::Serve { rank, .. } => assert_eq!(rank, Some(1)),
+                other => panic!("expected the narrow content, got {other:?}"),
             }
         }
         // And a viewer holding everything gets the caller's first choice rather than the fallback.
         match verdict(&Bitmap::of(&[1, 2, 3, 4, 5, 6])) {
-            ArtifactVerdict::Serve { variation, .. } => assert_eq!(variation, Some(0)),
-            other => panic!("expected the ranked-first variation, got {other:?}"),
+            ArtifactVerdict::Serve { rank, .. } => assert_eq!(rank, Some(0)),
+            other => panic!("expected the ranked-first content, got {other:?}"),
         }
         // A viewer holding none of it receives no artifact — not the count without the label.
         assert_eq!(
@@ -953,7 +954,7 @@ mod tests {
     fn a_generating_set_that_did_not_survive_projection_contains_nobody() {
         let d = declaration(false, None);
         // Two rows survived; the caller published four.
-        let rows = rows_with_variations(&[1, 2, 3], &[(&[1, 2], 4)]);
+        let rows = rows_with_contents(&[1, 2, 3], &[(&[1, 2], 4)]);
         let everything = Bitmap::from_range(0..1000);
         let view = ArtifactView {
             declaration: &d,
@@ -985,7 +986,7 @@ mod tests {
     fn attached_rows(members: &[u32]) -> ArtifactRows {
         ArtifactRows {
             rows: vec![Some(Bitmap::of(members))],
-            variations: vec![Vec::new()],
+            contents: vec![Vec::new()],
             attachments: vec![Some(Attachment {
                 layer: CLUSTERS.to_string(),
                 level: 0,
@@ -1153,14 +1154,14 @@ mod tests {
     /// A layer declaring no supplied content has nothing to contain, and its artifacts serve on the
     /// other conjuncts alone — which is every artifact Stage 2 could publish.
     #[test]
-    fn an_artifact_with_no_variations_has_nothing_to_contain() {
+    fn an_artifact_with_no_contents_has_nothing_to_contain() {
         let d = declaration(false, None);
         let fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
         assert_eq!(
             fx.view(&d, true).verdict(EntityId::new(999), 0, None),
             ArtifactVerdict::Serve {
                 masked_count: 3,
-                variation: None
+                rank: None
             }
         );
     }

@@ -119,7 +119,7 @@ type = "text"
 require_member_visibility = "all"
 "#;
 
-/// One row per `(artifact, variation)`: two clusters with no content, and one label carrying two
+/// One row per `(artifact, rank)`: two clusters with no content, and one label carrying two
 /// ranked descriptions and hanging from the first cluster. No parent/child edges in this fixture.
 fn write_artifacts(path: &Path) {
     write_artifacts_named(path, "topics/x")
@@ -131,7 +131,7 @@ fn write_artifacts_named(path: &Path, labels: &str) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("variation", DataType::UInt32, true),
+        Field::new("rank", DataType::UInt32, true),
         Field::new(
             "values",
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
@@ -143,7 +143,7 @@ fn write_artifacts_named(path: &Path, labels: &str) {
     ]));
     let layers = StringArray::from(vec!["clusters/a", "clusters/a", labels, labels]);
     let keys = StringArray::from(vec!["c-0000", "c-0001", "l-0000", "l-0000"]);
-    let variation = UInt32Array::from(vec![None, None, Some(0), Some(1)]);
+    let rank = UInt32Array::from(vec![None, None, Some(0), Some(1)]);
     let mut values = ListBuilder::new(StringBuilder::new());
     values.append(false);
     values.append(false);
@@ -160,7 +160,7 @@ fn write_artifacts_named(path: &Path, labels: &str) {
         vec![
             Arc::new(layers) as ArrayRef,
             Arc::new(keys),
-            Arc::new(variation),
+            Arc::new(rank),
             Arc::new(values.finish()),
             Arc::new(attached_layer),
             Arc::new(attached_key),
@@ -173,7 +173,7 @@ fn write_artifacts_named(path: &Path, labels: &str) {
     w.close().unwrap();
 }
 
-/// One row per `(artifact, member)`, in **source** entity ids — and deliberately shuffled, since
+/// One row per `(artifact, entity)`, in **source** entity ids — and deliberately shuffled, since
 /// ordinals must be a function of the artifacts and not of the file's row order.
 fn write_members(path: &Path, members_of_first_cluster: &[u64]) {
     write_members_of(path, members_of_first_cluster, "topics/x")
@@ -187,23 +187,23 @@ fn write_members_of(path: &Path, members_of_first_cluster: &[u64], labels: &str)
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("variation", DataType::UInt32, true),
-        Field::new("member", DataType::UInt64, false),
+        Field::new("rank", DataType::UInt32, true),
+        Field::new("entity", DataType::UInt64, false),
     ]));
     let mut layers = Vec::new();
     let mut keys = Vec::new();
-    let mut variation: Vec<Option<u32>> = Vec::new();
-    let mut member = Vec::new();
+    let mut rank: Vec<Option<u32>> = Vec::new();
+    let mut entity = Vec::new();
     let mut row = |layer: &str, key: &str, v: Option<u32>, m: u64| {
         layers.push(layer.to_string());
         keys.push(key.to_string());
-        variation.push(v);
-        member.push(m);
+        rank.push(v);
+        entity.push(m);
     };
     for &m in members_of_first_cluster {
         row("clusters/a", "c-0000", None, m);
         row(labels, "l-0000", None, m);
-        // Variation 0 was generated from the whole cluster; variation 1 from a third of it.
+        // Rank 0 was generated from the whole cluster; rank 1 from a third of it.
         row(labels, "l-0000", Some(0), m);
         if m % 3 == 0 {
             row(labels, "l-0000", Some(1), m);
@@ -218,8 +218,8 @@ fn write_members_of(path: &Path, members_of_first_cluster: &[u64], labels: &str)
         vec![
             Arc::new(StringArray::from(layers)) as ArrayRef,
             Arc::new(StringArray::from(keys)),
-            Arc::new(UInt32Array::from(variation)),
-            Arc::new(UInt64Array::from(member)),
+            Arc::new(UInt32Array::from(rank)),
+            Arc::new(UInt64Array::from(entity)),
         ],
     )
     .unwrap();
@@ -442,7 +442,7 @@ fn a_member_row_naming_an_undeclared_artifact_is_refused() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("member", DataType::UInt64, false),
+        Field::new("entity", DataType::UInt64, false),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -462,7 +462,7 @@ fn a_member_row_naming_an_undeclared_artifact_is_refused() {
     assert!(format!("{err}").contains("c-OOO0"), "{err}");
 }
 
-/// **A null member is not entity zero.** Arrow reads the values buffer whatever the validity
+/// **A null entity is not entity zero.** Arrow reads the values buffer whatever the validity
 /// bitmap says, so a producer whose join missed a row would publish the corpus's lowest-numbered
 /// document into the artifact, moving its masked count for whoever can see that document.
 #[test]
@@ -471,7 +471,7 @@ fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("member", DataType::UInt64, true),
+        Field::new("entity", DataType::UInt64, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -487,8 +487,8 @@ fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
     w.close().unwrap();
 
     let out = inputs.dir.join("bundle");
-    let err = run(&inputs, &out).expect_err("a null member is a refusal");
-    assert!(format!("{err}").contains("null member"), "{err}");
+    let err = run(&inputs, &out).expect_err("a null entity is a refusal");
+    assert!(format!("{err}").contains("null entity"), "{err}");
 }
 
 /// **Publication follows the declaration order, not the alphabet.** An attachment resolves against
@@ -649,21 +649,21 @@ fn write_treed_artifacts_unused(path: &Path, child_parent: &[(&str, Option<&str>
     w.close().unwrap();
 }
 
-/// Memberships for a treed level, one row per `(artifact, member)`.
+/// Memberships for a treed level, one row per `(artifact, entity)`.
 fn write_treed_members(path: &Path, membership: &[(&str, Vec<u64>)]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("member", DataType::UInt64, false),
+        Field::new("entity", DataType::UInt64, false),
     ]));
     let mut layers = Vec::new();
     let mut keys = Vec::new();
-    let mut member = Vec::new();
+    let mut entity = Vec::new();
     for (key, members) in membership {
         for &m in members {
             layers.push("clusters/tree".to_string());
             keys.push(key.to_string());
-            member.push(m);
+            entity.push(m);
         }
     }
     let batch = RecordBatch::try_new(
@@ -671,7 +671,7 @@ fn write_treed_members(path: &Path, membership: &[(&str, Vec<u64>)]) {
         vec![
             Arc::new(StringArray::from(layers)) as ArrayRef,
             Arc::new(StringArray::from(keys)),
-            Arc::new(UInt64Array::from(member)),
+            Arc::new(UInt64Array::from(entity)),
         ],
     )
     .unwrap();
@@ -876,15 +876,15 @@ fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Ve
         Field::new("layer", DataType::Utf8, false),
         Field::new("level", DataType::UInt32, true),
         Field::new("key", DataType::Utf8, false),
-        Field::new("member", DataType::UInt64, false),
+        Field::new("entity", DataType::UInt64, false),
     ]));
-    let (mut layers, mut levels, mut keys, mut member) = (vec![], vec![], vec![], vec![]);
+    let (mut layers, mut levels, mut keys, mut entity) = (vec![], vec![], vec![], vec![]);
     for (level, key, members) in membership {
         for &m in members {
             layers.push(layer.to_string());
             levels.push(Some(*level));
             keys.push(key.to_string());
-            member.push(m);
+            entity.push(m);
         }
     }
     let batch = RecordBatch::try_new(
@@ -893,7 +893,7 @@ fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Ve
             Arc::new(StringArray::from(layers)) as ArrayRef,
             Arc::new(UInt32Array::from(levels)),
             Arc::new(StringArray::from(keys)),
-            Arc::new(UInt64Array::from(member)),
+            Arc::new(UInt64Array::from(entity)),
         ],
     )
     .unwrap();

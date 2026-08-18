@@ -13,7 +13,7 @@ mod common;
 
 use common::*;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
-use tessera_lifecycle::membership::{IncomingAttachment, IncomingVariation};
+use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -125,17 +125,17 @@ fn publish_a_cluster_and_its_label(engine: &Engine, fx: &Fixture) {
             vec![IncomingArtifact::attached(
                 Some("l0".into()),
                 fx.members(0..150),
-                // Two ranked variations, as a real label layer publishes them: one generated from
+                // Two ranked contents, as a real label layer publishes them: one generated from
                 // the whole cluster, one from the third of it a narrower principal can see. Which
                 // one a viewer gets is containment's business and not this file's — what matters
-                // here is that a principal who is served *some* variation is still refused the
+                // here is that a principal who is served *some* content is still refused the
                 // whole artifact once its cluster goes.
                 vec![
-                    IncomingVariation::new(
+                    IncomingContent::new(
                         vec!["shipping and logistics".into()],
                         fx.members(0..150),
                     ),
-                    IncomingVariation::new(
+                    IncomingContent::new(
                         vec!["logistics".into()],
                         fx.members((0..150).filter(|s| terms_of(*s).contains(&SUBSET_TERM))),
                     ),
@@ -143,7 +143,7 @@ fn publish_a_cluster_and_its_label(engine: &Engine, fx: &Fixture) {
                 IncomingAttachment {
                     layer: CLUSTERS.into(),
                     level: 0,
-                    stable_key: "c0".into(),
+                    key: "c0".into(),
                 },
             )],
         )
@@ -346,14 +346,14 @@ fn an_edge_needs_a_target_that_exists_and_a_dependency_that_was_declared() {
         vec![IncomingArtifact::attached(
             Some("l0".into()),
             fx.members(0..150),
-            vec![IncomingVariation::new(
+            vec![IncomingContent::new(
                 vec!["shipping and logistics".into()],
                 fx.members(0..150),
             )],
             IncomingAttachment {
                 layer: CLUSTERS.into(),
                 level: 0,
-                stable_key: target.into(),
+                key: target.into(),
             },
         )]
     };

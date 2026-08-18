@@ -206,7 +206,7 @@ describe('the drill-down', () => {
   it('requires the view on the wire, and widens the count the frame delivers as u64', async () => {
     const seen = stubFetch(
       () =>
-        new Response(JSON.stringify({layer: 'clusters/x', stable_key: 'c-0001', masked_count: 143}), {
+        new Response(JSON.stringify({layer: 'clusters/x', key: 'c-0001', masked_count: 143}), {
           status: 200
         })
     );
@@ -215,12 +215,12 @@ describe('the drill-down', () => {
 
     expect(seen[0]!.url).toBe('http://viewer/v1/artifacts/42');
     expect(seen[0]!.body).toEqual({view: 's0'});
-    expect(detail).toEqual({layer: 'clusters/x', stableKey: 'c-0001', maskedCount: 143n});
+    expect(detail).toEqual({layer: 'clusters/x', key: 'c-0001', maskedCount: 143n});
   });
 
-  it('reads an absent stable key as none rather than as a missing field', async () => {
+  it('reads an absent key as none rather than as a missing field', async () => {
     stubFetch(() => new Response(JSON.stringify({layer: 'clusters/x', masked_count: 2}), {status: 200}));
-    expect((await client().artifact('tok', 9n, {view: 's0'})).stableKey).toBeNull();
+    expect((await client().artifact('tok', 9n, {view: 's0'})).key).toBeNull();
   });
 
   it('surfaces the one refusal as a typed error, with nothing else to read from it', async () => {

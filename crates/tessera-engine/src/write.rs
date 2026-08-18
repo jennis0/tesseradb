@@ -8293,13 +8293,13 @@ impl Executor {
                     "layer": d.layer,
                     "level": d.level,
                     "ordinal": d.ordinal,
-                    "stable_key": d.stable_key,
+                    "key": d.key,
                     "members_lost": d.members_lost,
                     "declared_members": d.declared_members,
-                    "variations_lost": d
-                        .variations_lost
+                    "contents_lost": d
+                        .contents_lost
                         .iter()
-                        .map(|(index, lost)| serde_json::json!({"variation": index, "lost": lost}))
+                        .map(|(index, lost)| serde_json::json!({"rank": index, "lost": lost}))
                         .collect::<Vec<_>>(),
                 })
             })

@@ -18,7 +18,7 @@ use common::*;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::membership::IncomingVariation;
+use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -506,7 +506,7 @@ fn publish_described(fx: &Fixture, engine: &Engine) {
             vec![IncomingArtifact::with_content(
                 Some("c0".into()),
                 fx.members(0..300),
-                vec![IncomingVariation::new(
+                vec![IncomingContent::new(
                     vec!["shipping and logistics".into()],
                     fx.members(0..30),
                 )],
@@ -521,7 +521,7 @@ fn publish_described(fx: &Fixture, engine: &Engine) {
 /// the text was derived from.
 ///
 /// And under the strict declaration the artifact goes with it. Its layer declares supplied content;
-/// the fold withdrew the only variation that had it; so what is left is an identity and a count with
+/// the fold withdrew the only content that had it; so what is left is an identity and a count with
 /// no description, which decision 0076 forbids serving. The caller republishes.
 #[test]
 fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
@@ -671,7 +671,7 @@ fn publication_refuses_a_generating_set_naming_a_deleted_document() {
             // The membership avoids the deleted document; only the sample names it.
             Some("c0".into()),
             fx.members((0..300).filter(|s| *s != 7)),
-            vec![IncomingVariation::new(
+            vec![IncomingContent::new(
                 vec!["shipping and logistics".into()],
                 fx.members(0..30),
             )],
@@ -716,7 +716,7 @@ fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them()
                 // Generated from a sample of the membership, so a deletion inside the sample is a
                 // content loss as well as a membership one — the two are separate rows of the
                 // report and a single number could not carry both.
-                vec![IncomingVariation::new(
+                vec![IncomingContent::new(
                     vec!["shipping and logistics".into()],
                     fx.members(0..30),
                 )],
@@ -737,20 +737,20 @@ fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them()
 
     let held = engine.last_fold_report();
     assert_eq!(held.len(), 1, "one artifact was degraded");
-    assert_eq!(held[0].stable_key.as_deref(), Some("c0"));
+    assert_eq!(held[0].key.as_deref(), Some("c0"));
     assert_eq!(held[0].members_lost, 2, "both deletions were members");
     assert_eq!(
         held[0].declared_members, 300,
         "against what the caller published, so the notice carries the proportion"
     );
     assert_eq!(
-        held[0].variations_lost,
+        held[0].contents_lost,
         vec![(0, 1)],
         "and exactly one of them was a source of the description"
     );
 
     let on_disk = report_on_disk(&fx, &engine.generation().prefix);
-    assert_eq!(on_disk["degraded"][0]["stable_key"], "c0");
+    assert_eq!(on_disk["degraded"][0]["key"], "c0");
     assert_eq!(on_disk["degraded"][0]["members_lost"], 2);
 }
 
@@ -897,7 +897,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
         .locate_artifact(last_before)
         .expect("the survivor still has an address");
     assert_eq!(
-        (survivor.ordinal, survivor.stable_key.as_deref()),
+        (survivor.ordinal, survivor.key.as_deref()),
         (2, Some("c2")),
         "the survivor after the hole keeps its ordinal and its key — its identity did not shift up"
     );
@@ -906,7 +906,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
     assert_eq!(
         engine
             .locate_artifact(deleted)
-            .and_then(|at| at.stable_key),
+            .and_then(|at| at.key),
         None,
         "and the deleted artifact's slot holds nothing"
     );
@@ -1031,14 +1031,14 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
             vec![IncomingArtifact::attached(
                 Some("l0".into()),
                 fx.members(0..300),
-                vec![IncomingVariation::new(
+                vec![IncomingContent::new(
                     vec!["shipping and logistics".into()],
                     Vec::new(),
                 )],
                 tessera_lifecycle::membership::IncomingAttachment {
                     layer: "clusters/a".into(),
                     level: 0,
-                    stable_key: "c0".into(),
+                    key: "c0".into(),
                 },
             )],
         )
@@ -1089,7 +1089,7 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
                 vec![IncomingArtifact::with_content(
                     Some("t0".into()),
                     fx.members(0..300),
-                    vec![IncomingVariation::new(
+                    vec![IncomingContent::new(
                         vec!["a label from the whole sample".into()],
                         fx.members(0..30),
                     )],

@@ -363,15 +363,15 @@ pub struct PublishedArtifact {
     /// reason [`WalRecord::LayerCreate`] carries its ids: replay applies what was decided.
     pub entity: EntityId,
     /// The caller's own key, if they supplied one.
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
     pub members: Vec<u8>,
-    /// The artifact's supplied content, as ranked variations. Empty on a layer declaring none.
-    pub variations: Vec<PublishedVariation>,
+    /// The artifact's supplied content, as ranked contents. Empty on a layer declaring none.
+    pub contents: Vec<PublishedContent>,
     /// What this artifact is an attachment to, **resolved** — the caller named the target by its
-    /// stable key, and replay applies the address that was decided rather than re-resolving a key
+    /// key, and replay applies the address that was decided rather than re-resolving a key
     /// whose target may since have been dropped.
     pub attached_to: Option<PublishedAttachment>,
     /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
@@ -415,11 +415,11 @@ pub struct PublishedAttachment {
     pub entity: EntityId,
 }
 
-/// One ranked variation inside a [`PublishedArtifact`].
+/// One entry of a [`PublishedArtifact`]'s ranked `contents`; its position is its **rank**.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PublishedVariation {
+pub struct PublishedContent {
     /// One value per kind the layer declares, positionally. The bytes themselves are re-written to
     /// the record blob at publication; they ride the log too because the log is what replay has
     /// before any extent exists.
@@ -517,7 +517,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// version-10 log would decode the new variants' bytes as whatever it thinks that index means. A
 /// layer registration decoded as an ingest batch is not a degraded read, it is a corrupt one.
 /// Version 11 adds [`WalRecord::ArtifactPublish`], appended on the same rule. Version 12 gives
-/// [`PublishedArtifact`] its `variations` field — an *appended struct field*, which postcard would
+/// [`PublishedArtifact`] its `contents` field — an *appended struct field*, which postcard would
 /// otherwise read out of the bytes of whatever record follows, so the bump is the whole guard.
 /// Version 13 gives it `attached_to`, on the same rule — and here the guard is load-bearing twice
 /// over, because an attachment is a *visibility* term: a log read on version 12's rules restores
@@ -1816,21 +1816,21 @@ mod tests {
                 PublishedArtifact {
                     ordinal: 65_535,
                     entity: EntityId::new(4_294_836_223),
-                    stable_key: Some("c-0017".into()),
+                    key: Some("c-0017".into()),
                     members: serialise_members(&first),
-                    variations: Vec::new(),
+                    contents: Vec::new(),
                     attached_to: None,
                     parent: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
-                // absent `stable_key` is the other optional field — both under postcard, which
+                // absent `key` is the other optional field — both under postcard, which
                 // decodes positionally, so this is the pair that would misread first.
                 PublishedArtifact {
                     ordinal: 65_536,
                     entity: EntityId::new(4_294_705_152),
-                    stable_key: None,
+                    key: None,
                     members: serialise_members(&second),
-                    variations: vec![PublishedVariation {
+                    contents: vec![PublishedContent {
                         values: vec!["a label".into()],
                         generated_from: serialise_members(&first),
                     }],

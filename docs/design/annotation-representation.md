@@ -296,8 +296,8 @@ artifacts/<layer>/
                                     #   membership source, containment verification result
   levels/<k>/members/<ordinal>.roaring   # enumerated membership, entity space (§2, §2.1)
   levels/<k>/geometry.arrow         # predicate membership: the shape only (§2.0)
-  levels/<k>/artifacts.arrow        # per ordinal: content and variation references,
-                                    #   optional caller stable key (§5.2)
+  levels/<k>/artifacts.arrow        # per ordinal: content and rank references,
+                                    #   optional caller key (§5.2)
   edges.arrow                       # (layer, level, ordinal) → (layer, level, ordinal)
 ```
 
@@ -485,9 +485,9 @@ flowchart TB
   T -->|no| X
   T -->|yes| C{"existence criterion, if declared:<br/>masked own-count clears it?"}
   C -->|no| X
-  C -->|yes| G{"some variation's contents<br/>all contained in M_auth?"}
+  C -->|yes| G{"some entry's generating set<br/>all contained in M_auth?"}
   G -->|no| X
-  G -->|yes| R["serve that variation, entire"]
+  G -->|yes| R["serve that entry, entire"]
 ```
 
 *The overlay test is first and unconditional. `verdict` is the existing per-entity composition
@@ -672,8 +672,8 @@ identity the caller never asserted. Losing per-artifact state is the *meaning* o
 analysis, not an accident of it.
 
 An earlier revision of this section made the opposite call: a publish-time refusal — a layer
-holding live suppressions could not be published over unless every suppressed artifact's stable key
-was absent from the successor or arrived already suppressed — which made the stable key mandatory
+holding live suppressions could not be published over unless every suppressed artifact's key
+was absent from the successor or arrived already suppressed — which made the key mandatory
 for any layer that had ever taken a suppression. **The refusal is withdrawn.** It existed to make a
 suppression survive an event that ends the object it addresses; with edit as the ordinary refresh,
 the case it protected against is a caller deliberately replacing an analysis. Automatic replay onto
@@ -683,7 +683,7 @@ or a reshaped clustering each silently un-hides something an owner hid.
 **What replaces the refusal is a report.** An operator who suppressed something and then replaced
 the layer under it is *told* that a suppression no longer addresses anything — the same operability
 signal as the fold's degraded-content report, on the same control-plane credential. ⊘ Neither
-report is built. The stable key returns to being optional (§5.2): a caller-side mapping across
+report is built. The key returns to being optional (§5.2): a caller-side mapping across
 generations, offered because only the caller knows two objects are the same.
 
 ⊘ **Until the edit pass lands, replacement is the only refresh that exists**, so today a
@@ -812,7 +812,7 @@ clusters they were not generated from, which is worse than an outage and is exac
 A selection assembled mid-session cannot ride `/control/ingest`, whose row carries a
 `{view → (x, y)}` coordinate map and an entity's terms. An artifact has no coordinates, and carries
 a membership reference, a layer binding and a gate. It needs its own control verb, which the write
-cycle now defines — `(layer, membership, gate, content, stable key?)`, a WAL record, eligibility at
+cycle now defines — `(layer, membership, gate, content, key?)`, a WAL record, eligibility at
 ack ([`annotation-write-cycle.md`](annotation-write-cycle.md) §5) — with the contract shape still
 contracts work.
 
@@ -834,7 +834,7 @@ event — changing the analysis, not refreshing it — the retirement of per-ses
 (model §7, C17) rests on identity that the dominant path preserves. ⊘ Edit is deferred; until its
 pass lands every refresh is a replacement and bookmarks are honestly documented as expiring.
 
-**The stable key is optional, and stays so.** A caller may supply one per artifact, carried in
+**The key is optional, and stays so.** A caller may supply one per artifact, carried in
 `artifacts.arrow` and resolved through a per-layer index — *"the immunology cluster"*, identified
 across generations by the caller because only the caller knows the two are the same. It is a
 caller-side mapping across replacements, nothing more; no refusal and no deny-lane machinery hangs
@@ -1127,7 +1127,7 @@ objects the principal may not individually see, which is C8's row.
 [decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md).** The hazard was a
 viewer who knows a layer declares a shape receiving an artifact without one — learning that its
 generating set reaches outside their mask. That state no longer exists: an artifact failing
-containment on any of the resolved variation's contents is absent, whole, so no served artifact
+containment on the resolved entry's generating set is absent, whole, so no served artifact
 ever lacks a content its layer declares. **C3 holds as written** — there is no shell to be
 distinguishable from absence, and no mechanism is owed.
 
@@ -1328,7 +1328,7 @@ and needs nothing.)
    specified. Includes what the artifact population's authoritative candidate set is, given it is
    never `M_auth`.
 
-Alongside those: variations are a general artifact property with a caller-supplied ranking
+Alongside those: ranked contents are a general artifact property with a caller-supplied ranking
 ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)), the
 frontier is a per-artifact test
 ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)), and replacement is
@@ -1423,6 +1423,11 @@ error was invisible from inside the argument that made it.
 
 ## Appendix R
 
+**r6 — 2026-08-19. Vocabulary only.** *Variation* becomes an entry of an artifact's ranked
+**`contents`**, indexed by its **rank**, matching `annotations.md` §2.3 and `configuration.md` §1.
+The level layout's `artifacts.arrow` carries rank references rather than variation references, and
+the caller's key is `key`, not `stable_key`, wherever it appears. No mechanism moved.
+
 **r5 — 2026-08-16.** §2.4 records where an attachment lives — in the attached artifact's own
 record, the edge being read on exactly the path that reads the artifact — and §5.0's bulk-publication
 note becomes a statement of what exists: the build plane takes declarations, memberships, content and
@@ -1444,7 +1449,7 @@ amendments this design owed are performed (r43).
 settled downward (§4), the visibility predicate carries the flag, the criterion and variation
 containment as one conjunction (§4), supplied content's home is the record blob with the edit route
 ⊘ deferred (§2.4), §5.0.2's publish-time suppression refusal is replaced by 0081's
-edit/replacement split with the stable key optional again, and §5 distinguishes the two refresh
+edit/replacement split with the key optional again, and §5 distinguishes the two refresh
 operations, replacement being the only one built. §12 now records four of the five rulings landed;
 search's gate remains the open one.
 

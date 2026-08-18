@@ -98,7 +98,7 @@ const store = createStore({
   sessionWarm: false,
   status: 'idle',
   lastError: null,
-  view: null,
+  depthChoice: null,
   budget: DEFAULT_BUDGET,
   mTarget: 16,
   lastVisibleInView: null,

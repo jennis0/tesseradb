@@ -158,7 +158,7 @@ export class DriverBinding {
       // What the budget chose for this frame. Without it the depth panel reads `—` for every
       // figure it has, which is worse than absent: the panel is there to show the prediction
       // against what actually arrived.
-      s.view = {...plan.choice, requestedAt: Date.now()};
+      s.depthChoice = {...plan.choice, requestedAt: Date.now()};
       s.replicaBytes = this.replica.bytes;
       s.replicaPoints = this.replica.points;
       s.replicaBands = this.replica.bandCount;

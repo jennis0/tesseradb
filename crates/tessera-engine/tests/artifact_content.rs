@@ -13,7 +13,7 @@ mod common;
 use common::*;
 use tessera_engine::derived::DerivedContent;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
-use tessera_lifecycle::membership::IncomingVariation;
+use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_spatial::morton::fixed32;
 use tessera_types::layer::{
@@ -349,12 +349,12 @@ fn label_layer(name: &str, corpus_derived: bool) -> LayerDeclaration {
     d
 }
 
-fn variation(
+fn content(
     text: &str,
     fx: &Fixture,
     generated_from: impl Iterator<Item = u64>,
-) -> IncomingVariation {
-    IncomingVariation::new(vec![text.to_string()], fx.members(generated_from))
+) -> IncomingContent {
+    IncomingContent::new(vec![text.to_string()], fx.members(generated_from))
 }
 
 /// **The stage's headline.** A label is served only to a viewer who can see every document it was
@@ -375,7 +375,7 @@ fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
             vec![IncomingArtifact::with_content(
                 Some("t0".into()),
                 fx.members(0..300),
-                vec![variation("a label from the whole sample", &fx, 0..30)],
+                vec![content("a label from the whole sample", &fx, 0..30)],
             )],
         )
         .unwrap();
@@ -392,7 +392,7 @@ fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
     );
 }
 
-/// Ranked variations: both principals fail the same full-sample label, and both are served the
+/// Ranked contents: both principals fail the same full-sample label, and both are served the
 /// narrower one. The design's own worked example.
 #[test]
 fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
@@ -411,8 +411,8 @@ fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
                 Some("t0".into()),
                 fx.members(0..300),
                 vec![
-                    variation("the whole sample", &fx, 0..300),
-                    variation("one term's worth", &fx, narrow_sample.iter().copied()),
+                    content("the whole sample", &fx, 0..300),
+                    content("one term's worth", &fx, narrow_sample.iter().copied()),
                 ],
             )],
         )
@@ -423,7 +423,7 @@ fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
     assert_eq!(
         narrow[0].content,
         vec!["one term's worth"],
-        "the first variation this principal contains entirely — never the ranked-first one they \
+        "the first content this principal contains entirely — never the ranked-first one they \
          do not"
     );
     // A principal holding nothing at all is served neither, and no artifact.
@@ -446,7 +446,7 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
             vec![IncomingArtifact::with_content(
                 Some("p0".into()),
                 fx.members(0..300),
-                vec![IncomingVariation::new(vec!["An authored name".into()], [])],
+                vec![IncomingContent::new(vec!["An authored name".into()], [])],
             )],
         )
         .unwrap();
@@ -541,7 +541,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 vec![IncomingArtifact::with_content(
                     Some("t0".into()),
                     fx.members(0..100),
-                    vec![variation("the first label", &fx, 0..10)],
+                    vec![content("the first label", &fx, 0..10)],
                 )],
             )
             .unwrap();
@@ -554,7 +554,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 vec![IncomingArtifact::with_content(
                     Some("t1".into()),
                     fx.members(100..200),
-                    vec![variation("the second label", &fx, 100..110)],
+                    vec![content("the second label", &fx, 100..110)],
                 )],
             )
             .unwrap();
@@ -601,7 +601,7 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
         IncomingArtifact::with_content(
             Some("c0".into()),
             fx.members(0..10),
-            vec![variation("a label", &fx, 0..10)],
+            vec![content("a label", &fx, 0..10)],
         ),
     )
     .is_err());
@@ -613,13 +613,13 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
     )
     .is_err());
 
-    // A variation supplying the wrong number of values.
+    // A content supplying the wrong number of values.
     assert!(publish(
         "topics/a",
         IncomingArtifact::with_content(
             Some("t2".into()),
             fx.members(0..10),
-            vec![IncomingVariation::new(
+            vec![IncomingContent::new(
                 vec!["a".into(), "b".into()],
                 fx.members(0..10)
             )],
@@ -633,7 +633,7 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
         IncomingArtifact::with_content(
             Some("t3".into()),
             fx.members(0..10),
-            vec![IncomingVariation::new(vec!["a label".into()], [])],
+            vec![IncomingContent::new(vec!["a label".into()], [])],
         ),
     )
     .is_err());

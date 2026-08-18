@@ -409,7 +409,7 @@ pub struct LayerDeclaration {
     // artifact when one member is deleted, and the fold has no such path — so the declaration
     // surface refuses `true` at parse rather than carrying a field the fold would silently ignore.
     // The **content**-level key of the same name is real and lives on `ContentDeclaration`.
-    /// The layers this one's edges point into. A layer named here needs stable keys, because an
+    /// The layers this one's edges point into. A layer named here needs keys, because an
     /// edge names its target and at publish time the caller has no `tessera_id` for it.
     #[serde(default)]
     pub depends_on: Vec<String>,

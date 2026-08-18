@@ -2562,9 +2562,9 @@ impl Engine {
             .flat_map(|artifact| {
                 artifact.members.iter().chain(
                     artifact
-                        .variations
+                        .contents
                         .iter()
-                        .flat_map(|variation| variation.generated_from.iter()),
+                        .flat_map(|content| content.generated_from.iter()),
                 )
             })
             .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
@@ -2648,14 +2648,14 @@ impl Engine {
     /// principal may not see is C8's row.
     pub fn locate_artifact(&self, entity: EntityId) -> Option<PublishedArtifactAddress> {
         let (layer, level, ordinal) = self.write.locate_artifact(entity)?;
-        let stable_key = self
+        let key = self
             .write
-            .with_artifacts(|store| store.get(&layer, level, ordinal).and_then(|r| r.stable_key.clone()));
+            .with_artifacts(|store| store.get(&layer, level, ordinal).and_then(|r| r.key.clone()));
         Some(PublishedArtifactAddress {
             layer,
             level,
             ordinal,
-            stable_key,
+            key,
         })
     }
 
@@ -2678,7 +2678,7 @@ pub struct PublishedArtifactAddress {
     pub layer: String,
     pub level: u32,
     pub ordinal: u32,
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
 }
 
 /// Steps 5 of compaction §4 for a prefix already committed: open it, and assemble the

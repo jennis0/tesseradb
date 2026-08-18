@@ -90,7 +90,7 @@ async function artifacts(token, layers) {
   if (!frame) return out;
   const table = tableFromIPC(frame.payload);
   const layerCol = table.getChild('layer');
-  const keys = table.getChild('stable_key');
+  const keys = table.getChild('key');
   const ids = table.getChild('tessera_id').toArray();
   const masked = table.getChild('masked_count').toArray();
   const content = table.getChild('content');

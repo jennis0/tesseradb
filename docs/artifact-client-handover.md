@@ -44,7 +44,7 @@ know the kind-5 artifacts frame:
 | Python oracle | `reference/oracle/wire.py` |
 
 `decodeViewport` returns `artifacts: Artifact[]` on `ViewportResult` — `{layer, tesseraId,
-stableKey, maskedCount}`, typed in `core/src/types.ts` with the rules that matter on the type
+key, maskedCount}`, typed in `core/src/types.ts` with the rules that matter on the type
 itself. **Empty is the only "nothing here" state**: the server omits the frame when nothing
 qualifies, so there is no absent-versus-empty distinction to model.
 
@@ -106,8 +106,8 @@ route already works this way.
   "level": 0,
   "addressing": "external",
   "artifacts": [
-    { "stable_key": "c-0001", "members": ["<base64 external id>", "..."] },
-    { "stable_key": "c-0002", "members": ["..."] }
+    { "key": "c-0001", "members": ["<base64 external id>", "..."] },
+    { "key": "c-0002", "members": ["..."] }
   ]
 }
 ```
@@ -119,7 +119,7 @@ route already works this way.
   `external_id_of` in the server's test fixtures).
 - `"tessera"` addressing additionally requires `"idset"`, from `/v1/meta`. It is refused beside
   external ids.
-- Response is `201` with one `{"stable_key", "tessera_id"}` per artifact, in submitted order.
+- Response is `201` with one `{"key", "tessera_id"}` per artifact, in submitted order.
 
 Three refusals you will meet:
 
@@ -127,7 +127,7 @@ Three refusals you will meet:
   deliberate: a silently dropped member shrinks both the count a viewer is shown and the size the
   proportional criterion divides by, so a typo would move clusters across their own threshold in the
   direction of hiding them.
-- **A repeated `stable_key` is refused** (`422`). Publication is append-only; an edit is a delete
+- **A repeated `key` is refused** (`422`). Publication is append-only; an edit is a delete
   plus a re-publish, and the delete half is Stage 7's. To re-run a clustering during development,
   drop the layer and register a new name — names are never reused, so pick `…-v2`.
 - **A member that is not a point is refused.** Members are documents. Another artifact or a layer
@@ -173,7 +173,7 @@ points frame**:
 |---|---|---|
 | `layer` | utf8, non-null | the layer's name |
 | `tessera_id` | uint64, non-null | the artifact's opaque identifier |
-| `stable_key` | utf8, **nullable** | the publisher's own key, if they supplied one |
+| `key` | utf8, **nullable** | the publisher's own key, if they supplied one |
 | `masked_count` | uint64, non-null | **how many members this principal can see** |
 
 **The frame is absent when nothing is served** — same rule as the points frame. A deployment with no
@@ -221,7 +221,7 @@ Session token, body `{"view": "s0", "idset": <optional>}`. The view is **require
 intersection in row space and row space is per view.
 
 ```json
-{ "layer": "clusters/hdbscan-2026-08", "stable_key": "c-0001", "masked_count": 143 }
+{ "layer": "clusters/hdbscan-2026-08", "key": "c-0001", "masked_count": 143 }
 ```
 
 A separate route from `/v1/items` because they answer about different things — a document and its

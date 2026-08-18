@@ -118,7 +118,7 @@ async function artifacts(token, layers) {
   if (!frame) return out;
   const table = tableFromIPC(frame.payload);
   const layerCol = table.getChild('layer');
-  const keys = table.getChild('stable_key');
+  const keys = table.getChild('key');
   const ids = table.getChild('tessera_id').toArray();
   const masked = table.getChild('masked_count').toArray();
   const content = table.getChild('content');
@@ -236,13 +236,13 @@ await register({
   depends_on: [clusterLayer]
 });
 
-await publish(clusterLayer, [{stable_key: 'c0', members: members.map(String)}]);
+await publish(clusterLayer, [{key: 'c0', members: members.map(String)}]);
 await publish(labelLayer, [
   {
-    stable_key: 'l-c0',
+    key: 'l-c0',
     members: members.map(String),
     content: [{values: ['written from three documents'], generated_from: sources.map(String)}],
-    attached_to: {layer: clusterLayer, level: 0, stable_key: 'c0'}
+    attached_to: {layer: clusterLayer, level: 0, key: 'c0'}
   }
 ]);
 

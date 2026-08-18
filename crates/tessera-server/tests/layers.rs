@@ -284,8 +284,8 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
         json!({
             "addressing": "external",
             "artifacts": [
-                { "stable_key": "c0", "members": [member(0), member(1), member(2)] },
-                { "stable_key": "c1", "members": [member(3), member(4)] },
+                { "key": "c0", "members": [member(0), member(1), member(2)] },
+                { "key": "c1", "members": [member(3), member(4)] },
             ]
         }),
     )
@@ -296,7 +296,7 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
     assert_eq!(artifacts.len(), 2);
     let mut ids = std::collections::BTreeSet::new();
     for (i, artifact) in artifacts.iter().enumerate() {
-        assert_eq!(artifact["stable_key"], ["c0", "c1"][i]);
+        assert_eq!(artifact["key"], ["c0", "c1"][i]);
         assert!(
             artifact["tessera_id"].is_string(),
             "string-encoded, since a bare JSON number loses a u64 past 2^53: {artifact}"
@@ -332,8 +332,8 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
         json!({
             "addressing": "external",
             "artifacts": [
-                { "stable_key": "c0", "members": [member(0)] },
-                { "stable_key": "c1", "members": [member(1), nonexistent] },
+                { "key": "c0", "members": [member(0)] },
+                { "key": "c1", "members": [member(1), nonexistent] },
             ]
         }),
     )
@@ -367,7 +367,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
         "regions/uk",
         json!({
             "addressing": "external",
-            "artifacts": [{ "stable_key": "c0", "members": [member(0)] }]
+            "artifacts": [{ "key": "c0", "members": [member(0)] }]
         }),
     )
     .await;
@@ -383,7 +383,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
         "clusters/never",
         json!({
             "addressing": "external",
-            "artifacts": [{ "stable_key": "c0", "members": [member(0)] }]
+            "artifacts": [{ "key": "c0", "members": [member(0)] }]
         }),
     )
     .await;
@@ -431,7 +431,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
         "clusters/a",
         json!({
             "addressing": "external",
-            "artifacts": [{ "stable_key": "c0", "members": members }]
+            "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
     .await;
@@ -457,7 +457,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
     );
     // The identifier is stable across principals by construction (C17); only the number moves.
     assert_eq!(broad[0].tessera_id, narrow[0].tessera_id);
-    assert_eq!(broad[0].stable_key.as_deref(), Some("c0"));
+    assert_eq!(broad[0].key.as_deref(), Some("c0"));
     assert_eq!(broad[0].layer, "clusters/a");
 }
 
@@ -477,7 +477,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
         "clusters/a",
         json!({
             "addressing": "external",
-            "artifacts": [{ "stable_key": "c0", "members": [member(0), member(1)] }]
+            "artifacts": [{ "key": "c0", "members": [member(0), member(1)] }]
         }),
     )
     .await;
@@ -511,9 +511,9 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
         json!({
             "addressing": "external",
             "artifacts": [
-                { "stable_key": "c0", "members": [member(0), member(3)] },
-                { "stable_key": "c1", "members": [member(6), member(9)] },
-                { "stable_key": "c2", "members": [member(12), member(15)] },
+                { "key": "c0", "members": [member(0), member(3)] },
+                { "key": "c1", "members": [member(6), member(9)] },
+                { "key": "c2", "members": [member(12), member(15)] },
             ]
         }),
     )
@@ -569,7 +569,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
         "clusters/a",
         json!({
             "addressing": "external",
-            "artifacts": [{ "stable_key": "c0", "members": members }]
+            "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
     .await;
@@ -582,7 +582,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     let (status, body) = drill(&server, &["0"], &id).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["layer"], "clusters/a");
-    assert_eq!(body["stable_key"], "c0");
+    assert_eq!(body["key"], "c0");
     assert_eq!(
         body["masked_count"].as_u64().unwrap(),
         served[0].masked_count,
@@ -620,7 +620,7 @@ async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids()
         json!({
             "addressing": "external",
             "idset": 1,
-            "artifacts": [{ "stable_key": "c0", "members": [member(0)] }]
+            "artifacts": [{ "key": "c0", "members": [member(0)] }]
         }),
     )
     .await;
@@ -631,7 +631,7 @@ async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids()
         "clusters/a",
         json!({
             "addressing": "tessera",
-            "artifacts": [{ "stable_key": "c0", "members": ["12345"] }]
+            "artifacts": [{ "key": "c0", "members": ["12345"] }]
         }),
     )
     .await;
@@ -659,7 +659,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
         "clusters/a",
         json!({
             "addressing": "external",
-            "artifacts": [{ "stable_key": "c0", "members": members }]
+            "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
     .await;

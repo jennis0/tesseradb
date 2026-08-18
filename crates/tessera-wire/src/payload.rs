@@ -253,7 +253,7 @@ pub fn sub_cells_frame(cells: &[u64], counts: &[u64]) -> Vec<u8> {
 pub struct ArtifactRow<'a> {
     pub layer: &'a str,
     pub tessera_id: u64,
-    pub stable_key: Option<&'a str>,
+    pub key: Option<&'a str>,
     pub masked_count: u64,
     /// Derived geometry, in the **grid units** the points frame's `code` is built from — the
     /// client needs no quantisation extent to draw either. Each is present exactly when the
@@ -262,10 +262,10 @@ pub struct ArtifactRow<'a> {
     /// `[qx_min, qy_min, qx_max, qy_max]`.
     pub bbox: Option<[u32; 4]>,
     pub hull: Option<&'a [[u32; 2]]>,
-    /// The publisher's supplied content — **one variation, entire**, one value per kind the layer
+    /// The publisher's supplied content — **one entry of the ranked `contents`, entire**, one value per kind the layer
     /// declares, in declaration order. Empty where the layer declares none.
     ///
-    /// A viewer receiving this artifact contains that variation's generating set completely; one
+    /// A viewer receiving this artifact contains that entry's generating set completely; one
     /// who contains none receives no artifact at all rather than this list empty. So there is no
     /// *content withheld* state on this wire and no shape to express one.
     pub content: &'a [String],
@@ -310,7 +310,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("layer", DataType::Utf8, false),
         Field::new("tessera_id", DataType::UInt64, false),
         // A publisher need not supply a key.
-        Field::new("stable_key", DataType::Utf8, true),
+        Field::new("key", DataType::Utf8, true),
         Field::new("masked_count", DataType::UInt64, false),
         Field::new("centroid_x", DataType::Float64, true),
         Field::new("centroid_y", DataType::Float64, true),
@@ -380,7 +380,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|r| r.tessera_id),
         )),
-        Arc::new(StringArray::from_iter(rows.iter().map(|r| r.stable_key))),
+        Arc::new(StringArray::from_iter(rows.iter().map(|r| r.key))),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|r| r.masked_count),
         )),

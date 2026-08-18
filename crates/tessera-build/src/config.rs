@@ -109,9 +109,10 @@
 //! object never declared, because both are answerable from the declaration alone; the *readers*
 //! refuse a name the file does not carry, because that needs the file open.
 //!
-//! ⊘ **A layer's map is the exception and is still refused.** The artifact and member readers read
-//! `layer`, `variation`, `member` and `values` — names this surface does not carry at all — so a
-//! layer field map has nothing to move until those sources are rebuilt on §8's names.
+//! ⊘ **A layer's map is the exception and is still refused.** The artifact and member readers take
+//! `rank` and `entity`, but still read a `layer` discriminator column, a per-row `values` and a
+//! `parent_key` — none of which this surface names — so a layer field map has nothing to move
+//! until those sources are rebuilt on §8's names.
 //!
 //! ## The access relation, in three shapes
 //!
@@ -1429,10 +1430,11 @@ fn check_fields(
 /// disregarded.
 ///
 /// Every other object's map reaches its reader (`input`'s readers take the resolved names), but the
-/// artifact and member readers still read `layer`, `variation`, `member` and `values` — names this
-/// surface does not even carry — so a map naming one of the canonical fields would parse, validate
-/// and do nothing. Refused until the artifact and member sources are rebuilt on §8's names
-/// (`configuration.md` §7, the stage that retires the `layer` discriminator column with them).
+/// artifact and member readers read their own column names — `rank` and `entity` now, beside a
+/// `layer` discriminator, a per-row `values` and a `parent_key` this surface does not name — so a
+/// map naming one of the canonical fields would parse, validate and do nothing. Refused until the
+/// artifact and member sources are rebuilt on §8's names (`configuration.md` §7, the stage that
+/// retires the `layer` discriminator column with them).
 fn refuse_layer_rename(object: &str, map: Option<&BTreeMap<String, String>>) -> Result<()> {
     let Some(map) = map else { return Ok(()) };
     for (canonical, actual) in map {

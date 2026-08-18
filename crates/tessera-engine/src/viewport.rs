@@ -561,7 +561,7 @@ pub struct ArtifactOut {
     /// and what a drill-down or a suppression later names.
     pub tessera_id: TesseraId,
     /// The publisher's own key, if they supplied one. Operator-chosen text, not corpus data.
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// **How many of this artifact's members this principal can see** — never how many it has. The
     /// same number the existence criterion was tested against, computed once and used for both.
     pub masked_count: u64,
@@ -582,7 +582,7 @@ pub struct ArtifactOut {
     /// that exists but was withheld from this viewer. Distinguishing them would disclose that a
     /// coarser grouping exists which they are not cleared to see.
     pub parent_id: Option<TesseraId>,
-    /// **This is one variation, entire.** Where an artifact carries several ranked descriptions,
+    /// **This is one content, entire.** Where an artifact carries several ranked descriptions,
     /// this is the first whose generating set the viewer contains completely; a viewer containing
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
     /// no supplied content, and nothing else.
@@ -3120,13 +3120,13 @@ impl Engine {
         // fail-closed answer reached by the same call.
         let crate::artifacts::ArtifactVerdict::Serve {
             masked_count,
-            variation,
+            rank,
         } = artifact_view.verdict(entity, ordinal, None)
         else {
             return Ok(None);
         };
         // Same resolution as the viewport's, by the same call — an identifier route that served a
-        // different variation would be a second ranking nobody wrote.
+        // different content would be a second ranking nobody wrote.
         let Some(content) = self.supplied_content(
             &generation,
             &name,
@@ -3134,7 +3134,7 @@ impl Engine {
             ordinal,
             entity,
             layer.declaration.content.supplied.len(),
-            variation,
+            rank,
         ) else {
             return Ok(None);
         };
@@ -3163,10 +3163,10 @@ impl Engine {
             content,
             layer: name.clone(),
             tessera_id: id,
-            stable_key: self.write.with_artifacts(|store| {
+            key: self.write.with_artifacts(|store| {
                 store
                     .get(&name, level, ordinal)
-                    .and_then(|r| r.stable_key.clone())
+                    .and_then(|r| r.key.clone())
             }),
             masked_count,
             derived,
@@ -3194,8 +3194,11 @@ impl Engine {
     /// would move with the box and let a viewer difference two boxes for the members in between.
     /// Candidacy is the only per-tile question here.
     #[allow(clippy::too_many_arguments)]
-    /// The values of the variation the predicate chose, or `None` where it chose one whose content
+    /// The values of the content the predicate chose, or `None` where it chose one whose content
     /// cannot be read back.
+    ///
+    /// **`rank` is the index into the artifact's ranked `contents`** — not a Morton rank and not a
+    /// rank within a bitmap, both of which this module uses the word for elsewhere.
     ///
     /// `Some(vec![])` and `None` are different answers and the difference is the whole point:
     /// the first is *this layer declares no supplied content*, which is most layers; the second is
@@ -3209,9 +3212,9 @@ impl Engine {
         ordinal: u32,
         entity: EntityId,
         kinds: usize,
-        variation: Option<u32>,
+        rank: Option<u32>,
     ) -> Option<Vec<String>> {
-        let Some(variation) = variation else {
+        let Some(rank) = rank else {
             return Some(Vec::new());
         };
         // The publication's own copy, while it is still in memory — the log is the only home the
@@ -3219,7 +3222,7 @@ impl Engine {
         let held = self.write.with_artifacts(|store| {
             store
                 .get(layer, level, ordinal)
-                .and_then(|record| record.variations.get(variation as usize))
+                .and_then(|record| record.contents.get(rank as usize))
                 .and_then(|set| set.values.clone())
         });
         if let Some(values) = held {
@@ -3227,12 +3230,12 @@ impl Engine {
         }
 
         // Otherwise the record blob, at this artifact's own entity: one block read, the same one a
-        // point's blob-resident fields cost. Tags are `variation × kinds + kind` against the
+        // point's blob-resident fields cost. Tags are `rank × kinds + kind` against the
         // layer's declaration — see `ArtifactStore::unpublished_content`.
         if kinds == 0 {
             return Some(Vec::new());
         }
-        let base = (variation as usize).checked_mul(kinds)?;
+        let base = (rank as usize).checked_mul(kinds)?;
         let fields = generation
             .filter_columns
             .records()
@@ -3437,12 +3440,12 @@ impl Engine {
                     // declaration a grant to everyone.
                     let crate::artifacts::ArtifactVerdict::Serve {
                         masked_count,
-                        variation,
+                        rank,
                     } = view.verdict(entity, ordinal, None)
                     else {
                         continue;
                     };
-                    passing.push((ordinal, entity, masked_count, variation));
+                    passing.push((ordinal, entity, masked_count, rank));
                 }
 
                 // The level's lineage, read from the parent pointers of **every** artifact and not
@@ -3484,11 +3487,11 @@ impl Engine {
                     layer.declaration.hierarchy.prune_children,
                 );
 
-                for (ordinal, entity, masked_count, variation) in passing {
+                for (ordinal, entity, masked_count, rank) in passing {
                     if served.binary_search(&ordinal).is_err() {
                         continue;
                     }
-                    // The one variation this viewer contains, entire. ⊘ A variation restored from a
+                    // The one content this viewer contains, entire. ⊘ A content restored from a
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than
                     // served with its description missing.
@@ -3499,7 +3502,7 @@ impl Engine {
                         ordinal,
                         entity,
                         layer.declaration.content.supplied.len(),
-                        variation,
+                        rank,
                     ) else {
                         continue;
                     };
@@ -3524,9 +3527,9 @@ impl Engine {
                             .unwrap_or_default();
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     };
-                    let (stable_key, parent) = self.write.with_artifacts(|store| {
+                    let (key, parent) = self.write.with_artifacts(|store| {
                         match store.get(&name, level, ordinal) {
-                            Some(record) => (record.stable_key.clone(), record.parent),
+                            Some(record) => (record.key.clone(), record.parent),
                             None => (None, None),
                         }
                     });
@@ -3539,7 +3542,7 @@ impl Engine {
                         content,
                         layer: name.clone(),
                         tessera_id,
-                        stable_key,
+                        key,
                         masked_count,
                         derived,
                         // Filled in below, once the response's own membership is settled.

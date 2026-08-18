@@ -127,7 +127,7 @@ fn artifacts_of(engine: &Engine, credential: &[u8], budget: Option<u32>) -> Vec<
 fn keys(artifacts: &[ArtifactOut]) -> Vec<String> {
     let mut names: Vec<String> = artifacts
         .iter()
-        .filter_map(|a| a.stable_key.clone())
+        .filter_map(|a| a.key.clone())
         .collect();
     names.sort();
     names
@@ -336,7 +336,7 @@ fn two_budgets_agree_on_every_artifact_both_return() {
                     a.masked_count, b.masked_count,
                     "an artifact two cuts both return says the same thing in both"
                 );
-                assert_eq!(a.stable_key, b.stable_key);
+                assert_eq!(a.key, b.key);
             }
         }
     }
@@ -571,7 +571,7 @@ fn an_ancestors_count_is_its_own_and_not_the_sum_of_its_children() {
     let count = |key: &str| {
         served
             .iter()
-            .find(|a| a.stable_key.as_deref() == Some(key))
+            .find(|a| a.key.as_deref() == Some(key))
             .expect("served")
             .masked_count
     };
@@ -695,7 +695,7 @@ fn a_tiered_parents_count_is_its_own() {
     let count = |key: &str| {
         served
             .iter()
-            .find(|a| a.stable_key.as_deref() == Some(key))
+            .find(|a| a.key.as_deref() == Some(key))
             .expect("served")
             .masked_count
     };
@@ -764,7 +764,7 @@ fn a_served_artifact_names_its_parent_when_the_parent_is_also_served() {
     let by_key = |key: &str| {
         served
             .iter()
-            .find(|a| a.stable_key.as_deref() == Some(key))
+            .find(|a| a.key.as_deref() == Some(key))
             .expect("served")
     };
     let country = by_key("country");
@@ -837,7 +837,7 @@ fn a_withheld_parent_is_named_no_differently_from_a_root() {
     );
     let state = broad
         .iter()
-        .find(|a| a.stable_key.as_deref() == Some("state"))
+        .find(|a| a.key.as_deref() == Some("state"))
         .expect("served");
     assert!(
         state.parent_id.is_some(),
@@ -871,7 +871,7 @@ fn a_pruned_response_carries_no_parent_links() {
     );
 }
 
-/// **The same key at two levels is a taxonomy, not a cycle.** A stable key is unique per
+/// **The same key at two levels is a taxonomy, not a cycle.** A key is unique per
 /// `(layer, level)`, so an arXiv archive with no subject class is `hep-ph` at level 0 and `hep-ph`
 /// at level 1, the second naming the first as its parent. Refusing that would make a caller rename
 /// half their taxonomy to satisfy a check written for a tree, where an artifact naming its own key

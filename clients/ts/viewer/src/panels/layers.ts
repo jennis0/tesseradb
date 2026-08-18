@@ -7,7 +7,7 @@ const fmt = (n: number | bigint) => n.toLocaleString('en-GB');
 
 /**
  * What to call an artifact on screen: its supplied text where the layer publishes any, and its
- * stable key otherwise.
+ * key otherwise.
  *
  * **The text is not decoration and it is not the key by another name.** Where an artifact carries
  * several ranked descriptions, what arrives is the one *this* principal qualifies for under the
@@ -22,7 +22,7 @@ const fmt = (n: number | bigint) => n.toLocaleString('en-GB');
 function describe(a: Artifact): string {
   const text = a.content[0];
   if (text !== undefined && text.length > 0) return text;
-  return a.stableKey ?? `#${a.tesseraId}`;
+  return a.key ?? `#${a.tesseraId}`;
 }
 
 /**
@@ -215,7 +215,7 @@ export function renderArtifactDetail(state: AppState): string {
   return panel(
     'Cluster',
     `${row('layer', opened.layer)}
-     ${row('stable key', opened.stableKey ?? '— none supplied —')}
+     ${row('key', opened.key ?? '— none supplied —')}
      ${row('tessera_id', opened.id.toString())}
      ${served ? row('inside', parent ? describe(parent) : '— nothing you were served —') : ''}
      ${served && children > 0 ? row('holds', `${fmt(children)} served below it`) : ''}
