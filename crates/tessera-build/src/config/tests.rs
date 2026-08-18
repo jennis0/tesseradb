@@ -1281,6 +1281,10 @@ fn files(keys: &[&str]) -> HashMap<String, PathBuf> {
         .collect()
 }
 
+fn bound_ok(text: &str, keys: &[&str]) -> Config {
+    parse_bound(text, &files(keys)).expect("expected a parse")
+}
+
 fn bound_err(text: &str, keys: &[&str]) -> String {
     format!(
         "{}",
@@ -1424,23 +1428,67 @@ fn a_field_map_without_a_source_is_refused() {
     assert!(message.contains("`fields` without a `source`"), "{message}");
 }
 
-/// ⊘ A map may not yet *move* a field: the readers resolve the canonical names, so an entry that
-/// renamed one would parse and do nothing — a column its author believes is being read.
+/// A map *moves* a field, and the reader takes the name it moved it to.
 #[test]
-fn a_renamed_field_is_refused_rather_than_disregarded() {
+fn a_renamed_field_reaches_the_reader() {
     let text = ACQUIRED.replace(
         "source = \"corpus.parquet\"",
         "source = \"corpus.parquet\"\nfields = { entity_id = \"id\" }",
     );
-    let message = bound_err(&text, &[]);
-    assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("entity_id"), "{message}");
-    assert!(message.contains("'id'"), "{message}");
+    let config = bound_ok(&text, &[]);
+    assert_eq!(config.corpus.fields.of("entity_id"), "id");
 
-    // An attribute's own one-field map is the same rule.
+    // An attribute's own one-field map is the same rule, spelled for one field.
     let text = with_line(SEVERITY, "field = \"sev\"");
+    let config = parse_str(&text).expect("expected a parse");
+    let severity = config
+        .schema
+        .attributes
+        .iter()
+        .find(|a| a.name == "severity")
+        .expect("the attribute is declared");
+    assert_eq!(severity.column(), "sev");
+    // The served name is untouched: the map says where the column is, not what it is called.
+    assert_eq!(severity.name, "severity");
+}
+
+/// A field map entry naming no column at all is refused rather than read as *the canonical name*.
+#[test]
+fn an_empty_field_name_is_refused() {
+    let text = ACQUIRED.replace(
+        "source = \"corpus.parquet\"",
+        "source = \"corpus.parquet\"\nfields = { entity_id = \"\" }",
+    );
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("names no column"), "{message}");
+
+    let text = with_line(SEVERITY, "field = \"  \"");
     let message = err(&text);
-    assert!(message.contains("specified and not built"), "{message}");
+    assert!(message.contains("names no column"), "{message}");
+}
+
+/// ⊘ A **layer's** map may not yet move a field: the artifact and member readers still read their
+/// own column names, so an entry that renamed one would parse and do nothing.
+#[test]
+fn a_renamed_layer_field_is_refused_rather_than_disregarded() {
+    let text = with_layer("").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { key = \"cluster_id\" }",
+    );
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("specified and not built for a layer"), "{message}");
+    assert!(message.contains("'cluster_id'"), "{message}");
+}
+
+/// ⊘ An access label carrying a comma is refused at the declaration, for the reason a term
+/// carrying one is refused at the data: the build joins terms with commas for the plugin to split
+/// apart, so the label would arrive as two.
+#[test]
+fn an_access_label_may_not_contain_a_comma() {
+    let text = ACQUIRED.replace("default = \"public\"", "default = \"ir:analyst,ir:legal\"");
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("contains a comma"), "{message}");
+    assert!(message.contains("either half"), "{message}");
 }
 
 /// **A point's label comes from a field or from a source, never both** (§1).
@@ -1520,7 +1568,11 @@ fn acquisition_names_the_files_this_build_reads() {
     let config = parse_at(dir.path(), ACQUIRED, &HashMap::new()).unwrap();
     let acquired = config.acquire("s0").expect("the view is declared");
     assert_eq!(acquired.points, dir.path().join("geometry.parquet"));
-    assert_eq!(acquired.pairs, dir.path().join("pairs.parquet"));
+    assert!(
+        matches!(&acquired.access.source, crate::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")),
+        "{:?}",
+        acquired.access
+    );
     assert_eq!(acquired.corpus, Some(dir.path().join("corpus.parquet")));
     assert_eq!(acquired.artifacts, None);
     assert_eq!(acquired.artifact_members, None);
@@ -1607,28 +1659,36 @@ fn a_build_refuses_a_view_with_no_source() {
     assert!(message.contains("`source` is required to build"), "{message}");
 }
 
-/// ⊘ Both label routes that are not built refuse rather than reading nothing: a corpus whose every
-/// point carries no term sits in no principal's mask, and the bundle would come up empty for
-/// everyone with no error anywhere.
+/// All three label routes acquire: a field of the view's own source, a separate exploded relation,
+/// and a `default` alone — the corpus with no permission model, where every point takes it.
 #[test]
-fn a_build_refuses_the_two_label_routes_that_are_not_built() {
-    for (declared, expected) in [
-        ("{ field = \"categories\", default = \"public\" }", "point_visibility.field"),
-        ("{ default = \"public\" }", "only a `default`"),
-    ] {
-        let text = ACQUIRED.replace(
-            "{ source = \"pairs.parquet\", default = \"public\" }",
-            declared,
-        );
-        let config = parse_bound(&text, &HashMap::new()).unwrap();
-        let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
-        assert!(message.contains("specified and not built"), "{message}");
-        assert!(message.contains(expected), "{message}");
-        assert!(
-            message.contains("no principal's mask") || message.contains("reserved term"),
-            "the refusal must say what reading nothing would produce: {message}"
-        );
-    }
+fn every_label_route_acquires() {
+    use crate::config::AccessSource;
+    let field = ACQUIRED.replace(
+        "{ source = \"pairs.parquet\", default = \"public\" }",
+        "{ field = \"categories\", default = \"public\" }",
+    );
+    let config = parse_bound(&field, &HashMap::new()).unwrap();
+    let acquired = config.acquire("s0").expect("a field route acquires");
+    assert!(
+        matches!(&acquired.access.source, AccessSource::Field(f) if f == "categories"),
+        "{:?}",
+        acquired.access
+    );
+    assert_eq!(acquired.access.default, "public");
+
+    let only_default = ACQUIRED.replace(
+        "{ source = \"pairs.parquet\", default = \"public\" }",
+        "{ default = \"ir:analyst\" }",
+    );
+    let config = parse_bound(&only_default, &HashMap::new()).unwrap();
+    let acquired = config.acquire("s0").expect("a default alone acquires");
+    assert!(
+        matches!(acquired.access.source, AccessSource::Default),
+        "{:?}",
+        acquired.access
+    );
+    assert_eq!(acquired.access.default, "ir:analyst");
 }
 
 /// Attributes with no corpus source: the pass has no file to read its columns from, and every

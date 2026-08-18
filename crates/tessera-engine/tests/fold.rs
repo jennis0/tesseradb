@@ -11,7 +11,7 @@
 mod common;
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{UInt32Array, UInt64Array};
@@ -110,9 +110,11 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_points_n(points_path, N_ITEMS);
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points_path.to_path_buf(),
         corpus: Some(points_path.to_path_buf()),
-        pairs: pairs_path.to_path_buf(),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -268,6 +270,25 @@ fn base_postings_of(root: &Path, prefix: &str) -> PostingsReader {
     .expect("the folded prefix's base postings open")
 }
 
+/// The term id `ALL_TERM`'s descriptor was interned at, read from `prefix`'s own dictionary.
+///
+/// **Resolved, not assumed.** `public` is reserved at term 0 by every build
+/// (`per-point-attributes.md` §3.8), so a descriptor's ordinal is a fact about the corpus rather
+/// than a constant a test may spell.
+fn all_term_of(root: &Path, prefix: &str) -> TermId {
+    let bundle = open_bundle(root).expect("the bundle opens");
+    let paths: Vec<PathBuf> = bundle.partitions["default"]
+        .manifest
+        .dict_extents
+        .iter()
+        .map(|extent| root.join(prefix).join(&extent.path))
+        .collect();
+    tessera_authz::Dict::load(&paths)
+        .expect("the dictionary loads")
+        .lookup(ALL_TERM.to_string().as_bytes())
+        .expect("every fixture item carries ALL_TERM")
+}
+
 /// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`, under `external_id`.
 fn ingest(
     engine: &Engine,
@@ -392,12 +413,12 @@ fn all_three_halves_of_one_deletion() {
 
     let postings = base_postings_of(&root, "v00001");
     assert!(
-        !postings_name(&postings, TermId::new(ALL_TERM as u32), deleted),
+        !postings_name(&postings, all_term_of(&root, "v00001"), deleted),
         "the folded entity is in no posting of the new term index — both halves, or Rule F's \
          retirement re-exposes it"
     );
     assert!(
-        postings_name(&postings, TermId::new(ALL_TERM as u32), survivor),
+        postings_name(&postings, all_term_of(&root, "v00001"), survivor),
         "and a surviving entity still is, so the sweep did not simply empty the file"
     );
 

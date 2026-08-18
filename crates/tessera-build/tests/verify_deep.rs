@@ -103,9 +103,11 @@ fn flushed_bundle(root: &Path) {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -433,10 +435,11 @@ fn a_posting_past_the_high_water_is_refused() {
     expect_refusal(&root, "entity_id_high_water");
 }
 
-/// Postings sorted and duplicate-free: term 0's record is hand-encoded with its own first entity
-/// duplicated (the honest writer refuses such input, so the record is built from raw bytes; the
-/// duplicate repeats a genuine pair so the sortedness check fires before the pairs comparison
-/// could).
+/// Postings sorted and duplicate-free: the first *carried* term's record is hand-encoded with its
+/// own first entity duplicated (the honest writer refuses such input, so the record is built from
+/// raw bytes; the duplicate repeats a genuine pair so the sortedness check fires before the pairs
+/// comparison could). Not term 0, which is the reserved `public` label and carries a posting only
+/// where the corpus declares it.
 #[test]
 fn a_posting_with_a_duplicate_entity_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -446,7 +449,11 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
     let path = root.join("v00000").join(rel);
 
     let per_term = read_base_postings(&path);
-    let first = *per_term[0].first().expect("term 0 has a posting");
+    let (carried, first) = per_term
+        .iter()
+        .enumerate()
+        .find_map(|(t, entities)| entities.first().map(|e| (t, *e)))
+        .expect("some term has a posting");
     let mut records: Vec<Vec<u8>> = per_term
         .iter()
         .enumerate()
@@ -457,7 +464,7 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
     let mut damaged = vec![0u8]; // tag 0: raw little-endian u32 array
     damaged.extend_from_slice(&first.to_le_bytes());
     damaged.extend_from_slice(&first.to_le_bytes());
-    records[0] = damaged;
+    records[carried] = damaged;
     tessera_authz::write_posting_records(&path, &records).unwrap();
     refresh_digest(&root, rel);
 

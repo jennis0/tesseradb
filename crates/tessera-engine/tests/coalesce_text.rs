@@ -138,9 +138,11 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
         view_id: "s0".to_string(),

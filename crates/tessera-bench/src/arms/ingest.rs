@@ -230,9 +230,11 @@ pub fn run_build(
 
             let collector = StageCollector::default();
             let args = BuildArgs {
+                point_fields: Default::default(),
+                corpus_fields: Default::default(),
                 points: geometry.clone(),
                 corpus: Some(geometry.clone()),
-                pairs: pairs.clone(),
+                access: tessera_build::config::AccessInput::relation(pairs.clone()),
                 out: out.clone(),
                 extent: Bounds {
                     x_min: 0.0,

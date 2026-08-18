@@ -185,7 +185,14 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
     // Checked here rather than left to the suite, which cannot run without a corpus on disk.
     let acquired = config.acquire("s0").expect("the corpus config acquires its own inputs");
     assert_eq!(acquired.points, dir.path().join("points.parquet"));
-    assert_eq!(acquired.pairs, dir.path().join("pairs.parquet"));
+    assert!(
+        matches!(
+            &acquired.access.source,
+            tessera_build::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")
+        ),
+        "{:?}",
+        acquired.access
+    );
     assert_eq!(acquired.corpus, Some(dir.path().join("points.parquet")));
     let schema = config.schema;
     let names: Vec<&str> = schema.attributes.iter().map(|a| a.name.as_str()).collect();

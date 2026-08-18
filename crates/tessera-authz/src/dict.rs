@@ -4,6 +4,22 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tessera_types::TermId;
 
+/// The reserved access label every principal holds, and the term id it is interned at
+/// (`per-point-attributes.md` §3.8, `configuration.md` §1).
+///
+/// **Reserved at build and satisfied at authorise, and the two halves must be read together.**
+/// Every build interns this descriptor first, so term `0` is `public` in every bundle and is minted
+/// for no other descriptor; every session resolved by the engine gains it *by construction*, inside
+/// the trust boundary. It is deliberately neither a grant — which would make the corpus's one
+/// universal label depend on grant hygiene — nor a plugin behaviour, the plugin being
+/// caller-supplied code that decides what a credential's bytes mean.
+pub const PUBLIC_LABEL: &[u8] = b"public";
+
+/// [`PUBLIC_LABEL`]'s term id. `0` is not an *absent* sentinel in term space (that convention is
+/// the category code space's); it is the first ordinal a dictionary assigns, and reserving it is
+/// what makes the label's identity a property of the format rather than of the input.
+pub const PUBLIC_TERM: TermId = TermId::new(0);
+
 /// Writes dictionary extents: deduplicates descriptors and assigns ordinal term IDs.
 pub struct DictWriter {
     dir: PathBuf,

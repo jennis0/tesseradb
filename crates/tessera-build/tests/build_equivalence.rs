@@ -37,7 +37,8 @@ use arrow::array::{
     BooleanArray, Float64Array, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
     UInt8Array,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit};
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
@@ -352,9 +353,11 @@ fn write_attributed_points(path: &Path) {
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points.to_path_buf(),
         corpus: Some(points.to_path_buf()),
-        pairs: pairs.to_path_buf(),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: extent(),
         view_id: "s0".to_string(),
@@ -462,6 +465,100 @@ fn streaming_build_is_byte_identical_to_the_reference_build() {
     assert_eq!(reference.pairs, streaming.pairs);
     assert_eq!(reference.bundle_bytes, streaming.bundle_bytes);
     assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
+}
+
+/// **The same byte identity over a view whose access terms are a `list<string>` field**, where the
+/// two implementations reach the dictionary by genuinely different routes.
+///
+/// The linear build walks items in source-id order and interns each descriptor as it meets it; the
+/// streaming build ranks distinct terms by `(first ordinal, source term)` over a relation it scans
+/// twice, a source term being a position in a sorted vocabulary. Those two agree only because the
+/// vocabulary is sorted — which is the sort of premise a differential is for, since a disagreement
+/// about term numbering is a disagreement about every permanent entity id (I9) and shows up as a
+/// bundle that is well-formed and differently numbered.
+#[test]
+fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let points = temp.path().join("points.parquet");
+    write_field_sourced_points(&points);
+
+    let mut reference_args = args_for(&points, &points, temp.path().join("reference"));
+    reference_args.corpus = None;
+    reference_args.access = tessera_build::config::AccessInput {
+        source: tessera_build::config::AccessSource::Field("categories".to_string()),
+        default: "public".to_string(),
+    };
+    let mut streaming_args = reference_args.clone();
+    streaming_args.out = temp.path().join("streaming");
+
+    let reference = build_in_memory(&reference_args).unwrap();
+    let streaming = build(&streaming_args).unwrap();
+    assert_eq!(reference.items, streaming.items);
+    assert_eq!(reference.terms, streaming.terms);
+    assert_eq!(reference.pairs, streaming.pairs);
+    assert_bundles_identical(
+        &reference_args.out,
+        &streaming_args.out,
+        "field-sourced streaming vs reference",
+    );
+}
+
+/// The field-route fixture: a `list<string>` access column carrying terms whose **lexicographic**
+/// order and whose order of first appearance deliberately disagree, so a build ranking them by the
+/// wrong one is caught rather than coincidentally right.
+fn write_field_sourced_points(path: &Path) {
+    use arrow::array::{ArrayRef, ListArray};
+    use arrow::buffer::OffsetBuffer;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("entity_id", DataType::UInt64, false),
+        ArrowField::new("x", DataType::Float64, false),
+        ArrowField::new("y", DataType::Float64, false),
+        ArrowField::new(
+            "categories",
+            DataType::List(Arc::new(ArrowField::new("item", DataType::Utf8, true))),
+            true,
+        ),
+    ]));
+    let (ids, xs, ys) = synth_geometry();
+    let vocabulary = ["zeta", "alpha", "mu", "beta", "public"];
+    let mut offsets: Vec<i32> = vec![0];
+    let mut flat: Vec<&str> = Vec::new();
+    let mut present: Vec<bool> = Vec::new();
+    for &e in &ids {
+        // Every twelfth item carries nothing at all — null and empty alike, so the fill is on the
+        // line here too — and the rest draw from the vocabulary in an order unrelated to its sort.
+        match e % 12 {
+            0 => present.push(false),
+            1 => present.push(true),
+            group => {
+                present.push(true);
+                for k in 0..(group % 3) + 1 {
+                    flat.push(vocabulary[((group * 7 + k) % vocabulary.len() as u64) as usize]);
+                }
+            }
+        }
+        offsets.push(flat.len() as i32);
+    }
+    let values: ArrayRef = Arc::new(StringArray::from(flat));
+    let list = ListArray::new(
+        Arc::new(ArrowField::new("item", DataType::Utf8, true)),
+        OffsetBuffer::new(offsets.into()),
+        values,
+        Some(present.into()),
+    );
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(list),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
 }
 
 /// **The same byte identity over a bundle that carries a scalar tail**, which no other fixture
@@ -908,9 +1005,11 @@ fn reference_build_at_scale() {
     let out = PathBuf::from("/tmp/tessera-reference-scale");
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: PathBuf::from("data/scaled/geometry.parquet"),
         corpus: Some(PathBuf::from("data/scaled/geometry.parquet")),
-        pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
+        access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
         out,
         extent: Bounds {
             x_min: 0.0,

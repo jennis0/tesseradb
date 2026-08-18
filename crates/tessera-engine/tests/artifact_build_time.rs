@@ -165,9 +165,11 @@ fn fixture() -> Fixture {
     write_members(&members);
 
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
         extent: extent(),
         view_id: "s0".to_string(),

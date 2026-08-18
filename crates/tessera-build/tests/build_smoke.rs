@@ -183,9 +183,11 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     write_pairs(&pairs);
 
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points.clone(),
         corpus: Some(points.clone()),
-        pairs: pairs.clone(),
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -478,9 +480,11 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -515,9 +519,11 @@ fn build_rejects_an_empty_selection() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -552,9 +558,11 @@ fn morton_input_requires_the_identity_extent() {
     write_pairs(&pairs);
 
     let args = |extent| BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points.clone(),
         corpus: Some(points.clone()),
-        pairs: pairs.clone(),
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: tmp
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
@@ -600,9 +608,11 @@ fn morton_input_requires_the_identity_extent() {
     };
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: identity,
         view_id: "s0".to_string(),
@@ -647,9 +657,11 @@ fn build_rejects_an_unsafe_view_id() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
         extent: extent(),
         view_id: "../escape".to_string(),
@@ -693,9 +705,11 @@ fn limit_filters_the_source_entity_id_prefix() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -733,9 +747,11 @@ fn verify_accepts_a_freshly_built_bundle() {
     write_pairs(&pairs);
 
     build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -776,9 +792,11 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -931,7 +949,7 @@ fn morton_plus_residual_recovers_sub_cell_position() {
     w.write(&batch).unwrap();
     w.close().unwrap();
 
-    let mut rows = read_points(&points, &IDENTITY_EXTENT, None).unwrap();
+    let mut rows = read_points(&points, &Default::default(), &IDENTITY_EXTENT, None).unwrap();
     rows.sort_by_key(|r| r.source_id);
     assert_eq!(rows.len(), 4);
 
@@ -961,7 +979,7 @@ fn bare_morton_widens_with_a_zero_residual() {
     let points = tmp.path().join("points.parquet");
     write_morton_points(&points);
 
-    let rows = read_points(&points, &IDENTITY_EXTENT, None).unwrap();
+    let rows = read_points(&points, &Default::default(), &IDENTITY_EXTENT, None).unwrap();
     assert!(!rows.is_empty());
     for row in &rows {
         assert_eq!(
@@ -1068,9 +1086,11 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         write_fixture(&points, &pairs);
 
         let args = BuildArgs {
+            point_fields: Default::default(),
+            corpus_fields: Default::default(),
             corpus: Some(points.clone()),
             points,
-            pairs,
+            access: tessera_build::config::AccessInput::relation(pairs),
             out: out.clone(),
             extent: tessera_build::input::IDENTITY_EXTENT,
             view_id: "s0".to_string(),

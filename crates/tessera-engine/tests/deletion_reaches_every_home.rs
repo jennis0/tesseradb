@@ -243,9 +243,11 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -640,6 +642,28 @@ fn sidecar_bindings(root: &Path) -> BTreeMap<u64, u64> {
 }
 
 /// `Home::TermPostings`: whether the base term index still names `entity` under `term`.
+/// The term id `ALL_TERM`'s descriptor was interned at, read from the bundle's own dictionary.
+///
+/// **Resolved, not assumed.** `public` is reserved at term 0 by every build, so a descriptor's
+/// ordinal is a fact about the corpus rather than a constant a test may spell — and a test that
+/// spelled one would fail the day another reservation moved it, for a reason unrelated to what it
+/// asserts.
+fn all_term(root: &Path) -> TermId {
+    let prefix = root.join(current_prefix(root));
+    let bundle = open_bundle(root).expect("the bundle opens");
+    let paths: Vec<PathBuf> = bundle
+        .partitions["default"]
+        .manifest
+        .dict_extents
+        .iter()
+        .map(|extent| prefix.join(&extent.path))
+        .collect();
+    tessera_authz::Dict::load(&paths)
+        .expect("the dictionary loads")
+        .lookup(ALL_TERM.to_string().as_bytes())
+        .expect("every item carries ALL_TERM")
+}
+
 fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
     let path = partition_dir(root).join("terms/postings.arrow");
     let postings = PostingsReader::open(&path, false).expect("the term postings open");
@@ -768,7 +792,7 @@ fn a_deletion_reaches_every_home() {
         "Home::ExternalIdSidecar"
     );
     assert!(
-        term_names(&root, TermId::new(ALL_TERM as u32), deleted),
+        term_names(&root, all_term(&root), deleted),
         "Home::TermPostings"
     );
 
@@ -1112,11 +1136,11 @@ fn a_deletion_reaches_every_home() {
     // postings left standing survives Rule F's retirement and is served to every authorised
     // principal afterwards.
     assert!(
-        !term_names(&root, TermId::new(ALL_TERM as u32), deleted),
+        !term_names(&root, all_term(&root), deleted),
         "Home::TermPostings: the deleted entity is still named by a term"
     );
     assert!(
-        term_names(&root, TermId::new(ALL_TERM as u32), survivor),
+        term_names(&root, all_term(&root), survivor),
         "Home::TermPostings: a suppressed entity left the term index, so the sweep took more than \
          the executed set"
     );

@@ -127,9 +127,11 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points_path.to_path_buf(),
         corpus: Some(points_path.to_path_buf()),
-        pairs: pairs_path.to_path_buf(),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
         view_id: "s0".to_string(),

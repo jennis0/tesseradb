@@ -1340,6 +1340,28 @@ impl Engine {
             }
         }
 
+        // **`public` is added here, inside the trust boundary, and nowhere else.**
+        // It is the one label every principal holds (`per-point-attributes.md` §3.8), and where it
+        // is added decides what it is worth. Not as a grant, which would make the corpus's only
+        // universal label depend on every credential being issued correctly; not in the plugin,
+        // which is caller-supplied code deciding what a credential's bytes mean; here, after the
+        // credential has been resolved and before anything is masked with the result.
+        //
+        // **Resolved by descriptor, not asserted as term `0`.** Every build interns it first, so
+        // the two are the same number in every bundle this build writes — but a bundle whose
+        // dictionary does not carry the label at all would, under a hardcoded `0`, hand every
+        // principal whichever descriptor happened to be interned first. Looking the label up costs
+        // one dictionary probe per authorise and cannot fail open: a bundle without it adds
+        // nothing, which is the narrow direction.
+        if let Some(term) = generation.dict.lookup(tessera_authz::PUBLIC_LABEL) {
+            debug_assert_eq!(
+                term,
+                tessera_authz::PUBLIC_TERM,
+                "`public` is reserved at term 0 by every build"
+            );
+            satisfied.insert(term);
+        }
+
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
         satisfied_sorted.sort_unstable();
         let satisfied_sorted = Arc::new(satisfied_sorted);

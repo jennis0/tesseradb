@@ -19,22 +19,28 @@ including the visibility semantics its §5 states; [`records-and-search.md`](rec
 artifact and member grains once it has read them. Where this and those differ on *semantics*, they
 govern; where they differ on *spelling*, this does.
 
-⊘ **The declaration and the acquisition are built; the readers do not yet take field names.**
-`tessera build` — with no flags at all — finds `tessera.toml`, reads the declaration it names, and
-compiles the blocks below with every refusal §7 states. Every `source` is a path relative to the
-declaring document; `--file KEY=PATH` overrides one, keyed by the object. `--extent`, `--id-key`,
-`--id-key-file`, `--points`, `--pairs`, `--values`, `--artifacts`, `--artifact-members`,
-`--schema`, `--layers`, `schema.toml` as a fixed name and `layers.toml` are all gone. What is
-**not** built, and is refused rather than accepted and ignored, each naming what is absent per
+**The declaration, the acquisition and the readers are built.** `tessera build` — with no flags at
+all — finds `tessera.toml`, reads the declaration it names, compiles the blocks below with every
+refusal §7 states, and reads each object's source under the names its `fields` map resolved. Every
+`source` is a path relative to the declaring document; `--file KEY=PATH` overrides one, keyed by
+the object. `--extent`, `--id-key`, `--id-key-file`, `--points`, `--pairs`, `--values`,
+`--artifacts`, `--artifact-members`, `--schema`, `--layers`, `schema.toml` as a fixed name and
+`layers.toml` are all gone. What is **not** built, and is refused rather than accepted and ignored,
+each naming what is absent per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
 
-- **A `fields` map that *moves* a field.** The map is parsed and validated — every name known,
-  every name declared — but the input readers resolve the canonical names, so an entry naming a
-  different column would parse and do nothing. The same holds for an attribute's `field`.
-- **`point_visibility` without a `source`.** Reading each point's labels from a *field* of the
-  view's own source needs the list-valued access column, and `default` alone needs the reserved
-  term it resolves to; neither is written yet, and building with no relation read would put every
-  point in no principal's mask. Both are refused at the build that would acquire them.
+- **A `fields` map on a `[[layer]]` or a `[layer.members]`.** Every other object's map moves its
+  field and the reader takes the name it moved it to. The artifact and member readers still read
+  `layer`, `variation`, `member` and `values` — names this surface does not carry at all — so a
+  layer map has nothing to move until those sources are rebuilt on §8's names, and one naming a
+  different column is refused rather than read as canonical.
+- **An access term containing a comma**, whether it arrives in a data row or as a declared label.
+  A build joins an item's terms with commas so the plugin can split them apart again; a term
+  carrying one would reach the plugin as two, and the point would be visible to a holder of either
+  half. The delimiter goes when the plugin takes a term **list** — the next stage of
+  [`../evidence/memos/2026-08-18-configuration-surface-plan.md`](../evidence/memos/2026-08-18-configuration-surface-plan.md),
+  which bumps the plugin hash with it; until then the refusal is the only answer that does not
+  widen.
 - **One file per layer.** A layer's `source` is real, but the artifact and member files still carry
   a `layer` column and the build reads one path, so two layers binding *different* files is
   refused; and `[layer.labels]`, a layer's inline `artifacts`, a view's own `visibility` and
@@ -155,6 +161,34 @@ point_visibility = { default = "public" }                         # no relation:
 Declaring both is refused. `default` is legal alone and is the corpus with no permission model, so
 the two acquisition keys are optional where `default` is not — a point's label has to come from
 somewhere, and *nowhere* is a decision rather than an omission.
+
+**A `field` is a `list<string>`, or a plain `string` where a point carries one term**, and its
+terms are minted as an open vocabulary is: whatever the column holds becomes a term. Three rules
+govern what a row means, and each is the fail-closed half of a plausible misreading:
+
+- **A null value and an empty list both mean *no access terms*, which means visible to no
+  principal.** Neither means unrestricted. Where a `default` is declared those are the rows it
+  fills, so under `default = "public"` an unlabelled point is public and under a default nobody
+  holds it is invisible — but the label is the one the declaration named, never *everyone*.
+- **Terms are trimmed** of surrounding whitespace, matching what the plugin already does to the
+  label it is handed, so ` cs.LG` and `cs.LG` are one term rather than two that no credential
+  spells the same way. A term empty after trimming is not a term.
+- **Filling never overrides.** A point carrying terms of its own keeps exactly those, and the build
+  reports how many rows it filled. That is inadmissible rather than unwise: a point's terms are
+  disjunctive — `M_auth` is a union of posting lists — so any label added to a point can only widen
+  it.
+
+⊘ **The `source` route fills nothing.** A point with no row in the exploded relation carries no
+term and so sits in no principal's mask, where the same point read from a `field` would take the
+default. The two should agree; not filling is the narrow half, so the divergence is a deferral
+rather than a hole, and closing it needs the streaming build to know which ordinals the relation
+never named.
+
+**`public` is reserved at term `0`** (`per-point-attributes.md` §3.8). Every build interns it first,
+so it is term 0 in every bundle and is minted for no other descriptor; every principal's resolved
+term set contains it **by construction, inside the trust boundary** — not by grant, which would
+make the one universal label depend on grant hygiene, and not in the plugin, which is
+caller-supplied code deciding what a credential's bytes mean.
 
 **A value set is *inline or sourced*, and its codes are *pinned or assigned* — two independent
 choices.** Where the values come from is `source` against `values`; where the codes come from is
@@ -602,8 +636,10 @@ content                   = { computed = ["centroid", "box"] }
 
 ⊘ **Three lines of that example do not build today**, and the ⊘ note at the head says why: the two
 renamed fields (`parent = "parent_id"`, and `contents = "text"` under `[layer.labels]`) are refused
-until the readers take names, and `[layer.labels]` is refused whole. It is written as the surface
-is, not as this build reads it.
+because a **layer's** map has nothing to move until the artifact and member sources are rebuilt on
+this document's names, and `[layer.labels]` is refused whole. Every other map in the example — the
+view's `fields = { x = "x", y = "y" }` among them — is read. It is written as the surface is, not as
+this build reads it.
 
 **A vocabulary is an object, not three attribute fields.** `name` is the identity, so attributes
 share one by naming it; `source` or an inline `[vocabulary.values]` table is where the values come
@@ -684,10 +720,15 @@ keys of a table, and Arrow's schema calls them fields either way. **The map says
 *whether*** — the object's own keys assert existence (`hierarchy` that there are parent edges,
 `depends_on` that there are attachment edges, `membership` that there are members,
 `content.supplied` that there is content) and `fields` only locates what is already declared. Three
-refusals follow, each naming both halves: a name that is not one of that object's fields at all, a
-field named in the map that the object never declared, and ⊘ a declared field whose default name is
-absent from the source — the third needing the source's own schema, which is the readers' to open.
-A map with no `source` is refused too: it locates fields in a file the object never names.
+refusals follow, each naming both halves, and they fall in the two places that can make them. The
+**parser** refuses a name that is not one of that object's fields at all, and a field named in the
+map that the object never declared — both answerable from the declaration alone. The **readers**
+refuse a declared field whose name is absent from the source, naming the object, the field, the
+column it looked for and the columns the file carries; that one needs the file open, and it is what
+turns a silent empty column into a build failure. Silence is the whole reason it exists: an absent
+geometry column puts every point at the origin, and an absent access column puts every point in no
+principal's mask. A map with no `source` is refused too: it locates fields in a file the object
+never names.
 
 **A layer's membership has two shapes, and it names whichever it uses.** A `members` field on the
 artifact row carries the membership as a list — the natural shape, and the one that makes an
@@ -751,6 +792,24 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-18 — the readers take the names, and a point's terms come from a field.** Two changes,
+and only the second moves a request. **Every object but a layer now reads its source under the
+names its `fields` map resolved** — a view's geometry, `[corpus]`'s identity, a vocabulary's
+`key`/`code`/`title`, an attribute's `field` — so §8's third refusal exists at last: a declared
+field the file does not carry is a build failure naming the object, the field, the column looked
+for and the columns the file has, where before it would have read an empty column and said nothing.
+A layer's map stays refused, its readers still spelling `layer`, `variation`, `member` and `values`.
+**`point_visibility = { field }` reads each point's access terms from a `list<string>` (or a plain
+`string`) column of the view's own source**, and `{ default }` alone gives every point one label —
+so all three shapes §1 declares now acquire. Terms are trimmed; a null value and an empty list both
+mean *no access terms*, which is *visible to no principal* rather than unrestricted, and are what a
+`default` fills; filling never overrides. **`public` is interned at term `0` by every build and
+added to every principal's resolved term set inside the engine** — not by grant and not in the
+plugin. One refusal is new and temporary: a term or a label containing a **comma**, the delimiter
+the build still joins terms with, which would otherwise reach the plugin as two terms and make the
+point visible to a holder of either half. ⊘ The `source` route fills nothing, where the `field`
+route does; that divergence is recorded above and is the narrow half.
 
 **2026-08-18 — the invocation is `tessera build`.** The previous revision made acquisition real and
 produced a nine-flag command line beside a detailed config, which is the problem it was meant to

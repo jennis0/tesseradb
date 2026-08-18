@@ -1077,6 +1077,7 @@ fn main() -> ExitCode {
                 &view_id,
                 &acquired.extent,
                 &acquired.points,
+                &acquired.point_fields,
                 limit,
             ) {
                 Ok(extent) => extent,
@@ -1142,8 +1143,10 @@ fn main() -> ExitCode {
 
             let args = tessera_build::BuildArgs {
                 points: acquired.points,
+                point_fields: acquired.point_fields,
                 corpus: acquired.corpus,
-                pairs: acquired.pairs,
+                corpus_fields: acquired.corpus_fields,
+                access: acquired.access,
                 out: out.clone(),
                 extent,
                 view_id,

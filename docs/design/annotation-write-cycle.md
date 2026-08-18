@@ -520,6 +520,13 @@ peculiar to them.
 discriminator: there is no `layer` column to select on, no filter to configure, and no way for a
 layer to ingest another's rows.
 
+⊘ **A layer's `fields` map does not yet move a field**, and the example below's
+`parent = "parent_id"` is therefore refused at parse rather than read. Every other object's map
+reaches its reader — a view's geometry, `[corpus]`'s identity, a vocabulary's `key`/`code`/`title`,
+an attribute's `field` — but the artifact and member readers still read `layer`, `variation`,
+`member` and `values`, names this surface does not carry at all, so there is nothing for a map to
+move until those sources are rebuilt on the names above.
+
 ```toml
 [[layer]]
 source     = "hdbscan"

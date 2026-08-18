@@ -165,9 +165,14 @@ fn c_zero_term_session_sees_nothing() {
         &tmp.path().join("wal.log"),
     );
     let session = engine.authorise(&zero_credential()).unwrap();
-    assert!(
-        session.satisfied.is_empty(),
-        "zero-term credential grants nothing"
+    // The reserved `public` term is the whole of what a zero-term credential holds — added by the
+    // engine, never by the credential — and this fixture's points carry `0` and `1` and nothing
+    // else, so it names no item. That is the shape of the reservation: a universal *label*, not a
+    // universal grant.
+    assert_eq!(
+        session.satisfied,
+        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
+        "zero-term credential grants nothing but the reserved label"
     );
 
     let out = engine
@@ -777,9 +782,11 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: tmp.path().join("points.parquet"),
         corpus: Some(tmp.path().join("points.parquet")),
-        pairs: tmp.path().join("pairs.parquet"),
+        access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
         out: bundle_root.clone(),
         extent: extent(),
         view_id: "s0".to_string(),
@@ -1136,9 +1143,11 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
+            point_fields: Default::default(),
+            corpus_fields: Default::default(),
             points: PathBuf::from("data/scaled/geometry.parquet"),
             corpus: Some(PathBuf::from("data/scaled/geometry.parquet")),
-            pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
+            access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
             // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not
             // coordinates (`read_points`'s Morton branch requires this exact extent).

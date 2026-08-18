@@ -272,9 +272,11 @@ fn fixture() -> Fixture {
     let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
 
     build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points.clone(),
         corpus: Some(points.clone()),
-        pairs: pairs.clone(),
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: bundle.clone(),
         extent: extent(),
         view_id: "s0".to_string(),

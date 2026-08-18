@@ -9,14 +9,22 @@
 //!   which the probe corpus writes and which carries the full 32 bits per axis; or a bare
 //!   `morton` column, which carries 16 and is widened without pretending otherwise. See
 //!   [`read_points`].
-//! * **pairs** — the exploded `(entity_id, term_id)` relation.
+//! * **access terms** — either the exploded `(entity_id, term_id)` relation ([`scan_pairs`]) or a
+//!   `list<string>` field of the points source itself ([`scan_access_field`]), which is where the
+//!   trim, the empty rule and the comma refusal live.
+//!
+//! **Every column is named by the declaration, never by this module** ([`crate::config::Fields`]).
+//! A declared field the file does not carry is [`field_index`]'s refusal, and that refusal is the
+//! point of the whole arrangement: an absent column reads as empty, and empty is silent in exactly
+//! the directions that matter — an absent geometry column puts every point at the origin, and an
+//! absent access column puts every point in no principal's mask.
 //!
 //! Both honour a `limit`: `entity_id < limit` selects a prefix of entity space, which is a
 //! whole coherent corpus because entity IDs are append-only (I9, dataset §4.1). Row groups
 //! whose statistics prove they hold no qualifying row are skipped outright — at 10⁹ items the
 //! pairs relation is billions of rows and the prefix is a few hundred thousand.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -32,6 +40,7 @@ use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds};
 use tessera_store::vocabulary::VocabularyMinter;
 
+use crate::config::{Fields, ENTITY_ID};
 use crate::error::{BuildError, Result};
 
 /// One input point: its source-corpus entity ID (which becomes the external ID) and geometry.
@@ -62,6 +71,9 @@ pub struct PointRow {
 
 /// The only extent under which the Morton input branch is meaningful: the grid's own
 /// coordinates, `[0, 65536)` on both axes (contracts §2.5 — the grid is 2^16 x 2^16).
+/// The exploded relation's term column (`configuration.md` §1's `point_visibility.source`).
+pub const TERM_ID: &str = "term_id";
+
 pub const IDENTITY_EXTENT: Bounds = Bounds {
     x_min: 0.0,
     x_max: 65536.0,
@@ -86,9 +98,14 @@ pub const IDENTITY_EXTENT: Bounds = Bounds {
 /// stretching the grid while `MANIFEST.json` went on declaring the extent the caller passed — a
 /// bundle whose geometry and whose declared quantisation disagree. A corpus with real coordinates
 /// ships `x`/`y` and takes branch 1.
-pub fn read_points(path: &Path, extent: &Bounds, limit: Option<u64>) -> Result<Vec<PointRow>> {
+pub fn read_points(
+    path: &Path,
+    fields: &Fields,
+    extent: &Bounds,
+    limit: Option<u64>,
+) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
-    scan_points(path, extent, limit, |row| {
+    scan_points(path, fields, extent, limit, |row| {
         out.push(row);
         ControlFlow::Continue(())
     })?;
@@ -126,6 +143,7 @@ fn decode_worker_count(row_groups: usize) -> usize {
 /// error does not decode the rest of a multi-gigabyte file first.
 pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     path: &Path,
+    fields: &Fields,
     extent: &Bounds,
     limit: Option<u64>,
     mut visit: F,
@@ -138,69 +156,52 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     // Statistics live against the *file's* column order; batches come back in the projected
     // order. Keep the two index spaces apart deliberately — conflating them would silently read
     // the wrong column.
-    let id_idx_in_file = column_index(path, &schema, "entity_id")?;
-    let wanted: Vec<&str> =
-        if schema.column_with_name("x").is_some() && schema.column_with_name("y").is_some() {
-            vec!["entity_id", "x", "y"]
-        } else if schema.column_with_name("morton").is_some()
-            && schema.column_with_name("residual").is_some()
-        {
-            if *extent != IDENTITY_EXTENT {
-                return Err(BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "this points file stores Morton codes rather than coordinates, which is \
-                         exact only against the grid's own extent (0,65536,0,65536); \
-                         ({},{},{},{}) was given. Pass the identity extent, or supply a points \
-                         file with 'x' and 'y' columns.",
-                        extent.x_min, extent.x_max, extent.y_min, extent.y_max
-                    ),
-                });
-            }
-            vec!["entity_id", "morton", "residual"]
-        } else if schema.column_with_name("morton").is_some() {
-            if *extent != IDENTITY_EXTENT {
-                return Err(BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "this points file stores Morton codes rather than coordinates, which is \
-                         exact only against the grid's own extent (0,65536,0,65536); \
-                         ({},{},{},{}) was given. Pass the identity extent, or supply a points \
-                         file with 'x' and 'y' columns.",
-                        extent.x_min, extent.x_max, extent.y_min, extent.y_max
-                    ),
-                });
-            }
-            vec!["entity_id", "morton"]
-        } else {
-            return Err(BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: "points file needs either 'x' and 'y' columns or a 'morton' column".into(),
-            });
-        };
+    let id_idx_in_file = field_index(path, &schema, fields, ENTITY_ID)?;
+    let geometry_kind = geometry_kind(path, &schema, fields)?;
+    if geometry_kind != GeometryKind::Xy && *extent != IDENTITY_EXTENT {
+        return Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "this points file stores Morton codes rather than coordinates, which is \
+                 exact only against the grid's own extent (0,65536,0,65536); \
+                 ({},{},{},{}) was given. Pass the identity extent, or supply a points \
+                 file with 'x' and 'y' columns.",
+                extent.x_min, extent.x_max, extent.y_min, extent.y_max
+            ),
+        });
+    }
+    // The column *names*, resolved: what the declaration moved, and the canonical name for
+    // everything it left alone. Every index below — in this schema and in each worker's projected
+    // one — is looked up by these, never by the canonical name.
+    let wanted: Vec<&str> = match geometry_kind {
+        GeometryKind::Xy => vec![fields.of(ENTITY_ID), fields.of("x"), fields.of("y")],
+        GeometryKind::Morton => vec![fields.of(ENTITY_ID), fields.of("morton")],
+        GeometryKind::MortonResidual => vec![
+            fields.of(ENTITY_ID),
+            fields.of("morton"),
+            fields.of("residual"),
+        ],
+    };
 
     // Project: the probe corpus carries columns this build has no use for, and at 10^9 rows
     // not decoding them is the difference between one pass and two. Each decode worker builds
     // its own `ProjectionMask` from these root indices against its own reader.
     let mut roots = Vec::with_capacity(wanted.len());
-    for name in &wanted {
-        roots.push(column_index(path, &schema, name)?);
+    for canonical in geometry_kind.canonical_fields() {
+        roots.push(field_index(path, &schema, fields, canonical)?);
     }
 
     let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
     drop(builder);
-    let geometry_kind = if wanted.contains(&"x") {
-        GeometryKind::Xy
-    } else if wanted.contains(&"residual") {
-        GeometryKind::MortonResidual
-    } else {
-        GeometryKind::Morton
-    };
     let workers = decode_worker_count(keep.len());
     let shards: Vec<Vec<usize>> = keep
         .chunks(keep.len().div_ceil(workers).max(1))
         .map(|c| c.to_vec())
         .collect();
+    // Resolved once, on this thread, and copied into each worker: a worker re-resolves its own
+    // indices against its own projected schema, and it must do so under the same names.
+    let (id_name, x_name, y_name) = (fields.of(ENTITY_ID), fields.of("x"), fields.of("y"));
+    let (morton_name, residual_name) = (fields.of("morton"), fields.of("residual"));
 
     /// One decoded batch's columns, extracted on a worker thread.
     enum PointCols {
@@ -231,36 +232,37 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                         .build()
                         .map_err(|e| BuildError::parquet(path, e))?;
                     let projected = arrow::array::RecordBatchReader::schema(&reader);
-                    let id_idx = column_index(path, &projected, "entity_id")?;
+                    let id_idx = column_index(path, &projected, id_name)?;
                     let geometry = match geometry_kind {
                         GeometryKind::Xy => Geometry::Xy(
-                            column_index(path, &projected, "x")?,
-                            column_index(path, &projected, "y")?,
+                            column_index(path, &projected, x_name)?,
+                            column_index(path, &projected, y_name)?,
                         ),
                         GeometryKind::Morton => {
-                            Geometry::Morton(column_index(path, &projected, "morton")?)
+                            Geometry::Morton(column_index(path, &projected, morton_name)?)
                         }
                         GeometryKind::MortonResidual => Geometry::MortonResidual(
-                            column_index(path, &projected, "morton")?,
-                            column_index(path, &projected, "residual")?,
+                            column_index(path, &projected, morton_name)?,
+                            column_index(path, &projected, residual_name)?,
                         ),
                     };
                     for batch in reader {
                         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-                        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+                        let ids = read_u64_column(path, &batch, id_idx, id_name)?;
                         let cols = match geometry {
                             Geometry::Xy(xi, yi) => PointCols::Xy(
                                 ids,
-                                read_f32_column(path, &batch, xi, "x")?,
-                                read_f32_column(path, &batch, yi, "y")?,
+                                read_f32_column(path, &batch, xi, x_name)?,
+                                read_f32_column(path, &batch, yi, y_name)?,
                             ),
-                            Geometry::Morton(mi) => {
-                                PointCols::Morton(ids, read_u64_column(path, &batch, mi, "morton")?)
-                            }
+                            Geometry::Morton(mi) => PointCols::Morton(
+                                ids,
+                                read_u64_column(path, &batch, mi, morton_name)?,
+                            ),
                             Geometry::MortonResidual(mi, ri) => PointCols::MortonResidual(
                                 ids,
-                                read_u64_column(path, &batch, mi, "morton")?,
-                                read_u64_column(path, &batch, ri, "residual")?,
+                                read_u64_column(path, &batch, mi, morton_name)?,
+                                read_u64_column(path, &batch, ri, residual_name)?,
                             ),
                         };
                         if tx.send(Ok(cols)).is_err() {
@@ -359,9 +361,13 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
 /// Read `pairs` (`entity_id`, `term_id`), keeping rows with `entity_id < limit`, grouped into
 /// each source entity's term list. Lists are returned sorted and deduplicated: the label set is
 /// a *set*, and downstream (the signature key, the postings writer) depends on it being one.
-pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u64>>> {
+pub fn read_pairs(
+    path: &Path,
+    fields: &Fields,
+    limit: Option<u64>,
+) -> Result<HashMap<u64, Vec<u64>>> {
     let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
-    scan_pairs(path, limit, |source_id, term| {
+    scan_pairs(path, fields, limit, |source_id, term| {
         grouped.entry(source_id).or_default().push(term);
         ControlFlow::Continue(())
     })?;
@@ -381,6 +387,7 @@ pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u6
 /// [`scan_points`]).
 pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
     path: &Path,
+    fields: &Fields,
     limit: Option<u64>,
     mut visit: F,
 ) -> Result<()> {
@@ -388,8 +395,9 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let id_idx = column_index(path, &schema, "entity_id")?;
-    let term_idx = column_index(path, &schema, "term_id")?;
+    let id_idx = field_index(path, &schema, fields, ENTITY_ID)?;
+    let term_idx = field_index(path, &schema, fields, TERM_ID)?;
+    let (id_name, term_name) = (fields.of(ENTITY_ID), fields.of(TERM_ID));
 
     let keep = prunable_row_groups(builder.metadata(), id_idx, limit);
     drop(builder);
@@ -417,8 +425,8 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
                         .map_err(|e| BuildError::parquet(path, e))?;
                     for batch in reader {
                         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-                        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
-                        let terms = read_u64_column(path, &batch, term_idx, "term_id")?;
+                        let ids = read_u64_column(path, &batch, id_idx, id_name)?;
+                        let terms = read_u64_column(path, &batch, term_idx, term_name)?;
                         if tx.send(Ok((ids, terms))).is_err() {
                             return Ok(());
                         }
@@ -453,6 +461,381 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// Access terms read from a field of the points source
+// ---------------------------------------------------------------------------------------------
+
+/// What descriptor a **source term** names — the string a build interns into the dictionary and a
+/// credential is later matched against.
+///
+/// Two shapes, because a view declares its access terms one of two ways (`configuration.md` §1),
+/// and both reach the rest of the build as a `u64` source term so that only this type knows the
+/// difference.
+#[derive(Debug, Clone)]
+pub enum TermDescriptors {
+    /// The exploded relation's own integer `term_id`s, spelled as decimals — what the probe
+    /// corpus has always carried and what `builtin:passthrough` has always been handed.
+    Ids,
+    /// A field-sourced view's distinct terms, **sorted**, a source term being a position in this
+    /// list.
+    ///
+    /// **Sorted, and that is load-bearing.** Term ids are assigned by first appearance, ties
+    /// broken by source term — so ordering source terms by their position here has to be ordering
+    /// their descriptors, or the two builds would number the dictionary differently and place
+    /// different permanent entity ids (I9).
+    Vocabulary(Vec<String>),
+}
+
+impl TermDescriptors {
+    /// The descriptor `source_term` names.
+    pub fn descriptor(&self, source_term: u64) -> std::borrow::Cow<'_, str> {
+        match self {
+            TermDescriptors::Ids => std::borrow::Cow::Owned(source_term.to_string()),
+            TermDescriptors::Vocabulary(terms) => {
+                std::borrow::Cow::Borrowed(terms[source_term as usize].as_str())
+            }
+        }
+    }
+
+    /// The source term a descriptor occupies, for a vocabulary; `None` if it carries none.
+    pub fn position_of(&self, descriptor: &str) -> Option<u64> {
+        match self {
+            TermDescriptors::Ids => descriptor.parse().ok(),
+            TermDescriptors::Vocabulary(terms) => terms
+                .binary_search_by(|t| t.as_str().cmp(descriptor))
+                .ok()
+                .map(|i| i as u64),
+        }
+    }
+}
+
+/// The distinct access terms a field-sourced view carries, sorted, with the default among them.
+///
+/// **A whole pass over one column before any term id exists**, which is the price of assigning
+/// term ids by a rule both builds can compute: the linear build walks items and interns as it
+/// goes, and the streaming build ranks terms by `(first ordinal, source term)` over a relation it
+/// scans twice. Making the source term a position in a *sorted* list is what makes those two the
+/// same ordering. The relation route pays nothing for this — its source terms are already integers
+/// the file supplies.
+///
+/// The default is always present, because it is what a null or empty row is filled with and a fill
+/// must have a term to fill with.
+pub fn read_access_vocabulary(
+    points: &Path,
+    fields: &Fields,
+    field: Option<&str>,
+    default: &str,
+    limit: Option<u64>,
+) -> Result<Vec<String>> {
+    let mut distinct: BTreeSet<String> = BTreeSet::new();
+    distinct.insert(default.to_string());
+    if let Some(field) = field {
+        scan_access_column(points, fields, field, limit, |_, terms| {
+            for term in terms {
+                if !distinct.contains(*term) {
+                    distinct.insert((*term).to_string());
+                }
+            }
+            ControlFlow::Continue(())
+        })?;
+    }
+    Ok(distinct.into_iter().collect())
+}
+
+/// The field route's counterpart to [`scan_pairs`]: one `(source_id, source_term)` per term a
+/// point carries, and **one carrying the default for a point that carries none**.
+///
+/// Three rules, all of them decided here because this is where a row's value becomes a term:
+///
+/// - **A null value and an empty list both mean *no access terms*, which means visible to no
+///   principal.** Neither means unrestricted. That is the reading a fill is *for*: where the view
+///   declares a default, those rows get exactly it, and where it declares one that no principal
+///   holds they stay invisible. The permissive misreading — *null is unspecified, so unrestricted*
+///   — would put every unlabelled point in everyone's mask.
+/// - **Terms are trimmed**, matching what `builtin:passthrough` already does to the label it is
+///   handed, so ` cs.LG` and `cs.LG` are one term rather than two that no credential spells the
+///   same way. A term that is empty after trimming is not a term.
+/// - **Filling never overrides.** A point carrying terms of its own keeps exactly those. A point's
+///   terms are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can
+///   only widen it, which makes overriding inadmissible rather than merely unwise.
+///
+/// `field` is `None` for a view declaring only a default, where every point takes it.
+pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
+    points: &Path,
+    fields: &Fields,
+    field: Option<&str>,
+    vocabulary: &[String],
+    default_term: u64,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<AccessFill> {
+    let mut fill = AccessFill::default();
+    let Some(field) = field else {
+        // Every point takes the default: the corpus with no permission model. Read from the
+        // identity column alone, so a view declaring only a default opens no access column at all.
+        scan_identity(points, fields, limit, |source_id| {
+            fill.filled += 1;
+            visit(source_id, default_term)
+        })?;
+        return Ok(fill);
+    };
+    // A term this pass sees and the vocabulary pass did not means the file changed underneath the
+    // build. Refused rather than assumed away: the two passes must see one relation, and the
+    // second is what assigns the postings.
+    let mut changed: Option<BuildError> = None;
+    scan_access_column(points, fields, field, limit, |source_id, terms| {
+        if terms.is_empty() {
+            fill.filled += 1;
+            return visit(source_id, default_term);
+        }
+        fill.carried += 1;
+        for term in terms {
+            let Ok(position) = vocabulary.binary_search_by(|t| t.as_str().cmp(term)) else {
+                changed = Some(BuildError::Schema {
+                    path: points.to_path_buf(),
+                    detail: format!(
+                        "the access column '{field}' now carries the term '{term}', which it \
+                         did not when this build read its vocabulary. The file changed underneath \
+                         the build, and the two passes must see one relation"
+                    ),
+                });
+                return ControlFlow::Break(());
+            };
+            if visit(source_id, position as u64).is_break() {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    })?;
+    if let Some(error) = changed {
+        return Err(error);
+    }
+    Ok(fill)
+}
+
+/// How many points carried terms of their own and how many took the view's default — reported by
+/// the build, because a fill is a visibility decision and a corpus that turned out to be almost
+/// entirely default is one whose author should see the number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccessFill {
+    pub carried: u64,
+    pub filled: u64,
+}
+
+/// Walk the identity column alone, in file order.
+fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
+    path: &Path,
+    fields: &Fields,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    let id_root = field_index(path, &schema, fields, ENTITY_ID)?;
+    let keep = prunable_row_groups(builder.metadata(), id_root, limit);
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [id_root]);
+    let reader = builder
+        .with_row_groups(keep)
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
+        for &id in &ids {
+            if limit.is_some_and(|l| id >= l) {
+                continue;
+            }
+            if visit(id).is_break() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk `(entity_id, access field)` in file order, handing each row its **trimmed, non-empty**
+/// terms. Single-threaded: one string column against geometry's decode cost, and both passes over
+/// it must see the same rows in the same order.
+fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
+    path: &Path,
+    fields: &Fields,
+    field: &str,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    let id_root = field_index(path, &schema, fields, ENTITY_ID)?;
+    // The access field is named directly by `point_visibility.field` rather than through the map:
+    // it is the declaration, not a relocation of a canonical name. Absent is the same refusal a
+    // moved name gets, and for the same reason — an unread access column is a corpus in no
+    // principal's mask, silently.
+    let access_root = schema
+        .column_with_name(field)
+        .map(|(i, _)| i)
+        .ok_or_else(|| BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "{}: `point_visibility.field = \"{field}\"` names a column this file does not \
+                 carry. Its columns are: {}. Refused rather than read as empty: with no access \
+                 column read, every point would carry no term and so sit in no principal\'s mask",
+                fields.object(),
+                column_names(&schema)
+            ),
+        })?;
+    let keep = prunable_row_groups(builder.metadata(), id_root, limit);
+    let projection =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [id_root, access_root]);
+    let reader = builder
+        .with_row_groups(keep)
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
+    let access_idx = column_index(path, &projected, field)?;
+
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
+        let terms = read_access_column(path, batch.column(access_idx), field)?;
+        let mut row: Vec<&str> = Vec::new();
+        for (i, &id) in ids.iter().enumerate() {
+            if limit.is_some_and(|l| id >= l) {
+                continue;
+            }
+            row.clear();
+            row.extend(terms.terms_of(i));
+            if visit(id, &row).is_break() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One batch's access column, flattened: row `i`'s terms are `terms[bounds[i]..bounds[i + 1]]`.
+struct AccessBatch {
+    bounds: Vec<usize>,
+    terms: Vec<String>,
+}
+
+impl AccessBatch {
+    fn terms_of(&self, row: usize) -> impl Iterator<Item = &str> {
+        self.terms[self.bounds[row]..self.bounds[row + 1]]
+            .iter()
+            .map(String::as_str)
+    }
+}
+
+/// Decode one batch of the access column, applying the trim, the empty rule and the comma refusal.
+///
+/// **A `list<string>`, or a plain `string` where a point carries one term** (`configuration.md`
+/// §1). Any other type is refused rather than coerced: a column of integers or of a nested struct
+/// is not a term list, and guessing what its rows meant would mint access terms nobody wrote.
+fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) -> Result<AccessBatch> {
+    use arrow::array::{Array as _, LargeStringArray, ListArray, StringArray};
+
+    let rows = column.len();
+    let mut batch = AccessBatch {
+        bounds: Vec::with_capacity(rows + 1),
+        terms: Vec::new(),
+    };
+    batch.bounds.push(0);
+    fn push(batch: &mut AccessBatch, path: &Path, name: &str, value: &str) -> Result<()> {
+        let term = value.trim();
+        if term.is_empty() {
+            return Ok(());
+        }
+        // ⊘ **The delimiter, and the one refusal it forces.** The build joins an item's terms with
+        // commas so `builtin:passthrough` can split them apart again, which was harmless while
+        // terms were integers and is not once they are a caller's strings: a term carrying a comma
+        // would arrive at the plugin as two, and the point would become visible to a holder of
+        // either half. The join disappears when the plugin takes a term *list* (`configuration.md`
+        // §1's next stage); until it does, the refusal is the only answer that does not widen.
+        if term.contains(',') {
+            return Err(BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the access column '{name}' carries the term '{term}', which contains a \
+                     comma. The build joins an item\'s terms with commas for the plugin to split \
+                     apart, so this term would reach it as two and the point would become visible \
+                     to a holder of either half. Refused rather than split: the delimiter goes \
+                     when the plugin takes a term list, and until then a comma in a term cannot be \
+                     carried"
+                ),
+            });
+        }
+        batch.terms.push(term.to_string());
+        Ok(())
+    }
+
+    if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
+        for i in 0..rows {
+            if !values.is_null(i) {
+                push(&mut batch, path, name, values.value(i))?;
+            }
+            batch.bounds.push(batch.terms.len());
+        }
+        return Ok(batch);
+    }
+    if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
+        for i in 0..rows {
+            if !values.is_null(i) {
+                push(&mut batch, path, name, values.value(i))?;
+            }
+            batch.bounds.push(batch.terms.len());
+        }
+        return Ok(batch);
+    }
+    if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
+        let values = list.values();
+        let strings = values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the access column '{name}' is a list of {:?}, and an access term is a \
+                     string",
+                    values.data_type()
+                ),
+            })?;
+        let offsets = list.value_offsets();
+        for i in 0..rows {
+            if !list.is_null(i) {
+                for j in offsets[i]..offsets[i + 1] {
+                    let j = j as usize;
+                    if !strings.is_null(j) {
+                        push(&mut batch, path, name, strings.value(j))?;
+                    }
+                }
+            }
+            batch.bounds.push(batch.terms.len());
+        }
+        return Ok(batch);
+    }
+    Err(BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!(
+            "the access column '{name}' has type {:?}. A point\'s access terms are a \
+             `list<string>`, or a plain `string` where a point carries one term \
+             (configuration.md §1). Refused rather than coerced: guessing what another type\'s \
+             rows meant would mint access terms nobody wrote",
+            column.data_type()
+        ),
+    })
+}
+
 /// The tightest box holding every point this build would read — `auto`'s input
 /// (`configuration.md` §1), or `None` when the selection is empty.
 ///
@@ -471,30 +854,37 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
 /// A Morton points file has no coordinates to bound, and is refused here rather than defaulted
 /// to the grid's own extent: the two Morton branches are exact only against
 /// [`IDENTITY_EXTENT`], so the answer is a line in the config rather than a guess in the reader.
-pub fn data_bounds(path: &Path, limit: Option<u64>) -> Result<Option<Bounds>> {
+pub fn data_bounds(path: &Path, fields: &Fields, limit: Option<u64>) -> Result<Option<Bounds>> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    if schema.column_with_name("x").is_none() || schema.column_with_name("y").is_none() {
+    let (x_name, y_name) = (fields.of("x"), fields.of("y"));
+    if schema.column_with_name(x_name).is_none() || schema.column_with_name(y_name).is_none() {
         return Err(BuildError::Schema {
             path: path.to_path_buf(),
-            detail: if schema.column_with_name("morton").is_some() {
+            detail: if schema.column_with_name(fields.of("morton")).is_some() {
                 "`extent = \"auto\"` fits a box around this view\'s coordinates, and this points \
                  file stores Morton codes rather than coordinates. Codes are exact only against \
                  the grid\'s own extent, so write it out: `extent = { min = 0.0, max = 65536.0 }`."
                     .to_string()
             } else {
-                "`extent = \"auto\"` needs \'x\' and \'y\' columns to fit a box around".to_string()
+                format!(
+                    "{}: `extent = \"auto\"` fits a box around this view\'s coordinates, and this \
+                     file carries no \'{x_name}\'/\'{y_name}\' pair to fit one around. Its columns \
+                     are: {}",
+                    fields.object(),
+                    column_names(&schema)
+                )
             },
         });
     }
 
-    let id_idx_in_file = column_index(path, &schema, "entity_id")?;
+    let id_idx_in_file = field_index(path, &schema, fields, ENTITY_ID)?;
     let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
     let mut roots = Vec::with_capacity(3);
-    for name in ["entity_id", "x", "y"] {
-        roots.push(column_index(path, &schema, name)?);
+    for canonical in [ENTITY_ID, "x", "y"] {
+        roots.push(field_index(path, &schema, fields, canonical)?);
     }
     let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
@@ -504,18 +894,18 @@ pub fn data_bounds(path: &Path, limit: Option<u64>) -> Result<Option<Bounds>> {
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = column_index(path, &projected, "entity_id")?;
-    let x_idx = column_index(path, &projected, "x")?;
-    let y_idx = column_index(path, &projected, "y")?;
+    let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
+    let x_idx = column_index(path, &projected, x_name)?;
+    let y_idx = column_index(path, &projected, y_name)?;
 
     let mut found = false;
     let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
-        let xs = read_f32_column(path, &batch, x_idx, "x")?;
-        let ys = read_f32_column(path, &batch, y_idx, "y")?;
+        let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
+        let xs = read_f32_column(path, &batch, x_idx, x_name)?;
+        let ys = read_f32_column(path, &batch, y_idx, y_name)?;
         for i in 0..ids.len() {
             if limit.is_some_and(|l| ids[i] >= l) {
                 continue;
@@ -528,8 +918,9 @@ pub fn data_bounds(path: &Path, limit: Option<u64>) -> Result<Option<Bounds>> {
                 return Err(BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
-                        "entity_id {} has a non-finite position ({x}, {y}), so no box fits the \
+                        "{} {} has a non-finite position ({x}, {y}), so no box fits the \
                          data. `extent = \"auto\"` reads every row it would place",
+                        fields.of(ENTITY_ID),
                         ids[i]
                     ),
                 });
@@ -571,11 +962,71 @@ enum Geometry {
 
 /// Which geometry schema the points file offers, decided once from the file's columns and then
 /// carried to every decode worker (each resolves its own column indices against its own reader).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum GeometryKind {
     Xy,
     Morton,
     MortonResidual,
+}
+
+impl GeometryKind {
+    /// The canonical fields this shape reads, identity first — the list `fields` is resolved
+    /// against to build the projection.
+    fn canonical_fields(self) -> &'static [&'static str] {
+        match self {
+            GeometryKind::Xy => &[ENTITY_ID, "x", "y"],
+            GeometryKind::Morton => &[ENTITY_ID, "morton"],
+            GeometryKind::MortonResidual => &[ENTITY_ID, "morton", "residual"],
+        }
+    }
+}
+
+/// Which geometry shape a points file offers, **the declaration deciding before the file does**.
+///
+/// A `fields` map naming `x` or `y` is the caller saying *this file holds coordinates*, so a miss
+/// on that name is [`field_index`]'s refusal rather than a quiet fall through to a Morton column
+/// that happens to be there under its canonical name — which would quantise a corpus against the
+/// wrong frame and produce a well-formed bundle with the geometry wrong. With no map, presence
+/// decides, as it always has. The two shapes being mutually exclusive is checked at parse
+/// (`configuration.md` §1).
+fn geometry_kind(
+    path: &Path,
+    schema: &arrow::datatypes::Schema,
+    fields: &Fields,
+) -> Result<GeometryKind> {
+    let has = |canonical: &str| schema.column_with_name(fields.of(canonical)).is_some();
+    if fields.names("x") || fields.names("y") {
+        return Ok(GeometryKind::Xy);
+    }
+    if fields.names("morton") || fields.names("residual") {
+        return Ok(if has("residual") {
+            GeometryKind::MortonResidual
+        } else {
+            GeometryKind::Morton
+        });
+    }
+    if has("x") && has("y") {
+        return Ok(GeometryKind::Xy);
+    }
+    if has("morton") {
+        return Ok(if has("residual") {
+            GeometryKind::MortonResidual
+        } else {
+            GeometryKind::Morton
+        });
+    }
+    Err(BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!(
+            "{}: this points file carries neither an '{}'/'{}' pair nor a '{}' column, so it \
+             holds no geometry to place. Its columns are: {}",
+            fields.object(),
+            fields.of("x"),
+            fields.of("y"),
+            fields.of("morton"),
+            column_names(schema)
+        ),
+    })
 }
 
 /// Narrow a `u64` column value to the `u32` a Morton or residual word must fit in, as a typed
@@ -627,6 +1078,49 @@ fn statistic_min(stats: &Statistics) -> Option<u64> {
         Statistics::Int32(s) => s.min_opt().map(|v| *v as u64),
         Statistics::Int64(s) => s.min_opt().and_then(|v| u64::try_from(*v).ok()),
         _ => None,
+    }
+}
+
+/// The column index of `canonical` under the names the declaration resolved — or a refusal naming
+/// the object, the field, the column it looked for, and the columns the file actually carries.
+///
+/// **The refusal a `fields` map needs and a parser cannot make.** The map is checked against the
+/// declaration at parse — every name known, every name declared — but whether the *file* has a
+/// column of that name needs the file open, which is here. Without this the miss would read as an
+/// absent column, and absent is silent in both directions that matter: an absent geometry column
+/// puts every point at the origin, and an absent access column puts every point in no principal's
+/// mask. Either is a blank map with no error anywhere, which is precisely the shape a `fields` map
+/// exists to make impossible.
+fn field_index(
+    path: &Path,
+    schema: &arrow::datatypes::Schema,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<usize> {
+    let name = fields.of(canonical);
+    schema
+        .column_with_name(name)
+        .map(|(i, _)| i)
+        .ok_or_else(|| BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "{}: field `{canonical}` is read from a column named '{name}', which this file \
+                 does not carry. Its columns are: {}. A declared field the file lacks is refused \
+                 rather than read as an empty column, an empty column being silent in exactly the \
+                 directions that matter",
+                fields.object(),
+                column_names(schema)
+            ),
+        })
+}
+
+/// Every column the file carries, for a refusal to spell out.
+fn column_names(schema: &arrow::datatypes::Schema) -> String {
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
     }
 }
 
@@ -742,6 +1236,7 @@ fn read_f32_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
 pub fn read_vocabulary_file(
     path: &Path,
     vocabulary: &str,
+    fields: &Fields,
 ) -> Result<crate::config::DeclaredValues> {
     use arrow::array::StringArray;
 
@@ -759,9 +1254,19 @@ pub fn read_vocabulary_file(
             path.display()
         )));
     }
-    let key_idx = column_index(path, &schema, "key")?;
-    let code_idx = schema.column_with_name("code").map(|(i, _)| i);
-    let title_idx = schema.column_with_name("title").map(|(i, _)| i);
+    // `key` is the one field a value file must carry; `code` and `title` are absent-or-present by
+    // design (absence assigns codes, and a value may have no title). A *declared* `code` or
+    // `title` the file lacks is still a refusal — the map says where a field is, and a name it
+    // gives that nothing carries is a column its author believes is being read.
+    let key_idx = field_index(path, &schema, fields, "key")?;
+    let code_idx = match fields.names("code") {
+        true => Some(field_index(path, &schema, fields, "code")?),
+        false => schema.column_with_name("code").map(|(i, _)| i),
+    };
+    let title_idx = match fields.names("title") {
+        true => Some(field_index(path, &schema, fields, "title")?),
+        false => schema.column_with_name("title").map(|(i, _)| i),
+    };
 
     let reader = builder.build().map_err(|e| BuildError::parquet(path, e))?;
 
@@ -774,10 +1279,10 @@ pub fn read_vocabulary_file(
             .downcast_ref::<StringArray>()
             .ok_or_else(|| BuildError::Schema {
                 path: path.to_path_buf(),
-                detail: "vocabulary column 'key' must be utf8".into(),
+                detail: format!("vocabulary column '{}' must be utf8", fields.of("key")),
             })?;
         let code_values = match code_idx {
-            Some(idx) => Some(read_u64_column(path, &batch, idx, "code")?),
+            Some(idx) => Some(read_u64_column(path, &batch, idx, fields.of("code"))?),
             None => None,
         };
         let title_values = match title_idx {
@@ -788,7 +1293,7 @@ pub fn read_vocabulary_file(
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| BuildError::Schema {
                         path: path.to_path_buf(),
-                        detail: "vocabulary column 'title' must be utf8".into(),
+                        detail: format!("vocabulary column '{}' must be utf8", fields.of("title")),
                     })?
                     .clone(),
             ),
@@ -859,6 +1364,7 @@ pub fn read_vocabulary_file(
 /// writer once the whole scan (there is exactly one, per build) has completed.
 pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
     path: &Path,
+    fields: &Fields,
     schema_decl: &crate::config::Schema,
     minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
@@ -872,20 +1378,22 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let file_schema = builder.schema().clone();
 
-    let mut roots = vec![column_index(path, &file_schema, "entity_id")?];
+    let mut roots = vec![field_index(path, &file_schema, fields, ENTITY_ID)?];
     for attribute in &schema_decl.attributes {
         roots.push(
             file_schema
-                .column_with_name(&attribute.name)
+                .column_with_name(attribute.column())
                 .map(|(i, _)| i)
                 .ok_or_else(|| BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
-                        "the schema declares attribute '{}', which this points file has no \
-                         column for. A declared column the data lacks would otherwise be written \
-                         as the absent sentinel for every row — a column that cost its width to \
-                         say nothing",
-                        attribute.name
+                        "the schema declares attribute '{}', read from a column named '{}', which \
+                         this corpus file has no column for. Its columns are: {}. A declared \
+                         column the data lacks would otherwise be written as the absent sentinel \
+                         for every row — a column that cost its width to say nothing",
+                        attribute.name,
+                        attribute.column(),
+                        column_names(&file_schema)
                     ),
                 })?,
         );
@@ -897,17 +1405,17 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = column_index(path, &projected, "entity_id")?;
+    let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
     let attribute_idx: Vec<usize> = schema_decl
         .attributes
         .iter()
-        .map(|a| column_index(path, &projected, &a.name))
+        .map(|a| column_index(path, &projected, a.column()))
         .collect::<Result<_>>()?;
 
     let mut row_values: Vec<ScalarValue> = Vec::with_capacity(schema_decl.attributes.len());
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+        let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
 
         // **Decoded once per batch, not once per row.** An earlier revision called a
         // whole-column converter from inside the row loop, so a 65,536-row batch decoded its

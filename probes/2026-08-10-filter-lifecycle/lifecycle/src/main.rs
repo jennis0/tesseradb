@@ -715,8 +715,10 @@ fn main() {
     log("building");
     let t = Instant::now();
     tessera_build::build(&tessera_build::BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: a.data.join("points.parquet"),
-        pairs: PathBuf::from("/home/joe/code/tessera/data/scaled/pairs/categories-subclass.pairs.parquet"),
+        access: tessera_build::config::AccessInput::relation(PathBuf::from("/home/joe/code/tessera/data/scaled/pairs/categories-subclass.pairs.parquet")),
         out: bundle.clone(),
         extent: EXTENT,
         view_id: "s0".into(),

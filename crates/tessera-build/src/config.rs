@@ -102,12 +102,30 @@
 //! fields at all: both would otherwise read as *this file has one*, which is a claim the map is not
 //! allowed to make.
 //!
-//! ⊘ **A field map may not yet *rename* anything.** The readers resolve the canonical names
-//! (`input`'s `entity_id`, `x`/`y` or `morton`/`residual`, `term_id`, `key`/`code`/`title`), so a
-//! map naming a different column is **refused rather than accepted and disregarded** — an entry
-//! that parses and does nothing is a column an author believes is being read. What is built is the
-//! validation above; the reader half is [`configuration.md`](../../../docs/design/configuration.md)
-//! §7's and lands with the input readers.
+//! **A field map moves a field, and the reader takes the name it moved it to.** [`Fields`] is the
+//! resolved answer — the declared name where the map moved one, the canonical name everywhere else
+//! — and it is carried to the reader rather than consulted here. Two refusals split across the two
+//! places that can make them: this module refuses a name the object does not have and a name the
+//! object never declared, because both are answerable from the declaration alone; the *readers*
+//! refuse a name the file does not carry, because that needs the file open.
+//!
+//! ⊘ **A layer's map is the exception and is still refused.** The artifact and member readers read
+//! `layer`, `variation`, `member` and `values` — names this surface does not carry at all — so a
+//! layer field map has nothing to move until those sources are rebuilt on §8's names.
+//!
+//! ## The access relation, in three shapes
+//!
+//! A view says where each point's access terms are and what a point carrying none gets
+//! ([`AccessInput`]): a `list<string>` field of its own source, a separate exploded
+//! `(entity_id, term_id)` relation, or neither — every point taking the default, which is the
+//! corpus with no permission model. `default` is required on all three, because a point's label has
+//! to come from somewhere and *nowhere* is a decision rather than an omission.
+//!
+//! **Filling never overrides**, and that is inadmissible rather than merely unwise: a point's terms
+//! are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can only
+//! widen it. A null value and an empty list both mean *no access terms*, which means visible to no
+//! principal; neither means unrestricted, and where a default is declared those are the rows it
+//! fills.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -146,7 +164,10 @@ const INHERITED: &str = "inherited";
 /// **The identity field, declared once on `[corpus]` and defaulting to that name**
 /// (`configuration.md` §7). It is entity-space and shared: a point has one identity across every
 /// view it appears in, and it is what a member row names.
-const ENTITY_ID: &str = "entity_id";
+/// The identity field, declared once on `[corpus]` and shared by every view
+/// (`configuration.md` §8). Not `entity`, which names the object rather than the value, and not
+/// `id`, which collides with `tessera_id` and with an external id.
+pub const ENTITY_ID: &str = "entity_id";
 
 // ---------------------------------------------------------------------------------------------
 // The file, as written
@@ -457,6 +478,8 @@ pub struct Corpus {
     /// object is declared and empty (`configuration.md` §2) — refused at a build that has
     /// attributes to fill.
     pub source: Option<PathBuf>,
+    /// Where the identity field sits in that file. Canonical is `entity_id`.
+    pub fields: Fields,
 }
 
 /// One layer's bound acquisition keys.
@@ -483,6 +506,9 @@ pub struct View {
     /// the view declares no source, which is legal to *declare* and refused at a build that would
     /// have to read it.
     pub source: Option<PathBuf>,
+    /// Where the identity and geometry fields sit in that file. Canonical is `entity_id` with
+    /// either `x`/`y` or `morton`/`residual`.
+    pub fields: Fields,
     /// The frame every position in this view is quantised across (`configuration.md` §1).
     /// [`Extent::Auto`] still needs the data: [`resolve_extent`] turns it into [`Bounds`].
     pub extent: Extent,
@@ -530,13 +556,14 @@ pub fn resolve_extent(
     view: &str,
     extent: &Extent,
     points: &Path,
+    fields: &Fields,
     limit: Option<u64>,
 ) -> Result<Bounds> {
     let margin = match extent {
         Extent::Fixed(bounds) => return Ok(*bounds),
         Extent::Auto { margin } => *margin,
     };
-    let data = crate::input::data_bounds(points, limit)?.ok_or_else(|| {
+    let data = crate::input::data_bounds(points, fields, limit)?.ok_or_else(|| {
         declaration_error(format!(
             "view '{view}': `extent` is `auto` and the points source selects no rows, so there is \
              no data to fit a box around. Either the source is empty or `--limit` excludes every \
@@ -701,12 +728,49 @@ const EXTENT_SPELLINGS: &str = "\n  \
      extent = { min = -25.0, max = 25.0 }     # one range, both axes — preserves aspect ratio\n  \
      extent = { x = [-18, 19], y = [-22, 24] }  # per axis, where stretching is meant";
 
+/// Where a build reads each point's access terms, and what a point carrying none is given.
+///
+/// **The three shapes are one declaration, not three routes.** `default` is required on all of
+/// them (`configuration.md` §1): a point's label has to come from somewhere, and *nowhere* is a
+/// decision rather than an omission — so the acquisition half is what is optional, and a corpus
+/// with no permission model is the one that declares only a default.
+#[derive(Debug, Clone)]
+pub struct AccessInput {
+    pub source: AccessSource,
+    /// What a point carrying no terms of its own is given. Never `inherited`, and never containing
+    /// a comma (§1, and the delimiter the plugin still splits on).
+    pub default: String,
+}
+
+/// The acquisition half of [`AccessInput`].
+#[derive(Debug, Clone)]
+pub enum AccessSource {
+    /// `point_visibility.source`: a separate exploded `(entity_id, term_id)` relation, one row per
+    /// `(point, term)`. The shape the probe generators produce natively at 10⁹.
+    Relation(PathBuf),
+    /// `point_visibility.field`: a `list<string>` — or a plain `string`, where a point carries one
+    /// term — of the view's own source.
+    Field(String),
+    /// Neither: every point takes the default.
+    Default,
+}
+
+impl AccessInput {
+    /// The exploded relation, with `public` as the default — the shape every fixture that predates
+    /// the field route declares, spelled once here rather than at each of them.
+    pub fn relation(path: impl Into<PathBuf>) -> AccessInput {
+        AccessInput {
+            source: AccessSource::Relation(path.into()),
+            default: String::from_utf8(tessera_authz::PUBLIC_LABEL.to_vec())
+                .expect("the reserved label is ASCII"),
+        }
+    }
+}
+
 /// A view's `point_visibility = { field, default }` or `{ source, default }`.
 #[derive(Debug, Clone)]
 pub struct PointVisibility {
-    /// ⊘ A column of the view's own source, carrying one label or a list per point. Recorded and
-    /// not yet read — the list-valued access column lands with the input readers
-    /// (`configuration.md` §7), and a build acquiring labels names a `source` instead.
+    /// A column of the view's own source, carrying one label or a list per point.
     pub field: Option<String>,
     /// The exploded `(entity_id, term_id)` relation, bound.
     pub source: Option<PathBuf>,
@@ -736,6 +800,9 @@ pub struct Attribute {
     pub name: String,
     /// ⊘ Recorded and not yet published — see [`View::title`].
     pub title: Option<String>,
+    /// The column this attribute is read from, where it differs from the served name. `None` means
+    /// the two are the same; [`Attribute::column`] is what a reader asks.
+    pub field: Option<String>,
     /// The declared type. For a category this is the **vocabulary's** width, which is why two
     /// attributes sharing a vocabulary can no longer disagree about it: the disagreement is not
     /// expressible rather than refused (`per-point-attributes.md` §3.9).
@@ -838,6 +905,18 @@ pub struct DeclaredValues {
 /// and renaming a manifest discriminant buys nothing a reader of this module can see.
 pub use tessera_store::manifest::Listing;
 
+impl Attribute {
+    /// The column in `[corpus]`'s source this attribute's values are read from: the declared
+    /// `field` where the declaration moved it, and the served `name` otherwise.
+    ///
+    /// **The served name and the source column are two different things**, which is the whole of
+    /// why the key exists: the name addresses the column on the wire (`/v1/categories/{column}`)
+    /// and in the manifest, and a producer's file is under no obligation to spell it the same way.
+    pub fn column(&self) -> &str {
+        self.field.as_deref().unwrap_or(&self.name)
+    }
+}
+
 impl Vocabulary {
     /// The code for `key`, or `None` if this vocabulary does not declare it.
     ///
@@ -930,34 +1009,20 @@ impl Config {
                  and is not built"
             ))
         })?;
-        let pairs = match (
-            &declared.point_visibility.source,
-            &declared.point_visibility.field,
-        ) {
-            (Some(path), _) => path.clone(),
-            // ⊘ Both remaining routes need the reader half. Refused rather than built with no
-            // labels at all: a corpus whose every point carries no term is in no principal's mask,
-            // so the bundle would come up empty for everyone and say nothing about why.
-            (None, Some(field)) => {
-                return Err(declaration_error(format!(
-                    "view '{view}': `point_visibility.field = \"{field}\"` is specified and not \
-                     built (configuration.md §8). A label column of the points source is read as a \
-                     list per point, which the input readers do not yet do. Write \
-                     `point_visibility = {{ source = \"<path>\", default = … }}`, naming the \
-                     exploded `(entity_id, term_id)` relation. Refused rather than ignored: with \
-                     no relation read, every point would carry no term and so sit in no \
-                     principal's mask"
-                )))
-            }
-            (None, None) => {
-                return Err(declaration_error(format!(
-                    "view '{view}': `point_visibility` declares only a `default`, which is \
-                     specified and not built (configuration.md §1, §7). Every point taking the \
-                     default needs the reserved term the default resolves to, which nothing writes \
-                     yet. Name the exploded `(entity_id, term_id)` relation — \
-                     `point_visibility = {{ source = \"<path>\", default = … }}`"
-                )))
-            }
+        let access = AccessInput {
+            source: match (
+                &declared.point_visibility.source,
+                &declared.point_visibility.field,
+            ) {
+                (Some(path), _) => AccessSource::Relation(path.clone()),
+                (None, Some(field)) => AccessSource::Field(field.clone()),
+                // Legal, and the corpus with no permission model: every point takes the default
+                // (§1). *Nowhere* is the decision the `default` key makes, so nothing is refused
+                // here — a build with neither acquisition key reads no relation and writes the one
+                // label the declaration named.
+                (None, None) => AccessSource::Default,
+            },
+            default: declared.point_visibility.default.clone(),
         };
         if !self.schema.is_empty() && self.corpus.source.is_none() {
             return Err(declaration_error(format!(
@@ -971,9 +1036,11 @@ impl Config {
         }
         Ok(Acquisition {
             corpus: self.corpus.source.clone(),
+            corpus_fields: self.corpus.fields.clone(),
             extent: declared.extent,
             points,
-            pairs,
+            point_fields: declared.fields.clone(),
+            access,
             artifacts: one_source(&self.layer_sources, |s| &s.artifacts, "[[layer]]", "source")?,
             artifact_members: one_source(
                 &self.layer_sources,
@@ -996,10 +1063,14 @@ pub struct Acquisition {
     /// declares no corpus source, which is legal only for an empty schema — a declared attribute
     /// with no file to read it from is refused above.
     pub corpus: Option<PathBuf>,
+    /// Where `[corpus]`'s identity field sits in that file.
+    pub corpus_fields: Fields,
     /// The built view's `source`: identity and geometry.
     pub points: PathBuf,
-    /// The built view's `point_visibility.source`: the exploded `(entity_id, term_id)` relation.
-    pub pairs: PathBuf,
+    /// Where the view's identity and geometry fields sit in that file.
+    pub point_fields: Fields,
+    /// Where this view's points get their access terms, and what a point carrying none gets.
+    pub access: AccessInput,
     /// The layers' `source`, and the memberships beside it.
     pub artifacts: Option<PathBuf>,
     pub artifact_members: Option<PathBuf>,
@@ -1238,15 +1309,84 @@ impl KnownField {
     }
 }
 
-/// Check one object's `fields` map: every name known, every name declared, and — ⊘ until the
-/// readers take names — no name actually moved.
+/// The source-field names one object reads: whatever its `fields` map moved, and the canonical
+/// name for everything it did not.
+///
+/// **Resolved once, at parse, and carried to the reader** — which is what makes the map real
+/// rather than decorative. The readers ask this for a name and never for a canonical one, so a
+/// field the declaration moved is read from where it was moved to, and a field it left alone is
+/// read from the name `configuration.md` §8 gives it.
+/// The object is carried with the names because it is half of the refusal: *which declaration*
+/// asked for a column the file does not carry is the part a caller acts on, and a reader deep in a
+/// Parquet decode has no other way to know it.
+#[derive(Debug, Clone, Default)]
+pub struct Fields {
+    object: String,
+    map: BTreeMap<String, String>,
+}
+
+impl Fields {
+    /// Canonical names throughout, for an object whose declaration moved nothing.
+    pub fn canonical(object: impl Into<String>) -> Fields {
+        Fields {
+            object: object.into(),
+            map: BTreeMap::new(),
+        }
+    }
+
+    /// A map built outright rather than parsed — for a caller binding a reader programmatically,
+    /// and for the tests that exercise a moved name without a document around it.
+    pub fn moved<K: Into<String>, V: Into<String>>(
+        object: impl Into<String>,
+        entries: impl IntoIterator<Item = (K, V)>,
+    ) -> Fields {
+        Fields {
+            object: object.into(),
+            map: entries
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        }
+    }
+
+    /// The declaration these names came from, for a refusal to name.
+    pub fn object(&self) -> &str {
+        if self.object.is_empty() {
+            "this source"
+        } else {
+            &self.object
+        }
+    }
+
+    /// The column `canonical` is read from.
+    pub fn of<'a>(&'a self, canonical: &'a str) -> &'a str {
+        self.map
+            .get(canonical)
+            .map(String::as_str)
+            .unwrap_or(canonical)
+    }
+
+    /// Whether the declaration named this field at all.
+    ///
+    /// **An assertion, not a location.** A reader choosing between two mutually exclusive shapes —
+    /// a view's `x`/`y` against its `morton`/`residual` — reads this as *the caller says the file
+    /// has one of these*, so a named-but-absent column becomes a refusal rather than a silent fall
+    /// through to the other shape.
+    pub fn names(&self, canonical: &str) -> bool {
+        self.map.contains_key(canonical)
+    }
+}
+
+/// Check one object's `fields` map — every name known, every name declared — and resolve it.
 fn check_fields(
     object: &str,
     source: Option<&PathBuf>,
     known: &[KnownField],
     map: Option<&BTreeMap<String, String>>,
-) -> Result<()> {
-    let Some(map) = map else { return Ok(()) };
+) -> Result<Fields> {
+    let Some(map) = map else {
+        return Ok(Fields::canonical(object));
+    };
     // A map with no source names the fields of nothing. Refused rather than kept for a source that
     // may arrive later: the object reads no file at all, so every entry in it is inert.
     if source.is_none() {
@@ -1272,28 +1412,43 @@ fn check_fields(
                  nothing declared is refused rather than read as the declaration"
             )));
         }
-        refuse_rename(object, canonical, actual)?;
+        if actual.trim().is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: `fields.{canonical}` is empty, so it names no column. Omit the entry to \
+                 read `{canonical}` under its own name"
+            )));
+        }
     }
-    Ok(())
+    Ok(Fields {
+        object: object.to_string(),
+        map: map.clone(),
+    })
 }
 
-/// ⊘ A field name that differs from the canonical one, refused rather than accepted and
+/// ⊘ A **layer's** field map may not yet move a field, refused rather than accepted and
 /// disregarded.
 ///
-/// The input readers resolve the canonical names, so an entry moving one would parse, validate and
-/// do nothing — a column its author believes is being read. What is built is the validation around
-/// it: which names exist, and which of them this object declared.
-fn refuse_rename(object: &str, canonical: &str, actual: &str) -> Result<()> {
-    if canonical == actual {
-        return Ok(());
+/// Every other object's map reaches its reader (`input`'s readers take the resolved names), but the
+/// artifact and member readers still read `layer`, `variation`, `member` and `values` — names this
+/// surface does not even carry — so a map naming one of the canonical fields would parse, validate
+/// and do nothing. Refused until the artifact and member sources are rebuilt on §8's names
+/// (`configuration.md` §7, the stage that retires the `layer` discriminator column with them).
+fn refuse_layer_rename(object: &str, map: Option<&BTreeMap<String, String>>) -> Result<()> {
+    let Some(map) = map else { return Ok(()) };
+    for (canonical, actual) in map {
+        if canonical == actual {
+            continue;
+        }
+        return Err(declaration_error(format!(
+            "{object}: the field map reads `{canonical}` from a column named '{actual}', which is \
+             specified and not built for a layer (configuration.md §8). The artifact and member \
+             readers still read their own column names, so the column read would be `{canonical}` \
+             whatever the map said. Refused rather than ignored: a rename that parses and does \
+             nothing is a column its author believes is being read. Name the column `{canonical}` \
+             in the source until the artifact readers take the map"
+        )));
     }
-    Err(declaration_error(format!(
-        "{object}: the field map reads `{canonical}` from a column named '{actual}', which is \
-         specified and not built (configuration.md §8). The readers resolve the canonical names, so \
-         the column read would be `{canonical}` whatever the map said. Refused rather than ignored: \
-         a rename that parses and does nothing is a column its author believes is being read. Name \
-         the column `{canonical}` in the source until the readers take the map"
-    )))
+    Ok(())
 }
 
 /// The one sub-block `configuration.md` §1 declares and no stage has built.
@@ -1331,13 +1486,13 @@ fn compile_corpus(block: Option<&CorpusBlock>, sources: &mut Sources) -> Result<
         Some(declared) => Some(sources.resolve("corpus", "[corpus]", declared)?),
         None => None,
     };
-    check_fields(
+    let fields = check_fields(
         "[corpus]",
         source.as_ref(),
         &[KnownField::always(ENTITY_ID)],
         block.fields.as_ref(),
     )?;
-    Ok(Corpus { source })
+    Ok(Corpus { source, fields })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1369,7 +1524,7 @@ fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View
         // `morton`/`residual`, and a map naming one of each says the file carries both — which the
         // reader would resolve by preferring one, silently, over a declaration that asked for the
         // other.
-        check_fields(
+        let fields = check_fields(
             &object,
             source.as_ref(),
             &[
@@ -1479,6 +1634,7 @@ fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View
             name: block.name.clone(),
             title: block.title.clone(),
             source,
+            fields,
             extent,
             point_visibility: PointVisibility {
                 field: point.field.clone(),
@@ -1497,6 +1653,20 @@ fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
         return Err(declaration_error(format!(
             "'{object}': `{key}` is empty. An access label is a term a principal either holds or \
              does not; write `public` for the one every principal holds"
+        )));
+    }
+    // ⊘ **The delimiter, refused at the declaration as well as at the data.** A build joins an
+    // item's terms with commas so the plugin can split them apart again, so a label carrying one
+    // would reach the plugin as two and the object would be reachable by a holder of either half.
+    // The join goes when the plugin takes a term list; until then a comma in a label cannot be
+    // carried, and refusing it here is one message at the line that wrote it.
+    if label.contains(',') {
+        return Err(declaration_error(format!(
+            "'{object}': `{key} = \"{label}\"` contains a comma. A build joins an item's access \
+             terms with commas for the plugin to split apart, so this label would reach it as two \
+             and the object would be reachable by a holder of either half. Refused rather than \
+             split: the delimiter goes when the plugin takes a term list, and until then a comma \
+             in a label cannot be carried"
         )));
     }
     if label == INHERITED {
@@ -1544,7 +1714,7 @@ fn compile_vocabularies(
         // A `code` field pins the codes and its absence assigns them, which is why it is *always*
         // available rather than asserted by another key: which of the two a file does is the file's
         // to say, and §1 makes that the one difference between the two spellings.
-        check_fields(
+        let fields = check_fields(
             &object,
             source.as_ref(),
             &[
@@ -1651,7 +1821,7 @@ fn compile_vocabularies(
                 )));
             }
             (Some(inline), None) => parse_inline_values(inline, &block.name)?,
-            (None, Some(path)) => crate::input::read_vocabulary_file(path, &block.name)?,
+            (None, Some(path)) => crate::input::read_vocabulary_file(path, &block.name, &fields)?,
             (None, None) if value_set == ValueSet::Closed => {
                 return Err(declaration_error(format!(
                     "vocabulary '{}': `value_set = \"closed\"` with no value source. A closed set \
@@ -1897,10 +2067,14 @@ fn compile_attributes(
             )));
         }
         // The attribute's own one-field map: `field` locates the column when it differs from the
-        // served name. ⊘ A differing name is refused for [`refuse_rename`]'s reason — the
-        // attribute pass reads the column named by `name`.
-        if let Some(field) = &decl.field {
-            refuse_rename(&format!("attribute '{}'", decl.name), &decl.name, field)?;
+        // served name, and the attribute pass reads it (`Attribute::field`). Empty is refused
+        // rather than read as *the same as the name*: it names no column at all.
+        if decl.field.as_deref().is_some_and(|f| f.trim().is_empty()) {
+            return Err(declaration_error(format!(
+                "attribute '{}': `field` is empty, so it names no column. Omit it to read the \
+                 column named '{}'",
+                decl.name, decl.name
+            )));
         }
         // `render` + `multi` before bare `multi`: the first is a permanent fence (0039) and the
         // second an unbuilt stage, and a caller who set both must hear the fence — it survives the
@@ -1983,6 +2157,7 @@ fn compile_attributes(
                 Attribute {
                     name: decl.name.clone(),
                     title: decl.title.clone(),
+                    field: decl.field.clone(),
                     ty: vocabulary.width,
                     analyser: None,
                     vocabulary: Some(vocabulary.name.clone()),
@@ -2083,6 +2258,7 @@ fn compile_attributes(
                 Attribute {
                     name: decl.name.clone(),
                     title: decl.title.clone(),
+                    field: decl.field.clone(),
                     ty,
                     analyser,
                     vocabulary: None,
@@ -2400,6 +2576,7 @@ fn compile_layers(
             ],
             block.fields.as_ref(),
         )?;
+        refuse_layer_rename(&object, block.fields.as_ref())?;
 
         let members = match members_block {
             None => None,
@@ -2445,6 +2622,7 @@ fn compile_layers(
                     ],
                     members.fields.as_ref(),
                 )?;
+                refuse_layer_rename(&object, members.fields.as_ref())?;
                 path
             }
         };

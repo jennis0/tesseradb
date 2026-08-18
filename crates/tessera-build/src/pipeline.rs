@@ -704,6 +704,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // ---- 2. the dictionary -----------------------------------------------------------
     let dict_dir = args.out.join(PREFIX).join("dictionary");
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
+    // What every source term is called, established before any term id exists — a field-sourced
+    // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
+    let access = crate::plan_access(args)?;
     let Dictionary {
         term_keys,
         term_ids,
@@ -713,7 +716,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         histogram,
         histogram_shift,
         dict_paths,
-    } = build_dictionary(args, &source_ids, &dict_dir)?;
+    } = build_dictionary(args, &access, &source_ids, &dict_dir)?;
     if term_count >= u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
             "{term_count} distinct terms exceeds the 2^32 term-ID space"
@@ -775,7 +778,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 },
             )
         };
-    input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
+    crate::scan_access(args, &access, |source_id, source_term| {
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(&mut chunk, &mut resolved, &mut sink) {
@@ -844,7 +847,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 Ok(())
             })
         };
-        input::scan_points(&args.points, &args.extent, args.limit, |point| {
+        input::scan_points(&args.points, &args.point_fields, &args.extent, args.limit, |point| {
             chunk.push((point.source_id, (point.qx, point.qy)));
             if chunk.len() == JOIN_CHUNK_ROWS {
                 if let Err(e) = resolve(
@@ -1700,6 +1703,7 @@ fn read_attributes_by_entity(
 
     input::scan_attributes(
         crate::corpus_source(args)?,
+        &args.corpus_fields,
         &args.schema,
         minters,
         args.limit,
@@ -2610,7 +2614,7 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
         None => {
             let mut count = 0usize;
-            input::scan_points(&args.points, &args.extent, args.limit, |_| {
+            input::scan_points(&args.points, &args.point_fields, &args.extent, args.limit, |_| {
                 count += 1;
                 ControlFlow::Continue(())
             })?;
@@ -2618,7 +2622,7 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         }
     };
     let mut ids = Vec::with_capacity(count);
-    input::scan_points(&args.points, &args.extent, args.limit, |point| {
+    input::scan_points(&args.points, &args.point_fields, &args.extent, args.limit, |point| {
         ids.push(point.source_id);
         ControlFlow::Continue(())
     })?;
@@ -2700,6 +2704,7 @@ struct Dictionary {
 /// Returns [`Dictionary`].
 fn build_dictionary(
     args: &BuildArgs,
+    access: &crate::AccessPlan,
     source_ids: &[u64],
     dict_dir: &std::path::Path,
 ) -> Result<Dictionary> {
@@ -2737,7 +2742,7 @@ fn build_dictionary(
         })
     };
     let mut failure: Option<BuildError> = None;
-    input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
+    let fill = crate::scan_access(args, access, |source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
@@ -2748,6 +2753,7 @@ fn build_dictionary(
         }
         ControlFlow::Continue(())
     })?;
+    crate::report_access_fill(args, fill);
     if let Some(error) = failure {
         return Err(error);
     }
@@ -2766,18 +2772,31 @@ fn build_dictionary(
         .collect();
     order.sort_unstable();
 
-    // The probe corpus carries integer term ids; the item's `access` label is the comma-joined
-    // decimal source term ids, so `builtin:passthrough` yields decimal-string descriptors (R6).
+    // A source term's descriptor is what `builtin:passthrough` yields for it (R6): the decimal
+    // for the exploded relation's integer ids, the term itself for a field-sourced view.
     // Streamed, not interned: the descriptors here are distinct by construction (one per
     // distinct source term) and arrive in term-id order, which is `DictStreamWriter`'s exact
     // contract — at T = 117M an interner is gigabytes of pointless ownership.
     let mut dict = tessera_authz::DictStreamWriter::new(dict_dir);
+    // **`public` is appended first, so it is term 0 in every bundle** and is minted for no other
+    // descriptor — the streaming half of what `build_in_memory` does by interning it first. A
+    // source term spelling `public` therefore maps to 0 rather than appending a second record,
+    // which would put one descriptor in the dictionary twice.
+    let public = dict.append(tessera_authz::PUBLIC_LABEL);
+    debug_assert_eq!(public, tessera_authz::PUBLIC_TERM);
     let mut pairs_of_term: Vec<(u64, u32)> = Vec::with_capacity(order.len());
-    let mut row_counts: Vec<u64> = Vec::with_capacity(order.len());
+    let mut row_counts: Vec<u64> = vec![0; 1];
     for &(_, source_term) in &order {
-        let term = dict.append(source_term.to_string().as_bytes());
+        let descriptor = access.descriptors.descriptor(source_term);
+        let rows = first_ordinal[&source_term].1;
+        if descriptor.as_bytes() == tessera_authz::PUBLIC_LABEL {
+            pairs_of_term.push((source_term, public.raw()));
+            row_counts[public.raw() as usize] = rows;
+            continue;
+        }
+        let term = dict.append(descriptor.as_bytes());
         pairs_of_term.push((source_term, term.raw()));
-        row_counts.push(first_ordinal[&source_term].1);
+        row_counts.push(rows);
     }
     drop(first_ordinal);
     drop(order);
@@ -2976,6 +2995,7 @@ mod tests {
     fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
         let category = crate::config::Attribute {
             name: "department".to_string(),
+            field: None,
             title: None,
             ty: ScalarType::U16,
             analyser: None,
@@ -2986,6 +3006,7 @@ mod tests {
         };
         let note = crate::config::Attribute {
             name: "note".to_string(),
+            field: None,
             title: None,
             ty: ScalarType::Keyword,
             analyser: None,

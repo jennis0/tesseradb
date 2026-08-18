@@ -264,9 +264,11 @@ fn inputs() -> Inputs {
 
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: inputs.points.clone(),
         corpus: Some(inputs.points.clone()),
-        pairs: inputs.pairs.clone(),
+        access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
         out: out.to_path_buf(),
         extent: extent(),
         view_id: "s0".to_string(),

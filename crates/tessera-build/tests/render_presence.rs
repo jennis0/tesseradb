@@ -108,6 +108,7 @@ fn write_empty_pairs(path: &Path) {
 
 fn render(name: &str, ty: ScalarType) -> Attribute {
     Attribute {
+        field: None,
         name: name.to_string(),
         title: None,
         ty,
@@ -121,6 +122,7 @@ fn render(name: &str, ty: ScalarType) -> Attribute {
 
 fn schema() -> Schema {
     let archive = Attribute {
+        field: None,
         name: "archive".to_string(),
         title: None,
         ty: ScalarType::U8,
@@ -157,9 +159,11 @@ fn schema() -> Schema {
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points.to_path_buf(),
         corpus: Some(points.to_path_buf()),
-        pairs: pairs.to_path_buf(),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: Bounds {
             x_min: 0.0,

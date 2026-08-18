@@ -115,9 +115,11 @@ fn parse_schema(text: &str) -> Schema {
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         points: points.to_path_buf(),
         corpus: Some(points.to_path_buf()),
-        pairs: pairs.to_path_buf(),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: extent(),
         view_id: "s0".to_string(),

@@ -4398,9 +4398,11 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
     let schema_path = tmp.join("scalar-tail-schema.toml");
     std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
     let args = BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
         view_id: "s0".to_string(),

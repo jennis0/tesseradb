@@ -75,6 +75,9 @@ pub struct BuildArgs {
     ///
     /// The built view's own `source` (`configuration.md` §1), bound by `--file KEY=PATH`.
     pub points: PathBuf,
+    /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
+    /// resolved. [`config::Fields::default`] is canonical names throughout.
+    pub point_fields: crate::config::Fields,
     /// Parquet file of entity space: `entity_id` and the declared attribute columns.
     ///
     /// `[corpus].source`, resolved. **A separate key from the view's**, and usually the
@@ -82,10 +85,13 @@ pub struct BuildArgs {
     /// corpus whose geometry is recomputed does not rewrite its attributes to say so. `None` is
     /// legal only for an empty [`BuildArgs::schema`], there being no column to read.
     pub corpus: Option<PathBuf>,
-    /// Parquet file of the exploded `(entity_id, term_id)` relation.
+    /// Where `[corpus]`'s identity field sits in that file — its `fields` map, resolved.
+    pub corpus_fields: crate::config::Fields,
+    /// Where each point's access terms come from, and what a point carrying none gets.
     ///
-    /// The built view's `point_visibility.source`, resolved.
-    pub pairs: PathBuf,
+    /// The built view's `point_visibility`, resolved: an exploded `(entity_id, term_id)` relation,
+    /// a `list<string>` field of the points source, or neither — every point taking the default.
+    pub access: crate::config::AccessInput,
     /// Bundle root to create.
     pub out: PathBuf,
     /// The quantisation extent Morton codes are computed against (contracts §2.5).
@@ -189,7 +195,7 @@ impl std::fmt::Debug for BuildArgs {
         f.debug_struct("BuildArgs")
             .field("points", &self.points)
             .field("corpus", &self.corpus)
-            .field("pairs", &self.pairs)
+            .field("access", &self.access)
             .field("out", &self.out)
             .field("extent", &self.extent)
             .field("view_id", &self.view_id)
@@ -238,6 +244,105 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key.sort_unstable();
     key.dedup();
     key
+}
+
+/// What a build needs in hand before it can turn a row into a term id: the descriptor every source
+/// term names, and the source term a point carrying nothing is filled with.
+///
+/// **Established once, before either build's first pass**, because both passes of the streaming
+/// build and the single pass of the linear one must agree on it exactly — a source term is a
+/// position in a sorted vocabulary for a field-sourced view, and a disagreement about that list is
+/// a disagreement about every permanent entity id (I9).
+pub(crate) struct AccessPlan {
+    pub descriptors: input::TermDescriptors,
+    /// The source term a point carrying none is given. Meaningless for the relation route, which
+    /// fills nothing.
+    pub default_term: u64,
+}
+
+/// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
+pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
+    use crate::config::AccessSource;
+    let field = match &args.access.source {
+        // The relation supplies its own integer term ids and needs no vocabulary pass.
+        AccessSource::Relation(_) => {
+            return Ok(AccessPlan {
+                descriptors: input::TermDescriptors::Ids,
+                default_term: 0,
+            })
+        }
+        AccessSource::Field(field) => Some(field.as_str()),
+        AccessSource::Default => None,
+    };
+    let vocabulary = input::read_access_vocabulary(
+        &args.points,
+        &args.point_fields,
+        field,
+        &args.access.default,
+        args.limit,
+    )?;
+    let default_term = vocabulary
+        .binary_search_by(|t| t.as_str().cmp(&args.access.default))
+        .expect("the default is read into the vocabulary unconditionally")
+        as u64;
+    Ok(AccessPlan {
+        descriptors: input::TermDescriptors::Vocabulary(vocabulary),
+        default_term,
+    })
+}
+
+/// Walk this build's access relation, whichever of the three shapes declared it, as
+/// `(source entity id, source term)`.
+pub(crate) fn scan_access<F: FnMut(u64, u64) -> std::ops::ControlFlow<()>>(
+    args: &BuildArgs,
+    plan: &AccessPlan,
+    visit: F,
+) -> Result<input::AccessFill> {
+    use crate::config::AccessSource;
+    match (&args.access.source, &plan.descriptors) {
+        (AccessSource::Relation(path), _) => {
+            input::scan_pairs(path, &access_fields(args), args.limit, visit)?;
+            Ok(input::AccessFill::default())
+        }
+        (source, input::TermDescriptors::Vocabulary(vocabulary)) => input::scan_access_field(
+            &args.points,
+            &args.point_fields,
+            match source {
+                AccessSource::Field(field) => Some(field.as_str()),
+                _ => None,
+            },
+            vocabulary,
+            plan.default_term,
+            args.limit,
+            visit,
+        ),
+        (_, input::TermDescriptors::Ids) => unreachable!("planned by `plan_access` together"),
+    }
+}
+
+/// Say how many points carried terms of their own and how many took the view's default.
+///
+/// **Printed rather than merely counted** (`configuration.md` §5): a fill is a visibility
+/// decision the build made on the caller's behalf, and a corpus that turned out to be almost
+/// entirely default is one whose author wants to know before it is served.
+pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
+    if fill.filled == 0 {
+        return;
+    }
+    eprintln!(
+        "view '{}': {} point(s) carried access terms of their own; {} took the declared default \
+         '{}'",
+        args.view_id, fill.carried, fill.filled, args.access.default
+    );
+}
+
+/// The access relation's own field names — canonical, and named for a refusal to quote.
+///
+/// `point_visibility` takes no `fields` map of its own (`configuration.md` §1): the exploded
+/// relation is `entity_id` and `term_id` under those names. What this carries is the *object*, so
+/// a file missing one of them is refused naming the view whose labels went unread.
+fn access_fields(args: &BuildArgs) -> crate::config::Fields {
+    crate::config::Fields::canonical(format!("view '{}' point_visibility", args.view_id))
 }
 
 /// Entity space's file: where the declared attribute columns are read from.
@@ -364,7 +469,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
 
     // ---- 1. read inputs --------------------------------------------------------------
-    let mut points = input::read_points(&args.points, &args.extent, args.limit)?;
+    let mut points = input::read_points(&args.points, &args.point_fields, &args.extent, args.limit)?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
@@ -380,7 +485,24 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             "points file contains duplicate entity_id values".into(),
         ));
     }
-    let mut pairs_by_source = input::read_pairs(&args.pairs, args.limit)?;
+    // What every source term will be called, before any term id exists — a field-sourced view's
+    // sorted vocabulary, or the relation's own integers (`AccessPlan`).
+    let access = plan_access(args)?;
+    let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
+    let fill = scan_access(args, &access, |source_id, source_term| {
+        pairs_by_source
+            .entry(source_id)
+            .or_default()
+            .push(source_term);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    report_access_fill(args, fill);
+    // Sorted and deduplicated per item: the label set is a *set*, and the signature key and the
+    // postings writer both depend on it being one.
+    for terms in pairs_by_source.values_mut() {
+        terms.sort_unstable();
+        terms.dedup();
+    }
 
     // ---- 2. label each item through the plugin, interning descriptors ----------------
     let plugin = Passthrough::new();
@@ -389,21 +511,30 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     let mut dict = DictWriter::new(&dict_dir);
 
+    // **`public` is interned first, so it is term 0 in every bundle** and is minted for no other
+    // descriptor (`tessera_authz::PUBLIC_TERM`). Reserved unconditionally, whether or not any point
+    // carries it: the label's identity has to be a property of the format rather than of the input,
+    // since `Engine::authorise` adds it to every principal's satisfied set and a term whose number
+    // moved with the data would make that addition mean something different per bundle.
+    dict.intern(tessera_authz::PUBLIC_LABEL);
+
     let mut staged: Vec<StagedItem> = Vec::with_capacity(points.len());
     let mut over_bound_items = 0u64;
     for point in &points {
         let source_terms = pairs_by_source.remove(&point.source_id).unwrap_or_default();
-        // The probe corpus carries integer term IDs; the item's `access` label is the
-        // comma-joined decimal source term IDs, so `builtin:passthrough` yields decimal-string
-        // descriptors.
-        let mut access = String::new();
+        // ⊘ **The comma join, and the reason a term may not contain one.** The item's `access`
+        // label is its descriptors joined with commas, which `builtin:passthrough` splits apart
+        // again — the shape that has always carried the probe corpus's integer term ids, and the
+        // one a caller's strings now ride. A term carrying a comma would arrive as two, so the
+        // readers refuse one; the join goes when the plugin takes a term list.
+        let mut label = String::new();
         for (i, t) in source_terms.iter().enumerate() {
             if i > 0 {
-                access.push(',');
+                label.push(',');
             }
-            access.push_str(&t.to_string());
+            label.push_str(&access.descriptors.descriptor(*t));
         }
-        let descriptors = plugin.terms_of_label(access.as_bytes())?;
+        let descriptors = plugin.terms_of_label(label.as_bytes())?;
         if descriptors.len() > bounds.max_terms_per_item as usize {
             // A declared bound is a *declaration*: record it and carry on. Dropping terms here
             // would silently widen the item's visibility (I2/I3).
@@ -567,6 +698,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         let mut seen = 0usize;
         input::scan_attributes(
             corpus_source(args)?,
+            &args.corpus_fields,
             &args.schema,
             &mut minters,
             args.limit,
@@ -1506,9 +1638,11 @@ mod tests {
     fn build_args_debug_does_not_print_the_identity_key() {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
+            point_fields: Default::default(),
+            corpus_fields: Default::default(),
             points: PathBuf::from("points.parquet"),
             corpus: Some(PathBuf::from("points.parquet")),
-            pairs: PathBuf::from("pairs.parquet"),
+            access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
             out: PathBuf::from("out"),
             extent: Bounds {
                 x_min: 0.0,

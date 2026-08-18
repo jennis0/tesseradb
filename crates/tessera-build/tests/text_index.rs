@@ -93,6 +93,7 @@ fn write_empty_pairs(path: &Path) {
 fn text_schema(index: bool) -> Schema {
     Schema {
         attributes: vec![Attribute {
+            field: None,
             name: "abstract".to_string(),
             title: None,
             ty: ScalarType::Text,
@@ -114,9 +115,11 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
+        point_fields: Default::default(),
+        corpus_fields: Default::default(),
         corpus: Some(points.clone()),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out,
         extent: Bounds {
             x_min: 0.0,
