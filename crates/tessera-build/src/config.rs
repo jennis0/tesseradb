@@ -237,6 +237,14 @@ struct LayerBlock {
     name: String,
     #[serde(default)]
     title: Option<String>,
+    /// ⊘ Declared so the refusal can *name* what is absent (decision 0013). Without these two
+    /// fields the blocks fall to `deny_unknown_fields`, whose "unknown field `members`" reads as a
+    /// typo rather than as machinery that is specified and not yet built — and a caller who wrote
+    /// one had every reason to expect it to work, `configuration.md` §1 listing both.
+    #[serde(default)]
+    members: Option<toml::Value>,
+    #[serde(default)]
+    labels: Option<toml::Value>,
     #[serde(default)]
     views: Option<Vec<String>>,
     #[serde(default)]
@@ -601,6 +609,33 @@ fn refuse_acquisition(block: &str, key: &str, present: bool) -> Result<()> {
     )))
 }
 
+/// The two sub-blocks `configuration.md` §1 declares and no stage has built.
+///
+/// Separate from [`refuse_acquisition`] because the reason differs: an acquisition key names a file
+/// nothing opens, where these name *machinery* — a member source of its own, and the label sugar
+/// that expands to a second layer. Both land with later stages, and until then a caller who wrote
+/// one must be told which it is rather than left reading a typo message.
+fn refuse_unbuilt_block(layer: &str, block: &str, present: bool) -> Result<()> {
+    if !present {
+        return Ok(());
+    }
+    let (what, lands) = match block {
+        "members" => (
+            "membership in its own source, one row per (artifact, entity)",
+            "`annotation-write-cycle.md` §6.1's artifact and member grains",
+        ),
+        _ => (
+            "the label sugar, expanding to a layer of its own",
+            "`annotation-write-cycle.md` §6.1's `[layer.labels]`",
+        ),
+    };
+    Err(declaration_error(format!(
+        "layer '{layer}': `[layer.{block}]` is specified and not built — {what} ({lands}). \
+         Declared in configuration.md §1 and refused here rather than ignored, because a block \
+         that parses and does nothing is a declaration its author believes is in effect"
+    )))
+}
+
 // ---------------------------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------------------------
@@ -846,6 +881,21 @@ fn compile_vocabularies(
 
         assign_codes(&mut declared, &reserved, width, &block.name)?;
         check_codes(&declared.codes, &reserved, width, &block.name)?;
+
+        // **Applied here, after the three spellings converge**, and not at the source: an inline
+        // table, a bare key array and a bound Parquet each reach this point as one `codes` map, so
+        // no spelling can acquire a rule another lacks. Refusing only *the absence of a source*
+        // would admit a source that declares nothing, which is the same column with the same cost
+        // and none of the message.
+        if value_set == ValueSet::Closed && declared.codes.is_empty() {
+            return Err(declaration_error(format!(
+                "vocabulary '{}': `value_set = \"closed\"` with no values. A closed set is the \
+                 authority on what may be ingested, so an empty one refuses every value for ever \
+                 while its column costs its width in every row. Author the values, or write \
+                 `value_set = \"open\"` to have them minted as they arrive",
+                block.name
+            )));
+        }
 
         compiled.insert(
             block.name.clone(),
@@ -1341,6 +1391,8 @@ fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDecl
         refuse_acquisition("[[layer]]", "source", block.source.is_some())?;
         refuse_acquisition("[[layer]]", "fields", block.fields.is_some())?;
         refuse_acquisition("[[layer]]", "artifacts", block.artifacts.is_some())?;
+        refuse_unbuilt_block(&block.name, "members", block.members.is_some())?;
+        refuse_unbuilt_block(&block.name, "labels", block.labels.is_some())?;
 
         // **Refused here, before the artifacts file is opened**: a layer appears only in the views
         // it declares, so a mistyped view name would produce a bundle whose layer is registered,
@@ -1481,7 +1533,7 @@ fn compile_layers(blocks: &[LayerBlock], views: &[View]) -> Result<Vec<LayerDecl
 
         let declaration = LayerDeclaration {
             name: block.name.clone(),
-            title: block.title.clone().unwrap_or_default(),
+            title: block.title.clone(),
             views: declared_views.clone(),
             membership,
             visibility,
@@ -1553,16 +1605,9 @@ fn compile_levels(block: &LayerBlock) -> Result<Vec<LevelDeclaration>> {
                 block.name
             ))
         })?;
-        let title = entry.title.clone().ok_or_else(|| {
-            declaration_error(format!(
-                "layer '{}': level {level} declares no `title`. The metadata endpoint publishes \
-                 the zoom → level map, and a level with no name is one a client cannot label",
-                block.name
-            ))
-        })?;
         levels.push(LevelDeclaration {
             level,
-            title,
+            title: entry.title.clone(),
             zoom: entry.zoom,
         });
     }

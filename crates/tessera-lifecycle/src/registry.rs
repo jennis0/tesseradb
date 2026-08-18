@@ -851,7 +851,7 @@ mod tests {
     fn declaration(name: &str) -> LayerDeclaration {
         LayerDeclaration {
             name: name.into(),
-            title: name.into(),
+            title: Some(name.into()),
             views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
             visibility: None,

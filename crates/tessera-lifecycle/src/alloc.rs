@@ -509,7 +509,7 @@ mod tests {
         WalRecord::LayerCreate {
             declaration: Box::new(tessera_types::layer::LayerDeclaration {
                 name: format!("l{entity}"),
-                title: "l".into(),
+                title: Some("l".into()),
                 views: Vec::new(),
                 membership: MembershipSource::Enumerated,
                 visibility: None,

@@ -147,7 +147,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | Key | | Value |
 |---|---|---|
 | `name` | R | identity; tombstoned on drop |
-| `title` | R | human-readable; the metadata endpoint publishes it |
+| `title` | O | human-readable; absent is served as absent |
 | `views` | R | the views this layer's artifacts are drawn on |
 | `source` | R unless inline | one file per layer, so no discriminator field exists |
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row |
@@ -217,7 +217,7 @@ two levels one base and a gap would reserve a run no address reaches.
 | Key | | Value |
 |---|---|---|
 | `level` | R | the number. **Explicit, not array position**, because edges reference `(layer, level, ordinal)` and reordering the file would silently renumber them |
-| `title` | R | human-readable; the metadata endpoint publishes the zoom→level map |
+| `title` | O | human-readable; the metadata endpoint publishes the zoom→level map |
 | `zoom` | O | `[min, max]`, **advisory** — it bounds no work; a tiered layer's response is bounded by the level asked for and a treed layer's by the request's artifact budget |
 
 **`[layer.content]`** — what this layer's artifacts carry, in three parts.
@@ -473,6 +473,11 @@ share one by naming it; `source` or an inline `[vocabulary.values]` table is whe
 from; `value_set` decides whether an unknown key at ingest is refused or minted; `width` belongs
 here because it is the **code space's** width, not a column's. This retires `values_key`,
 `values_of` and `vocabulary = "declared"|"discovered"` — one mechanism where there were four.
+
+**A title is always optional.** It is presentation metadata on an object whose visibility is
+already decided, it discloses nothing a name does not, and the name is already served — so absent
+is served as **absent** rather than as the name. Displaying an identity like `clusters/hdbscan` is
+a client's choice, not one the service makes on its behalf.
 
 **`title` on everything nameable**: attributes, vocabularies, each vocabulary value (replacing
 `label`, a word that means *access label* everywhere else), views, layers and levels. It is

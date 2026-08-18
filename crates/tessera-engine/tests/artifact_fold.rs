@@ -30,7 +30,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
+        title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         visibility: None,

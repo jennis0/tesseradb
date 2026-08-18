@@ -574,7 +574,7 @@ mod tests {
     fn declaration(carry_own: bool, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
         LayerDeclaration {
             name: "clusters/a".into(),
-            title: "A".into(),
+            title: Some("A".into()),
             views: vec!["s0".into()],
             membership: MembershipSource::Enumerated,
             visibility: None,

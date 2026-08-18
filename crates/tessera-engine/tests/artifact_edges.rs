@@ -29,7 +29,7 @@ const LABELS: &str = "topics/x";
 fn clusters(gate: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
         name: CLUSTERS.into(),
-        title: "clusters".into(),
+        title: Some("clusters".into()),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         visibility: gate.map(str::to_string),
@@ -52,7 +52,7 @@ fn clusters(gate: Option<&str>) -> LayerDeclaration {
 fn labels() -> LayerDeclaration {
     LayerDeclaration {
         name: LABELS.into(),
-        title: "topics".into(),
+        title: Some("topics".into()),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         visibility: None,

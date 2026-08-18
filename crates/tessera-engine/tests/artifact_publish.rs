@@ -22,7 +22,7 @@ use tessera_types::EntityId;
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
+        title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         visibility: None,

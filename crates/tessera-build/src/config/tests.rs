@@ -133,11 +133,11 @@ fn expect_keys(text: &str, block: &str, documented: &[&str]) {
 
 /// **`configuration.md` §1's table, transcribed — and the transcription is the test.**
 ///
-/// Two blocks §1 names are deliberately absent from the parser at this stage and so from this
-/// table: `[layer.members]` carries nothing but `source` and `fields`, and `[layer.labels]` is the
-/// sugar that expands to a second layer. Both are acquisition or expansion rather than
-/// declaration, and both land with the stages that build them; until then they are refused as
-/// unknown blocks, which is the honest answer.
+/// Two blocks §1 names are **parsed but not built**: `[layer.members]` carries nothing but a
+/// source and its fields, and `[layer.labels]` is the sugar expanding to a second layer. Both land
+/// with the stages that build them. They are accepted by the derive *so that the refusal can name
+/// them* — decision 0013's rule, since "unknown field `members`" reads as a typo where a caller who
+/// wrote one had every reason to expect it to work, §1 listing both.
 #[test]
 fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
@@ -217,6 +217,8 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "depends_on",
             "levels",
             "content",
+            "members",
+            "labels",
         ],
     );
     expect_keys(
@@ -852,6 +854,37 @@ fn the_membership_requirement_has_five_settings() {
     assert!(err(&text).contains("exactly one of"), "{}", err(&text));
 }
 
+/// **An empty closed vocabulary is refused in every spelling**, the rule applying after the three
+/// converge rather than at the source.
+///
+/// Refusing only *the absence of a source* would admit a source that declares nothing — the same
+/// column, the same width in every row, and none of the message. A closed set is the authority on
+/// what may be ingested, so an empty one refuses every value for ever.
+#[test]
+fn a_closed_vocabulary_with_no_values_is_refused_in_every_spelling() {
+    // Both spellings of "authored, and authoring nothing": the inline table emptied, and the bare
+    // key array emptied. `SEVERITY` pins two codes, so removing them is the whole edit.
+    for emptied in ["  [vocabulary.values]\n", "values = []\n"] {
+        let text = SEVERITY
+            .replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", emptied)
+            .to_string();
+        let message = err(&text);
+        assert!(
+            message.contains("no values") || message.contains("value source"),
+            "{emptied:?}: {message}"
+        );
+        assert!(
+            message.contains("open"),
+            "{emptied:?}: the refusal must name the other value_set: {message}"
+        );
+    }
+    // An open one is legal empty: its values arrive as they are minted.
+    let text = SEVERITY
+        .replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "values = []\n")
+        .replace("value_set  = \"closed\"", "value_set  = \"open\"");
+    parse_str(&text).expect("an open vocabulary may start empty");
+}
+
 /// A threshold that cannot fail, or cannot pass, is refused rather than compiled.
 ///
 /// `{ count = 0 }` clears on every masked count and `{ fraction = 0.0 }` with it, so each declares
@@ -980,8 +1013,12 @@ fn a_level_declares_its_number_and_its_title() {
     let base = with_layer("").replace("kind = \"flat\"", "kind = \"stacked\"");
     let message = err(&format!("{base}\n[[layer.levels]]\ntitle = \"countries\"\n"));
     assert!(message.contains("declares no `level` number"), "{message}");
-    let message = err(&format!("{base}\n[[layer.levels]]\nlevel = 0\n"));
-    assert!(message.contains("declares no `title`"), "{message}");
+    // A title is presentation metadata and optional everywhere in the surface: it discloses
+    // nothing a name does not, and the name is already served, so absent is served as absent
+    // rather than as an identity the service decided to display.
+    let config = parse_str(&format!("{base}\n[[layer.levels]]\nlevel = 0\n"))
+        .expect("a level need not be titled");
+    assert_eq!(config.layers[0].levels[0].title, None);
     // Levels address by `entity − base`, so a gap reserves a run nothing reaches.
     let message = err(&format!(
         "{base}\n[[layer.levels]]\nlevel = 0\ntitle = \"a\"\n\n[[layer.levels]]\nlevel = 2\ntitle = \"c\"\n"

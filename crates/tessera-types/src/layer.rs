@@ -361,7 +361,11 @@ impl Default for ContentDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LevelDeclaration {
     pub level: u32,
-    pub title: String,
+    /// Human-readable, served as metadata. **Optional, like every other title in the surface**: a
+    /// title discloses nothing a name does not, and the name is already served, so requiring one
+    /// buys nothing. Absent is served as absent rather than as the name — choosing to display an
+    /// identity like `clusters/hdbscan` is a client's call, not something the service manufactures.
+    pub title: Option<String>,
     /// Advisory min/max zoom, as every tile schema carries. **It bounds no work** — what bounds a
     /// treed layer's response is the request's artifact budget, and what bounds a levelled layer's
     /// is the level asked for.
@@ -376,8 +380,8 @@ pub struct LayerDeclaration {
     /// something must not come to mean something else, since bookmarks, edges and suppressions all
     /// travel by it.
     pub name: String,
-    /// Human-readable, served as metadata.
-    pub title: String,
+    /// Human-readable, served as metadata. Optional — see [`LevelDeclaration::title`].
+    pub title: Option<String>,
     /// Which views this layer appears in.
     pub views: Vec<String>,
     pub membership: MembershipSource,
@@ -742,7 +746,7 @@ mod tests {
     fn decl(kind: HierarchyKind, levels: Vec<u32>) -> LayerDeclaration {
         LayerDeclaration {
             name: "clusters/x".into(),
-            title: "X".into(),
+            title: Some("X".into()),
             views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
             visibility: None,
@@ -758,7 +762,7 @@ mod tests {
                 .into_iter()
                 .map(|level| LevelDeclaration {
                     level,
-                    title: format!("L{level}"),
+                    title: Some(format!("L{level}")),
                     zoom: None,
                 })
                 .collect(),
@@ -936,7 +940,7 @@ mod tests {
         d.require_member_visibility = None;
         d.levels = vec![LevelDeclaration {
             level: 0,
-            title: "only".into(),
+            title: Some("only".into()),
             zoom: None,
         }];
         d.hierarchy.kind = HierarchyKind::Stacked;

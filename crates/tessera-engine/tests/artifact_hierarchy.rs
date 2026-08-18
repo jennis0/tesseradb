@@ -47,7 +47,7 @@ fn declaration(
 ) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
+        title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         visibility: None,
@@ -595,7 +595,7 @@ fn tiered(name: &str, levels: u32) -> LayerDeclaration {
     d.levels = (0..levels)
         .map(|level| tessera_types::layer::LevelDeclaration {
             level,
-            title: format!("level {level}"),
+            title: Some(format!("level {level}")),
             zoom: None,
         })
         .collect();

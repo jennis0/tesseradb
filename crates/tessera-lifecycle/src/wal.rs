@@ -1736,7 +1736,7 @@ mod tests {
         let create = WalRecord::LayerCreate {
             declaration: Box::new(LayerDeclaration {
                 name: "boundaries/uk-2026".into(),
-                title: "UK administrative boundaries".into(),
+                title: Some("UK administrative boundaries".into()),
                 views: vec!["geographic".into()],
                 membership: MembershipSource::Spatial,
                 visibility: Some("public".into()),
@@ -1755,12 +1755,12 @@ mod tests {
                 levels: vec![
                     LevelDeclaration {
                         level: 0,
-                        title: "LSOA".into(),
+                        title: Some("LSOA".into()),
                         zoom: Some((12, 16)),
                     },
                     LevelDeclaration {
                         level: 1,
-                        title: "LAD".into(),
+                        title: Some("LAD".into()),
                         zoom: None,
                     },
                 ],

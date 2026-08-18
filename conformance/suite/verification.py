@@ -281,6 +281,29 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") 
 # ---------------------------------------------------------------------------------------------
 
 
+def _value_codes(vocabulary: Mapping[str, object]) -> Mapping[str, int] | None:
+    """A vocabulary's `key -> code` map, in either spelling (configuration.md §1).
+
+    `values` is a table when the caller pinned codes and a bare array when it left them to the
+    build, which assigns from 1 in declaration order, skipping `reserved` and never reaching the
+    absent sentinel. The oracle has to mirror that assignment rather than refuse the spelling: it is
+    the second reader the conformance suite exists to differ against, and a reader that only speaks
+    one half of the surface silently narrows what the suite can cover.
+    """
+    values = vocabulary.get("values")
+    if values is None or isinstance(values, Mapping):
+        return values
+    reserved = set(vocabulary.get("reserved", ()))
+    codes: dict[str, int] = {}
+    code = 1
+    for key in values:
+        while code in reserved:
+            code += 1
+        codes[key] = code
+        code += 1
+    return codes
+
+
 @dataclass(frozen=True)
 class ColumnDecl:
     name: str
@@ -312,7 +335,7 @@ class Declaration:
                 type=a["type"],
                 render=bool(a.get("render", False)),
                 index=bool(a.get("index", False)),
-                values=vocabularies.get(a.get("vocabulary", ""), {}).get("values"),
+                values=_value_codes(vocabularies.get(a.get("vocabulary", ""), {})),
             )
             for a in raw["attribute"]
         )

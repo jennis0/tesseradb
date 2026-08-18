@@ -344,7 +344,7 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     let id = engine
         .register_layer(tessera_types::layer::LayerDeclaration {
             name: "clusters/online".into(),
-            title: "registered against the running node".into(),
+            title: Some("registered against the running node".into()),
             views: vec!["s0".into()],
             membership: tessera_types::layer::MembershipSource::Enumerated,
             visibility: None,

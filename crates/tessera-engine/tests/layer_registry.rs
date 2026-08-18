@@ -19,7 +19,7 @@ use tessera_types::layer::{
 fn declaration(name: &str, gate: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
+        title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         visibility: gate.map(str::to_string),
@@ -275,7 +275,7 @@ fn an_incoherent_declaration_is_refused_with_nothing_spent() {
     let mut treed_with_levels = declaration("clusters/bad", None);
     treed_with_levels.levels = vec![tessera_types::layer::LevelDeclaration {
         level: 0,
-        title: "L0".into(),
+        title: Some("L0".into()),
         zoom: None,
     }];
     let refused = engine
