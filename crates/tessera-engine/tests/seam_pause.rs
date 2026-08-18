@@ -176,7 +176,7 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
     let descriptors = vec![b"0".to_vec()];
     let row = UnallocatedRow {
         external_id: Some(b"seam-flush-1".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),

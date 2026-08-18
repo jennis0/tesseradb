@@ -49,7 +49,7 @@ def _sha256_hex(data: bytes) -> str:
 
 @dataclass
 class Segment:
-    """One (partition, slice, seg_id)'s row-space geometry.
+    """One (partition, view, seg_id)'s row-space geometry.
 
     Contracts r6 replaced the `entity_id` column in `columns.arrow` with `tessera_id`
     (`docs/evidence/memos/2026-07-30-tessera-id-construction.md`): `tessera_id` is now read
@@ -247,7 +247,7 @@ def _compact64(code: np.ndarray) -> np.ndarray:
 
 @dataclass
 class Permutation:
-    """`permutation.bin`: entity id -> row id (or absent), for one slice's single segment."""
+    """`permutation.bin`: entity id -> row id (or absent), for one view's single segment."""
 
     bound: int
     slots: np.ndarray  # uint32, length == bound; PERMUTATION_ABSENT where entity has no row
@@ -262,7 +262,7 @@ class Permutation:
 class Bundle:
     """A verified, opened bundle: `CURRENT` -> `MANIFEST.json` -> `SEGMENTS-0.json` -> segments.
 
-    Phase 1 has exactly one partition (`default`) and, per slice, exactly one segment — matching
+    Phase 1 has exactly one partition (`default`) and, per view, exactly one segment — matching
     the build's own scope (tessera-build's module doc).
     """
 
@@ -327,7 +327,7 @@ class Bundle:
         self._partition_dir = partition_dir
         self._segment_cache: dict[str, Segment] = {}
         self._permutation_cache: dict[str, Permutation] = {}
-        # Derived per-slice columns: pure functions of geometry and of the permutation, so they
+        # Derived per-view columns: pure functions of geometry and of the permutation, so they
         # never vary with a mask and can safely be held for the bundle's lifetime. See
         # `row_morton_codes` for why the Morton one is recomputed rather than read.
         self._morton_cache: dict[str, list[int]] = {}
@@ -362,24 +362,24 @@ class Bundle:
     def term_id_of(self, descriptor: bytes) -> int | None:
         return self.descriptor_to_term_id.get(descriptor)
 
-    def segment_dir(self, slice_id: str) -> Path:
+    def segment_dir(self, view_id: str) -> Path:
         for seg in self.segments_manifest["segments"]:
-            if seg["slice"] == slice_id:
+            if seg["view"] == view_id:
                 return (
                     self._partition_dir
-                    / "slices"
-                    / slice_id
+                    / "views"
+                    / view_id
                     / "segments"
                     / seg["seg_id"]
                 )
-        raise KeyError(f"no segment for slice '{slice_id}'")
+        raise KeyError(f"no segment for view '{view_id}'")
 
-    def segment(self, slice_id: str) -> Segment:
-        if slice_id not in self._segment_cache:
-            seg_dir = self.segment_dir(slice_id)
+    def segment(self, view_id: str) -> Segment:
+        if view_id not in self._segment_cache:
+            seg_dir = self.segment_dir(view_id)
             perm_path = seg_dir.parent.parent / "permutation.bin"
-            self._segment_cache[slice_id] = _read_segment(seg_dir, perm_path)
-        return self._segment_cache[slice_id]
+            self._segment_cache[view_id] = _read_segment(seg_dir, perm_path)
+        return self._segment_cache[view_id]
 
     def attach_source_geometry(self, source: SourceGeometry) -> None:
         """Hand the oracle the points file this bundle was built from (see [`SourceGeometry`]).
@@ -403,7 +403,7 @@ class Bundle:
             )
         return self.source_geometry
 
-    def row_source_ids(self, slice_id: str) -> list[int]:
+    def row_source_ids(self, view_id: str) -> list[int]:
         """Every row's **source-corpus** id — the join the source geometry is keyed by.
 
         Three hops, none of which reads a geometry column: row → `entity_id` (`permutation.bin`,
@@ -414,14 +414,14 @@ class Bundle:
         burden and must; a bundle built without `--mint-external-ids` cannot be checked this way
         at all, which is why the harness's fixture passes the flag.
         """
-        if slice_id not in self._position_cache:
-            self._position_cache[slice_id] = [
+        if view_id not in self._position_cache:
+            self._position_cache[view_id] = [
                 int.from_bytes(self.external_id_of(entity_id), "little")
-                for entity_id in self.row_entity_ids(slice_id)
+                for entity_id in self.row_entity_ids(view_id)
             ]
-        return self._position_cache[slice_id]
+        return self._position_cache[view_id]
 
-    def row_position_codes(self, slice_id: str) -> list[int]:
+    def row_position_codes(self, view_id: str) -> list[int]:
         """Every row's full 64-bit position code, **recomputed from the source geometry**.
 
         The §7.2 oracle needs to know which tile a row is in, and the wire comparison needs the
@@ -430,29 +430,29 @@ class Bundle:
         that emitted a wrong column and then sorted and served consistently by its own wrong
         values must fail the differential rather than agree with itself.
 
-        Computed once per slice and held, because it is a pure function of geometry and does not
+        Computed once per view and held, because it is a pure function of geometry and does not
         vary with the mask — unlike anything in `viewport.Selection`, which is rebuilt per mask on
         purpose.
         """
-        if slice_id not in self._morton_cache:
+        if view_id not in self._morton_cache:
             source = self._require_source()
             codes = []
-            for source_id in self.row_source_ids(slice_id):
+            for source_id in self.row_source_ids(view_id):
                 qx, qy = source.position(source_id)
                 cell_code, residual = morton_mod.split32(qx, qy)
                 codes.append((cell_code << 32) | residual)
-            self._morton_cache[slice_id] = codes
-        return self._morton_cache[slice_id]
+            self._morton_cache[view_id] = codes
+        return self._morton_cache[view_id]
 
-    def row_morton_codes(self, slice_id: str) -> list[int]:
+    def row_morton_codes(self, view_id: str) -> list[int]:
         """Every row's 32-bit Morton **cell** code: the high half of [`row_position_codes`].
 
         Same independence, and the same single derivation — a cell is a prefix of a position, so
         deriving it separately would only create a way for the two to disagree.
         """
-        return [code >> 32 for code in self.row_position_codes(slice_id)]
+        return [code >> 32 for code in self.row_position_codes(view_id)]
 
-    def row_entity_ids(self, slice_id: str) -> list[int]:
+    def row_entity_ids(self, view_id: str) -> list[int]:
         """Every row's entity id as a plain Python list — the permutation-derived, key-independent
         direction (I4: permissions live in entity space, geometry in row space, and the two are
         related only by the explicit permutation).
@@ -461,19 +461,19 @@ class Bundle:
         Python `set` per row, and `int(numpy.uint64)` per test dominates the mask-composition pass
         that is the oracle's only real cost.
         """
-        if slice_id not in self._entity_list_cache:
-            seg = self.segment(slice_id)
-            self._entity_list_cache[slice_id] = [int(e) for e in seg.entity_id]
-        return self._entity_list_cache[slice_id]
+        if view_id not in self._entity_list_cache:
+            seg = self.segment(view_id)
+            self._entity_list_cache[view_id] = [int(e) for e in seg.entity_id]
+        return self._entity_list_cache[view_id]
 
-    def verify_identity_cross_check(self, slice_id: str, sample: int = 200) -> None:
+    def verify_identity_cross_check(self, view_id: str, sample: int = 200) -> None:
         """The only test that catches a key/column disagreement (Task 12 brief, Step 2): for
         a sample of rows, `identity.forward(shard, entity_of_row[r]) == tessera_id[r]`, where
         `entity_of_row` came from the permutation (key-independent) and `tessera_id` came
         from the stored column. Requires a post-r6 bundle."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
-        seg = self.segment(slice_id)
+        seg = self.segment(view_id)
         if seg.tessera_id is None:
             raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
         rng = np.random.default_rng(20260730)
@@ -496,7 +496,7 @@ class Bundle:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         return identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
 
-    def derive_row_order(self, slice_id: str) -> np.ndarray:
+    def derive_row_order(self, view_id: str) -> np.ndarray:
         """Re-derive row order from `(source-recomputed morton, forward(identity.key,
         identity.shard_id, entity_id))` ascending, with no further tiebreak (the
         priority-as-identity-prefix fold; `tessera_id` is already unique so nothing else is
@@ -518,23 +518,23 @@ class Bundle:
         """
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
-        seg = self.segment(slice_id)
+        seg = self.segment(view_id)
         return row_order_from_geometry(
             self.identity_key,
             self.identity_shard_id,
             seg.entity_id,
-            self.row_morton_codes(slice_id),
+            self.row_morton_codes(view_id),
         )
 
-    def permutation(self, slice_id: str) -> Permutation:
-        if slice_id not in self._permutation_cache:
-            path = self._partition_dir / "slices" / slice_id / "permutation.bin"
-            self._permutation_cache[slice_id] = _read_permutation(path)
-        return self._permutation_cache[slice_id]
+    def permutation(self, view_id: str) -> Permutation:
+        if view_id not in self._permutation_cache:
+            path = self._partition_dir / "views" / view_id / "permutation.bin"
+            self._permutation_cache[view_id] = _read_permutation(path)
+        return self._permutation_cache[view_id]
 
-    def pairs_path(self, slice_id: str = "default") -> Path:
+    def pairs_path(self, view_id: str = "default") -> Path:
         # Phase 1 has one partition; pairs.parquet lives at partitions/default/terms/pairs.parquet
-        # regardless of slice (postings/pairs are entity-space, not slice-scoped).
+        # regardless of view (postings/pairs are entity-space, not view-scoped).
         return self._partition_dir / "terms" / "pairs.parquet"
 
     def _external_id_runs(self) -> list[str]:
@@ -760,7 +760,7 @@ def _entity_of_rows(perm: Permutation, rows: np.ndarray) -> dict[int, int]:
     Contracts r6 removed the entity_id column from `columns.arrow`; the permutation is the
     only key-independent artefact relating the two spaces (§5.1, I4). Computed for the rows
     asked about rather than materialised whole: a full inversion at 10^9 needs ~17-20 GB
-    transient (brief), so the scan over `perm.slots` is chunked in slices of 2**24 and only
+    transient (brief), so the scan over `perm.slots` is chunked in views of 2**24 and only
     entries landing in `rows` are collected.
     """
     wanted = np.asarray(rows, dtype=np.uint32)

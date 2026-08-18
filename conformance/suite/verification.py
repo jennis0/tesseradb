@@ -253,7 +253,7 @@ def materialise_corpus(
     )
 
 
-def build_bundle(files: CorpusFiles, bundle_root: Path, *, slice_id: str = "s0") -> None:
+def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
     (`oracle.catalogue._build_argv`): external ids minted from the source entity id (the denies
     address items by exactly those bytes), a stated identity-key decision, the grid extent."""
@@ -265,7 +265,7 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, slice_id: str = "s0")
             "--pairs", str(files.pairs),
             "--schema", str(files.schema),
             "--extent", GRID_EXTENT_ARG,
-            "--slice", slice_id,
+            "--view", view_id,
             "--out", str(bundle_root),
             "--mint-external-ids",
             "--id-key", FIXTURE_ID_KEY_HEX,

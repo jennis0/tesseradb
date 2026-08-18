@@ -56,6 +56,6 @@ echo "Building the 10^9 bundle at $OUT (no --limit)..."
   --pairs "$ROOT/data/scaled/pairs/categories-subclass.pairs.parquet" \
   --out "$OUT" \
   --extent 0,65536,0,65536 \
-  --slice s0 \
+  --view s0 \
   --mint-external-ids \
   "${IDENTITY_ARGS[@]}"

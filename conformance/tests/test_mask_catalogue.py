@@ -50,9 +50,9 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     250k `--mint-id-key` fixture, whose key is a build output rather than a fixture input — so the
     catalogue, which is the corpus every §7.2 assertion is made over, was never covered.
     """
-    catalogue_bundle.verify_identity_cross_check(cat.SLICE_ID)
+    catalogue_bundle.verify_identity_cross_check(cat.VIEW_ID)
 
-    order = catalogue_bundle.derive_row_order(cat.SLICE_ID)
+    order = catalogue_bundle.derive_row_order(cat.VIEW_ID)
     assert np.array_equal(order, np.arange(len(order))), (
         "the catalogue's rows are not stored in (morton, tessera_id) order re-derived from "
         "geometry and the identity key — so the stored order is not the order §7.2 selects in"
@@ -185,7 +185,7 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
 
     case = next(c for c in cat.catalogue() if c.name == "full_100pct")
     token = catalogue_server.authorise(list(case.grants))["token"]
-    raw = catalogue_server.viewport(token, cat.SLICE_ID, 4, cat.FULL_VIEWPORT, k=30)
+    raw = catalogue_server.viewport(token, cat.VIEW_ID, 4, cat.FULL_VIEWPORT, k=30)
     points = decode_viewport_points(raw)
 
     assert "fx_key" in points.schema.names, (
@@ -199,7 +199,7 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     # from the segment because only the fixture may make that translation: on the viewer plane an
     # identity is opaque (I10), and this test is the fixture, not a viewer.
     planted = cat.fx_keys()
-    seg = catalogue_bundle.segment(cat.SLICE_ID)
+    seg = catalogue_bundle.segment(cat.VIEW_ID)
     entity_of = {int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)}
     for ident, key in zip(points.column("tessera_id").to_pylist(), points.column("fx_key").to_pylist()):
         assert key == planted[entity_of[ident]], (

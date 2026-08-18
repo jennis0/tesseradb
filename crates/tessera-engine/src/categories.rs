@@ -11,9 +11,9 @@
 //! `finance` under `reviewing_department` may see nothing under `owner_department`. §3.2 makes
 //! that normative, so the gate is applied per column even where the values behind it are shared.
 //!
-//! **Slice is not part of the address**, and deliberately. Membership is an *entity-space*
-//! question and entity ids are bundle-global, so a column rendered in several slices has one
-//! member set and one correct answer; adding slice to the key would invent a distinction the
+//! **View is not part of the address**, and deliberately. Membership is an *entity-space*
+//! question and entity ids are bundle-global, so a column rendered in several views has one
+//! member set and one correct answer; adding view to the key would invent a distinction the
 //! predicate does not have.
 //!
 //! ## What is gated, and what is not

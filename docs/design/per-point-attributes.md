@@ -19,7 +19,7 @@ therefore stands unqualified.
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
 Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
 §5.4; [`records-and-search.md`](records-and-search.md) §2–§3, §4.2, §5 (cited as **records §n**);
-`slices-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
+`views-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
 `system-architecture.md` §7; design memo 2026-07-29 (secondary attribute indexing);
 decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
 [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
@@ -65,7 +65,7 @@ principal cannot see.
 > in full — a `category` block of `{vocabulary, kind, listing}` whose absence marks a column plain —
 > and `/v1/categories/{column}` serves the values: the codes a caller names, or the set paged by
 > value key, both behind one `listing` check. The column name is the identifier, and is not
-> slice-qualified, because membership is entity-space and a column rendered in several slices has
+> view-qualified, because membership is entity-space and a column rendered in several views has
 > one member set.
 >
 > **Vocabulary visibility is built.** §3.3's predicate runs against the per-value member sets — a
@@ -138,7 +138,7 @@ per-attribute table would not:
   anyone deciding to erode it.
 - **Warn on the combinations that break in practice** — `open` + `u8` (§3.6), dense codes
   under `visibility = "derived"` (§3.4), and `render_in` left at its default across
-  non-overlapping slices (§3.9).
+  non-overlapping views (§3.9).
 
 **It reports; it cannot refuse.** Appendix A is a *sizing* table — per-structure figures at 10⁷ and
 10⁹, with no total, no ceiling and no machine-memory figure anywhere in the architecture. §10.3's
@@ -251,14 +251,14 @@ scattering uses space already reserved.
 
 `0` remains the reserved *absent* sentinel and is excluded from assignment; `reserved` tombstones
 work identically; nothing sorts by category code; codes stay vocabulary-scoped, so §3.9's
-cross-slice legends compose.
+cross-view legends compose.
 
 **Authoring.** Declared vocabularies pin their codes, following ClickHouse's `Enum8('low'=1,…)` — a
 re-sorted file cannot recolour anything when the mapping is in a reviewed artifact. The system
 scatters when it *mints*; an author writes what they like, and the plan step warns on dense codes
 under `visibility = "derived"`. Retired keys move to `reserved` (Protobuf's mechanism and its
 reasoning), so the tombstone is auditable in the schema rather than buried in the manifest — reusing
-a key silently recolours history, on the argument slices §87 makes for slice names.
+a key silently recolours history, on the argument views §87 makes for view names.
 
 ### 3.5 Two dictionaries, two postings files
 
@@ -373,7 +373,7 @@ author a gate for a value nobody declared. Two properties of that gate:
   member" — and what makes the empty-value case coherent. It follows that a caller can make a
   value's *name* more visible than any of its members: an explicit assertion of the same class as
   `public`, recorded in Appendix C as such.
-- **Satisfaction is intersection** with the principal's satisfied term set, per slices §61 —
+- **Satisfaction is intersection** with the principal's satisfied term set, per views §61 —
   *not* a conservative label join, which yields an empty required set for a disjunctive gate
   (`finance | legal`) and admits every principal.
 
@@ -417,26 +417,26 @@ different sets. **Attributes sharing a vocabulary must agree on `listing`, `voca
 published one. Refused at parse.
 
 **There is no metadata table.** "Table" implies entity-major and dense — a row per entity, a column
-per attribute — which for two non-overlapping slices is a mostly-empty rectangle worth real
+per attribute — which for two non-overlapping views is a mostly-empty rectangle worth real
 gigabytes at 10⁸ + 10⁸ entities. What is shared is attribute-major and sparse, which is what the
 term index already is: vocabulary and postings in entity space, one posting per value; hot columns
-in row space, dense only over a slice's own rows; blob rows per entity, absent for entities
-carrying no blob-resident field. Slices §51's "shared metadata" therefore means *shared vocabulary
+in row space, dense only over a view's own rows; blob rows per entity, absent for entities
+carrying no blob-resident field. Views §51's "shared metadata" therefore means *shared vocabulary
 and postings*, not that every entity has every attribute.
 
-**`render` is per-slice; `index` and the blob are not.** They are entity-space, declared once,
+**`render` is per-view; `index` and the blob are not.** They are entity-space, declared once,
 applying everywhere. `render` is row-space, so an attribute declared for a document corpus would
-otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor slice — slices §53
-already permits per-slice columns. ⊘ **`render_in` is refused at parse**: `MANIFEST.declared_scalars`
-is one flat bundle-wide list, so accepting it would put the column in every slice anyway and
-silently, which is the opposite of what it asks for. Omitting it *is* every slice — the expensive
-default, and the one the plan step warns about (§2.3). Per-slice enumeration needs contracts §2.6
-and belongs with the slices epic (§6).
+otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor view — views §53
+already permits per-view columns. ⊘ **`render_in` is refused at parse**: `MANIFEST.declared_scalars`
+is one flat bundle-wide list, so accepting it would put the column in every view anyway and
+silently, which is the opposite of what it asks for. Omitting it *is* every view — the expensive
+default, and the one the plan step warns about (§2.3). Per-view enumeration needs contracts §2.6
+and belongs with the views epic (§6).
 
-**Codes are shared across slices**, being vocabulary-scoped and entity-space, so the same code means
-the same key in every slice that renders the attribute. A legend built for one slice is correct for
+**Codes are shared across views**, being vocabulary-scoped and entity-space, so the same code means
+the same key in every view that renders the attribute. A legend built for one view is correct for
 another and a client compositing two reconciles nothing. Server-side compositing stays out of scope
-— coordinate systems, θ and tile ranges are per-slice, and contracts §3.2's viewport names one — but
+— coordinate systems, θ and tile ranges are per-view, and contracts §3.2's viewport names one — but
 nothing here forecloses it.
 
 ---
@@ -486,7 +486,7 @@ keys close.
 rebuild, so recolouring a legend never touches the build path.
 
 **Declare-then-use.** An ingest row naming an undeclared value under `vocabulary = "declared"` is a
-`422` naming the column and the key, the whole batch without effect, following slices §80 — *"no
+`422` naming the column and the key, the whole batch without effect, following views §80 — *"no
 same-batch creation, no auto-create on first reference"* — for the same reason: a category carries
 properties and, through its postings, a visibility consequence, so a typo must not create one. A
 retired key is an unknown key: retirement removes it from `values` and moves its code to `reserved`,
@@ -507,7 +507,7 @@ the rows it colours are both durable or neither is.
 **Read this as a status list, not a work list.** The `render` placement is built, and discovered
 vocabularies mint at build and at ingest ([#82], 2026-08-07) — so several of these amendments would
 now deliver something that has been decided against, and several have had their content changed by
-an owner ruling. Executing the original list would put per-slice hot columns and an attribute
+an owner ruling. Executing the original list would put per-view hot columns and an attribute
 dictionary into the contract, neither of which is wanted.
 
 What remains owed is owed for one of two reasons, and the distinction is the whole point of keeping
@@ -518,7 +518,7 @@ describe**. Nothing here is waiting on someone to type it out.
 |---|---|
 | **contracts §2.2** — `declared_scalars` becomes the compiled per-placement attribute record | **Delivered.** Each entry carries `render` and `index`, neither defaulted, and a `vocabularies` table beside them; the two flags are the whole placement, the third home being their joint absence rather than a field (records §3). The blob's own extents are not column-keyed and sit in `record_extents` (contracts §2.3) |
 | **contracts §2.4** — the attribute dictionary namespace and its postings file, and an attribute `dict_extents` counterpart | **Changed, and mostly not needed.** A *category* needs no attribute dictionary: the vocabulary already enumerates every value and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard — an attribute descriptor byte-equal to a satisfied auth descriptor — cannot arise. What §3.3's visibility wants is a postings file keyed by `(column, code)`, sized at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`). A dictionary is for attribute terms that are *not* categories, which nothing declares |
-| **contracts §2.6** — attribute columns and their widths, **per slice** | **Delivered without the per-slice half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-slice declaration would put the column in every slice anyway, silently. Per-slice enumeration belongs with the slices epic, which the roadmap already pairs it with |
+| **contracts §2.6** — attribute columns and their widths, **per view** | **Delivered without the per-view half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-view declaration would put the column in every view anyway, silently. Per-view enumeration belongs with the views epic, which the roadmap already pairs it with |
 | **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Delivered, less the gate** (contracts r25; the empty-operand rule delivered at r26). The relationship to `/v1/meta` resolves as a **schema/values split**: `/v1/meta` carries the column descriptor and `/v1/categories/{column}` carries the values, in two forms — resolve named codes, or page by value key. That is what answers §3.8's size worry, since the viewer's normal path names the codes it drew and never fetches a set. Visibility is the vocabulary's `visibility`, fail-closed: `public` publishes, `derived` is filtered per principal by §3.3's membership predicate, and a column whose member sets cannot be read is refused rather than served empty. The authored per-value gate (§3.8, C23) is ⊘ unbuilt, so membership-derivation is the only gate a value has. The empty-operand rule belonged to the filter surface and is **delivered** (contracts §3.2 r26, decision 0062): an unknown *value* is an empty operand, where an unknown column — or an operator outside the column's family — is a `422`. The split is which side of the trust boundary the fact sits on |
 | **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Delivered for the wire and the rule** (contracts r24, [#82]): a category column carries `utf8` value keys, an unknown key under `vocabulary = "declared"` is a 422 naming column and key, null is *absent* and the empty string is refused. §5 is amended with it, so its first paragraph no longer claims the scalar-tail validation extends to categories unchanged. `/control/categories` is **still owed** and needs no new decision — runtime vocabulary amendment (§5) has no endpoint |
 | **architecture §5.3** — the hot-column list | **Owed**, and unchanged by anything since |
@@ -538,7 +538,7 @@ describe**. Nothing here is waiting on someone to type it out.
   design against §8.2.
 - **No multi-valued attributes** (⊘, §3.7). No cold `inspect` sidecar either — the placement is
   gone rather than deferred, the record blob having taken over §10.3's per-interaction intention.
-- **No server-side multi-slice composition** (§3.9).
+- **No server-side multi-view composition** (§3.9).
 - **No vocabulary cardinality limit.** §3.6's guidance is judgement, not measurement, and §8's
   authorise arm must run before any number becomes a documented limit.
 

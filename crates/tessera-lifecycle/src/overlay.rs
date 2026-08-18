@@ -550,7 +550,7 @@ mod tests {
                 crate::wal::WalRow {
                     external_id: None,
                     entity_id: EntityId::new(100),
-                    slice: "default".to_string(),
+                    view: "default".to_string(),
                     descriptors: Vec::new(),
                     x: 0.0,
                     y: 0.0,
@@ -559,7 +559,7 @@ mod tests {
                 crate::wal::WalRow {
                     external_id: None,
                     entity_id: EntityId::new(101),
-                    slice: "default".to_string(),
+                    view: "default".to_string(),
                     descriptors: Vec::new(),
                     x: 0.0,
                     y: 0.0,

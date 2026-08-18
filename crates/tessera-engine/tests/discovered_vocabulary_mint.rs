@@ -121,7 +121,7 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         pairs: pairs.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -181,7 +181,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,
@@ -209,8 +209,8 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
                 .join(prefix)
                 .join("partitions")
                 .join(phash)
-                .join("slices")
-                .join(&segment.slice)
+                .join("views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
@@ -314,7 +314,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
 
     let row = |external_id: &str| UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 1.0,
         y: 1.0,
@@ -483,7 +483,7 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"one-too-many".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,

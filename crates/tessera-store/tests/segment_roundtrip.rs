@@ -430,7 +430,7 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
         "small_term_threshold": 32,
         "quantisation": {"x_min": 0.0, "x_max": 1.0, "y_min": 0.0, "y_max": 1.0},
         "entity_id_high_water": 0,
-        "slices": [],
+        "views": [],
         "partitions": [],
         "files": {}
     });
@@ -721,10 +721,10 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
     // forward unpermuted.
     for (row, item) in items.iter().enumerate() {
         for ((name, ty), expected) in schema.iter().zip(&item.scalars) {
-            let slice = cols
+            let view = cols
                 .scalar(name)
                 .unwrap_or_else(|| panic!("column '{name}'"));
-            let got = match (slice, ty) {
+            let got = match (view, ty) {
                 (ScalarSlice::Bool(v), ScalarType::Bool) => ScalarValue::Bool(v.value(row)),
                 (ScalarSlice::U8(v), ScalarType::U8) => ScalarValue::U8(v[row]),
                 (ScalarSlice::U16(v), ScalarType::U16) => ScalarValue::U16(v[row]),

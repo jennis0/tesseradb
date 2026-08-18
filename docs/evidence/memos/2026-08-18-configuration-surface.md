@@ -178,7 +178,7 @@ Two levels, and the same shape at both:
 
 **`point_visibility` sits on the view** (owner ruling, 2026-08-18), which is where a caller looks
 for it and where the points source already is. One rule keeps that honest: a point's label is
-**entity-space and shared** — the term index and the mask serve every view (slices §3) — so two
+**entity-space and shared** — the term index and the mask serve every view (views §3) — so two
 views may not disagree about a point. With a single view, which is every corpus today, the
 question does not arise. With more than one, **the declarations must agree and disagreement is
 refused**, naming both views. The alternative readings — labels duplicated per view, or a per-view
@@ -198,7 +198,7 @@ what a member with none gets. Omit `default` for points and a point with no labe
 principal — the narrow direction, so it may be omitted; a *widening* default never may.
 
 **The container's gate conjoins and can only narrow**, at both levels. That is already normative
-for views ([`slices-and-multi-table.md`](../../design/slices-and-multi-table.md) §3: a slice's
+for views ([`views-and-multi-table.md`](../../design/views-and-multi-table.md) §3: a view's
 gate is a label, evaluated by the item-visibility predicate verbatim, *conjunctive with item
 labels, never substitutive*). ⊘ **View gating is specified and not implemented** — a bundle has
 one coordinate system reachable by every principal that authorises — so the `[[view]]` block is
@@ -292,7 +292,7 @@ its warning (C11 with no accountable party), not a refusal.
 ## 6. Everything nameable takes a `title`
 
 Layers and levels carry one; nothing else does. Attributes have none, so a client shows
-`primary_category`. Slices have `display_name` in the manifest, served on `/v1/meta`, which the
+`primary_category`. Views have `display_name` in the manifest, served on `/v1/meta`, which the
 build hardcodes to the view id with no route to set it. Vocabularies have none. Vocabulary values
 have one spelled `label`, a word meaning *access label* everywhere else here.
 
@@ -326,11 +326,12 @@ config currently says where any of their fields are**: `entity_id`, `x`, `y`, `t
 `stable_key` and `member` are hardcoded in the readers, so every corpus renames its columns to suit
 us.
 
-**`slice` becomes `view`** (owner ruling, 2026-08-18). A slice is a named coordinate system over
+**`slice` becomes `view`** (owner ruling, 2026-08-18). A view is a named coordinate system over
 the shared entity space — disjoint time ranges, several embedding spaces, several datasets — and
 *slice* reads as the temporal case that was merely the first instance. This is the one rename in
-this memo that reaches beyond the config: `slices-and-multi-table.md` is a normative document whose
-title, sections and every citation carry the word, as do `SliceDescriptor`, `slice_id`, the
+this memo that reaches beyond the config: `slices-and-multi-table.md` (now
+[`views-and-multi-table.md`](../../design/views-and-multi-table.md)) is a normative document whose
+title, sections and every citation carried the word, as did `SliceDescriptor`, `slice_id`, the
 per-slice layout paths and `--slice`. Pre-release that costs nothing but the edit
 ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)); it
 is simply a larger edit than the rest.

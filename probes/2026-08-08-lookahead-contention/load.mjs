@@ -73,7 +73,7 @@ async function viewport(token, tiles, k = 500) {
   const r = await fetch(`${VIEWER}/v1/viewport`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-    body: JSON.stringify({slice: 's0', zoom: DEPTH, tiles: tiles.map(Number), k})
+    body: JSON.stringify({view: 's0', zoom: DEPTH, tiles: tiles.map(Number), k})
   });
   const body = await r.arrayBuffer();
   return {

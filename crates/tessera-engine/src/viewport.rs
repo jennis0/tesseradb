@@ -371,8 +371,8 @@ pub struct SubCellCount {
 /// Construct with [`ViewportRequest::new`] and add the optional parts.
 #[derive(Debug, Clone)]
 pub struct ViewportRequest<'a> {
-    /// A slice id from `GET /v1/meta`.
-    pub slice: &'a str,
+    /// A view id from `GET /v1/meta`.
+    pub view: &'a str,
     /// Tile depth, 0–16.
     pub zoom: u8,
     /// `[x0, y0, x1, y1]` in the bundle's declared extent. Ignored when `tiles` is present.
@@ -464,9 +464,9 @@ pub struct ViewportRequest<'a> {
 
 impl<'a> ViewportRequest<'a> {
     /// The required parameters; `stamp` and `underlay_offset` default to absent.
-    pub fn new(slice: &'a str, zoom: u8, bbox: [f64; 4], k: usize) -> Self {
+    pub fn new(view: &'a str, zoom: u8, bbox: [f64; 4], k: usize) -> Self {
         ViewportRequest {
-            slice,
+            view,
             zoom,
             bbox,
             tiles: None,
@@ -531,7 +531,7 @@ impl<'a> ViewportRequest<'a> {
 pub struct ViewCoordinates {
     /// Whether a held band may be **rendered at all** — the cache partition key.
     ///
-    /// Over the idset, the auth-data hash, the mask fragment's identity and the slice: everything
+    /// Over the idset, the auth-data hash, the mask fragment's identity and the view: everything
     /// that determines *what this principal may see*. Decision 0029's warning applies to this one —
     /// a client cache keyed more loosely than this serves one principal's authorised data to
     /// another, which is a disclosure and not a staleness bug.
@@ -794,7 +794,7 @@ pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
     /// `(id, display_name)` pairs, in manifest order.
-    pub slices: Vec<(String, String)>,
+    pub views: Vec<(String, String)>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
@@ -820,8 +820,8 @@ impl Engine {
         EngineMeta {
             api_version: API_VERSION,
             bundle_format: manifest.bundle_format,
-            slices: manifest
-                .slices
+            views: manifest
+                .views
                 .iter()
                 .map(|s| (s.id.clone(), s.display_name.clone()))
                 .collect(),
@@ -868,7 +868,7 @@ impl Engine {
     ///
     /// **`idset` is checked against the SAME generation this call loads for the lookup below —
     /// never a separate `Engine::meta()` call.** A handler that called `Engine::meta()` (its own
-    /// `generation.load_full()`, plus a clone of every declared scalar and slice name, just to read
+    /// `generation.load_full()`, plus a clone of every declared scalar and view name, just to read
     /// one field) before calling this method would load the generation twice for one logical
     /// request, against lifecycle §1.1's one-load-per-request invariant. Checking here, first,
     /// against the snapshot already in hand is not merely cheaper: it closes the gap where a
@@ -969,18 +969,18 @@ impl Engine {
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
         for partition in generation.bundle.partitions.values() {
-            for (slice, slice_data) in &partition.slices {
+            for (view, view_data) in &partition.views {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
                 // bounds-checked slot read, not a scan.
-                let Some(row) = slice_data.row_space.row_of(entity) else {
+                let Some(row) = view_data.row_space.row_of(entity) else {
                     continue;
                 };
-                // **A slice holds more than one segment once anything has flushed**, and `row` is
-                // a *slice*-space row: it must be resolved to the segment that owns it and to that
+                // **A view holds more than one segment once anything has flushed**, and `row` is
+                // a *view*-space row: it must be resolved to the segment that owns it and to that
                 // segment's local index before anything is read. Taking the first segment and
-                // indexing it with a slice row read past the build segment's end for every
+                // indexing it with a view row read past the build segment's end for every
                 // flushed item.
-                let segments = segments_with_row_bases(slice, slice_data)?;
+                let segments = segments_with_row_bases(view, view_data)?;
                 let Some(&(segment, row_base)) =
                     segments.iter().rev().find(|(_, base)| row.raw() >= *base)
                 else {
@@ -997,12 +997,12 @@ impl Engine {
                 let resolved = resolve_scalars(segment, &render_scalars);
                 let local = (row.raw() - row_base) as usize;
                 for (slot, declared_index) in manifest.render_indices().enumerate() {
-                    let Some(slice) = &resolved[slot] else {
+                    let Some(view) = &resolved[slot] else {
                         continue;
                     };
                     let d = &manifest.declared_scalars[declared_index];
                     values[declared_index] =
-                        row_field_out(slice, local, d, &generation.vocabularies);
+                        row_field_out(view, local, d, &generation.vocabularies);
                 }
 
                 // Home 2: entity space — every non-rendered column with a value column (indexed
@@ -1083,13 +1083,13 @@ impl Engine {
 /// the row cannot say which, and this reports the stored value rather than inventing a rule. The
 /// entity-space and blob homes do not share the ambiguity.
 fn row_field_out(
-    slice: &ScalarSlice<'_>,
+    view: &ScalarSlice<'_>,
     idx: usize,
     d: &DeclaredScalar,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
     if d.vocabulary.is_some() {
-        let code = match slice {
+        let code = match view {
             ScalarSlice::U8(s) => s[idx] as u32,
             ScalarSlice::U16(s) => s[idx] as u32,
             ScalarSlice::U32(s) => s[idx],
@@ -1103,7 +1103,7 @@ fn row_field_out(
     // neither is stored as a flat slice of itself.
     macro_rules! out {
         ($(($v:ident, $t:ty)),* $(,)?) => {
-            match slice {
+            match view {
                 $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
                 ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
                 ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
@@ -1237,15 +1237,15 @@ impl Engine {
         &self,
         generation: &Generation,
         geometry: &SessionGeometry,
-        slice: &str,
+        view: &str,
     ) -> ViewCoordinates {
         let mut hasher = Sha256::new();
         hasher.update(b"tessera-identity-key-v1");
         hasher.update(generation.bundle.manifest.identity.idset.to_le_bytes());
         hasher.update(geometry.auth_data_hash);
         hasher.update(geometry.fragment.identity);
-        hasher.update((slice.len() as u64).to_le_bytes());
-        hasher.update(slice.as_bytes());
+        hasher.update((view.len() as u64).to_le_bytes());
+        hasher.update(view.as_bytes());
         let identity_digest: [u8; 32] = hasher.finalize().into();
         let mut identity_key = [0u8; 16];
         identity_key.copy_from_slice(&identity_digest[..16]);
@@ -1270,14 +1270,14 @@ impl Engine {
         &self,
         session: &Session,
         generation: &Generation,
-        slice: &str,
-        slice_data: &tessera_store::read::SliceData,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
     ) -> Result<Arc<SessionGeometry>> {
         let key = RowProjectionKey {
             token_id: session.token_id,
-            slice: slice.to_string(),
+            view: view.to_string(),
             segments_version: generation.segments_version,
             prefix: generation.prefix.clone(),
         };
@@ -1288,7 +1288,7 @@ impl Engine {
         // Rung 2. The generation exactly one below is the only one the retention depth keeps
         // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`) and the only one an append can be served
         // across.
-        let space = &slice_data.row_space;
+        let space = &view_data.row_space;
         if let Some(previous) = key.segments_version.checked_sub(1) {
             let stale_key = RowProjectionKey {
                 segments_version: previous,
@@ -1435,7 +1435,7 @@ impl Engine {
     ) -> Result<StageTimings> {
         let ViewportRequest {
             filter: _,
-            slice,
+            view,
             zoom,
             bbox,
             tiles: requested_tiles,
@@ -1473,7 +1473,7 @@ impl Engine {
 
         let k = k.min(self.config.max_k);
 
-        // Fail closed on a slice spanning partitions, for the same reason the segment guard below
+        // Fail closed on a view spanning partitions, for the same reason the segment guard below
         // exists: this resolves to ONE partition, and theta's anchor and every rank are then taken
         // over that partition alone — which §12.3 forbids (the anchor must be session-global, or
         // "below the cut" means different things in different partitions). The build emits one
@@ -1483,19 +1483,19 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.slices.contains_key(slice))
+            .filter(|partition| partition.views.contains_key(view))
             .count();
         if carriers > 1 {
-            return Err(EngineError::MultiPartitionSlice(slice.to_string()));
+            return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let slice_data = generation
+        let view_data = generation
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.slices.get(slice))
-            .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
-        // Every segment of the slice, each with where its rows begin in the slice's row space.
+        // Every segment of the view, each with where its rows begin in the view's row space.
         //
         // **Keyed on `seg_id`, never on position.** `Bundle::with_segment` appends a flush
         // segment to `segments` while `RowSpace::with_extent` appends its extent, so the two lists
@@ -1508,8 +1508,8 @@ impl Engine {
         //
         // The build segment is the one `permutation.bin` addresses and has no extent; it is
         // therefore the one with no entry here, and its rows begin at 0.
-        let segments = segments_with_row_bases(slice, slice_data)?;
-        probe.lap(|t| &mut t.slice_lookup_ns);
+        let segments = segments_with_row_bases(view, view_data)?;
+        probe.lap(|t| &mut t.view_lookup_ns);
 
         // **Zero update-induced work on this thread, in the steady state** (decision 0044's D1).
         // Every flush advances `segments_version`, so every flush rotates this key for every live
@@ -1524,9 +1524,9 @@ impl Engine {
         // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
         // `EffectiveMask`) by every `tile_sweep` call — never re-fetched or re-built per tile.
         let geometry =
-            self.session_geometry(session, &generation, slice, slice_data, &cancel, &mut probe)?;
+            self.session_geometry(session, &generation, view, view_data, &cancel, &mut probe)?;
         // Minted here, from the geometry that actually resolved — see `view_coordinates`.
-        let coordinates = self.view_coordinates(&generation, &geometry, slice);
+        let coordinates = self.view_coordinates(&generation, &geometry, view);
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -1564,16 +1564,16 @@ impl Engine {
         // on to do itself.
         check_cancelled(&cancel)?;
 
-        // **Fail-closed on a missing entry.** Every slice the bundle carries has one, empty when
+        // **Fail-closed on a missing entry.** Every view the bundle carries has one, empty when
         // nothing is denied (`compose::derive_denied`), so an absent key means the mask and the
         // bundle disagree about what this generation holds. Serving that as "nothing is denied
         // here" would publish suppressed and deleted rows on the map with no error anywhere —
         // the same shape as `SegmentWithoutRowBase`, and refused the same way.
         let denied = generation
             .denied
-            .get(slice)
+            .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
-                slice: slice.to_string(),
+                view: view.to_string(),
             })?;
 
         let mask = compose(
@@ -1581,7 +1581,7 @@ impl Engine {
             &generation.overlay,
             &generation.buffer,
             base,
-            &slice_data.row_space,
+            &view_data.row_space,
             denied,
         );
         probe.lap(|t| &mut t.compose_ns);
@@ -1687,7 +1687,7 @@ impl Engine {
             }
         };
 
-        // θ's anchor: the session's **composed** visible cardinality over this slice's whole row
+        // θ's anchor: the session's **composed** visible cardinality over this view's whole row
         // space. It must be the composed figure and not `base`'s — see `Threshold::anchor`'s doc
         // for the I2 argument and the concrete channel the pre-overlay figure opens.
         //
@@ -1727,7 +1727,7 @@ impl Engine {
         // into per-tile part lists, because a tile is the union of its parts across segments
         // (`select::SelectionParts`) while the sweep's monotone advantage is per column.
         //
-        // A slice with zero segments (an empty build) has nothing visible in any tile: every
+        // A view with zero segments (an empty build) has nothing visible in any tile: every
         // tile's part list is empty, and the response is empty — as before.
         let per_segment: Vec<Vec<Range<u32>>> = segments
             .iter()
@@ -1833,7 +1833,7 @@ impl Engine {
                     crate::filter::RoutedFilter::Entity(entities) => {
                         probe.count(|t| &mut t.filter_matched, entities.cardinality());
                         self.cross_filter_into_row_space(
-                            &slice_data.row_space,
+                            &view_data.row_space,
                             &entities,
                             &ranges,
                             &segments,
@@ -1845,7 +1845,7 @@ impl Engine {
                         let domain = crossing_domain(&ranges, &row_bases);
                         let rows = self.evaluate_row_route(
                             &tree,
-                            &slice_data.row_space,
+                            &view_data.row_space,
                             &segments,
                             &domain,
                             rows_in_ranges,
@@ -1995,8 +1995,8 @@ impl Engine {
         let artifacts = self.serve_artifacts(
             session,
             &generation,
-            slice,
-            slice_data,
+            view,
+            view_data,
             &ranges,
             &mask,
             req_layers,
@@ -2066,7 +2066,7 @@ impl Engine {
         Ok(probe.finish())
     }
 
-    /// Cross a filter's entity-space result into one slice's row space, by whichever of the two
+    /// Cross a filter's entity-space result into one view's row space, by whichever of the two
     /// routes is cheaper for this request.
     ///
     /// **Project** — [`RowSpace::project`] — crosses the whole result and costs ~20–30 ns per set
@@ -2084,7 +2084,7 @@ impl Engine {
     ///
     /// The route is **latency only**: the two answers agree exactly over every range the request
     /// can ask about, which is what [`FilterRows`] carries the domain to keep true, and what
-    /// `filter_routes_agree_over_the_domain` asserts. A slice that published no `row-entity.u32`
+    /// `filter_routes_agree_over_the_domain` asserts. A view that published no `row-entity.u32`
     /// cannot take the per-tile route at all and silently gets the projecting one.
     fn cross_filter_into_row_space(
         &self,
@@ -2394,7 +2394,7 @@ enum HotSlice<'a> {
 /// a value.
 ///
 /// **The presence bitmap is intersected once per run, outside the row loop.** `present` is this
-/// segment's presence for the column, already shifted into slice row space by
+/// segment's presence for the column, already shifted into view row space by
 /// [`scan_rows`], and `None` means every row carries a value — the representation an absent file
 /// has, so the common column costs neither bytes nor an intersection. Testing presence per row
 /// instead would put a bitmap lookup inside the loop the hoist below exists to keep flat.
@@ -2827,7 +2827,7 @@ fn as_f64(s: Scalar) -> f64 {
 struct ScannedSegment<'a> {
     row_base: u32,
     values: HotSlice<'a>,
-    /// The rows that carry a value, **in slice row space** — the presence bitmap shifted by
+    /// The rows that carry a value, **in view row space** — the presence bitmap shifted by
     /// `row_base` once, here, rather than per run. `None` where every row does.
     present: Option<croaring::Bitmap>,
 }
@@ -2866,7 +2866,7 @@ fn scan_rows(
                 // a string, so either way the segment and the manifest disagree about the tail.
                 _ => {
                     return Err(EngineError::Malformed(format!(
-                        "a segment of this slice has no rendered column '{column}' at a fixed \
+                        "a segment of this view has no rendered column '{column}' at a fixed \
                          width, which the routed filter requires; the manifest and the segment \
                          disagree about the tail"
                     )))
@@ -2925,14 +2925,14 @@ fn scan_rows(
     Ok(croaring::Bitmap::fast_or(&refs))
 }
 
-/// The rows of one segment that carry a value for `column`, **in slice row space** — `None` where
+/// The rows of one segment that carry a value for `column`, **in view row space** — `None` where
 /// every row does.
 ///
 /// `ColumnsRef::presence` answers for a column with no file, and for a name it does not know, with
 /// an all-present bitmap — so there is no branch here and no way for a caller to read a missing
 /// artefact as an absence. A damaged bitmap has already refused, at `ColumnsRef::load`.
 ///
-/// The shift into slice row space belongs here rather than in the scan: the bitmap is over the
+/// The shift into view row space belongs here rather than in the scan: the bitmap is over the
 /// segment's own `0..row_count` (`render_presence`'s module doc — a merge permutes rows, so it can
 /// be nothing else), and shifting once per segment keeps the run loop comparing bitmaps in one
 /// numbering.
@@ -2970,7 +2970,7 @@ const PER_TILE_CROSSING_RATIO: u64 = 3;
 /// realistic viewport still splits hundreds of ways.
 const CROSSING_CHUNK_MIN_ROWS: u32 = 4096;
 
-/// The slice-space rows a request's tiles span: every tile part shifted into slice row space by its
+/// The view-space rows a request's tiles span: every tile part shifted into view row space by its
 /// segment's `row_base`, sorted, and merged.
 ///
 /// **Merged, and that is not tidiness.** Adjacent tiles are adjacent Morton ranges, so merging
@@ -3021,7 +3021,7 @@ impl Engine {
         session: &Session,
         id: TesseraId,
         idset: Option<u32>,
-        slice: &str,
+        view: &str,
     ) -> Result<Option<ArtifactOut>> {
         let generation = self.generation.load_full();
         if let Some(e) = idset {
@@ -3041,7 +3041,7 @@ impl Engine {
         let Some(layer) = self.write.registered_layer(&name) else {
             return Ok(None);
         };
-        if !layer.declaration.slices.iter().any(|s| s == slice) {
+        if !layer.declaration.views.iter().any(|s| s == view) {
             return Ok(None);
         }
         // Reachability, then the live suppression of the layer itself — the same two steps in the
@@ -3061,33 +3061,33 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.slices.contains_key(slice))
+            .filter(|partition| partition.views.contains_key(view))
             .count();
         if carriers > 1 {
-            return Err(EngineError::MultiPartitionSlice(slice.to_string()));
+            return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let slice_data = generation
+        let view_data = generation
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.slices.get(slice))
-            .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
         let geometry =
-            self.session_geometry(session, &generation, slice, slice_data, &None, &mut probe)?;
+            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
             .denied
-            .get(slice)
+            .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
-                slice: slice.to_string(),
+                view: view.to_string(),
             })?;
         let mask = compose(
             &session.satisfied,
             &generation.overlay,
             &generation.buffer,
             Arc::clone(&geometry.projection),
-            &slice_data.row_space,
+            &view_data.row_space,
             denied,
         );
 
@@ -3095,17 +3095,17 @@ impl Engine {
         let rows = self.write.with_artifacts(|store| {
             self.artifact_projections.get_or_build(
                 &generation.prefix,
-                slice,
+                view,
                 &name,
                 level,
                 store,
                 store_version,
-                &slice_data.row_space,
+                &view_data.row_space,
             )
         });
         let attachment_gate = self.attachment_gate(&reachable);
         let attachment_resolves = self.attachment_resolves();
-        let view = crate::artifacts::ArtifactView {
+        let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
             satisfied: &session.satisfied,
@@ -3121,7 +3121,7 @@ impl Engine {
         let crate::artifacts::ArtifactVerdict::Serve {
             masked_count,
             variation,
-        } = view.verdict(entity, ordinal, None)
+        } = artifact_view.verdict(entity, ordinal, None)
         else {
             return Ok(None);
         };
@@ -3152,7 +3152,7 @@ impl Engine {
             crate::derived::DerivedContent::default()
         } else {
             let locator =
-                crate::derived::RowLocator::new(segments_with_row_bases(slice, slice_data)?);
+                crate::derived::RowLocator::new(segments_with_row_bases(view, view_data)?);
             let visible = rows
                 .get(ordinal)
                 .map(|members| mask.visible_rows(members))
@@ -3295,7 +3295,7 @@ impl Engine {
     }
 
     // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
-    // of: the session, the generation, the slice and its data, the resolved tile ranges, the
+    // of: the session, the generation, the view and its data, the resolved tile ranges, the
     // composed mask, and the request's own two artifact parameters. Bundling them into a struct
     // would name the same nine things one call earlier.
     #[allow(clippy::too_many_arguments)]
@@ -3303,8 +3303,8 @@ impl Engine {
         &self,
         session: &Session,
         generation: &crate::Generation,
-        slice: &str,
-        slice_data: &tessera_store::SliceData,
+        view: &str,
+        view_data: &tessera_store::ViewData,
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
         requested: Option<&[&str]>,
@@ -3339,9 +3339,9 @@ impl Engine {
         // every tile this request resolved. `crossing_domain` already merges and globalises them
         // for the filter's crossing, and reusing it is what keeps the two from disagreeing about
         // which rows a request covers.
-        let segments = segments_with_row_bases(slice, slice_data)?;
+        let segments = segments_with_row_bases(view, view_data)?;
         let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
-        // Built once per request rather than per layer: it is the same slice's segment list for
+        // Built once per request rather than per layer: it is the same view's segment list for
         // every artifact in the response, and a layer declaring no derived content never asks it
         // anything.
         let locator = crate::derived::RowLocator::new(segments);
@@ -3370,9 +3370,9 @@ impl Engine {
                 // one a gate failure gives.
                 continue;
             };
-            // A layer declares which slices it lives in; one it did not declare has no membership
+            // A layer declares which views it lives in; one it did not declare has no membership
             // in this row space to project.
-            if !layer.declaration.slices.iter().any(|s| s == slice) {
+            if !layer.declaration.views.iter().any(|s| s == view) {
                 continue;
             }
             // **The live half, asked per request.** A layer's own entity carries its suppression,
@@ -3400,12 +3400,12 @@ impl Engine {
                 let rows = self.write.with_artifacts(|store| {
                     self.artifact_projections.get_or_build(
                         &generation.prefix,
-                        slice,
+                        view,
                         &name,
                         level,
                         store,
                         store_version,
-                        &slice_data.row_space,
+                        &view_data.row_space,
                     )
                 });
                 let view = crate::artifacts::ArtifactView {
@@ -3905,7 +3905,7 @@ const TILE_PAR_MIN_LEN: usize = 8;
 /// above), and the return value is owned outright by the caller — no shared mutable state, no
 /// interior mutability, nothing to synchronise.
 ///
-/// `Ok(None)` — an empty tile: no segment for this slice, or nothing visible in `range`. Exactly
+/// `Ok(None)` — an empty tile: no segment for this view, or nothing visible in `range`. Exactly
 /// the "skip empty" rule the old inline loop applied (no count row, no selection work). `Err`
 /// carries [`EngineError::Cancelled`] from the per-tile cancellation checkpoint below — checked
 /// first, so a flip
@@ -3937,7 +3937,7 @@ fn tile_sweep<'a>(
     let mut stats = TileProbe::new();
 
     // **The count is the sum over the segments the tile touches** — each segment's own tile range
-    // shifted into slice row space by its `row_base`, counted there, and added. §7.1's exact
+    // shifted into view row space by its `row_base`, counted there, and added. §7.1's exact
     // masked count is a property of the tile, not of whichever segment happens to hold the rows,
     // so a tile straddling a build segment and a fresh flush segment must report their union.
     let parts: Vec<SelectionPart<'_>> = tile_parts
@@ -4064,7 +4064,7 @@ fn tile_sweep<'a>(
 /// implementation detail of the sweep, not part of this crate's public API — [`ViewportOut`]
 /// and the [`ViewportSink`] callbacks are what callers see.
 ///
-/// `rows` are slice-space rows **ascending by `tessera_id`** ([`Selection::rows`]) — the order
+/// `rows` are view-space rows **ascending by `tessera_id`** ([`Selection::rows`]) — the order
 /// the wire requires within a tile, and the property every mid-stream cut's validity rests on.
 struct TileSweepOut<'a> {
     count: TileCount,
@@ -4074,7 +4074,7 @@ struct TileSweepOut<'a> {
     stats: TileStats,
 }
 
-/// A slice's segments paired with their `row_base` in slice row space, ascending.
+/// A view's segments paired with their `row_base` in view row space, ascending.
 ///
 /// **Keyed on `seg_id`, never zipped positionally.** `Bundle::with_segment` appends to `segments`
 /// while `RowSpace::with_extent` appends the extent, so after a flush the two lists agree by
@@ -4089,21 +4089,21 @@ struct TileSweepOut<'a> {
 ///
 /// **One definition, because two read paths need it.** `Engine::viewport` selects over the parts
 /// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
-/// `segments.first()` and index it with a *slice*-space row — a drill-down on any flushed item
+/// `segments.first()` and index it with a *view*-space row — a drill-down on any flushed item
 /// read past the build segment's end and panicked. A second copy is how the two come to disagree.
 fn segments_with_row_bases<'a>(
-    slice: &str,
-    slice_data: &'a tessera_store::read::SliceData,
+    view: &str,
+    view_data: &'a tessera_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {
-    let row_bases: std::collections::HashMap<&str, u32> = slice_data
+    let row_bases: std::collections::HashMap<&str, u32> = view_data
         .row_space
         .extents()
         .iter()
         .map(|extent| (extent.seg_id.as_str(), extent.row_base))
         .collect();
     let mut base_seen = false;
-    let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(slice_data.segments.len());
-    for segment in &slice_data.segments {
+    let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(view_data.segments.len());
+    for segment in &view_data.segments {
         let row_base = match row_bases.get(segment.seg_id.as_str()) {
             Some(&row_base) => row_base,
             // No extent: the build segment, at 0. Legitimate exactly once — see
@@ -4115,7 +4115,7 @@ fn segments_with_row_bases<'a>(
             }
             None => {
                 return Err(EngineError::SegmentWithoutRowBase {
-                    slice: slice.to_string(),
+                    view: view.to_string(),
                     seg_id: segment.seg_id.clone(),
                 })
             }
@@ -4166,7 +4166,7 @@ fn resolve_scalars<'a>(
 
 /// Gather one tile's selected rows **column-major**.
 ///
-/// `rows` are slice-space rows ascending by `tessera_id` — not by segment — so consecutive rows
+/// `rows` are view-space rows ascending by `tessera_id` — not by segment — so consecutive rows
 /// can land in different parts. They are therefore resolved to `(part, local)` **once**, in one
 /// pass, and every column then walks that placement rather than re-resolving per value. Together
 /// with the per-part slice resolution this leaves the inner loop a bounds-checked index into a
@@ -4211,7 +4211,7 @@ fn gather_tile_columns(
 
     let malformed = |d: &DeclaredScalar| {
         EngineError::Malformed(format!(
-            "a segment of this slice has no scalar column '{}' at the declared type {}, which \
+            "a segment of this view has no scalar column '{}' at the declared type {}, which \
              the manifest's render declaration requires; serving it would put values under \
              another column's name",
             d.name,
@@ -4579,7 +4579,7 @@ mod tests {
         );
     }
 
-    /// A slice with no `row-entity.u32` declines the per-tile route rather than answering from a
+    /// A view with no `row-entity.u32` declines the per-tile route rather than answering from a
     /// base it cannot invert. `entity_of` returning `None` on such a row means "ask another way",
     /// and reading it as "this row has no entity" would drop rows from a filtered viewport
     /// silently — so the route decision asks `can_invert` before committing, and the walk itself
@@ -4608,7 +4608,7 @@ mod tests {
         );
     }
 
-    /// The domain is the request's tile parts in slice row space: shifted by each segment's
+    /// The domain is the request's tile parts in view row space: shifted by each segment's
     /// `row_base`, sorted across segments, and merged where they touch. Merging is what makes the
     /// walk sequential and `FilterRows::covers` a single binary search; it must never widen.
     #[test]

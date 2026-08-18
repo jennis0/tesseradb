@@ -207,13 +207,13 @@ pub struct CompactionSchedule {
     /// it a node down at 00:00 and started at 09:00 would fold at 09:00, which is the one hour the
     /// operator configured it away from.
     pub window_secs: u32,
-    /// Live segments in any one slice at or above which a fold is worth running *inside the
+    /// Live segments in any one view at or above which a fold is worth running *inside the
     /// window*. Below it the window passes and nothing happens.
     ///
     /// **The low threshold of two.** It answers "is there enough here to be worth a quiet-hours
     /// fold"; [`Self::max_segments`] answers "is this bad enough that it cannot wait".
     pub window_min_segments: usize,
-    /// Live segments in any one slice at or above which a fold is dispatched **at any hour**;
+    /// Live segments in any one view at or above which a fold is dispatched **at any hour**;
     /// `None` switches this route off.
     ///
     /// **Deferring segment growth has a limit, and this is it.** The windowed threshold exists
@@ -287,9 +287,9 @@ impl CompactionSchedule {
 /// nightly tidy from a deployment that is drowning in un-retired deletions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldTrigger {
-    /// Inside the daily window, with a slice over `window_min_segments`.
+    /// Inside the daily window, with a view over `window_min_segments`.
     Window,
-    /// A slice reached `max_segments`, at whatever hour — segment growth past the point where
+    /// A view reached `max_segments`, at whatever hour — segment growth past the point where
     /// deferring it is cheaper than paying it.
     SegmentCount,
     /// `|deleted|` reached `after_deletions`, at whatever hour.
@@ -307,7 +307,7 @@ pub(crate) enum FoldTrigger {
 /// The fourth gauge is not here: it is a directory walk, and it arrives as a closure.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Gauges {
-    /// The largest live segment count across the partition's slices.
+    /// The largest live segment count across the partition's views.
     pub(crate) live_segments: usize,
     /// `|deleted|` — deletions alone, never the union with `suppressed` (see [`due`]).
     pub(crate) retirable_deletions: u64,
@@ -327,8 +327,8 @@ pub(crate) struct DeadBytes {
 ///
 /// **Pure, so the whole trigger is testable without a clock or an executor** — which matters more
 /// here than usual, because the alternative is a test that waits for midnight. `now_unix` and
-/// `last_fold_unix` are seconds; `live_segments` is the largest live segment count across slices,
-/// since compaction §9's gauge is per (partition, slice) and any slice over the threshold is worth
+/// `last_fold_unix` are seconds; `live_segments` is the largest live segment count across views,
+/// since compaction §9's gauge is per (partition, view) and any view over the threshold is worth
 /// a fold.
 ///
 /// # The floor is what stops a persistently-discarding fold, so it must be stamped by a discard
@@ -342,7 +342,7 @@ pub(crate) struct DeadBytes {
 /// # It is process-local, and for the *success* case the work gates make that harmless
 ///
 /// A node that restarts inside its own window has no record of the fold it just finished. It
-/// dispatches nothing anyway: a fold leaves one segment per partition-slice and an overlay with the
+/// dispatches nothing anyway: a fold leaves one segment per partition-view and an overlay with the
 /// executed deletions gone, so both gauges are re-read against the bundle the fold itself produced
 /// and neither is over. A restart after a *discard* does lose the back-off — the orphan the discard
 /// left is not a gauge anything reads — so the loop above is bounded by the floor within one
@@ -428,7 +428,7 @@ fn in_window(now_unix: u64, start_secs: u32, window_secs: u32) -> bool {
 // The plan
 // =================================================================================================
 
-/// One live segment of one slice, as the plan names it.
+/// One live segment of one view, as the plan names it.
 ///
 /// `dir` is **prefix-relative**, so the plan is a list of names rather than of resolved paths — the
 /// same form the manifest's `files` map takes, and the form [`execute`] joins onto whichever prefix
@@ -438,14 +438,14 @@ pub(crate) struct PlannedSegment {
     pub(crate) dir: String,
 }
 
-/// One slice's half of a fold plan.
-pub(crate) struct FoldSlicePlan {
-    pub(crate) slice: String,
-    /// Every live segment of this slice at the snapshot — the base plus every extent. Pass 1 merges
+/// One view's half of a fold plan.
+pub(crate) struct FoldViewPlan {
+    pub(crate) view: String,
+    /// Every live segment of this view at the snapshot — the base plus every extent. Pass 1 merges
     /// them all; order does not matter to it, since the merge is driven by a heap over each
     /// cursor's `(morton, tessera_id)` key.
     pub(crate) segments: Vec<PlannedSegment>,
-    /// The bound for this slice's new `permutation.bin`: **one past the highest entity the
+    /// The bound for this view's new `permutation.bin`: **one past the highest entity the
     /// snapshot's row space covers**, and emphatically not the live `entity_id_high_water`.
     ///
     /// `RowSpace::with_extent` refuses an extent that begins below the base permutation's bound, so
@@ -465,7 +465,7 @@ pub(crate) struct FoldSlicePlan {
 /// (compaction §4 step 1) is for.
 pub(crate) struct FoldPlan {
     pub(crate) partition: String,
-    pub(crate) slices: Vec<FoldSlicePlan>,
+    pub(crate) views: Vec<FoldViewPlan>,
     /// Every live delta tier, prefix-relative, in the live manifest's order — all consumed.
     pub(crate) tiers: Vec<String>,
     /// Every live external-id run, prefix-relative, oldest first — all consumed by pass 3.
@@ -517,7 +517,7 @@ pub(crate) enum NoFold {
     /// **A partition is serving a stepped-down side-manifest.** A fold assembled from older served
     /// state would fold the stepped-past segment out of existence rather than merely shadow it.
     SteppedDown,
-    /// No partition, or a partition with no slice holding a segment. Nothing to fold.
+    /// No partition, or a partition with no view holding a segment. Nothing to fold.
     NothingToFold,
     /// **The estimated peak memory is above what the host has available** (compaction §3). Both
     /// figures in bytes.
@@ -583,8 +583,8 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
 /// | 90 B × membership containers | the artifact pass's row forms, held while it rebuilds them |
 ///
-/// The permutation term is the **maximum** across slices rather than their sum: pass 1 folds one
-/// slice at a time and drops each slice's writer before the next, so the peak is one of them.
+/// The permutation term is the **maximum** across views rather than their sum: pass 1 folds one
+/// view at a time and drops each view's writer before the next, so the peak is one of them.
 ///
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
@@ -672,30 +672,30 @@ pub(crate) fn plan_fold(
         .ok_or(NoFold::NothingToFold)?;
     let manifest = &partition_data.manifest;
 
-    let mut slices: Vec<FoldSlicePlan> = Vec::new();
+    let mut views: Vec<FoldViewPlan> = Vec::new();
     // Sorted, so a plan is a function of the generation and not of a `HashMap`'s iteration order —
     // the new manifest's segment list follows this order, and a manifest whose bytes depend on
     // hashing is a bundle identity that depends on hashing.
-    let mut slice_ids: Vec<&String> = partition_data.slices.keys().collect();
-    slice_ids.sort_unstable();
-    for slice in slice_ids {
-        let slice_data = &partition_data.slices[slice];
-        if slice_data.segments.is_empty() {
+    let mut view_ids: Vec<&String> = partition_data.views.keys().collect();
+    view_ids.sort_unstable();
+    for view in view_ids {
+        let view_data = &partition_data.views[view];
+        if view_data.segments.is_empty() {
             continue;
         }
-        let row_space = &slice_data.row_space;
+        let row_space = &view_data.row_space;
         let permutation_bound = row_space
             .extents()
             .last()
             .map_or(row_space.base().bound(), |extent| extent.entity_hi + 1);
-        slices.push(FoldSlicePlan {
-            slice: slice.clone(),
-            segments: slice_data
+        views.push(FoldViewPlan {
+            view: view.clone(),
+            segments: view_data
                 .segments
                 .iter()
                 .map(|segment| PlannedSegment {
                     dir: format!(
-                        "partitions/{partition}/slices/{slice}/segments/{}",
+                        "partitions/{partition}/views/{view}/segments/{}",
                         segment.seg_id
                     ),
                     seg_id: segment.seg_id.clone(),
@@ -704,16 +704,16 @@ pub(crate) fn plan_fold(
             permutation_bound,
         });
     }
-    if slices.is_empty() {
+    if views.is_empty() {
         return Err(NoFold::NothingToFold);
     }
 
     // The partition-wide locator span. Every post-snapshot locator extent begins above this, for
     // the same reason every post-snapshot segment does — `with_extent`'s floor — and publication
     // checks that rather than assuming it.
-    let entity_bound = slices
+    let entity_bound = views
         .iter()
-        .map(|slice| slice.permutation_bound)
+        .map(|view| view.permutation_bound)
         .max()
         .unwrap_or(0);
 
@@ -730,9 +730,9 @@ pub(crate) fn plan_fold(
     let dict_len = generation.dict.len();
     if let Some(available) = resources.available_memory {
         let need = memory_estimate(
-            slices
+            views
                 .iter()
-                .map(|slice| slice.permutation_bound)
+                .map(|view| view.permutation_bound)
                 .max()
                 .unwrap_or(0),
             entity_bound,
@@ -771,7 +771,7 @@ pub(crate) fn plan_fold(
 
     Ok(FoldPlan {
         partition: partition.clone(),
-        slices,
+        views,
         tiers: manifest.deltas.clone(),
         runs: manifest.external_id_runs.clone(),
         locator_extents: manifest
@@ -809,7 +809,7 @@ pub(crate) struct FoldContext {
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) scalar_schema: Vec<(String, ScalarType)>,
-    /// The new base segment's id, one per slice — never reused, so a discarded fold's orphans can
+    /// The new base segment's id, one per view — never reused, so a discarded fold's orphans can
     /// never be mistaken for a later one's output (contracts §2.1).
     pub(crate) seg_id: String,
     /// The live base postings and the live tiers — pass 2's inputs.
@@ -869,7 +869,7 @@ pub struct PassCost {
 pub(crate) struct CompletedFold {
     pub(crate) plan: FoldPlan,
     pub(crate) prefix: String,
-    /// The new base segment of each slice, in the plan's slice order.
+    /// The new base segment of each view, in the plan's view order.
     pub(crate) segments: Vec<SegmentDescriptor>,
     /// Every file the fold itself wrote, prefix-relative, with its digest. Publication adds the
     /// carried-forward files' digests and writes the result as `MANIFEST.json`.
@@ -951,23 +951,23 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
     // ---- pass 1 — row space -------------------------------------------------------------------
     //
-    // One new segment per (partition, slice), and one `permutation.bin` beside it. Rows whose
+    // One new segment per (partition, view), and one `permutation.bin` beside it. Rows whose
     // entity is in `D₀` are dropped, which shifts the row id of every row after them — the whole
     // reason compaction §6 exists.
-    let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.slices.len());
+    let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.views.len());
     let mut base_segment_bytes = 0u64;
-    for slice in &plan.slices {
-        let slice_rel = format!("partitions/{}/slices/{}", plan.partition, slice.slice);
-        let slice_dir = ctx.to_prefix_dir.join(&slice_rel);
-        std::fs::create_dir_all(&slice_dir).map_err(|e| failed("creating the slice", &e))?;
-        let segment_rel = format!("{slice_rel}/segments/{}", ctx.seg_id);
+    for view in &plan.views {
+        let view_rel = format!("partitions/{}/views/{}", plan.partition, view.view);
+        let view_dir = ctx.to_prefix_dir.join(&view_rel);
+        std::fs::create_dir_all(&view_dir).map_err(|e| failed("creating the view", &e))?;
+        let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);
         let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
-        let permutation_rel = format!("{slice_rel}/permutation.bin");
+        let permutation_rel = format!("{view_rel}/permutation.bin");
         let permutation_path = ctx.to_prefix_dir.join(&permutation_rel);
-        let row_entity_rel = format!("{slice_rel}/{}", tessera_store::ROW_ENTITY_FILE);
+        let row_entity_rel = format!("{view_rel}/{}", tessera_store::ROW_ENTITY_FILE);
         let row_entity_path = ctx.to_prefix_dir.join(&row_entity_rel);
 
-        let inputs: Vec<FoldSegmentInput> = slice
+        let inputs: Vec<FoldSegmentInput> = view
             .segments
             .iter()
             .map(|planned| FoldSegmentInput {
@@ -986,23 +986,23 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 scalar_schema: &ctx.scalar_schema,
                 // `D₀`, whole and unmodified. See the module doc.
                 tombstones: &plan.tombstones,
-                permutation_bound: slice.permutation_bound,
+                permutation_bound: view.permutation_bound,
             },
         )
         .map_err(|e| failed("pass 1 (row space)", &e))?;
 
-        let mut slice_bytes = 0u64;
+        let mut view_bytes = 0u64;
         for name in ["morton.u32", "columns.arrow"] {
             let path = segment_dir.join(name);
-            slice_bytes += std::fs::metadata(&path)
+            view_bytes += std::fs::metadata(&path)
                 .map_err(|e| failed("sizing the new base segment", &e))?
                 .len();
             written.push((format!("{segment_rel}/{name}"), path));
         }
-        base_segment_bytes = base_segment_bytes.max(slice_bytes);
+        base_segment_bytes = base_segment_bytes.max(view_bytes);
         // The render columns' presence bitmaps beside the new segment (decision 0064), named by
         // the pass that decided which columns still have an absence after the drops. Not counted
-        // into `slice_bytes`, which is the two mapped files step 3's headroom check is about.
+        // into `view_bytes`, which is the two mapped files step 3's headroom check is about.
         for column in &out.presence_columns {
             written.push((
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
@@ -1013,14 +1013,14 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         written.push((row_entity_rel, row_entity_path));
 
         segments.push(SegmentDescriptor {
-            slice: slice.slice.clone(),
+            view: view.view.clone(),
             seg_id: ctx.seg_id.clone(),
             row_count: out.row_count,
             entity_lo: 0,
             // Inclusive, and the permutation's span rather than the highest surviving entity: this
             // is what the base *addresses*, and a range short of it would leave a carried-forward
             // extent's floor test asking about entities the base already owns.
-            entity_hi: slice.permutation_bound.saturating_sub(1),
+            entity_hi: view.permutation_bound.saturating_sub(1),
         });
     }
 
@@ -1445,7 +1445,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 /// # Why this family needs a pass of its own
 ///
 /// Every other indexed family stores one value per entity, so folding it is a merge of value
-/// slices and a presence subtraction, and its postings are then *re-derived* from the folded
+/// views and a presence subtraction, and its postings are then *re-derived* from the folded
 /// column. A text column has no value column: its prose is a record-blob row and its index is a
 /// token dictionary plus postings over it, so there is nothing for that merge to take. Deriving
 /// the postings the same way — re-analysing every surviving row out of the folded blob — would
@@ -1638,7 +1638,7 @@ mod tests {
 
     fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentDescriptor {
         SegmentDescriptor {
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             seg_id: seg_id.to_string(),
             row_count: (entity_hi - entity_lo + 1) as u32,
             entity_lo,
@@ -2286,7 +2286,7 @@ mod tests {
         );
     }
 
-    /// The permutation term is the **largest** slice's, not every slice's — pass 1 folds one slice
+    /// The permutation term is the **largest** view's, not every view's — pass 1 folds one view
     /// at a time and drops each writer before the next, so a sum would refuse folds a host could
     /// comfortably run. Asserted through the estimate's own arithmetic, since that is where a
     /// reader would look for the rule.

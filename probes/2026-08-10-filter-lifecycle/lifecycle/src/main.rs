@@ -719,7 +719,7 @@ fn main() {
         pairs: PathBuf::from("/home/joe/code/tessera/data/scaled/pairs/categories-subclass.pairs.parquet"),
         out: bundle.clone(),
         extent: EXTENT,
-        slice_id: "s0".into(),
+        view_id: "s0".into(),
         limit: Some(a.limit),
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
         identity_key_hex: KEY_HEX.into(),
@@ -904,7 +904,7 @@ fn main() {
             let term = a.terms[s % a.terms.len()].clone();
             rows.push(UnallocatedRow {
                 external_id: Some(format!("ing-{s}").into_bytes()),
-                slice: "s0".into(),
+                view: "s0".into(),
                 descriptors: vec![term.clone().into_bytes()],
                 x: (s % 65536) as f32,
                 y: ((s / 65536) % 65536) as f32,

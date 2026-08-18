@@ -151,7 +151,7 @@
     <li><span class="num">12</span><a href="#p2">The shape of the system</a></li>
     <li><span class="num">13</span><a href="#p10">Writing new data</a></li>
     <li><span class="num">14</span><a href="#p2b">Inside the engine</a></li>
-    <li><span class="num">15</span><a href="#pslice">Slices</a></li>
+    <li><span class="num">15</span><a href="#pview">Views</a></li>
     <li><span class="num">16</span><a href="#p11">Clusters roll up</a></li>
     <li><span class="num">17</span><a href="#p12">Serving labels</a></li>
     <li><span class="num">18</span><a href="#p13">The figure board</a></li>
@@ -192,7 +192,7 @@
           <text x="427" y="97">and filtering</text>
           <text x="593" y="84">writes, then the</text>
           <text x="593" y="97">machine in one view</text>
-          <text x="759" y="84">slices, clusters and</text>
+          <text x="759" y="84">views, clusters and</text>
           <text x="759" y="97">labels — unbuilt</text>
         </g>
         <g font-size="10.5" fill="#0e6f8a" text-anchor="middle">
@@ -896,7 +896,7 @@
         <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Static sampling, worked: sixteen rows, four tiles, two zoom levels</text>
         <text x="20" y="46" font-size="11.5" fill="#5b6a75">every item keeps one fixed draw priority for life — a 2-digit ID here, the leading 16 bits of its keyed public ID in reality; there is no randomness at query time</text>
 
-        <text x="96" y="82" font-size="11" fill="#5b6a75">one slice&#8217;s rows, in Morton order — so each tile below is a contiguous run (plates 04–05); two rows are outside this viewer&#8217;s mask</text>
+        <text x="96" y="82" font-size="11" fill="#5b6a75">one view&#8217;s rows, in Morton order — so each tile below is a contiguous run (plates 04–05); two rows are outside this viewer&#8217;s mask</text>
         <g stroke="#b7c2c9">
           <rect x="96"  y="92" width="44" height="36" fill="#ffffff"/><rect x="140" y="92" width="44" height="36" fill="#ffffff"/>
           <rect x="184" y="92" width="44" height="36" fill="#ffffff"/><rect x="228" y="92" width="44" height="36" fill="#ffffff"/>
@@ -1406,7 +1406,7 @@
         <g font-size="11.5" fill="#101820">
           <text x="60" y="438">the crossing</text>
           <text x="234" y="438">term postings</text>
-          <text x="408" y="438">geometry — per slice</text>
+          <text x="408" y="438">geometry — per view</text>
           <text x="60" y="530">attributes</text>
           <text x="234" y="530">records</text>
           <text x="408" y="530">MANIFEST + side-manifest</text>
@@ -1469,38 +1469,38 @@
 
 <div class="act">
   <p class="act-label">Act V · Under discussion</p>
-  <p>Slices, clusters and cluster labels are designed and not yet built — these three plates are the basis for that discussion.</p>
+  <p>Views, clusters and cluster labels are designed and not yet built — these three plates are the basis for that discussion.</p>
 </div>
 
-<section class="plate" id="pslice">
+<section class="plate" id="pview">
   <p class="eyebrow">15 · Act V — the same items under more than one projection</p>
-  <h2>Slices: one identity, many coordinate systems</h2>
+  <h2>Views: one identity, many coordinate systems</h2>
   <figure>
     <div class="board">
-      <svg class="plate-svg" viewBox="0 0 860 484" role="img" aria-label="A shared entity space fans into three slices — two temporal snapshots and an alternative embedding projection — each with its own coordinates for the same identified items; one item is absent from the earliest slice." font-family="ui-sans-serif, system-ui, sans-serif">
+      <svg class="plate-svg" viewBox="0 0 860 484" role="img" aria-label="A shared entity space fans into three views — two temporal snapshots and an alternative embedding projection — each with its own coordinates for the same identified items; one item is absent from the earliest view." font-family="ui-sans-serif, system-ui, sans-serif">
 
         <defs>
           <marker id="arS" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#101820"/></marker>
         </defs>
-        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Slices: the same identified items, placed by more than one coordinate system</text>
+        <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Views: the same identified items, placed by more than one coordinate system</text>
         <text x="840" y="26" font-size="11" fill="#7d6111" text-anchor="end">design under review — not yet built</text>
 
         <rect x="40" y="52" width="780" height="70" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
-        <text x="56" y="76" font-size="12" fill="#101820">ENTITY SPACE — SHARED ACROSS EVERY SLICE</text>
+        <text x="56" y="76" font-size="12" fill="#101820">ENTITY SPACE — SHARED ACROSS EVERY VIEW</text>
         <text x="56" y="94" font-size="11" fill="#5b6a75">one identity per item · permissions (term postings) · labels and generating sets · metadata · the viewer's mask</text>
-        <text x="56" y="110" font-size="11" fill="#5b6a75">all of it exists once, and is valid for every slice — nothing below owns any of it</text>
+        <text x="56" y="110" font-size="11" fill="#5b6a75">all of it exists once, and is valid for every view — nothing below owns any of it</text>
 
         <g stroke="#101820" stroke-width="1.2" marker-end="url(#arS)">
           <line x1="160" y1="126" x2="160" y2="162"/>
           <line x1="430" y1="126" x2="430" y2="162"/>
           <line x1="700" y1="126" x2="700" y2="162"/>
         </g>
-        <text x="430" y="148" font-size="10.5" fill="#5b6a75" text-anchor="middle">the mask projects into whichever slice the request names</text>
+        <text x="430" y="148" font-size="10.5" fill="#5b6a75" text-anchor="middle">the mask projects into whichever view the request names</text>
 
         <g font-size="12" fill="#101820" text-anchor="middle">
-          <text x="160" y="184">slice "2024-Q4"</text>
-          <text x="430" y="184">slice "2025-Q1"</text>
-          <text x="700" y="184">slice "embedding-B"</text>
+          <text x="160" y="184">view "2024-Q4"</text>
+          <text x="430" y="184">view "2025-Q1"</text>
+          <text x="700" y="184">view "embedding-B"</text>
         </g>
         <g font-size="10.5" fill="#5b6a75" text-anchor="middle">
           <text x="160" y="199">temporal snapshot</text>
@@ -1512,7 +1512,7 @@
           <rect x="330" y="208" width="200" height="150"/>
           <rect x="600" y="208" width="200" height="150"/>
         </g>
-        <!-- slice A: items 1,2,3,5 (4 not yet ingested) -->
+        <!-- view A: items 1,2,3,5 (4 not yet ingested) -->
         <g fill="#9aa8b1">
           <circle cx="100" cy="244" r="5"/><circle cx="185" cy="236" r="5"/><circle cx="88" cy="330" r="5"/>
         </g>
@@ -1522,7 +1522,7 @@
           <text x="108" y="240">1</text><text x="193" y="232">2</text><text x="96" y="326">5</text>
         </g>
         <text x="164" y="292" font-size="9.5" fill="#0e6f8a">3</text>
-        <!-- slice B: items 1..5, drifted -->
+        <!-- view B: items 1..5, drifted -->
         <g fill="#9aa8b1">
           <circle cx="372" cy="252" r="5"/><circle cx="452" cy="228" r="5"/><circle cx="502" cy="318" r="5"/><circle cx="362" cy="336" r="5"/>
         </g>
@@ -1532,7 +1532,7 @@
           <text x="380" y="248">1</text><text x="460" y="224">2</text><text x="510" y="314">4</text><text x="370" y="332">5</text>
         </g>
         <text x="446" y="300" font-size="9.5" fill="#0e6f8a">3</text>
-        <!-- slice C: items 1..5, different arrangement -->
+        <!-- view C: items 1..5, different arrangement -->
         <g fill="#9aa8b1">
           <circle cx="642" cy="332" r="5"/><circle cx="702" cy="230" r="5"/><circle cx="652" cy="248" r="5"/><circle cx="732" cy="338" r="5"/>
         </g>
@@ -1543,19 +1543,19 @@
         </g>
         <text x="776" y="272" font-size="9.5" fill="#0e6f8a">3</text>
 
-        <text x="430" y="380" font-size="11.5" fill="#101820" text-anchor="middle">each slice owns only what is downstream of the permutation: its coordinates, its Morton ranking, its tile ranges</text>
+        <text x="430" y="380" font-size="11.5" fill="#101820" text-anchor="middle">each view owns only what is downstream of the permutation: its coordinates, its Morton ranking, its tile ranges</text>
         <text x="430" y="397" font-size="11.5" fill="#0e6f8a" text-anchor="middle">item 3 is the same entity everywhere — same ID, same permissions, same record; only its position differs</text>
-        <text x="430" y="414" font-size="11.5" fill="#5b6a75" text-anchor="middle">item 4 has no row in "2024-Q4": slice membership is simply "has a position here" — no membership structure is stored</text>
+        <text x="430" y="414" font-size="11.5" fill="#5b6a75" text-anchor="middle">item 4 has no row in "2024-Q4": view membership is simply "has a position here" — no membership structure is stored</text>
 
         <g font-size="11">
-          <text x="20" y="444" fill="#101820">one token authorises across every slice — the mask is built once in entity space, and current credentials govern historical slices too</text>
-          <text x="20" y="462" fill="#5b6a75">deliberately not time-as-a-third-Morton-axis: slices are discrete and viewed one at a time, so each keeps its own clean ranking</text>
-          <text x="20" y="480" fill="#5b6a75">the price per slice: its own permutation array (~4 GB flat at 10⁹, pageable when sparse) and one projection per session that touches it</text>
+          <text x="20" y="444" fill="#101820">one token authorises across every view — the mask is built once in entity space, and current credentials govern historical views too</text>
+          <text x="20" y="462" fill="#5b6a75">deliberately not time-as-a-third-Morton-axis: views are discrete and viewed one at a time, so each keeps its own clean ranking</text>
+          <text x="20" y="480" fill="#5b6a75">the price per view: its own permutation array (~4 GB flat at 10⁹, pageable when sparse) and one projection per session that touches it</text>
         </g>
       
 </svg>
     </div>
-    <figcaption>In relational vocabulary: one logical table (entity space, owning identity and metadata) and N clustered covering indexes (the slices), each a physical ordering carrying only the scalars its rendering needs — so there is nothing to keep consistent between slices.</figcaption>
+    <figcaption>In relational vocabulary: one logical table (entity space, owning identity and metadata) and N clustered covering indexes (the views), each a physical ordering carrying only the scalars its rendering needs — so there is nothing to keep consistent between views.</figcaption>
   </figure>
 </section>
 
@@ -1716,7 +1716,7 @@
       <tr><td colspan="3" style="font-weight:600; padding-top:18px;">Resident structures, 10⁹ items (unsharded)</td></tr>
       <tr><td>Hot columns + Morton codes</td><td class="num">14 + 4 GB</td><td class="src">12 B/row gather columns; 4 B/row sorted code column, searched every request</td></tr>
       <tr><td>Term index</td><td class="num">~20 GB</td><td class="src">at ~10 postings/item; ~2 GB at ~1</td></tr>
-      <tr><td>Permutation</td><td class="num">4 GB</td><td class="src">permission order → row order, u32, one per temporal slice</td></tr>
+      <tr><td>Permutation</td><td class="num">4 GB</td><td class="src">permission order → row order, u32, one per temporal view</td></tr>
       <tr><td>One viewer&#8217;s dense mask</td><td class="num">125 MB</td><td class="src">ceiling; compression takes realistic masks far below it</td></tr>
       <tr><td>Filter column</td><td class="num">1 GB / byte of width</td><td class="src">per declared column — sixteen declared columns cost sixteen times what they declare</td></tr>
 

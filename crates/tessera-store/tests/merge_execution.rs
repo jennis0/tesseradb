@@ -4,7 +4,7 @@ mod fixture;
 
 use std::path::Path;
 
-use fixture::{build_bundle, PARTITION, SLICE};
+use fixture::{build_bundle, PARTITION, VIEW};
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use tessera_store::manifest::Quantisation;
@@ -41,7 +41,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
     write_flush_segment(
         &root.join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id,
             rows,
@@ -65,7 +65,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
     execute_merge(
         &root.join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         MergeSpec {
             seg_id: "merged-1",
             inputs,
@@ -85,8 +85,8 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
 fn seg_dir(root: &Path, seg_id: &str) -> std::path::PathBuf {
     root.join("v00000/partitions")
         .join(PARTITION)
-        .join("slices")
-        .join(SLICE)
+        .join("views")
+        .join(VIEW)
         .join("segments")
         .join(seg_id)
 }
@@ -254,7 +254,7 @@ fn out_of_order_inputs_are_refused() {
     let err = execute_merge(
         &dir.path().join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         MergeSpec {
             seg_id: "merged-1",
             inputs: &[a, b],
@@ -288,7 +288,7 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
     let err = execute_merge(
         &dir.path().join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         MergeSpec {
             seg_id: "merged-1",
             inputs: &[a, b],

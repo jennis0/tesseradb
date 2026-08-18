@@ -23,7 +23,7 @@ No code changed for this finding, doc-only.
 
 **What changed.** Moved the epoch validation from the handler (`viewer.rs`'s `item` function,
 which called `state.engine.meta()` — its own `generation.load_full()` plus a clone of every
-declared scalar and slice name, just to read one field) into `Engine::item` itself
+declared scalar and view name, just to read one field) into `Engine::item` itself
 (`crates/tessera-engine/src/viewport.rs`), checked against the one `generation.load_full()` that
 method already performs for the entity lookup that follows. This was the "preferred" option in
 the brief and I took it rather than arguing for a different shape, since the response bytes/status

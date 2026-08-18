@@ -83,7 +83,7 @@ reconcile explicitly rather than silently:
 
 ## 5. Open — and *not* for Phase 1 to settle
 
-Retroactive revocation across slices (design §9, architecture-affecting);
+Retroactive revocation across views (design §9, architecture-affecting);
 sharded index placement (§13.3); prompt-sample vs full-membership label
 gating (§7.8 — Phase 3, recorded in the manifest either way); entity-ID
 width and exhaustion (§16 — note the new input that croaring's frozen
@@ -128,7 +128,7 @@ already. A masked 300-tile viewport at the full 10⁹ scale measures
 ~1–2 ms of exact `range_cardinality`, so the design's core claim is now
 demonstrated on a real 10⁹ Morton ranking rather than argued from
 Appendix A. Note the permutation into row space costs seconds at that
-size — cache it per (token, slice, pin) as §10.4 requires; it must
+size — cache it per (token, view, pin) as §10.4 requires; it must
 never sit on the per-viewport path.
 
 ## 7b. Findings from the 10⁹ corpus that bear on Phase 1/2 scope

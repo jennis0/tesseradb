@@ -101,7 +101,7 @@ fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
         title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         access: LayerAccess {
             label: None,

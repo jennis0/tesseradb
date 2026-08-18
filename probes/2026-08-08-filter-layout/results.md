@@ -31,7 +31,7 @@ bandwidth problem will be ~5–7× optimistic.
 | Presence shape | bare | runs | roaring | pairs |
 |---|---|---|---|---|
 | Every entity present | **0** | 0.0000 (12 B) | 0.0002 (216 KB) | 4.00 (4.0 GB) |
-| Slice-blocked, 10 slices | n/a | 0.0001 (12 KB) | 0.0004 (36 KB) | 4.00 (400 MB) |
+| View-blocked, 10 views | n/a | 0.0001 (12 KB) | 0.0004 (36 KB) | 4.00 (400 MB) |
 | Scattered, 10% | n/a | 10.80 (1.08 GB) | **1.25** (125 MB) | 4.00 (400 MB) |
 
 **Scan latency, ms, at 1e9:**
@@ -41,8 +41,8 @@ bandwidth problem will be ~5–7× optimistic.
 | all / 1% contiguous | **28.7** | 35.0 | 1078 | 279 |
 | all / 25% broad | **730** | 939 | 1518 | 870 |
 | all / 1% scattered | **221** | 259 | 3684 | 1413 |
-| slices / 1% contiguous | n/a | 113.8 | **109.0** | 56.6 |
-| slices / 25% broad | n/a | 2873 | **161** | 800 |
+| views / 1% contiguous | n/a | 113.8 | **109.0** | 56.6 |
+| views / 25% broad | n/a | 2873 | **161** | 800 |
 | scattered / 25% broad | n/a | 10204 | **232** | 881 |
 
 Every layout is **linear in *n*** from 1e6 to 1e9 (9.5–11.2× per decade). No cliffs, and the
@@ -53,7 +53,7 @@ ranking never changes — the choice can be made once and does not need re-deriv
 - **Presence universal → a bare value array**, entity id as the index. Free, and fastest in every
   candidate shape measured. Nothing else is competitive when it is legal.
 - **Presence partial → a Roaring presence bitmap** with values stored compactly. A few tens of KB
-  for slice-blocked presence, 1.25 B/present when genuinely scattered, and the only layout that
+  for view-blocked presence, 1.25 B/present when genuinely scattered, and the only layout that
   does not degrade on a broad candidate.
 - **Explicit `(entity_id, value)` pairs → never optimal**, on either axis, at any scale or presence
   shape measured. Its case is simplicity, not cost. It costs 4 B/entity **per column**: at 1e9 with
@@ -62,7 +62,7 @@ ranking never changes — the choice can be made once and does not need re-deriv
 **Run tables are a trap, and this is the finding most likely to be re-derived wrongly.** A
 `(start, len, base_rank)` table is unbeatable on storage — 12 bytes for an entire 1e9 column — and
 that number alone recommends it. It collapses on broad candidates, because rank costs a binary
-search *per candidate entity*: 2.9 s slice-blocked and 10.2 s scattered at 1e9, against Roaring's
+search *per candidate entity*: 2.9 s view-blocked and 10.2 s scattered at 1e9, against Roaring's
 161 ms and 232 ms. **Do not choose an addressing structure on its storage column.**
 
 ## Where the masked scan stops being affordable
@@ -169,7 +169,7 @@ improved.
 **(1) Iterate runs, not values** — the same observation applied to both presence shapes.
 
 - **Universal presence** — the entity id *is* the array index, so a candidate run is a contiguous
-  slice of the value column. The loop becomes a bulk range read and a plain integer walk.
+  view of the value column. The loop becomes a bulk range read and a plain integer walk.
 - **Partial presence** — slot *k* is the *k*-th set bit of the presence bitmap, so a naive walk
   steps it one bit at a time and costs O(present) however small the candidate is. But rank is
   **affine inside a run**: within a presence run starting at `ps` with `base` bits before it, entity
@@ -190,9 +190,9 @@ fractional bound on an integer column rounds outward.
 | universal | 1% contiguous | 30.97 ms (3.10 ns) | 9.81 ms | **2.82 ms (0.28 ns)** | **11×** |
 | universal | 25% broad | 900.51 ms (3.60 ns) | 201.55 ms | **74.46 ms (0.30 ns)** | **12×** |
 | universal | 1% scattered | 276.75 ms (27.67 ns) | 161.90 ms | **96.45 ms (9.64 ns)** | 2.9× |
-| slice-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.27 ms (0.03 ns)** | **462×** |
-| slice-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **6.65 ms (0.03 ns)** | 27× |
-| slice-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **18.46 ms (1.85 ns)** | 22× |
+| view-blocked | 1% contiguous | 124.89 ms (12.49 ns) | 0.89 ms | **0.27 ms (0.03 ns)** | **462×** |
+| view-blocked | 25% broad | 176.85 ms (0.71 ns) | 18.97 ms | **6.65 ms (0.03 ns)** | 27× |
+| view-blocked | 1% scattered | 402.97 ms (40.29 ns) | 27.25 ms | **18.46 ms (1.85 ns)** | 22× |
 
 (The "+ typed" column carries the **final** figures, re-measured after arms 6 and 7 against the code
 as it now stands: the universal arms are unchanged within noise throughout and the partial-presence
@@ -293,7 +293,7 @@ which is the adversarial case for a byte comparison and also what a real string 
 Arrow had already validated when the column was opened. The predicates now compare bytes, which
 answers the same question: UTF-8 is self-synchronising, so a valid needle cannot match starting
 part-way through a character. Text also never received arm 4's typed traversal, because its values
-are not a slice of anything; giving the traversal a *slot-range* interface rather than a
+are not a view of anything; giving the traversal a *slot-range* interface rather than a
 *single-slot* one let text walk offset pairs with the same freedom from bounds checks that the
 fixed-width arm walks values with.
 
@@ -564,7 +564,7 @@ removes a layer until the fold — so per-request cost and open cost both grow a
 [`run-layers-1e9.csv`](run-layers-1e9.csv)) times the shipped `ValueColumn` in exactly
 `FilterColumns::resolve`'s loop — base scan plus one scan per extent, unioned — over a 10⁹ `u32`
 base and up to 960 contiguous 25,000-entity extents, which is a day of continuous ingest at the
-90 s flush tick. Medians of three; extents are the single-slice contiguous shape, so the per-layer
+90 s flush tick. Medians of three; extents are the single-view contiguous shape, so the per-layer
 floor is a floor rather than a ceiling.
 
 **The per-layer cost is microseconds, and a layer the candidate never reaches costs nothing
@@ -599,7 +599,7 @@ attribute pass — a merge and a banded postings emit, neither reachable from a 
 a module of `tessera-filter` and cost the universal arms **0.27 → 0.44 ns** per candidate entity,
 with `values.rs` byte-identical bar three visibility keywords. Moving it into `values_writer.rs`,
 the module that exists to keep code out of the hot file, cost exactly the same: **0.44 ns**, and
-the slice-blocked arms doubled from 0.02 to 0.04 ns.
+the view-blocked arms doubled from 0.02 to 0.04 ns.
 
 | variant | universal / 1% contiguous | universal / 25% | universal / 1% scattered |
 |---|---|---|---|
@@ -624,7 +624,7 @@ both. Stated rather than left for the next regression to rediscover.
 
 `layoutprobe` builds one synthetic column of 1,000 distinct `u32` values under three presence
 shapes, and scans it for a single value under three candidate masks, in four layouts. Presence
-shapes: universal; ten slices interleaved in 10⁵-entity blocks (modelling concurrent multi-slice
+shapes: universal; ten views interleaved in 10⁵-entity blocks (modelling concurrent multi-view
 ingest, where write-path §4.2 makes an entity range ascending-*with-holes*); and 10% scattered.
 Candidates: 1% contiguous (a sparse principal under signature-sorted assignment), 25% contiguous
 (a head principal), 1% scattered (the `surnames` policy shape, where signature sorting measured
@@ -648,7 +648,7 @@ corrupt offset refuses there instead of reaching `&bytes[lo..hi]` on a request p
 | universal / 1% contiguous | 2.44 ms | **4.16** |
 | universal / 25% broad | 62.4 ms | **105.7** |
 | universal / 1% scattered | 92.9 ms | 94.1 |
-| slice-blocked (all three) | 0.23 / 5.7 / 15.0 | 0.43 / 10.5 / 15.1 |
+| view-blocked (all three) | 0.23 / 5.7 / 15.0 | 0.43 / 10.5 / 15.1 |
 
 **The function is never called and the regression is identical.** Deleting the call while leaving the
 function in the crate reproduces it exactly (4.18 / 105.66), so this is codegen perturbation from the
@@ -656,7 +656,7 @@ symbol existing — not the check's work, and not its call site.
 
 Four remedies, measured, none sufficient:
 
-| remedy | universal contiguous | universal broad | slice-blocked |
+| remedy | universal contiguous | universal broad | view-blocked |
 |---|---|---|---|
 | `codegen-units = 1` on the crate | 4.21 (no change) | 105.9 (no change) | **fixed** — 0.24 / 5.80 |
 | `#[inline(always)]` on `for_each_slot_run` | 4.18 | 104.6 | unaffected |

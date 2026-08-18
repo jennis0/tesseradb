@@ -58,12 +58,12 @@ def catalogue_battery(catalogue_server, battery_token):
     against contracts §3.2's second request form; `build_battery` itself emits the bbox form.
     """
     meta = catalogue_server.meta(battery_token)
-    raw = catalogue_server.viewport(battery_token, cat.SLICE_ID, 3, BBOX, k=K)
+    raw = catalogue_server.viewport(battery_token, cat.VIEW_ID, 3, BBOX, k=K)
     _tiles, points = wire.decode_viewport(raw)
     item_ids = sorted({tessera_id for tessera_id, _code in points})[:3]
     battery = build_battery(
         meta,
-        slice_id=cat.SLICE_ID,
+        view_id=cat.VIEW_ID,
         item_ids=item_ids,
         bbox=BBOX,
         zooms=ZOOMS,
@@ -72,7 +72,7 @@ def catalogue_battery(catalogue_server, battery_token):
         filters={"department": {"eq": sorted(cat.DEPARTMENT_CODES)[0]}},
     )
     tiles_form = Viewport(
-        cat.SLICE_ID, 1, tiles=(0, 1, 2, 3), k=K, underlay_offset=2
+        cat.VIEW_ID, 1, tiles=(0, 1, 2, 3), k=K, underlay_offset=2
     )
     return battery + (tiles_form,)
 
@@ -113,7 +113,7 @@ def test_region_is_still_a_true_absence(catalogue_server, battery_token, catalog
     resp = requests.post(
         f"{catalogue_server.viewer_base}/v1/region",
         headers={"Authorization": f"Bearer {battery_token}"},
-        json={"slice": cat.SLICE_ID, "bbox": list(BBOX)},
+        json={"view": cat.VIEW_ID, "bbox": list(BBOX)},
         timeout=10,
     )
     assert resp.status_code == 404, (

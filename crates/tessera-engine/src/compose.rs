@@ -1,7 +1,7 @@
 //! I1 mask composition: `M_auth = (fragment \ L) ∪ direct_eval(L)` — evaluated as diffs over a
 //! cached row-space projection of the frozen fragment, never by recomputing the whole mask.
 //!
-//! [`RowProjection`] is the cached `Permutation::project` output for one `(token, slice, pin)` —
+//! [`RowProjection`] is the cached `Permutation::project` output for one `(token, view, pin)` —
 //! computed once — seconds at 10⁹ rows — and reused across every
 //! viewport and every `compose` call in that session, never recomputed on a per-viewport path.
 //!
@@ -40,17 +40,17 @@ use tessera_types::{EntityId, TermId};
 
 use crate::DenyMask;
 
-/// A cached row-space projection of one frozen fragment, for one `(token, slice, pin)`.
+/// A cached row-space projection of one frozen fragment, for one `(token, view, pin)`.
 ///
 /// Constructing this crosses entity space into row space via `Permutation::project`, which
 /// touches every set bit of the fragment and then sorts the result — cheap at the 10k scale this
 /// phase's fixtures use, but *seconds* at 10⁹ rows (see `Permutation::project`'s doc). Callers
-/// must cache the result per `(token, slice, pin)` and never reconstruct it on a per-viewport
+/// must cache the result per `(token, view, pin)` and never reconstruct it on a per-viewport
 /// path (shared-context constraint 8) — `compose` itself only ever reads it via `range_cardinality`
 /// / `contains`, both O(containers touched), never re-derives it from the fragment.
 pub struct RowProjection {
     rows: Bitmap,
-    /// How many of the slice's extents this projection already covers — the index
+    /// How many of the view's extents this projection already covers — the index
     /// `RowSpace::project_extents_from` resumes at when a flush extends it (see
     /// [`RowProjection::extend`]).
     extents_covered: usize,
@@ -83,7 +83,7 @@ pub struct RowProjection {
 }
 
 impl RowProjection {
-    /// Project `fragment`'s entity-space bitmap into this slice's row space. Do not call this on
+    /// Project `fragment`'s entity-space bitmap into this view's row space. Do not call this on
     /// the per-viewport path — see this struct's doc.
     pub fn new(fragment: &FrozenFragment, rows: &RowSpace) -> Self {
         Self::over(rows.project(&fragment.view()), rows)
@@ -216,13 +216,13 @@ impl RowProjection {
 /// The two crossings from the filter's entity-space result into row space produce sets of
 /// different extent, and the difference is not an implementation detail a consumer may ignore.
 /// [`RowSpace::project`](tessera_store::permutation::RowSpace::project) crosses the whole result
-/// and yields every matching row in the slice; the per-tile route tests only the rows the
+/// and yields every matching row in the view; the per-tile route tests only the rows the
 /// request's tiles actually span, and is *silent* — not negative — everywhere else. Handing a
 /// counting path the second while it believes it holds the first under-reports `matched` with no
 /// error anywhere, which is why the extent travels with the bitmap rather than in a comment at
 /// the call site.
 pub enum FilterRows {
-    /// Every matching row in the slice. Exact at any range.
+    /// Every matching row in the view. Exact at any range.
     Complete(Bitmap),
     /// Only the rows inside `domain` were tested. Outside it the bitmap is empty and that
     /// emptiness means nothing at all.
@@ -703,8 +703,8 @@ pub(crate) fn verdict(
     // was replay re-buffering every retained WAL row; `WritePath::reconstruct` now drops any row
     // whose entity already has geometry, so the buffer holds exactly the rows without it and a
     // hit here cannot be an entity the fragment covers. The gate was also only ever *exact* while
-    // entity-allocation order and flush order coincided — one slice per partition — so removing it
-    // takes a silent multi-slice hazard out with it.
+    // entity-allocation order and flush order coincided — one view per partition — so removing it
+    // takes a silent multi-view hazard out with it.
     buffer
         .get(entity)
         .map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
@@ -712,7 +712,7 @@ pub(crate) fn verdict(
 
 /// Derive the row-space deny mask from the authoritative entity-space stores.
 ///
-/// **`{row_of(e) : e ∈ deleted ∪ suppressed}`, per slice, and nothing else.** The union is taken
+/// **`{row_of(e) : e ∈ deleted ∪ suppressed}`, per view, and nothing else.** The union is taken
 /// from [`Overlay::denied`] rather than assembled here, so the rule below has one expression.
 ///
 /// **The derivation rule, stated where it is derived.** This function's result is the *only* legal
@@ -730,25 +730,25 @@ pub(crate) fn verdict(
 /// `segments_version`. `Executor::publish` asserts this equality in debug builds, so a build site
 /// that breaks the rule fails the suite rather than a viewer's map.
 ///
-/// An entity with no row — still buffered, or belonging to another slice — contributes nothing:
+/// An entity with no row — still buffered, or belonging to another view — contributes nothing:
 /// the mask is complete for what it governs, which is row-space questions, and `verdict` answers
 /// the entity-space ones.
 pub(crate) fn derive_denied(overlay: &Overlay, bundle: &Bundle) -> DenyMask {
     let mut out = DenyMask::default();
     for partition in bundle.partitions.values() {
-        for (slice, slice_data) in &partition.slices {
-            // Every slice gets an entry, empty or not: a missing one must mean "the mask and the
+        for (view, view_data) in &partition.views {
+            // Every view gets an entry, empty or not: a missing one must mean "the mask and the
             // bundle disagree", never "nothing is denied here".
             out.insert(
-                slice.clone(),
-                denied_rows_of(overlay, &slice_data.row_space),
+                view.clone(),
+                denied_rows_of(overlay, &view_data.row_space),
             );
         }
     }
     out
 }
 
-/// One slice's deny mask — see [`derive_denied`], whose per-slice body this is.
+/// One view's deny mask — see [`derive_denied`], whose per-view body this is.
 pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
     let mut rows = Bitmap::new();
     for entity in overlay.denied().iter() {

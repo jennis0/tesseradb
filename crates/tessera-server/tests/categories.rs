@@ -151,7 +151,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         pairs: pairs.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -310,7 +310,7 @@ async fn a_viewport_filters_on_a_rendered_number_over_its_own_rows() {
 
     let viewport = |filter: Option<serde_json::Value>| {
         let mut body = serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1000
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1000
         });
         if let Some(filter) = filter {
             body["filters"] = filter;

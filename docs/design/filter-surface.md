@@ -124,7 +124,7 @@ as written** — indistinguishable *"in outcome and in work"* — and no amendme
 
 `M_auth` is the candidate bitmap. Pushing it into an operand's evaluation bounds every intermediate: each
 posting as a wide union accumulates, each canonical node of a level-tree range, and the working set across
-a bit-sliced column's *k* slice operations.
+a bit-sliced column's *k* view operations.
 
 **The cost asymmetry runs in the right direction.** Bitmap operations cost **O(containers touched), not
 O(cardinality)**. A sparse principal's `M_auth` touches few containers, so push-down is cheapest exactly
@@ -238,7 +238,7 @@ through `IdentityKey::invert` costs **~17.5 ns per row**, which dominates every 
 loop and cannot be batched away: inverting a whole tile into a scratch buffer before testing
 membership measures *slightly worse* than interleaving (6.22 ms against 6.00 ms), because the cost is
 the four Feistel rounds and not a stalled pipeline. The table removes it for **4 bytes per row per
-slice**, shared across every filter column — it is a property of the slice's geometry, not of any
+view**, shared across every filter column — it is a property of the view's geometry, not of any
 attribute, so sixteen filterable columns need no more of it than one does.
 
 **Both constants are shape-dependent and neither may be quoted flat.** Arm 3's results are contiguous,
@@ -318,7 +318,7 @@ compared against the live row space, and segment IDs are never reused. **That co
 argument, and the key only selects the candidate.**
 
 **The extension's own cost is the clone, and it couples the cache's population to the publication cadence.**
-At *P* resident broad entries per slice, each flush costs ~*P* × 41 ms of pool time; the byte budget is
+At *P* resident broad entries per view, each flush costs ~*P* × 41 ms of pool time; the byte budget is
 therefore a throughput constraint as well as a memory one, and §4.4 sizes it as both. Extension is **lazy**
 — performed on next touch, folding ~41 ms into one request per operand per publication — rather than eager
 over the whole resident set, so an idle operand costs nothing.
@@ -374,8 +374,8 @@ matching 10⁸ entities costs ~12.7 s to project (*modelled*). So:
 The entries worth caching per canonical node are the *upper-level* nodes, and those are the broad ones: a
 node near the root covers ~*N*/*b* entities, and attribute membership is scattered in row space, so its row
 projection is bitmap-container dominated at **~31–125 MB each at 10⁹** (*modelled* from the *measured*
-125.12 MB dense bound). One popular column's top levels are 4–20 such nodes — **0.5–2.5 GB per slice per
-generation, modelled** — doubled by a retained superseded generation and again by a second slice.
+125.12 MB dense bound). One popular column's top levels are 4–20 such nodes — **0.5–2.5 GB per view per
+generation, modelled** — doubled by a retained superseded generation and again by a second view.
 
 That is the arithmetic the budget must be set against, and it is not obviously satisfiable: a few GB holds
 one hot column and evicts under a second, while each eviction of a broad entry re-arms a ~12.7 s
@@ -393,7 +393,7 @@ introduces it and the register must carry it.
 
 ### 4.5 The cache key
 
-`(operand identity, slice, segments_version, bundle identity, prefix)`.
+`(operand identity, view, segments_version, bundle identity, prefix)`.
 
 **The bundle identity is required, not defensive.** Attribute ordinals are bundle-relative positions
 (index §2.4), so an entry surviving a rebuild would serve a bitmap naming a different set of entities. The

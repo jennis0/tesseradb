@@ -32,7 +32,7 @@ grant and the load client's actual first-drawn bbox reproduces Task 9's regressi
 
 == threads=1 (compute_threads = 1) ==
   total_ns            avg=   80257  p50=   76125  p99=  145770
-  serial prefix sum   avg=   10569   (generation/pin/slice/row_projection/compose/theta/tiles_for_bbox/tile_ranges)
+  serial prefix sum   avg=   10569   (generation/pin/view/row_projection/compose/theta/tiles_for_bbox/tile_ranges)
   parallel section (pool.install + fold), = total - serial prefix   avg=   69688
     [reference] count_ns=823 select_ns=2222 gather_ns=909  (real per-tile work: ~4 us total)
 
@@ -43,7 +43,7 @@ grant and the load client's actual first-drawn bbox reproduces Task 9's regressi
     [reference] count_ns=1483 select_ns=4948 gather_ns=1565  (real per-tile work: ~8 us total, cross-worker sum)
 ```
 
-**Finding.** The serial *prefix* (generation load, pin, slice lookup, row-projection cache lookup,
+**Finding.** The serial *prefix* (generation load, pin, view lookup, row-projection cache lookup,
 compose, θ anchor, `tiles_for_bbox`, `tile_ranges_all`) costs ~10-12 µs either way — unaffected by
 `compute_threads`, as `timing.rs`'s doc predicts. The entire gap is inside "parallel section":
 ~70 µs at `threads=1` vs ~898 µs at `threads=default` — a **12.9x** difference at this exact

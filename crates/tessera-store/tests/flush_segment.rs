@@ -8,7 +8,7 @@ use tessera_store::{open_bundle, ExternalIdSidecar, MortonSlice};
 use tessera_types::{EntityId, IdentityKey, ROW_ABSENT};
 
 mod fixture;
-use fixture::{build_bundle, PARTITION, SLICE};
+use fixture::{build_bundle, PARTITION, VIEW};
 
 const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
 
@@ -36,7 +36,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
     write_flush_segment(
         prefix_dir,
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id,
             rows,
@@ -70,7 +70,7 @@ fn a_flush_segment_is_morton_sorted_against_the_global_quantisation() {
     let out = flush(&prefix, "seg-flush", rows, 50);
 
     let codes = MortonSlice::load(&prefix.join(format!(
-        "partitions/{PARTITION}/slices/{SLICE}/segments/seg-flush/morton.u32"
+        "partitions/{PARTITION}/views/{VIEW}/segments/seg-flush/morton.u32"
     )))
     .unwrap();
     assert!(codes.u32().windows(2).all(|w| w[0] <= w[1]));
@@ -166,7 +166,7 @@ fn every_file_written_is_named_and_digested() {
     );
 
     let seg_dir = prefix.join(format!(
-        "partitions/{PARTITION}/slices/{SLICE}/segments/seg-flush"
+        "partitions/{PARTITION}/views/{VIEW}/segments/seg-flush"
     ));
     let mut on_disk: Vec<String> = std::fs::read_dir(&seg_dir)
         .unwrap()
@@ -224,7 +224,7 @@ fn unordered_rows_are_refused() {
     let result = write_flush_segment(
         &dir.path().join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id: "seg-bad",
             rows: vec![row(52, None, 0.1, 0.1), row(50, None, 0.2, 0.2)],

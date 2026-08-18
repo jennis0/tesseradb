@@ -102,7 +102,7 @@ DEFAULT_WORK_DIR = Path("/tmp/tessera-catalogue")
 
 EXTENT = (0.0, 65536.0, 0.0, 65536.0)
 EXTENT_ARG = "0,65536,0,65536"
-SLICE_ID = "s0"
+VIEW_ID = "s0"
 SEED = 20260731
 
 POINTS_NAME = "catalogue-points.parquet"
@@ -1086,8 +1086,8 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
         str(work_dir / SCHEMA_NAME),
         "--extent",
         EXTENT_ARG,
-        "--slice",
-        SLICE_ID,
+        "--view",
+        VIEW_ID,
         "--out",
         str(bundle_root),
         "--mint-external-ids",
@@ -1135,7 +1135,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "fx_seed": _FX_SEED,
         "geometry_seed": _GEOMETRY_SEED,
         "extent": EXTENT_ARG,
-        "slice": SLICE_ID,
+        "view": VIEW_ID,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
         "id_key": CATALOGUE_ID_KEY_HEX,
         # The filter columns' planting rules — everything `department_of`/`title_of` are a
@@ -1290,7 +1290,7 @@ def verify(bundle: Bundle) -> VerificationReport:
     7. the crossover cases really sit either side of 5%.
     """
     report = VerificationReport()
-    seg = bundle.segment(SLICE_ID)
+    seg = bundle.segment(VIEW_ID)
     report.row_count = seg.row_count
     if seg.row_count != N_ITEMS:
         report.failures.append(f"segment has {seg.row_count} rows, expected {N_ITEMS}")
@@ -1383,8 +1383,8 @@ def verify(bundle: Bundle) -> VerificationReport:
 
 def _tiles_of(bundle: Bundle, entities: set[int], depth: int) -> set[int]:
     """The depth-`depth` tiles the given entities' rows fall in, recomputed from geometry."""
-    seg = bundle.segment(SLICE_ID)
-    codes = bundle.row_morton_codes(SLICE_ID)
+    seg = bundle.segment(VIEW_ID)
+    codes = bundle.row_morton_codes(VIEW_ID)
     shift = 32 - 2 * depth
     out: set[int] = set()
     for row in range(seg.row_count):

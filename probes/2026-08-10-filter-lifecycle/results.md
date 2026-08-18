@@ -348,7 +348,7 @@ Measured per column at 25M, opening each on its own between two reads of the pro
 whatever its size. **A `utf8` column does not** — 99.2% of it is resident the instant it opens,
 because the reader constructs a `LargeStringArray` over the mapped buffer and that validates UTF-8
 across every byte (`values.rs`, `read_values`). The validation is deliberate and is what lets the
-scan slice by offset without re-validating; what is not stated anywhere is that it makes a text
+scan view by offset without re-validating; what is not stated anywhere is that it makes a text
 column's residency its *size*. At 10⁹ that is ~14 GB for one text column, against the 2 MB §8's
 table would lead a reader to size for.
 

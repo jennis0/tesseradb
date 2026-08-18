@@ -37,7 +37,7 @@ print("\n=== RESIDENT-SET STRATEGIES AT N=1e9 ===")
 N=1e9
 opts={
  'x,y (2x f32)':N*8, 'priority u32':N*4, 'priority u16 (quantised)':N*2,
- 'rowid->entity u32':N*4, 'entity->row u32/slice':N*4,
+ 'rowid->entity u32':N*4, 'entity->row u32/view':N*4,
  'term index (~1.5B/posting)':N*10*1.5, 'rep groups (w=120)':349525*120*16,
 }
 for k,v in opts.items(): print(f"  {k:32} {v/1e9:8.2f} GB")

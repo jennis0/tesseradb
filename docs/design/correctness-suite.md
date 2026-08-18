@@ -76,7 +76,7 @@ two most likely to be forgotten by a harness — so the mapping is stated rather
 
 | asked for | the operation(s) under test |
 |---|---|
-| **Build** | `tessera build`: points + pairs → a bundle, one segment per (partition, slice) |
+| **Build** | `tessera build`: points + pairs → a bundle, one segment per (partition, view) |
 | **Load** | opening a bundle, and reopening after every publication and every restart |
 | **Write** | ingest → commit window → WAL → **flush**, which appends a segment, a delta tier, an external-id run, a dictionary extent, an attribute extent and a record extent |
 | **Merge** | the **row-space merge**: bounds the segment count, permutes row ids inside its span, publishes its own geometry version |
@@ -508,7 +508,7 @@ correctness checks that can run where the data came from somewhere real.
   segment**, without which the tile→contiguous-row-range mapping (§11.3) is unsound and every
   masked count is bitmap arithmetic over ranges derived from a lie. **Both are discharged by the
   open the deep pass performs** rather than by a loop of its own: the segment loader and the Morton
-  slice already refuse each, fail-closed. Writing the loops again would duplicate an unreachable
+  view already refuse each, fail-closed. Writing the loops again would duplicate an unreachable
   check; what the suite adds is a deliberate-damage test per property, so a loader relaxed in a
   later change fails here instead of quietly widening what opens. The cost is diagnostic — a
   damaged bundle refuses at the open and names the loader's reason rather than the check's.
@@ -538,7 +538,7 @@ larger tiers, and every *n*th fold in the endurance tier.
 
 > **⊘ Specified, not implemented, and the built half needs extending before it can be invoked this
 > way.** Every bullet above is new. The identity loop of the built verifier restarts its row index
-> at zero for each segment while indexing an array spanning the whole slice — correct for the
+> at zero for each segment while indexing an array spanning the whole view — correct for the
 > single-segment shape a build produces, and wrong for any bundle that has flushed. So "run it after
 > a merge" is not a call site; it is that loop taking a per-segment row offset first.
 
@@ -619,7 +619,7 @@ same function as a built one.** Four materialisers, one source:
   (`external_id`, `x`, `y`, access, the declared scalars) rather than any engine type.
 
 That last is deliberately not the executor's `UnallocatedRow`: that type carries resolved term ids,
-descriptors and a slice, is constructed after admission, and lives in `tessera-lifecycle` — which
+descriptors and a view, is constructed after admission, and lives in `tessera-lifecycle` — which
 this crate must not depend on if §13's dependency rule is to hold. `/control/ingest` takes **Arrow
 IPC**, not JSON, so the corpus emits a batch and the driver posts it.
 
@@ -632,8 +632,8 @@ using a second name for it would create exactly the drift the shared column exis
 A battery is a list of queries and a recorded response per query:
 
 ```python
-Query  = Meta | Categories(column) | Viewport(slice, zoom, bbox|tiles, k, filters) |
-         Region(slice, polygon|bbox, filters) | Item(tessera_id)
+Query  = Meta | Categories(column) | Viewport(view, zoom, bbox|tiles, k, filters) |
+         Region(view, polygon|bbox, filters) | Item(tessera_id)
 Recorded = dict[Query, Canonical]
 Canonical = Json(dict)
           | Streamed(tiles: bytes, points: bytes, underlay: bytes, trailer: dict)
@@ -811,7 +811,7 @@ deliberately rather than relaxed by exemption.
 carrying spec §11's bullets. Two things have to be got right and neither is obvious from the list.
 
 **The row-offset fix comes first.** The built identity loop restarts its row index at zero for each
-segment while indexing an array spanning the whole slice — correct for the single-segment shape a
+segment while indexing an array spanning the whole view — correct for the single-segment shape a
 build produces, and wrong for every bundle that has flushed. Until that is fixed the verifier
 cannot be pointed at any bundle this suite produces, so it is the first commit rather than a
 detail.

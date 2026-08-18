@@ -131,7 +131,7 @@ function encodingOf(store: Store): Encoding {
  * The stand-in colour buffer, reused while the stand-ins and the encoding are the same.
  *
  * The layers are rebuilt on every paint, and a paint happens per store change — arrivals, absorb
- * slices, panel updates. The stand-in *marks* survive most of those by reference (`refreshExact`
+ * views, panel updates. The stand-in *marks* survive most of those by reference (`refreshExact`
  * keeps `standIn` whole for exactly this reason), but their colour buffer was rebuilt from scratch
  * each time: 5.8 x 10^5 marks at the median and 2.7 x 10^6 at worst, measured at 50–70 ms of the
  * very frames that missed p95. Keyed on the stand-in object and the encoding signature — the same

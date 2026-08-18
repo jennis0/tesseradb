@@ -49,8 +49,8 @@ describe('the viewport request', () => {
     const seen = stubFetch(() => new Response(new ArrayBuffer(0), {status: 200}));
     const c = client();
 
-    await c.viewport('tok', {slice: 's0', zoom: 4, layers: []});
-    await c.viewport('tok', {slice: 's0', zoom: 4});
+    await c.viewport('tok', {view: 's0', zoom: 4, layers: []});
+    await c.viewport('tok', {view: 's0', zoom: 4});
 
     // The distinction the server acts on: `[]` costs nothing, absent answers for every layer this
     // principal reaches. A client meaning the first and sending neither pays for the others.
@@ -62,7 +62,7 @@ describe('the viewport request', () => {
     const seen = stubFetch(() => new Response(new ArrayBuffer(0), {status: 200}));
 
     await client().viewport('tok', {
-      slice: 's0',
+      view: 's0',
       zoom: 4,
       layers: ['clusters/hdbscan-2026-08'],
       artifactBudget: 500
@@ -80,7 +80,7 @@ describe('/v1/meta', () => {
     const base = {
       api_version: 1,
       idset: 7,
-      slices: [{id: 's0', display_name: 'S0'}],
+      views: [{id: 's0', display_name: 'S0'}],
       quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536},
       declared_scalars: [],
       selection: {
@@ -97,7 +97,7 @@ describe('/v1/meta', () => {
         {
           name: 'clusters/hdbscan-2026-08',
           title: 'HDBSCAN clusters',
-          slices: ['s0'],
+          views: ['s0'],
           membership: 'enumerated',
           hierarchy: {kind: 'flat', prune_children: false},
           levels: [{level: 0, title: 'clusters', zoom: null}],
@@ -118,7 +118,7 @@ describe('/v1/meta', () => {
       {
         name: 'clusters/hdbscan-2026-08',
         title: 'HDBSCAN clusters',
-        slices: ['s0'],
+        views: ['s0'],
         membership: 'enumerated',
         hierarchy: {kind: 'flat', pruneChildren: false},
         levels: [{level: 0, title: 'clusters', zoom: null}],
@@ -203,7 +203,7 @@ describe('the artifacts frame, decoded from a captured response', () => {
 });
 
 describe('the drill-down', () => {
-  it('requires the slice on the wire, and widens the count the frame delivers as u64', async () => {
+  it('requires the view on the wire, and widens the count the frame delivers as u64', async () => {
     const seen = stubFetch(
       () =>
         new Response(JSON.stringify({layer: 'clusters/x', stable_key: 'c-0001', masked_count: 143}), {
@@ -211,16 +211,16 @@ describe('the drill-down', () => {
         })
     );
 
-    const detail = await client().artifact('tok', 42n, {slice: 's0'});
+    const detail = await client().artifact('tok', 42n, {view: 's0'});
 
     expect(seen[0]!.url).toBe('http://viewer/v1/artifacts/42');
-    expect(seen[0]!.body).toEqual({slice: 's0'});
+    expect(seen[0]!.body).toEqual({view: 's0'});
     expect(detail).toEqual({layer: 'clusters/x', stableKey: 'c-0001', maskedCount: 143n});
   });
 
   it('reads an absent stable key as none rather than as a missing field', async () => {
     stubFetch(() => new Response(JSON.stringify({layer: 'clusters/x', masked_count: 2}), {status: 200}));
-    expect((await client().artifact('tok', 9n, {slice: 's0'})).stableKey).toBeNull();
+    expect((await client().artifact('tok', 9n, {view: 's0'})).stableKey).toBeNull();
   });
 
   it('surfaces the one refusal as a typed error, with nothing else to read from it', async () => {
@@ -232,6 +232,6 @@ describe('the drill-down', () => {
     // Every withheld case arrives here identically — an identifier naming nothing, one naming a
     // point, one gated, one suppressed, one below its layer's criterion. A caller that branched on
     // the detail string would be inventing a distinction the server refuses to make.
-    await expect(client().artifact('tok', 1n, {slice: 's0'})).rejects.toThrow(TesseraError);
+    await expect(client().artifact('tok', 1n, {view: 's0'})).rejects.toThrow(TesseraError);
   });
 });

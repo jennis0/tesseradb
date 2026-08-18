@@ -268,7 +268,7 @@ fn fixture() -> Fixture {
         pairs: pairs.clone(),
         out: bundle.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: "000102030405060708090a0b0c0d0e0f".to_string(),
@@ -613,7 +613,7 @@ fn ingest_and_flush_with(
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1205,7 +1205,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
 
     let short = UnallocatedRow {
         external_id: Some(b"short".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1225,7 +1225,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
     // (I9) and leaves the executor running.
     let good = UnallocatedRow {
         external_id: Some(b"good".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1715,7 +1715,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
     // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
     let row = UnallocatedRow {
         external_id: Some(b"buffered".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,

@@ -1,4 +1,4 @@
-//! `row-entity.u32`: the **row→entity** direction of a slice's base permutation, materialised.
+//! `row-entity.u32`: the **row→entity** direction of a view's base permutation, materialised.
 //!
 //! `permutation.bin` is entity→row and [`crate::permutation`] is emphatic that it is the only
 //! legal path in that direction (I4). This is the other direction, for the one caller that needs
@@ -18,8 +18,8 @@
 //! difference between 6.0 ms and 0.7 ms on a clumped result, and 18.5 ms against 11.1 ms on a
 //! scattered one.
 //!
-//! The cost is **4 bytes per row per slice**, and it is *shared across every filter column* — this
-//! is a property of the slice's geometry, not of any attribute, so sixteen filterable columns need
+//! The cost is **4 bytes per row per view**, and it is *shared across every filter column* — this
+//! is a property of the view's geometry, not of any attribute, so sixteen filterable columns need
 //! no more of it than one does. Mapped rather than read, a viewport touches only the rows it draws:
 //! ~1.2 MB for 300 tiles of 1,000 rows, sequential within each tile.
 //!
@@ -50,7 +50,7 @@ use tessera_types::{EntityId, RowId};
 
 use crate::error::{Result, StoreError};
 
-/// The file name, beside `permutation.bin` in a slice directory.
+/// The file name, beside `permutation.bin` in a view directory.
 pub const ROW_ENTITY_FILE: &str = "row-entity.u32";
 
 /// A memory-mapped `row-entity.u32`.
@@ -137,7 +137,7 @@ impl RowToEntity {
     }
 }
 
-/// Write `row-entity.u32` from a slice's row order.
+/// Write `row-entity.u32` from a view's row order.
 ///
 /// `row_order[row]` is the entity at that row — the same vector the build already has in hand as
 /// its tiler output, and the same one the fold builds when it rewrites row space, so neither

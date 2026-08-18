@@ -155,7 +155,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
         pairs,
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -195,8 +195,8 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
                 .join(prefix)
                 .join("partitions")
                 .join(phash)
-                .join("slices")
-                .join(&segment.slice)
+                .join("views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
@@ -372,7 +372,7 @@ fn both_build_implementations_write_the_same_tail() {
         pairs: pairs.clone(),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -395,11 +395,11 @@ fn both_build_implementations_write_the_same_tail() {
     tessera_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
 
     let a = std::fs::read(
-        streamed.join("v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+        streamed.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
     )
     .unwrap();
     let b = std::fs::read(
-        linear.join("v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+        linear.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
     )
     .unwrap();
     assert_eq!(
@@ -425,7 +425,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-1".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -487,7 +487,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
             .accept_ingest(
                 vec![UnallocatedRow {
                     external_id: Some(format!("merged-{batch}").into_bytes()),
-                    slice: "s0".to_string(),
+                    view: "s0".to_string(),
                     descriptors: vec![b"0".to_vec()],
                     // Spread across the extent so the merge genuinely interleaves in Morton order
                     // rather than appending one segment after another.
@@ -571,7 +571,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"folded-1".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 500.0,
                 y: 500.0,
@@ -654,7 +654,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
 /// point. A row-indexed assertion would pass on a gather that carried values forward unpermuted.
 ///
 /// **Two segments and a multi-tile viewport**, because the interesting failures need both. The
-/// flush gives the slice a second segment, so a tile's rows resolve to different parts and any
+/// flush gives the view a second segment, so a tile's rows resolve to different parts and any
 /// per-part hoisting has to key correctly; `zoom = 3` spans many tiles, so the per-tile results
 /// have to concatenate in tile order. The schema's three widths are what make a positional slip a
 /// type error rather than a plausible value (see this file's header).
@@ -669,7 +669,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-read-path".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -845,7 +845,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         pairs,
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -870,7 +870,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
 fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(b"non-prefix-flushed".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -898,8 +898,8 @@ fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
                 .join(prefix)
                 .join("partitions")
                 .join(phash)
-                .join("slices")
-                .join(&segment.slice)
+                .join("views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
@@ -1228,7 +1228,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         pairs,
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1285,7 +1285,7 @@ fn record_stack(root: &Path) -> tessera_filter::RecordStack {
 fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,

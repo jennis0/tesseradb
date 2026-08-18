@@ -233,7 +233,7 @@ pub struct Session {
     /// Bearer token: 32 random bytes, hex-encoded.
     pub token: String,
     /// A process-local identity for this session, distinct from `token` — used as (part of) the
-    /// row-projection cache key (`(token_id, slice, segments_version)`, shared-context
+    /// row-projection cache key (`(token_id, view, segments_version)`, shared-context
     /// constraint 8) so the cache never has to hash or compare the full token string.
     pub token_id: u64,
     /// The credential's granted terms, resolved to bundle-relative `TermId`s. An unknown
@@ -337,7 +337,7 @@ impl Session {
     }
 }
 
-/// One (partition, slice)'s live segment count — [`Engine::live_segment_counts`]'s element, and
+/// One (partition, view)'s live segment count — [`Engine::live_segment_counts`]'s element, and
 /// what `/control/status` publishes under `segments`.
 ///
 /// **Plain `String`s and a `usize`, defined here rather than re-exported from `tessera-store`.**
@@ -346,10 +346,10 @@ impl Session {
 /// `DeclaredScalar` already establish at the crate root. This one owns nothing of the store's
 /// vocabulary, so it is a definition here rather than a re-export.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SliceSegments {
+pub struct ViewSegments {
     pub partition: String,
-    pub slice: String,
-    /// Segments this slice's viewport sweep would iterate — base plus every flush extent merge has
+    pub view: String,
+    /// Segments this view's viewport sweep would iterate — base plus every flush extent merge has
     /// not yet collapsed.
     pub segments: usize,
 }
@@ -357,7 +357,7 @@ pub struct SliceSegments {
 /// One partition's live geometry position — [`Engine::partition_status`]'s element, and what
 /// `/control/status` publishes as contracts §3.4's per-partition block.
 ///
-/// Defined here rather than re-exported from `tessera-store`, for [`SliceSegments`]' reason: the
+/// Defined here rather than re-exported from `tessera-store`, for [`ViewSegments`]' reason: the
 /// server may not depend on the store (SA §3), so a value it publishes must be nameable from this
 /// crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,29 +395,29 @@ pub enum EngineError {
     Wal(WalError),
     Plugin(PluginError),
     Io(io::Error),
-    /// A viewport request named a slice this bundle doesn't have.
-    UnknownSlice(String),
-    /// A slice holding a segment whose rows have no known place in the slice's row space.
+    /// A viewport request named a view this bundle doesn't have.
+    UnknownView(String),
+    /// A view holding a segment whose rows have no known place in the view's row space.
     ///
     /// `tile_ranges` returns **segment-local** row indices (contracts §2.4) while the mask is a
-    /// bitmap over the whole **slice** row space, so serving a segment requires knowing its
+    /// bitmap over the whole **view** row space, so serving a segment requires knowing its
     /// `row_base`. Exactly one segment — the build segment, the one `permutation.bin` addresses —
     /// legitimately has no extent and begins at 0; every other arrives with one, from a flush or
     /// from a merge. A second segment with no extent means the row space and the segment list
-    /// disagree about what the slice holds.
+    /// disagree about what the view holds.
     ///
     /// **Fails closed because the wrong answer is quiet.** Defaulting such a segment to `row_base
     /// 0` would count its rows against the base segment's mask positions and gather points from
     /// one entity under another's identity — every count plausible, every mark wrong, no error
     /// anywhere. That is a worse outcome than a 500.
     SegmentWithoutRowBase {
-        slice: String,
+        view: String,
         seg_id: String,
     },
-    /// This generation's deny mask has no entry for a slice its bundle carries.
+    /// This generation's deny mask has no entry for a view its bundle carries.
     ///
     /// **Fails closed for the same reason [`Self::SegmentWithoutRowBase`] does: the wrong answer
-    /// is silent.** `compose::derive_denied` gives every slice an entry, empty when nothing is
+    /// is silent.** `compose::derive_denied` gives every view an entry, empty when nothing is
     /// denied, precisely so that a missing one cannot be read as "nothing is denied here". Reading
     /// it that way would compose a mask with the deny half simply absent — every suppressed and
     /// deleted row served on the map, every count including them, and no error anywhere. A 500 is
@@ -426,18 +426,18 @@ pub enum EngineError {
     /// Unreachable while the mask and the bundle are built together, which `Executor::publish`
     /// asserts in debug.
     DenyMaskMissing {
-        slice: String,
+        view: String,
     },
-    /// A slice carried by more than one partition.
+    /// A view carried by more than one partition.
     ///
     /// The symmetric case to [`Self::SegmentWithoutRowBase`], and it fails closed for the symmetric
-    /// reason: `Engine::viewport` resolves a slice by taking the first partition that carries the
+    /// reason: `Engine::viewport` resolves a view by taking the first partition that carries the
     /// id, and θ's anchor plus every rank is then computed over **that partition alone**. Design
     /// §12.3 requires the anchor to be session-global across partitions — a per-partition anchor
     /// makes "below the cut" mean different things in different partitions, so the coordinator's
     /// union stops computing §7.2's definition. The build emits exactly one partition, so this
     /// is unreachable today; serving a §12 bundle half-masked with no error is what it prevents.
-    MultiPartitionSlice(String),
+    MultiPartitionView(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
     /// `/v1/categories` was asked for a `listing = "per_viewer"` column whose per-`(column, code)`
@@ -471,7 +471,7 @@ pub enum EngineError {
     /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
     /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
     UnderlayRefused(String),
-    /// This session's row projection for `(token_id, slice, segments_version)` was being built by
+    /// This session's row projection for `(token_id, view, segments_version)` was being built by
     /// a concurrent request, and **this request waited for it and the wait budget ran out**
     /// (decision 0058). It is no longer the immediate answer to finding a build in flight: a racer
     /// parks on that build and is served its result, because refusing sheds no load — the work is
@@ -533,23 +533,23 @@ impl std::fmt::Display for EngineError {
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
-            EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
-            EngineError::SegmentWithoutRowBase { slice, seg_id } => write!(
+            EngineError::UnknownView(view) => write!(f, "unknown view '{view}'"),
+            EngineError::SegmentWithoutRowBase { view, seg_id } => write!(
                 f,
-                "slice '{slice}' holds segment '{seg_id}', which has no extent and so no known \
-                 row_base — the row space and the segment list disagree about what this slice \
+                "view '{view}' holds segment '{seg_id}', which has no extent and so no known \
+                 row_base — the row space and the segment list disagree about what this view \
                  holds (see EngineError::SegmentWithoutRowBase's doc)"
             ),
-            EngineError::DenyMaskMissing { slice } => write!(
+            EngineError::DenyMaskMissing { view } => write!(
                 f,
-                "this generation's deny mask has no entry for slice '{slice}', so the mask and \
+                "this generation's deny mask has no entry for view '{view}', so the mask and \
                  the bundle disagree about what it holds (see EngineError::DenyMaskMissing's doc)"
             ),
-            EngineError::MultiPartitionSlice(slice) => write!(
+            EngineError::MultiPartitionView(view) => write!(
                 f,
-                "slice '{slice}' is carried by more than one partition, which this engine's \
+                "view '{view}' is carried by more than one partition, which this engine's \
                  single-anchor selection does not yet support (see \
-                 EngineError::MultiPartitionSlice's doc)"
+                 EngineError::MultiPartitionView's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
             EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
@@ -606,7 +606,7 @@ pub struct Engine {
     pub(crate) plugin: Arc<dyn Plugin>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
-    /// Artifact memberships in row space, one entry per `(slice, layer, level)` — see
+    /// Artifact memberships in row space, one entry per `(view, layer, level)` — see
     /// [`ArtifactProjections`]. Distinct from the cache above and deliberately so: that one is
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
     /// published), and they move on different events.
@@ -965,15 +965,15 @@ impl Engine {
             &dict,
             &initial_deny,
             &mut vocabularies,
-            // An entity belongs to exactly one slice, so "any slice's row space holds it" is the
-            // same question as "its slice's does" — and asking it this way needs no slice lookup,
+            // An entity belongs to exactly one view, so "any view's row space holds it" is the
+            // same question as "its view's does" — and asking it this way needs no view lookup,
             // which the buffer would otherwise have to supply before it has been filtered.
             |entity| {
                 bundle.partitions.values().any(|partition| {
                     partition
-                        .slices
+                        .views
                         .values()
-                        .any(|slice| slice.row_space.row_of(entity).is_some())
+                        .any(|view| view.row_space.row_of(entity).is_some())
                 })
             },
         )?;
@@ -1675,7 +1675,7 @@ impl Engine {
         self.generation.load().overlay.deleted_len()
     }
 
-    /// Live segments per (partition, slice), read straight off the current generation — the gauge
+    /// Live segments per (partition, view), read straight off the current generation — the gauge
     /// decision 0049 obliges and `/control/status` publishes as `segments`.
     ///
     /// **This is a read-path constant made observable, not a maintenance counter.** A viewport pays
@@ -1693,25 +1693,25 @@ impl Engine {
     /// segment set a request actually sweeps. What a reader gets here is exactly what
     /// `viewport::tile_ranges_all` would iterate at the same instant.
     ///
-    /// Sorted by `(partition, slice)` because the generation holds them in `HashMap`s: an operator
+    /// Sorted by `(partition, view)` because the generation holds them in `HashMap`s: an operator
     /// diffing two status responses must not see a reordering that means nothing.
-    pub fn live_segment_counts(&self) -> Vec<SliceSegments> {
+    pub fn live_segment_counts(&self) -> Vec<ViewSegments> {
         let generation = self.generation.load();
-        let mut counts: Vec<SliceSegments> = generation
+        let mut counts: Vec<ViewSegments> = generation
             .bundle
             .partitions
             .iter()
             .flat_map(|(partition, data)| {
-                data.slices
+                data.views
                     .iter()
-                    .map(move |(slice, slice_data)| SliceSegments {
+                    .map(move |(view, view_data)| ViewSegments {
                         partition: partition.clone(),
-                        slice: slice.clone(),
-                        segments: slice_data.segments.len(),
+                        view: view.clone(),
+                        segments: view_data.segments.len(),
                     })
             })
             .collect();
-        counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
+        counts.sort_by(|a, b| (&a.partition, &a.view).cmp(&(&b.partition, &b.view)));
         counts
     }
 

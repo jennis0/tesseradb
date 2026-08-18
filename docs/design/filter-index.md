@@ -77,7 +77,7 @@ nonexistent one indistinguishable **in work**, as per-point-attributes §3.8 req
 
 Two further consequences. The artefact is the same one per-point-attributes §3.3 needs for vocabulary
 visibility, so building it closed the `listing = "per_viewer"` refusal rather than deferring it. And it
-is **entity-space, so it is slice-invariant**: a slice attaches, populates or drops without touching any
+is **entity-space, so it is view-invariant**: a view attaches, populates or drops without touching any
 of it (§7).
 
 > **⊘ Built: the read path for every family, and ingest.** The value column, its presence bitmap,
@@ -130,7 +130,7 @@ whether every entity carries one, and the choice is **measured, not judged**
 | Presence | Addressing | Cost of the addressing structure at 10⁹ |
 |---|---|---|
 | Every entity carries a value | **None** — the entity id is the array index | 0 |
-| Partial | **A Roaring presence bitmap**; the *k*-th set bit's value is at slot *k* | 36 KB slice-blocked, 1.25 B/present scattered |
+| Partial | **A Roaring presence bitmap**; the *k*-th set bit's value is at slot *k* | 36 KB view-blocked, 1.25 B/present scattered |
 
 Two results from that campaign are worth carrying at the site, because both invert what the arithmetic
 suggests. An explicit `(entity_id, value)` pair column — the obvious shape — is **never optimal on
@@ -140,11 +140,11 @@ all — 12 bytes for an entire 10⁹ column — yet collapses on a broad candida
 rank becomes a binary search per candidate entity. **An addressing structure cannot be chosen from its
 storage column.**
 
-**Partial presence is the ordinary case, not the exception.** `x-tessera-slice` is per request and a
-flush plans per slice, but write-path §4.2 makes a segment's entity range *ascending-with-holes* "where
-a commit window interleaved slices" — merge's adjacency test is `hi < lo`, not `hi + 1 == lo`, for
-exactly that reason. Under concurrent multi-slice ingest a dense positional extent would waste up to
-(*S*−1)/*S* of its slots, so "the entity id is the array index" is single-slice reasoning and holds only
+**Partial presence is the ordinary case, not the exception.** `x-tessera-view` is per request and a
+flush plans per view, but write-path §4.2 makes a segment's entity range *ascending-with-holes* "where
+a commit window interleaved views" — merge's adjacency test is `hi < lo`, not `hi + 1 == lo`, for
+exactly that reason. Under concurrent multi-view ingest a dense positional extent would waste up to
+(*S*−1)/*S* of its slots, so "the entity id is the array index" is single-view reasoning and holds only
 where a column genuinely covers everything.
 
 ### 2.2 The scan, and why its work carries no channel
@@ -251,7 +251,7 @@ work rather than of the values:
   rank is what costs: slot *k* is the *k*-th set bit of the presence bitmap, so a per-bit walk pays
   O(present) however small the candidate is. Rank is affine *inside* a run — entity `e` in a run
   from `ps` with `base` bits before it is at slot `base + (e − ps)` — so merging the two bitmaps'
-  runs gives every slot by arithmetic. A 1% candidate over a slice-blocked column went from
+  runs gives every slot by arithmetic. A 1% candidate over a view-blocked column went from
   124.89 ms to **0.30 ms**. Arm 1 read that cell as a cost of the addressing structure; it was the
   rank algorithm, and the presence bitmap is now a filter on work rather than a tax on it.
 - **Traverse at the column's own type**, so the `Codes` dispatch and the widening to a common
@@ -266,7 +266,7 @@ work rather than of the values:
 
 **One traversal serves every family, and that is a security property before it is a tidiness one.**
 It hands out contiguous *slot ranges* rather than single slots, which is what lets a fixed-width
-column walk a slice of values and a text column walk a slice of offset pairs, each without a bounds
+column walk a slice of values and a text column walk a view of offset pairs, each without a bounds
 check per element. Because the ranges are a function of `(candidate, presence)` alone, a predicate
 cannot skip work whatever it is testing for — so adding a family adds a comparison and cannot add a
 channel.
@@ -310,7 +310,7 @@ close:
 | Scattered | ~1×10⁸ entities — 10% |
 
 Measured, a 25%-coverage contiguous principal costs **61 ms** over a universal column and **12 ms**
-over a slice-blocked one: inside the band by more than an order of magnitude, with no accelerator of
+over a view-blocked one: inside the band by more than an order of magnitude, with no accelerator of
 any kind. **No coverage exceeds the budget on a contiguous candidate** — the whole corpus scans in
 ~240 ms — so the corner an accelerator addresses is a scattered candidate at high coverage, and not
 "broad coverage" as an earlier revision framed it against a borrowed 50 ms viewport budget.
@@ -531,7 +531,7 @@ they are *declined* rather than deferred are worth stating, because one of them 
 - **Bit-sliced indexing** is declined as unnecessary rather than harmful. It is I2-clean and would give
   masked min/max and sum for free — the argument for revisiting it is an *aggregate* argument, not a
   range-latency one, and it should be made on that ground if it is made at all. No mature Rust library
-  exists, so it is a few hundred lines against a published design, and its ~half-dense slices are what
+  exists, so it is a few hundred lines against a published design, and its ~half-dense views are what
   Roaring barely compresses.
 
 **So a numeric column is a value column and nothing else.** The scan is exact, carries no timing channel,
@@ -601,7 +601,7 @@ costs 49.5 ms (§2.3). **Do not cite the union spread against a filter operand.*
 
 What contiguity does still govern is the *scan*, where it is worth **~40×**: ~0.24 ns per candidate
 entity contiguous against ~10 ns scattered. A contiguous candidate collapses to a handful of runs, so
-the scan walks slices of the value column; a scattered one degenerates to a run per entity and pays
+the scan walks views of the value column; a scattered one degenerates to a run per entity and pays
 cache misses on every read (§2.2).
 
 ---
@@ -775,7 +775,7 @@ The mechanics, against the pass's existing shape:
   forever. The merge therefore carries the axis's own guard, as the dictionary axis carries its
   never-repeat guard: the output presence is the union of the inputs', refused unless the union's
   cardinality equals the sum of the inputs' — O(containers), checked before any value is written.
-  Values merge by family: a fixed-width column concatenates its inputs' slices in entity order; a
+  Values merge by family: a fixed-width column concatenates its inputs' views in entity order; a
   keyword column additionally merges its inputs' dictionaries and **renumbers every ordinal**
   against the merged key set, under a guard of its own — recolouring every value changes no
   cardinality, so the union-equals-sum check above passes over a window whose every key has moved.
@@ -987,8 +987,8 @@ reads the process's own mappings: a folded entity is outside every candidate, so
 cloned column holds are unreachable, and what a clone actually costs is the fold's reason for
 existing — the superseded prefix stays mapped, so the reclamation unlinks names and frees nothing.
 
-**Slice invariance holds through the fold**: the pass is per partition in entity space, reads
-nothing per-slice, and emits nothing per-slice. §7's statement is unchanged by it.
+**View invariance holds through the fold**: the pass is per partition in entity space, reads
+nothing per-view, and emits nothing per-view. §7's statement is unchanged by it.
 
 **Deliberately not designed here.** A resumable attribute pass — the fold has no resume anywhere,
 deliberately (compaction §3), and this pass inherits that. And any change to *when* folds run:
@@ -1025,7 +1025,7 @@ whole-column writers they replace at every chunking tested, and the batch build 
 
 That mattered more than an optimisation: it is what the earlier revision of this paragraph had
 wrong. `write_value_column` took a fully materialised `Codes` and the keyed writer its complete
-entries slice, and the format's reader refuses a second record batch, so incremental append was no
+entries view, and the format's reader refuses a second record batch, so incremental append was no
 escape — banding the *ids* against unbanded writers would have moved the resident gigabytes from
 the ids to the values array or the serialised postings rather than removing them. Measured at
 2×10⁸ over a fully covered `u32` category, heap peak: the value column 800 MB → **1 MB**, the
@@ -1113,28 +1113,28 @@ pass list gain the attribute pass and the band budget (normative — its own rev
 and contracts §2.1's tree gain the coalesce's fourth axis and `coalesced/<id>/attrs/<column>/`.
 
 
-## 7. Slices
+## 7. Views
 
-**The filter index is slice-invariant.** Nothing about it is per-slice, and a slice attaching, being
+**The filter index is view-invariant.** Nothing about it is per-view, and a view attaching, being
 populated or being dropped touches none of it.
 
 The governing statement is architecture §9: the term index, node memberships and generating sets are
-shared across slices in entity space (**I4**), while each slice stores its own permutation and derives its
+shared across views in entity space (**I4**), while each view stores its own permutation and derives its
 own tile ranges. per-point-attributes §3.9 draws the same line for attributes — `render` is row-space and
-therefore per-slice; `filter` and `inspect` are entity-space, declared once, and apply everywhere.
-`slices-and-multi-table.md` reaches the same conclusion in more detail, but it is provisional and
+therefore per-view; `filter` and `inspect` are entity-space, declared once, and apply everywhere.
+`views-and-multi-table.md` reaches the same conclusion in more detail, but it is provisional and
 explicitly not approved, so it corroborates this section rather than grounding it.
 
-- **One entity ID globally**, never one per `(slice, entity)`. An entity appearing in several slices has one
+- **One entity ID globally**, never one per `(view, entity)`. An entity appearing in several views has one
   set of attribute postings and one membership in every value it carries.
-- **Attach and drop are row-space operations.** Populating a new slice builds that slice's Morton order and
+- **Attach and drop are row-space operations.** Populating a new view builds that view's Morton order and
   permutation; dropping one tombstones a name and leaves its row-space artefacts to the next compaction.
   Neither deletes an entity, and neither reads or writes anything under `attrs/`.
-- **The per-slice cost is the projection, not the index** — surface §4's subject.
+- **The per-view cost is the projection, not the index** — surface §4's subject.
 
-With tier paths slice-independent (index §5.3), there is no per-slice case anywhere in this document — and
+With tier paths view-independent (index §5.3), there is no per-view case anywhere in this document — and
 the two removal rules gain none either, because deletions and suppressions are entity-space mechanisms
-that do not know slices exist.
+that do not know views exist.
 
 ---
 

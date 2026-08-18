@@ -1,7 +1,7 @@
 //! What an artifact's membership is, and where the canonical copy lives.
 //!
-//! **Entity space, always, for the durable form.** Entity ids are permanent and slice-invariant;
-//! row space is per slice, derived, and renumbered globally by every fold. A membership stored in
+//! **Entity space, always, for the durable form.** Entity ids are permanent and view-invariant;
+//! row space is per view, derived, and renumbered globally by every fold. A membership stored in
 //! row space would be a frozen projection — correct until the first fold, then silently naming
 //! other people's documents. The row form is built from this one at open and rebuilt when the
 //! generation moves (`annotation-representation.md` §2.1), and it never travels.
@@ -215,7 +215,7 @@ pub struct ArtifactRecord {
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
     /// no `tessera_id` for it.
     pub stable_key: Option<String>,
-    /// Entity-space membership — the canonical, slice-invariant record.
+    /// Entity-space membership — the canonical, view-invariant record.
     pub members: Bitmap,
     /// The ranked variations of this artifact's supplied content, most specific first.
     ///
@@ -1014,9 +1014,9 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
     let mut at = 0usize;
     let mut take = |n: usize| -> Option<&[u8]> {
         let end = at.checked_add(n)?;
-        let slice = blob.get(at..end)?;
+        let view = blob.get(at..end)?;
         at = end;
-        Some(slice)
+        Some(view)
     };
     let key_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
     if key_len == u16::MAX as usize {

@@ -73,7 +73,7 @@ export type Domain = {min: number; max: number};
 
 /**
  * Widen `held` to cover `column`, or establish it. Never narrows: a pan that happens to land on a
- * narrow slice of the data must not recolour everything that is still on screen.
+ * narrow view of the data must not recolour everything that is still on screen.
  *
  * Returns `null` for a column with no numeric reading (`bool`, `utf8`) or no marks.
  */

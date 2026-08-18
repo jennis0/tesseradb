@@ -37,9 +37,9 @@ use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, Segme
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
 
-/// One loaded (partition, slice) pair: the row space addressing its rows, and every segment
-/// in that slice — a build writes exactly one (contracts §2.1's "one segment per
-/// (partition, slice) at build"); the field is a `Vec` because the on-disk shape, and the
+/// One loaded (partition, view) pair: the row space addressing its rows, and every segment
+/// in that view — a build writes exactly one (contracts §2.1's "one segment per
+/// (partition, view) at build"); the field is a `Vec` because the on-disk shape, and the
 /// engine's tile-lookup interface with it, already generalises to streamed segments.
 ///
 /// `row_space` is the built `permutation.bin` plus whatever extents flush has appended — see
@@ -52,7 +52,7 @@ use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESEN
 /// `Clone`; an `Arc` per segment is what makes "share, do not re-open" expressible, and re-opening
 /// would re-pay `Permutation::load`'s O(bound) `validate_rows` per flush.
 #[derive(Debug, Clone)]
-pub struct SliceData {
+pub struct ViewData {
     pub row_space: RowSpace,
     pub segments: Vec<Arc<SegmentData>>,
 }
@@ -68,9 +68,9 @@ pub struct SegmentData {
 }
 
 /// One loaded partition: its verified side-manifest, the `n` that manifest was found at, the
-/// highest `n` present in the partition directory, and every slice it names.
+/// highest `n` present in the partition directory, and every view it names.
 ///
-/// `Clone` for [`Bundle::with_segment`]'s sake — see [`SliceData`]. Cloning one copies a manifest
+/// `Clone` for [`Bundle::with_segment`]'s sake — see [`ViewData`]. Cloning one copies a manifest
 /// and two small maps of `Arc`s; it opens no file.
 #[derive(Debug, Clone)]
 pub struct PartitionData {
@@ -97,7 +97,7 @@ pub struct PartitionData {
     /// built, its time bound is not, so a stepped-down partition serves its older manifest
     /// indefinitely. Contracts §2.3 is marked the same way.
     pub highest_candidate_n: u64,
-    pub slices: HashMap<String, SliceData>,
+    pub views: HashMap<String, ViewData>,
 }
 
 impl PartitionData {
@@ -131,7 +131,7 @@ pub struct PublishedManifest {
 }
 
 impl Bundle {
-    /// This bundle plus one segment in `(partition, slice)`: a **new** `Bundle` sharing every
+    /// This bundle plus one segment in `(partition, view)`: a **new** `Bundle` sharing every
     /// mapped file with this one.
     ///
     /// **Required, not an optimisation.** `open_bundle` maps every file afresh and
@@ -152,23 +152,23 @@ impl Bundle {
     pub fn with_segment(
         &self,
         partition: &str,
-        slice: &str,
+        view: &str,
         segment: SegmentData,
         extent: SegmentExtent,
         published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        self.substituting(partition, slice, published, |slice_data| {
-            let row_space = slice_data.row_space.with_extent(extent).ok_or_else(|| {
+        self.substituting(partition, view, published, |view_data| {
+            let row_space = view_data.row_space.with_extent(extent).ok_or_else(|| {
                 StoreError::MalformedBundle {
                     detail: format!(
-                        "flush segment '{}' does not continue slice '{slice}'s row space",
+                        "flush segment '{}' does not continue view '{view}'s row space",
                         segment.seg_id
                     ),
                 }
             })?;
-            let mut segments = slice_data.segments.clone();
+            let mut segments = view_data.segments.clone();
             segments.push(Arc::new(segment));
-            Ok(SliceData {
+            Ok(ViewData {
                 row_space,
                 segments,
             })
@@ -185,30 +185,30 @@ impl Bundle {
     pub fn with_merged(
         &self,
         partition: &str,
-        slice: &str,
+        view: &str,
         consumed: &[String],
         segment: SegmentData,
         extent: SegmentExtent,
         published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        self.substituting(partition, slice, published, |slice_data| {
-            let row_space = slice_data
+        self.substituting(partition, view, published, |view_data| {
+            let row_space = view_data
                 .row_space
                 .collapsing(consumed, extent)
                 .ok_or_else(|| StoreError::MalformedBundle {
                     detail: format!(
-                        "merge inputs {consumed:?} are not a present, adjacent run of slice \
-                         '{slice}', or the merged segment does not preserve their rows"
+                        "merge inputs {consumed:?} are not a present, adjacent run of view \
+                         '{view}', or the merged segment does not preserve their rows"
                     ),
                 })?;
-            let mut segments: Vec<Arc<SegmentData>> = slice_data
+            let mut segments: Vec<Arc<SegmentData>> = view_data
                 .segments
                 .iter()
                 .filter(|s| !consumed.contains(&s.seg_id))
                 .cloned()
                 .collect();
             segments.push(Arc::new(segment));
-            Ok(SliceData {
+            Ok(ViewData {
                 row_space,
                 segments,
             })
@@ -227,30 +227,30 @@ impl Bundle {
         partition: &str,
         published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        let slice = self
+        let view = self
             .partitions
             .get(partition)
-            .and_then(|p| p.slices.keys().next().cloned())
+            .and_then(|p| p.views.keys().next().cloned())
             .ok_or_else(|| StoreError::MalformedBundle {
-                detail: format!("no partition '{partition}' with a slice in this bundle"),
+                detail: format!("no partition '{partition}' with a view in this bundle"),
             })?;
-        self.substituting(partition, &slice, published, |slice_data| {
-            Ok(SliceData {
-                row_space: slice_data.row_space.clone(),
-                segments: slice_data.segments.clone(),
+        self.substituting(partition, &view, published, |view_data| {
+            Ok(ViewData {
+                row_space: view_data.row_space.clone(),
+                segments: view_data.segments.clone(),
             })
         })
     }
 
     /// The shared half of [`Self::with_segment`], [`Self::with_merged`] and
-    /// [`Self::with_manifest`]: clone the partition and slice maps — `Arc`s and a manifest, no
-    /// file IO — and replace the one slice.
+    /// [`Self::with_manifest`]: clone the partition and view maps — `Arc`s and a manifest, no
+    /// file IO — and replace the one view.
     fn substituting(
         &self,
         partition: &str,
-        slice: &str,
+        view: &str,
         published: PublishedManifest,
-        replace: impl FnOnce(&SliceData) -> Result<SliceData>,
+        replace: impl FnOnce(&ViewData) -> Result<ViewData>,
     ) -> Result<Arc<Bundle>> {
         let existing =
             self.partitions
@@ -258,19 +258,19 @@ impl Bundle {
                 .ok_or_else(|| StoreError::MalformedBundle {
                     detail: format!("no partition '{partition}' in this bundle"),
                 })?;
-        let slice_data = existing
-            .slices
-            .get(slice)
+        let view_data = existing
+            .views
+            .get(view)
             .ok_or_else(|| StoreError::MalformedBundle {
-                detail: format!("no slice '{slice}' in partition '{partition}'"),
+                detail: format!("no view '{view}' in partition '{partition}'"),
             })?;
-        let next_slice = replace(slice_data)?;
+        let next_view = replace(view_data)?;
 
         let mut partitions = self.partitions.clone();
         let entry = partitions
             .get_mut(partition)
             .expect("looked up immediately above");
-        entry.slices.insert(slice.to_string(), next_slice);
+        entry.views.insert(view.to_string(), next_view);
         // The served `n` and the highest candidate move together: this generation *is* the newest
         // manifest, so it is not stepped down, whatever the one it was built from was.
         //
@@ -428,41 +428,41 @@ fn open_prefix(
         let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir, verification)?;
         let segments_manifest = selected.manifest;
 
-        let mut slices: HashMap<String, SliceData> = HashMap::new();
+        let mut views: HashMap<String, ViewData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
-            sanitize_component("slice id", &seg_desc.slice)?;
+            sanitize_component("view id", &seg_desc.view)?;
             sanitize_component("segment id", &seg_desc.seg_id)?;
 
-            let slice_dir = partition_dir.join("slices").join(&seg_desc.slice);
-            let is_new_slice = !slices.contains_key(&seg_desc.slice);
-            let slice_entry = match slices.get_mut(&seg_desc.slice) {
+            let view_dir = partition_dir.join("views").join(&seg_desc.view);
+            let is_new_view = !views.contains_key(&seg_desc.view);
+            let view_entry = match views.get_mut(&seg_desc.view) {
                 Some(entry) => entry,
                 None => {
-                    let perm_path = slice_dir.join("permutation.bin");
+                    let perm_path = view_dir.join("permutation.bin");
                     let perm_rel = format!(
-                        "partitions/{}/slices/{}/permutation.bin",
-                        partition_desc.phash, seg_desc.slice
+                        "partitions/{}/views/{}/permutation.bin",
+                        partition_desc.phash, seg_desc.view
                     );
                     ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
                     let permutation = Permutation::load(&perm_path)?;
 
                     // `row-entity.u32` beside it, the other direction
                     // (`crate::row_entity`). **Optional, and its absence is not a refusal**: it is
-                    // an optimisation for the filtered viewport's per-tile route, and a slice
+                    // an optimisation for the filtered viewport's per-tile route, and a view
                     // without one still answers every query through the projecting route. Where it
                     // *is* named, it is verified like any other file — an unverifiable table is a
                     // refusal, because a wrong row→entity mapping would put another entity's
                     // filter verdict on a row.
                     let row_entity_rel = format!(
-                        "partitions/{}/slices/{}/{}",
+                        "partitions/{}/views/{}/{}",
                         partition_desc.phash,
-                        seg_desc.slice,
+                        seg_desc.view,
                         crate::row_entity::ROW_ENTITY_FILE
                     );
                     let row_entity = if segments_manifest.files.contains_key(&row_entity_rel)
                         || manifest.files.contains_key(&row_entity_rel)
                     {
-                        let path = slice_dir.join(crate::row_entity::ROW_ENTITY_FILE);
+                        let path = view_dir.join(crate::row_entity::ROW_ENTITY_FILE);
                         ensure_verified(
                             &row_entity_rel,
                             &segments_manifest,
@@ -476,7 +476,7 @@ fn open_prefix(
                         None
                     };
 
-                    // The first segment named for a slice is its build segment: `permutation.bin`
+                    // The first segment named for a view is its build segment: `permutation.bin`
                     // addresses that one's row space, and every later segment arrives as an
                     // extent above it.
                     let mut row_space =
@@ -484,27 +484,27 @@ fn open_prefix(
                     if let Some(table) = row_entity {
                         row_space = row_space.with_row_entity(table);
                     }
-                    slices.insert(
-                        seg_desc.slice.clone(),
-                        SliceData {
+                    views.insert(
+                        seg_desc.view.clone(),
+                        ViewData {
                             row_space,
                             segments: Vec::new(),
                         },
                     );
-                    slices.get_mut(&seg_desc.slice).expect("just inserted")
+                    views.get_mut(&seg_desc.view).expect("just inserted")
                 }
             };
 
-            let seg_dir = slice_dir.join("segments").join(&seg_desc.seg_id);
+            let seg_dir = view_dir.join("segments").join(&seg_desc.seg_id);
             let morton_path = seg_dir.join("morton.u32");
             let columns_path = seg_dir.join("columns.arrow");
             let morton_rel = format!(
-                "partitions/{}/slices/{}/segments/{}/morton.u32",
-                partition_desc.phash, seg_desc.slice, seg_desc.seg_id
+                "partitions/{}/views/{}/segments/{}/morton.u32",
+                partition_desc.phash, seg_desc.view, seg_desc.seg_id
             );
             let columns_rel = format!(
-                "partitions/{}/slices/{}/segments/{}/columns.arrow",
-                partition_desc.phash, seg_desc.slice, seg_desc.seg_id
+                "partitions/{}/views/{}/segments/{}/columns.arrow",
+                partition_desc.phash, seg_desc.view, seg_desc.seg_id
             );
             ensure_verified(
                 &morton_rel,
@@ -536,9 +536,9 @@ fn open_prefix(
                         source,
                     })?;
                     let rel = format!(
-                        "partitions/{}/slices/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
+                        "partitions/{}/views/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
                         partition_desc.phash,
-                        seg_desc.slice,
+                        seg_desc.view,
                         seg_desc.seg_id,
                         entry.file_name().to_string_lossy()
                     );
@@ -554,10 +554,10 @@ fn open_prefix(
             {
                 return Err(StoreError::MalformedBundle {
                     detail: format!(
-                        "segment '{}' (slice '{}'): manifest row_count {} doesn't match \
+                        "segment '{}' (view '{}'): manifest row_count {} doesn't match \
                          morton.u32 ({} codes) or columns.arrow ({} rows)",
                         seg_desc.seg_id,
-                        seg_desc.slice,
+                        seg_desc.view,
                         seg_desc.row_count,
                         morton.len(),
                         columns.row_count()
@@ -565,12 +565,12 @@ fn open_prefix(
                 });
             }
 
-            // `permutation.bin` addresses this slice's single build segment (R4); validate its
+            // `permutation.bin` addresses this view's single build segment (R4); validate its
             // row bound against that segment's `row_count` the first time we see it (I11/I4 —
             // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
-            // out of range). Only meaningful once, against the one segment a Phase-1 slice has.
-            if is_new_slice && verification == Verification::Digests {
-                slice_entry
+            // out of range). Only meaningful once, against the one segment a Phase-1 view has.
+            if is_new_view && verification == Verification::Digests {
+                view_entry
                     .row_space
                     .base()
                     .validate_rows(seg_desc.row_count)?;
@@ -583,14 +583,14 @@ fn open_prefix(
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
             // than serving rows under the wrong entity.
-            if !is_new_slice {
-                let row_base = u32::try_from(slice_entry.row_space.total_rows()).map_err(|_| {
+            if !is_new_view {
+                let row_base = u32::try_from(view_entry.row_space.total_rows()).map_err(|_| {
                     StoreError::MalformedBundle {
                         detail: format!(
-                            "slice '{}' already holds {} rows, so segment '{}' cannot begin \
+                            "view '{}' already holds {} rows, so segment '{}' cannot begin \
                              inside a u32 row space",
-                            seg_desc.slice,
-                            slice_entry.row_space.total_rows(),
+                            seg_desc.view,
+                            view_entry.row_space.total_rows(),
                             seg_desc.seg_id
                         ),
                     }
@@ -604,18 +604,18 @@ fn open_prefix(
                     &identity_key,
                     manifest.identity.shard_id,
                 )?;
-                slice_entry.row_space =
-                    slice_entry.row_space.with_extent(extent).ok_or_else(|| {
+                view_entry.row_space =
+                    view_entry.row_space.with_extent(extent).ok_or_else(|| {
                         StoreError::MalformedBundle {
                             detail: format!(
-                                "segment '{}' does not continue slice '{}'s row space",
-                                seg_desc.seg_id, seg_desc.slice
+                                "segment '{}' does not continue view '{}'s row space",
+                                seg_desc.seg_id, seg_desc.view
                             ),
                         }
                     })?;
             }
 
-            slice_entry.segments.push(Arc::new(SegmentData {
+            view_entry.segments.push(Arc::new(SegmentData {
                 seg_id: seg_desc.seg_id.clone(),
                 row_count: seg_desc.row_count,
                 morton,
@@ -629,7 +629,7 @@ fn open_prefix(
                 manifest: segments_manifest,
                 segments_n: selected.n,
                 highest_candidate_n: selected.highest_candidate_n,
-                slices,
+                views,
             },
         );
     }
@@ -640,7 +640,7 @@ fn open_prefix(
     })
 }
 
-/// Reject a single opaque path component (`phash`, slice id, seg id) that could otherwise
+/// Reject a single opaque path component (`phash`, view id, seg id) that could otherwise
 /// escape the bundle root once joined: empty, `.`, `..`, containing a path separator, or
 /// absolute. Manifest JSON is trusted for shape (it was digest-verified before we get here)
 /// but never for path safety — a digest only proves the bytes weren't tampered with, not that
@@ -1169,17 +1169,17 @@ impl MortonSlice {
                 ),
             });
         }
-        let slice = MortonSlice { mmap };
+        let view = MortonSlice { mmap };
         // `tile_ranges`'s binary search is only sound over an ascending array (contracts
         // §2.5/§2.6: "Morton order"); a hand-corrupted or wrongly-built `morton.u32` that isn't
         // sorted would make `partition_point` silently return a wrong (not merely imprecise)
         // range instead of erroring — checked once here, fail-closed, rather than trusted.
-        if !slice.u32().windows(2).all(|w| w[0] <= w[1]) {
+        if !view.u32().windows(2).all(|w| w[0] <= w[1]) {
             return Err(StoreError::MalformedBundle {
                 detail: format!("{}: codes are not sorted ascending", path.display()),
             });
         }
-        Ok(slice)
+        Ok(view)
     }
 
     /// The number of codes (rows) in this segment.
@@ -1587,7 +1587,7 @@ pub(crate) fn decode_single_batch(buffer: &Buffer, path: &Path) -> Result<Record
     let trailer_start = buffer.len() - FOOTER_TRAILER_LEN;
     let trailer: [u8; FOOTER_TRAILER_LEN] = buffer[trailer_start..]
         .try_into()
-        .expect("slice length matches FOOTER_TRAILER_LEN");
+        .expect("view length matches FOOTER_TRAILER_LEN");
     let footer_len = read_footer_length(trailer)
         .map_err(|e| invalid_columns(path, &format!("bad footer length: {e}")))?;
     if footer_len > trailer_start {
@@ -1719,8 +1719,8 @@ fn invalid_columns(path: &Path, detail: &str) -> StoreError {
 
 /// The row range `tile` occupies within `seg`'s Morton order, found by binary search over
 /// `seg.morton.u32()` (contracts §2.5). Callers must treat a tile as resolving to a **set** of
-/// ranges — one per segment sharing the tile's slice — even though a build writes exactly one
-/// segment per slice; the engine-level signature is `Vec<Range<u32>>` accordingly.
+/// ranges — one per segment sharing the tile's view — even though a build writes exactly one
+/// segment per view; the engine-level signature is `Vec<Range<u32>>` accordingly.
 ///
 /// `Tile::code_range` returns `u64` bounds deliberately: at depth 0 the exclusive end is
 /// `1 << 32`, which does not fit in `u32`. Each stored code is widened for the comparison
@@ -1768,7 +1768,7 @@ pub fn tile_ranges_within(seg: &SegmentData, tile: &Tile, within: Range<u32>) ->
 /// is not a drop-in for a full-column search — it equals one exactly when `from` is at or below
 /// the true partition point, which is the caller's obligation to establish. Stating it this way
 /// is deliberate: the property test can then check it against `partition_point` over arbitrary
-/// slices and arbitrary `from`, with nothing assumed.
+/// views and arbitrary `from`, with nothing assumed.
 ///
 /// **Why galloping and not a binary search of the tail.** [`tile_ranges_all`] sweeps tiles in
 /// ascending code order, so successive searches are a short hop apart — usually zero rows apart

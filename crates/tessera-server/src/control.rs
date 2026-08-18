@@ -594,7 +594,7 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// with no error anywhere and the row carried a code no key explains. A key can be
 /// membership-checked, and membership is the rule: an unknown key under `vocabulary = "declared"`
 /// is a 422 naming the column and the key, whole batch without effect (declare-then-use, §5,
-/// slices §80).
+/// views §80).
 ///
 /// It also makes a schema/client disagreement visible: a plain `u16` scalar and a `u16` category
 /// are now different types on the wire, so a client that thinks a column is one when the bundle
@@ -729,9 +729,9 @@ fn parse_ingest_batch(
     Ok(items)
 }
 
-/// `x-tessera-slice` (contracts §3.4): optional when the bundle has one slice, `422` if ambiguous.
+/// `x-tessera-view` (contracts §3.4): optional when the bundle has one view, `422` if ambiguous.
 ///
-/// | header | slices | answer |
+/// | header | views | answer |
 /// |---|---|---|
 /// | absent | 0 or 1 | accepted — there is nothing to be ambiguous about |
 /// | absent | ≥ 2 | **422**, naming what it could have meant |
@@ -739,38 +739,38 @@ fn parse_ingest_batch(
 /// | present, known | any | accepted |
 ///
 /// **Unknown is 404, not 422**, and the difference is not cosmetic: contracts §3.1's code list is
-/// **closed**, and its 404 row reads "unknown `tessera_id`, node, external ID **or slice**". The
-/// viewer plane already answers exactly that (`map_engine_error` maps `EngineError::UnknownSlice`
-/// to `ApiError::Unknown`), and two planes disagreeing about what an unknown slice id is would be a
+/// **closed**, and its 404 row reads "unknown `tessera_id`, node, external ID **or view**". The
+/// viewer plane already answers exactly that (`map_engine_error` maps `EngineError::UnknownView`
+/// to `ApiError::Unknown`), and two planes disagreeing about what an unknown view id is would be a
 /// contradiction inside a closed list. §3.4's 422 is licensed for *ambiguity*, which is the second
 /// row, not the third.
 ///
-/// **The resolved id is what every row of the batch is stored under** — `WalRow::slice`, and from
-/// there `BufferedItem::slice` and the flush segment's row space. Absent-with-one-slice resolves to
-/// that slice's id; it is never defaulted to a literal, because a defaulted slice is how a row
-/// silently joins the wrong row space the day partitioning lands. A bundle declaring no slice at
+/// **The resolved id is what every row of the batch is stored under** — `WalRow::view`, and from
+/// there `BufferedItem::view` and the flush segment's row space. Absent-with-one-view resolves to
+/// that view's id; it is never defaulted to a literal, because a defaulted view is how a row
+/// silently joins the wrong row space the day partitioning lands. A bundle declaring no view at
 /// all has no row space to ingest into, so it is refused here rather than accepted into nothing.
 ///
-/// No build path emits a multi-slice bundle (`tessera-build` writes exactly one `SliceDescriptor`),
+/// No build path emits a multi-view bundle (`tessera-build` writes exactly one `ViewDescriptor`),
 /// so the second row is unreachable. It is implemented rather than asserted-away because it is a
 /// contract clause and it costs one comparison.
-fn resolve_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<String, ApiError> {
-    match slice {
-        None if slices.len() > 1 => Err(ApiError::Contract(format!(
-            "this bundle has {} slices ({}), so x-tessera-slice is required — which one a batch \
+fn resolve_view(view: Option<&str>, views: &[(String, String)]) -> Result<String, ApiError> {
+    match view {
+        None if views.len() > 1 => Err(ApiError::Contract(format!(
+            "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
              belongs to is not inferable (contracts §3.4)",
-            slices.len(),
-            slices
+            views.len(),
+            views
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => slices.first().map(|(id, _)| id.clone()).ok_or_else(|| {
-            ApiError::Contract("this bundle declares no slice to ingest into".into())
+        None => views.first().map(|(id, _)| id.clone()).ok_or_else(|| {
+            ApiError::Contract("this bundle declares no view to ingest into".into())
         }),
-        Some(id) if slices.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
-        Some(id) => Err(ApiError::Unknown(format!("unknown slice '{id}'"))),
+        Some(id) if views.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
+        Some(id) => Err(ApiError::Unknown(format!("unknown view '{id}'"))),
     }
 }
 
@@ -844,16 +844,16 @@ fn run_ingest(
     state: &AppState,
     body: &[u8],
     batch_id: String,
-    slice: Option<&str>,
+    view: Option<&str>,
 ) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
 
     // One `Engine::meta()` call per batch — not per row — for the two things the manifest decides
-    // about a batch: which slices exist, and what scalar tail is declared. `meta()` rather than a
+    // about a batch: which views exist, and what scalar tail is declared. `meta()` rather than a
     // narrower accessor on purpose: it is the one definition of what this bundle declares, the one
     // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
     let meta = state.engine.meta();
-    let slice = resolve_slice(slice, &meta.slices)?;
+    let view = resolve_view(view, &meta.views)?;
 
     let items = parse_ingest_batch(body, &meta.declared_scalars, &meta.vocabularies)?;
 
@@ -1044,7 +1044,7 @@ fn run_ingest(
         .zip(descriptor_lists)
         .map(|((item, terms), descriptors)| UnallocatedRow {
             external_id: item.external_id,
-            slice: slice.clone(),
+            view: view.clone(),
             descriptors,
             x: item.x,
             y: item.y,
@@ -1162,17 +1162,17 @@ async fn ingest(
         .to_string();
 
     // Read here rather than inside `run_ingest` because a `HeaderMap` is the handler's, not the
-    // blocking closure's. A header whose bytes are not valid UTF-8 names no slice any manifest can
+    // blocking closure's. A header whose bytes are not valid UTF-8 names no view any manifest can
     // hold, so it is refused rather than lossily decoded — the same rule this handler applies to
     // external ids one function over.
-    let slice = match headers.get("x-tessera-slice") {
+    let view = match headers.get("x-tessera-view") {
         None => None,
         Some(value) => Some(
             value
                 .to_str()
                 .map_err(|_| {
                     ApiError::Contract(
-                        "x-tessera-slice is not valid UTF-8, so it names no slice".to_string(),
+                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
                     )
                 })?
                 .to_string(),
@@ -1209,7 +1209,7 @@ async fn ingest(
     // handler-drop would under-count exactly when the pool is under pressure.
     let resp = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        run_ingest(&state, &body, batch_id, slice.as_deref())
+        run_ingest(&state, &body, batch_id, view.as_deref())
     })
     .await
     .map_err(map_join_error)??;
@@ -2141,9 +2141,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
     let ingest = state.ingest_admission.status();
     let sessions = state.sessions.lock().stats();
-    // **`tessera_engine::SliceSegments`, for `FragmentCacheStats`' reason** — the server may not
+    // **`tessera_engine::ViewSegments`, for `FragmentCacheStats`' reason** — the server may not
     // depend on `tessera-store`, where the segment set actually lives.
-    let segments: Vec<tessera_engine::SliceSegments> = state.engine.live_segment_counts();
+    let segments: Vec<tessera_engine::ViewSegments> = state.engine.live_segment_counts();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         // Contracts §3.4's per-partition block, and the write path's stage barrier
@@ -2247,7 +2247,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // 10⁹, so it is invisible to a soak and needs a gauge. Rising past the low hundreds means
         // merge has stopped bounding it and only a fold will reset it.
         //
-        // A fold resets it to one segment per partition-slice, and the schedule dispatches one at
+        // A fold resets it to one segment per partition-view, and the schedule dispatches one at
         // `compaction_max_segments` at any hour, or at `compaction_window_min_segments` inside the
         // nightly window (compaction §9, decision 0056). So this gauge now has a lever, and reading
         // it climbing past the ceiling means the fold is being *refused* rather than not
@@ -2255,13 +2255,13 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // below. `POST /control/compact` asks for one out of band.
         //
         // A list rather than a scalar because the trigger compaction §9 specifies is per
-        // (partition, slice); this build emits one of each, so the list has one element and will not
+        // (partition, view); this build emits one of each, so the list has one element and will not
         // always.
         "segments": segments
             .iter()
             .map(|s| serde_json::json!({
                 "partition": s.partition,
-                "slice": s.slice,
+                "view": s.view,
                 "count": s.segments,
             }))
             .collect::<Vec<_>>(),
@@ -2379,7 +2379,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`
         // refuses at startup any bound below `expected_concurrent_sessions × the measured
         // per-entry size (see `validate_cache_bounds`), so a young eviction means the collapsing
-        // regime was entered *another* way — a second slice per session, a generation swap's
+        // regime was entered *another* way — a second view per session, a generation swap's
         // transient duplicate, or entries larger than the measured figure. That is precisely what
         // `validate_cache_bounds`' own doc says this counter is for.
         "row_projection_cache": {
@@ -2545,7 +2545,7 @@ mod tests {
             );
         }
 
-        /// **Declare-then-use** (§5, slices §80): a category carries properties and a visibility
+        /// **Declare-then-use** (§5, views §80): a category carries properties and a visibility
         /// consequence, so a typo must not create one. The refusal names both the column and the
         /// key, and the whole batch is without effect.
         #[test]

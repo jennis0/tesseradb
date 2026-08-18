@@ -316,7 +316,7 @@ build_scale() {
     --values "archive=$DATA/demo/archive.parquet" \
     --values "primary_category=$DATA/demo/primary_category.parquet" \
     --out "$bundle" --limit "$(items_of "$scale")" \
-    --extent 0,65536,0,65536 --slice s0 \
+    --extent 0,65536,0,65536 --view s0 \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
     $mint_external --mint-id-key --no-oracle-pairs
   local peak

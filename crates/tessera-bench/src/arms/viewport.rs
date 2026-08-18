@@ -115,11 +115,11 @@ pub fn run(
         let bundle = open_bundle(&fixture.root)?;
         let q = bundle.manifest.quantisation;
         let extent_span = q.x_max - q.x_min;
-        let slice_id = bundle
+        let view_id = bundle
             .partitions
             .values()
             .next()
-            .and_then(|p| p.slices.keys().next().cloned())
+            .and_then(|p| p.views.keys().next().cloned())
             .unwrap_or_else(|| "s0".to_string());
         drop(bundle);
 
@@ -191,7 +191,7 @@ pub fn run(
 
                 for &mode in &modes {
                     let plan = if matches!(mode, Mode::Battery | Mode::CoverageSweep) {
-                        density_deciles(&engine, &session, &slice_id, extent_span, zoom, seed)?
+                        density_deciles(&engine, &session, &view_id, extent_span, zoom, seed)?
                     } else {
                         build_plan(mode, extent_span, zoom, seed)
                     };
@@ -212,7 +212,7 @@ pub fn run(
                         // it separately; so does this one.
                         let warm = engine.viewport(
                             &session,
-                            ViewportRequest::new(&slice_id, plan[0].0, plan[0].1, k),
+                            ViewportRequest::new(&view_id, plan[0].0, plan[0].1, k),
                         )?;
                         let warmup_ns = warm.timings.total_ns;
                         let built = warm.timings.row_projection_built;
@@ -238,7 +238,7 @@ pub fn run(
                                 let out = engine
                                     .viewport(
                                         &session,
-                                        ViewportRequest::new(&slice_id, *vz, *bbox, k),
+                                        ViewportRequest::new(&view_id, *vz, *bbox, k),
                                     )
                                     .expect("viewport");
                                 let t = out.timings;
@@ -367,7 +367,7 @@ fn build_plan(mode: Mode, extent: f64, zoom: u8, seed: u64) -> Vec<(u8, [f64; 4]
 fn density_deciles(
     engine: &Engine,
     session: &tessera_engine::Session,
-    slice: &str,
+    view: &str,
     extent: f64,
     zoom: u8,
     seed: u64,
@@ -377,7 +377,7 @@ fn density_deciles(
 
     let mut measured: Vec<(u64, (u8, [f64; 4]))> = Vec::new();
     for (z, bbox) in candidates {
-        let out = engine.viewport(session, ViewportRequest::new(slice, z, bbox, 0))?;
+        let out = engine.viewport(session, ViewportRequest::new(view, z, bbox, 0))?;
         let sigma = out.timings.sigma_visible;
         if sigma > 0 {
             measured.push((sigma, (z, bbox)));

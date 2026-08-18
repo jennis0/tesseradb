@@ -126,8 +126,8 @@ Phase 1 conformance — `crates/tessera-server/src/control.rs`'s module doc desc
 fail-open-vs-fail-closed handling, but injecting a real fsync failure requires fault-injection
 plumbing this phase doesn't have. Not tested here.
 
-Also out of scope per the ledger note: the `x-tessera-slice` header (unimplemented; contracts
-allow 422 on ambiguity but Phase 1 ships one slice, so this is never exercised).
+Also out of scope per the ledger note: the `x-tessera-view` header (unimplemented; contracts
+allow 422 on ambiguity but Phase 1 ships one view, so this is never exercised).
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ from oracle.harness import (
 )
 from oracle.wire import decode_viewport
 
-SLICE = "s0"
+VIEW = "s0"
 GRID_MAX = 65536.0
 BATCH_ID = "conformance-restart-replay-batch-1"
 
@@ -352,7 +352,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         dictionary = oracle_bundle.dictionary
         bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
         zoom = 4
-        expected_counts = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
+        expected_counts = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
         # --- the sync point advanced, so the sidecar is live ---------------------------------
         # Both offsets must come from the same member for the comparison to mean anything: an
@@ -403,7 +403,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
             )
 
             token = srv2.authorise([dictionary[term0].decode("ascii")])["token"]
-            tiles, _points = decode_viewport(srv2.viewport(token, SLICE, zoom, bbox, k=200))
+            tiles, _points = decode_viewport(srv2.viewport(token, VIEW, zoom, bbox, k=200))
             assert {t: v for t, v, m, _s in tiles} == expected_counts, (
                 "an acked delete or suppression did not survive the discard of the unsynced tail"
             )
@@ -469,11 +469,11 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
 
         bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
         zoom = 4
-        raw = srv.viewport(token, SLICE, zoom, bbox, k=200)
+        raw = srv.viewport(token, VIEW, zoom, bbox, k=200)
         tiles, _points = decode_viewport(raw)
         counts_before = {t: v for t, v, m, _s in tiles}
 
-        from_oracle_before = _oracle_counts(oracle_bundle, resolved_mask_before, SLICE, zoom, bbox)
+        from_oracle_before = _oracle_counts(oracle_bundle, resolved_mask_before, VIEW, zoom, bbox)
         assert counts_before == from_oracle_before
         assert sum(counts_before.values()) == len(base_mask) - 3, (
             "three denies (1 delete + 2 suppress) must each remove exactly one member"
@@ -494,7 +494,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
 
             auth2 = srv2.authorise([dictionary[term0].decode("ascii")])
             token2 = auth2["token"]
-            raw2 = srv2.viewport(token2, SLICE, zoom, bbox, k=200)
+            raw2 = srv2.viewport(token2, VIEW, zoom, bbox, k=200)
             tiles2, _points2 = decode_viewport(raw2)
             counts_after_restart = {t: v for t, v, m, _s in tiles2}
 
@@ -539,7 +539,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             stop_server(proc)
 
 
-def _oracle_counts(bundle, mask, slice_id, zoom, bbox):
+def _oracle_counts(bundle, mask, view_id, zoom, bbox):
     from oracle import viewport as vp
 
-    return vp.counts(bundle, mask, slice_id, zoom, bbox)
+    return vp.counts(bundle, mask, view_id, zoom, bbox)

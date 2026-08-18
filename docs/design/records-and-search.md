@@ -180,7 +180,7 @@ field's value bytes live in exactly one home:
 
 | home | who lives there | `entity → value` route |
 |---|---|---|
-| the hot column (row space, per slice) | `render = true` | `tessera_id → entity → row`, one array read |
+| the hot column (row space, per view) | `render = true` | `tessera_id → entity → row`, one array read |
 | the family's entity-space structure | `index = true` — and **every category** (§4.2) | one array index; ordinal → dictionary for keyword |
 | **the record blob** | everything else — including every `text` field's values | one block read |
 
@@ -755,7 +755,7 @@ filterable in entity space alone.
 
 **Over a category's codes the built route costs 0.22–0.46 ns per viewport row** — invariant in
 corpus size, mask shape and coverage across 2.4M, 25M and 10⁸, and across viewports from 3×10⁵ rows
-to a whole slice
+to a whole view
 ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md), [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md); *measured*). A 343,391-row viewport at 10⁸ costs 0.13–0.16 ms.
 
 ⊘ **Every constant in this section is a 1- or 2-byte category column's, and none may be carried
@@ -799,7 +799,7 @@ than the probe's — see the note at its statement.
 **No entity-space copy is stored for a rendered number or datetime.** This is the store-once rule,
 scoped by §4.2's category exemption to the families it can safely reach (review B1): the hot
 column serves the viewport route above, and the coarse-zoom cell — where the view is the corpus
-and the row-space route degenerates to a whole-slice scan — is served by that scan, **measured
+and the row-space route degenerates to a whole-view scan — is served by that scan, **measured
 21–29 ms at 10⁸ single-threaded and 3.2–5.3 ms on twelve cores** (both columns and both values, at
 the same 1- and 2-byte widths the caveat above scopes; [the campaign's follow-up](../../probes/2026-08-12-epic1-measurements/results.md)) — inside the 100 ms interaction target
 without the sweep's parallelism rather than only with it — and **modelled 0.21–0.29 s serial /
@@ -815,7 +815,7 @@ a format change — rather than every deployment paying for the possibility now 
 shape).
 
 Two bounds inherited from placement §2.1, whose third — the membership question — is what §4.2's
-exemption answers: the route is per slice; and a rendered **number** joined it with 0064's presence
+exemption answers: the route is per view; and a rendered **number** joined it with 0064's presence
 bitmap, which is what lets the row scan tell an absence from the type's zero — without it the hot
 column cannot express absence at all (§4.1, §2). The composition rule
 when a tree names both kinds: evaluate the entity-space sub-tree, cross it once by surface §4's
@@ -894,7 +894,7 @@ write-path §5.4's Rule S and Rule F remain the whole of the removal model, ever
 is rebuilt whole at the fold, and a suppression touches no attribute artefact, ever.
 
 **Flush.** A flush writes, per indexed column, one extent holding whatever the family stores: the
-value slice (plus CSR offsets where multi), and for keyword the extent's **own** sorted dictionary
+value view (plus CSR offsets where multi), and for keyword the extent's **own** sorted dictionary
 with ordinals against it. A **text** extent is the shape without a value column at all: its own
 sorted token dictionary, postings over that dictionary, and a presence bitmap — no per-entity slot,
 there being many terms per entity and no single ordinal to hold. Presence is stored rather than

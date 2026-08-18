@@ -105,7 +105,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         let descriptors = vec![b"0".to_vec(), format!("soak-term-{round}").into_bytes()];
         let row = UnallocatedRow {
             external_id: Some(external_id.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: descriptors.clone(),
             x: 3.0 * (round as f32 + 1.0),
             y: 7.0,
@@ -150,7 +150,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
     let manifest = &partition.manifest;
-    let segments = partition.slices["s0"].segments.len();
+    let segments = partition.views["s0"].segments.len();
     let stats = engine.write_executor_stats();
     eprintln!(
         "soak: {ROUNDS} flushes → segments {segments}, deltas {}, runs {}, dict extents {}, \
@@ -220,7 +220,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
             "{external_id} lost its binding"
         );
         assert!(
-            partition.slices["s0"].row_space.row_of(*entity).is_some(),
+            partition.views["s0"].row_space.row_of(*entity).is_some(),
             "entity {} lost its row",
             entity.raw()
         );
@@ -268,7 +268,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
         let descriptors = vec![b"0".to_vec(), format!("soak-term-{round}").into_bytes()];
         let row = UnallocatedRow {
             external_id: Some(external_id.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: descriptors.clone(),
             x: 3.0 * (round as f32 + 1.0),
             y: 7.0,
@@ -288,7 +288,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
     assert_eq!(
-        partition.slices["s0"].segments.len(),
+        partition.views["s0"].segments.len(),
         ROUNDS + 1,
         "the build segment plus one per flush — this is what the merge bounds"
     );

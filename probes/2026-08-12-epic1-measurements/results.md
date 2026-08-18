@@ -40,7 +40,7 @@ cargo build --release -p tessera-bench -p tessera-cli
   --values archive=data/scaled/attrs/archive.parquet \
   --values primary_category=data/scaled/attrs/primary_category.parquet \
   --out /tmp/tessera-bench/fixtures/2422486/attrs-subclass \
-  --extent 0,65536,0,65536 --slice s0 --limit 2422486 \
+  --extent 0,65536,0,65536 --view s0 --limit 2422486 \
   --mint-external-ids --id-key 000102030405060708090a0b0c0d0e0f --idset 1
 # ... and again with schema-render-and-index.toml into .../attrs-both
 
@@ -63,7 +63,7 @@ entity-space index as well.
 - **No 10⁹ run.** Buildable on this machine — under two hours end to end, ~50 GB of the 96 GB free
   — and not built. Every 10⁹ figure in the memo is marked *modelled* with the 25M→10⁸ flatness as
   its basis.
-- **Nothing but categories.** `scan_rows` accepts a `u8`/`u16`/`u32` code slice and refuses
+- **Nothing but categories.** `scan_rows` accepts a `u8`/`u16`/`u32` code view and refuses
   anything else, so the row route serves categories alone today (records §6.2 — a rendered number
   waits on 0064's render half). The per-row constants here are 1- and 2-byte columns' and must not
   be carried onto an `i64`.
@@ -78,7 +78,7 @@ entity-space index as well.
 ## Follow-up, same day: hoisting the dispatch out of the row loop
 
 The campaign above found the built route 4.8× above the probe and named no cause. The cause was
-`scan_rows`' inner loop, which resolved the segment, matched the `CodeSlice` width and matched the
+`scan_rows`' inner loop, which resolved the segment, matched the `CodeView` width and matched the
 `RowPredicate` **per row** — roughly four branches and two bounds checks per row, none hoistable,
 and no vectorisable compare anywhere in it. The tell was in this campaign's own data: the constant
 was *insensitive to the code width*, which a loop bound by moving one or two bytes per row could
@@ -90,14 +90,14 @@ monomorphic compare over a slice (`scan_run`/`run_matching`):
 | shape, single-threaded | before | after | ratio |
 |---|---|---|---|
 | 343,391-row viewport, 10⁸ | 2.462 ns/row (0.845 ms) | 0.376 ns/row (0.129 ms) | **6.5×** |
-| whole slice, 10⁸, selective | 2.390 ns/row (238.95 ms) | 0.220 ns/row (22.02 ms) | **10.9×** |
-| whole slice, 10⁸, broad | 2.532 ns/row (253.15 ms) | 0.299 ns/row (29.87 ms) | **8.5×** |
-| whole slice, 10⁸, 12 threads | 33–38 ms | **3.2–5.3 ms** | 7.2–10.1× |
+| whole view, 10⁸, selective | 2.390 ns/row (238.95 ms) | 0.220 ns/row (22.02 ms) | **10.9×** |
+| whole view, 10⁸, broad | 2.532 ns/row (253.15 ms) | 0.299 ns/row (29.87 ms) | **8.5×** |
+| whole view, 10⁸, 12 threads | 33–38 ms | **3.2–5.3 ms** | 7.2–10.1× |
 
 *A/B in one session on one binary pair, `git stash` between them, same fixtures, `--repeat 3`. Raw
 for the "after" column: `run-row-route-100000000-hoisted.txt`, and `-2422486-`/`-25000000-` for the
 other scales — the last row is the coarse block's four cells (both columns, both values), paired
-against the same four before, and none is dropped; the viewport block's own whole-slice cells at
+against the same four before, and none is dropped; the viewport block's own whole-view cells at
 12 threads run 3.55–5.67 ms. **⊘ The "before" run's output was not saved**, so only that row's is
 reproducible (`run-row-route-100000000.txt`'s coarse block, 32.9–38.5 ms). The other three cells are
 this session's own: the earlier campaign measures the same pre-hoist code on the same fixtures at
@@ -112,7 +112,7 @@ invariance in corpus and viewport size is unchanged **above that bound and not b
 2.4M fixture's 139,920-row viewport measures 0.62–0.66 ns/row and its 3,504-row one 15.3–15.9,
 which is the fixed floor below, not a different constant.
 
-Two consequences worth stating. The **coarse-zoom whole-slice cell now costs 21–29 ms
+Two consequences worth stating. The **coarse-zoom whole-view cell now costs 21–29 ms
 single-threaded at 10⁸** against 280–299 ms before, so it is inside the 100 ms interaction target
 *without* the tile sweep's parallelism rather than only with it. And the **fixed floor is
 unchanged** — a 3,504-row viewport still measures 15.3–15.9 ns/row, bitmap setup amortised over too

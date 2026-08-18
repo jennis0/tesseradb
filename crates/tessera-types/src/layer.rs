@@ -292,8 +292,8 @@ pub struct LayerDeclaration {
     pub name: String,
     /// Human-readable, served as metadata.
     pub title: String,
-    /// Which slices this layer appears in.
-    pub slices: Vec<String>,
+    /// Which views this layer appears in.
+    pub views: Vec<String>,
     pub membership: MembershipSource,
     pub access: LayerAccess,
     /// `None` declares *no such rule*, which is a statement rather than an omission.
@@ -476,7 +476,7 @@ pub enum DeclarationError {
     ProportionalOnPredicate,
     /// A layer naming itself in `depends_on`.
     SelfDependency,
-    /// The same slice, level title or supplied-content kind declared twice.
+    /// The same view, level title or supplied-content kind declared twice.
     Duplicate(String),
     /// A derived property outside [`DerivedProperty::VOCABULARY`].
     ///
@@ -592,10 +592,10 @@ impl LayerDeclaration {
             }
         }
 
-        let mut slices: BTreeSet<&str> = BTreeSet::new();
-        for slice in &self.slices {
-            if !slices.insert(slice.as_str()) {
-                return Err(DeclarationError::Duplicate(format!("slice {slice}")));
+        let mut views: BTreeSet<&str> = BTreeSet::new();
+        for view in &self.views {
+            if !views.insert(view.as_str()) {
+                return Err(DeclarationError::Duplicate(format!("view {view}")));
             }
         }
         let mut derived: BTreeSet<&str> = BTreeSet::new();
@@ -638,7 +638,7 @@ mod tests {
         LayerDeclaration {
             name: "clusters/x".into(),
             title: "X".into(),
-            slices: vec!["default".into()],
+            views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
             access: LayerAccess {
                 label: None,
@@ -737,14 +737,14 @@ mod tests {
         // acquire a value nobody wrote. `deny_unknown_fields` plus the absence of `#[serde(default)]`
         // is what enforces it, and this test is what stops someone adding a default later.
         let missing_flag = serde_json::json!({
-            "name": "l", "title": "L", "slices": [], "membership": "enumerated",
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
             "access": {},
             "hierarchy": { "kind": "flat" }
         });
         assert!(serde_json::from_value::<LayerDeclaration>(missing_flag).is_err());
 
         let missing_provenance = serde_json::json!({
-            "name": "l", "title": "L", "slices": [], "membership": "enumerated",
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
             "access": { "artifacts_carry_own": false },
             "hierarchy": { "kind": "flat" },
             "content": { "supplied": [{ "kind": "label_text" }] }

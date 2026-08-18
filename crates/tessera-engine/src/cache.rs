@@ -14,7 +14,7 @@
 //! Nothing here modifies a cached value — lifecycle §7 requires entries to be immutable and
 //! "invalidation is key rotation, never mutation", and both eviction and pruning only ever
 //! *remove*. That is what makes a rebuilt projection identical to the evicted one: the miss path
-//! builds `RowProjection::new(&session.fragment, &slice_data.permutation)` from the session's own
+//! builds `RowProjection::new(&session.fragment, &view_data.permutation)` from the session's own
 //! frozen fragment and the *pinned* generation's permutation, both of which the key names or the
 //! request pins. **There is no route by which a miss composes against a different mask than a
 //! hit**, which is the property `eviction_never_widens_a_mask` exists to keep true.
@@ -30,13 +30,13 @@ use crate::cancel::CancelToken;
 use crate::compose::RowProjection;
 use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
-/// `(token_id, slice, segments_version)` — the row-projection cache's key (shared-context
+/// `(token_id, view, segments_version)` — the row-projection cache's key (shared-context
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
 /// compare a full bearer token.
 ///
 /// **Named fields, not a tuple, and the reason is a disclosure.** Two of the
 /// three components are `u64`, so as `(u64, String, u64)` a transposition at the construction site
-/// compiles, runs, and keys every session's projection on `(segments_version, slice, token_id)` —
+/// compiles, runs, and keys every session's projection on `(segments_version, view, token_id)` —
 /// at which point any two sessions whose `token_id` collides with the live `segments_version` share
 /// a row projection. That is cross-principal mask reuse: one viewer composing against another's
 /// `M_auth` — a principal's authorised set (I2/I3) — presenting as a cache-hit-rate improvement.
@@ -75,8 +75,8 @@ use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded
 pub(crate) struct RowProjectionKey {
     /// The session's process-local identity (`Session::token_id`), never the bearer token itself.
     pub token_id: u64,
-    /// The slice this projection addresses — its `Permutation` is what defines the row space.
-    pub slice: String,
+    /// The view this projection addresses — its `Permutation` is what defines the row space.
+    pub view: String,
     /// The geometry generation the row space belongs to. A bundle swap changes it, and entries
     /// more than [`KEEP_SUPERSEDED_GENERATIONS`] behind become
     /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an *overlay*
@@ -180,7 +180,7 @@ impl CacheWeight for RowProjection {
     }
 }
 
-/// Cached row-space projections, keyed `(token_id, slice, segments_version)` — never recomputed on
+/// Cached row-space projections, keyed `(token_id, view, segments_version)` — never recomputed on
 /// the per-viewport path (shared-context constraint 8; see `crate::compose::RowProjection`'s doc
 /// for the cost this avoids).
 ///
@@ -331,9 +331,9 @@ impl RowProjectionCache {
     /// the drill-down off the per-publication fragment rebuild at the same time (a *measured*
     /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
     ///
-    /// **The fragment is not slice-scoped**, so any of this token's entries answers: the fragment
+    /// **The fragment is not view-scoped**, so any of this token's entries answers: the fragment
     /// cache keys on `(satisfied, auth_data_hash, dict_len, watermark)` and none of those is a
-    /// slice. The freshest is taken because a later watermark is a strictly better answer to an
+    /// view. The freshest is taken because a later watermark is a strictly better answer to an
     /// entity-space question.
     ///
     /// **Per token, never per entity** — the scan cost cannot depend on which identifier was

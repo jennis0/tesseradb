@@ -49,9 +49,9 @@ use crate::Generation;
 /// which is what makes the rebase ABA-safe against the flushes that published while it ran.
 pub(crate) struct MergePlan {
     pub(crate) partition: String,
-    pub(crate) slice: String,
+    pub(crate) view: String,
     pub(crate) inputs: Vec<MergeInput>,
-    /// Where the merged extent begins in slice row space — the first consumed extent's `row_base`.
+    /// Where the merged extent begins in view row space — the first consumed extent's `row_base`.
     pub(crate) row_base: u32,
 }
 
@@ -66,18 +66,18 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
     if partition_data.stepped_down() {
         return None;
     }
-    for (slice, slice_data) in &partition_data.slices {
+    for (view, view_data) in &partition_data.views {
         // **Only extents may be merged, never the base segment.** The base is the one segment with
         // no extent — `permutation.bin` addresses it — so restricting selection to the extent list
         // excludes it structurally rather than by the size bound alone.
-        let extents = slice_data.row_space.extents();
+        let extents = view_data.row_space.extents();
         if extents.len() < policy.tier_width {
             continue;
         }
         let descriptors: Vec<SegmentDescriptor> = extents
             .iter()
             .map(|extent| SegmentDescriptor {
-                slice: slice.clone(),
+                view: view.clone(),
                 seg_id: extent.seg_id.clone(),
                 row_count: extent.row_count(),
                 entity_lo: extent.entity_lo,
@@ -86,7 +86,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .collect();
         let sizes: Vec<u64> = descriptors
             .iter()
-            .map(|d| segment_bytes(&partition_data.manifest, partition, slice, &d.seg_id))
+            .map(|d| segment_bytes(&partition_data.manifest, partition, view, &d.seg_id))
             .collect();
         let Some(chosen) = policy.select(&descriptors, &sizes) else {
             continue;
@@ -97,7 +97,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .expect("select returns seg_ids from the list it was given");
         return Some(MergePlan {
             partition: partition.clone(),
-            slice: slice.clone(),
+            view: view.clone(),
             inputs: descriptors
                 .iter()
                 .filter(|d| chosen.contains(&d.seg_id))
@@ -117,10 +117,10 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
 fn segment_bytes(
     manifest: &tessera_store::manifest::SegmentsManifest,
     partition: &str,
-    slice: &str,
+    view: &str,
     seg_id: &str,
 ) -> u64 {
-    let dir = format!("partitions/{partition}/slices/{slice}/segments/{seg_id}/");
+    let dir = format!("partitions/{partition}/views/{view}/segments/{seg_id}/");
     manifest
         .files
         .iter()
@@ -196,7 +196,7 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
     let output = execute_merge(
         &ctx.prefix_dir,
         &plan.partition,
-        &plan.slice,
+        &plan.view,
         MergeSpec {
             seg_id: &ctx.seg_id,
             inputs: &plan.inputs,
@@ -214,8 +214,8 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
         .prefix_dir
         .join("partitions")
         .join(&plan.partition)
-        .join("slices")
-        .join(&plan.slice)
+        .join("views")
+        .join(&plan.view)
         .join("segments")
         .join(&ctx.seg_id);
     let segment = SegmentData {
@@ -262,7 +262,7 @@ pub(crate) fn rebase_into(
         manifest
             .segments
             .iter()
-            .position(|s| s.seg_id == seg_id && s.slice == plan.slice)
+            .position(|s| s.seg_id == seg_id && s.view == plan.view)
     };
     let Some(first_segment) = seg_at(consumed[0]) else {
         return false;
@@ -273,14 +273,14 @@ pub(crate) fn rebase_into(
 
     let run_paths: Vec<String> = consumed
         .iter()
-        .map(|seg_id| run_path(&plan.partition, &plan.slice, seg_id))
+        .map(|seg_id| run_path(&plan.partition, &plan.view, seg_id))
         .collect();
     let Some(runs) = contiguous(&manifest.external_id_runs, &run_paths, |rel| rel) else {
         return false;
     };
     let locator_paths: Vec<String> = consumed
         .iter()
-        .map(|seg_id| locator_path(&plan.partition, &plan.slice, seg_id))
+        .map(|seg_id| locator_path(&plan.partition, &plan.view, seg_id))
         .collect();
     let Some(locators) = contiguous(&manifest.locator_extents, &locator_paths, |e| &e.path) else {
         return false;
@@ -288,7 +288,7 @@ pub(crate) fn rebase_into(
 
     manifest
         .segments
-        .retain(|s| !(s.slice == plan.slice && consumed.contains(&s.seg_id.as_str())));
+        .retain(|s| !(s.view == plan.view && consumed.contains(&s.seg_id.as_str())));
     manifest
         .segments
         .insert(first_segment, completed.output.segment.clone());
@@ -310,8 +310,8 @@ pub(crate) fn rebase_into(
     // has removed, which refuses at the next open.
     for seg_id in &consumed {
         let seg_rel = format!(
-            "partitions/{}/slices/{}/segments/{seg_id}",
-            plan.partition, plan.slice
+            "partitions/{}/views/{}/segments/{seg_id}",
+            plan.partition, plan.view
         );
         for name in [
             "morton.u32",
@@ -344,12 +344,12 @@ pub(crate) fn rebase_into(
     true
 }
 
-fn run_path(partition: &str, slice: &str, seg_id: &str) -> String {
-    format!("partitions/{partition}/slices/{slice}/segments/{seg_id}/external-ids.arrow")
+fn run_path(partition: &str, view: &str, seg_id: &str) -> String {
+    format!("partitions/{partition}/views/{view}/segments/{seg_id}/external-ids.arrow")
 }
 
-fn locator_path(partition: &str, slice: &str, seg_id: &str) -> String {
-    format!("partitions/{partition}/slices/{slice}/segments/{seg_id}/ext-locator.u32")
+fn locator_path(partition: &str, view: &str, seg_id: &str) -> String {
+    format!("partitions/{partition}/views/{view}/segments/{seg_id}/ext-locator.u32")
 }
 
 /// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order.

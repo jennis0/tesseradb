@@ -86,7 +86,7 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
             str(schema_path),
             "--extent",
             EXTENT_ARG,
-            "--slice",
+            "--view",
             "s0",
             "--out",
             str(out),

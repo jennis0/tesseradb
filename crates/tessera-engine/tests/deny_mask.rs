@@ -66,7 +66,7 @@ fn fixture(tmp: &Path) -> PathBuf {
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -106,7 +106,7 @@ fn denied_rows(engine: &Engine) -> croaring::Bitmap {
         .generation()
         .denied
         .get("s0")
-        .expect("every slice the bundle carries has an entry")
+        .expect("every view the bundle carries has an entry")
         .clone()
 }
 
@@ -146,7 +146,7 @@ fn row_of(engine: &Engine, entity: EntityId) -> u32 {
         .bundle
         .partitions
         .values()
-        .find_map(|p| p.slices["s0"].row_space.row_of(entity))
+        .find_map(|p| p.views["s0"].row_space.row_of(entity))
         .expect("the entity has a row")
         .raw()
 }

@@ -132,7 +132,7 @@ async fn meta(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Authenticated like every other route on this plane (R5: bearer auth on every plane). It is
-    // not a public endpoint: it discloses the bundle's extents, slices and declared-scalar schema,
+    // not a public endpoint: it discloses the bundle's extents, views and declared-scalar schema,
     // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
     // viewer listener. The bearer here is a session token, so a valid, unexpired session is
     // required exactly as for `/v1/viewport`.
@@ -155,7 +155,7 @@ async fn meta(
         // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
         "idset": meta.idset,
-        "slices": meta.slices.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
+        "views": meta.views.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
         "quantisation": {
             "x_min": meta.quantisation.x_min,
             "x_max": meta.quantisation.x_max,
@@ -270,7 +270,7 @@ async fn meta(
         //
         // They disclose nothing. All of them are deployment constants, identical for every
         // principal. Publishing `theta_target_marks` lets a client solve for theta's anchor, which
-        // is the composed cardinality of its OWN mask over the whole slice -- precisely what a
+        // is the composed cardinality of its OWN mask over the whole view -- precisely what a
         // `zoom = 0`, full-bbox request already returns as `visible` in a single call (§7.1).
         // Already obtainable, exactly.
         //
@@ -307,7 +307,7 @@ async fn meta(
         // noticed. Nothing on this document says how big a layer is.
         //
         // What *is* published is the declaration: identity, structure, the derived vocabulary a
-        // client must know to draw anything, which slices the layer appears in, and what kinds of
+        // client must know to draw anything, which views the layer appears in, and what kinds of
         // supplied content its artifacts carry. Publishing the supplied *kinds* is safe because an
         // artifact failing containment is absent whole, so no served artifact ever lacks a content
         // its layer declared — there is no shell to be distinguishable from absence.
@@ -321,7 +321,7 @@ async fn meta(
             serde_json::json!({
                 "name": d.name,
                 "title": d.title,
-                "slices": d.slices,
+                "views": d.views,
                 "membership": d.membership,
                 "hierarchy": {
                     "kind": d.hierarchy.kind,
@@ -457,7 +457,7 @@ fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Fami
 
 #[derive(Debug, Deserialize)]
 struct ViewportReq {
-    slice: String,
+    view: String,
     zoom: u8,
     /// Absent exactly when `tiles` is present — the two are alternatives, not a pair.
     #[serde(default)]
@@ -788,7 +788,7 @@ fn run_viewport_stream(
         .layers
         .as_ref()
         .map(|names| names.iter().map(String::as_str).collect());
-    let mut request = ViewportRequest::new(&req.slice, req.zoom, bbox, k)
+    let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
@@ -1150,7 +1150,7 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.stamp_compare_ns,
-        t.slice_lookup_ns,
+        t.view_lookup_ns,
         t.row_projection_ns,
         t.compose_ns,
         t.tiles_for_bbox_ns,
@@ -1317,10 +1317,10 @@ fn run_item(
 
 #[derive(Debug, Deserialize)]
 struct ArtifactReq {
-    /// Which slice's row space the count is taken in. **Required, unlike `/v1/items`'s absence of
+    /// Which view's row space the count is taken in. **Required, unlike `/v1/items`'s absence of
     /// one**: a point's record is the same wherever it is read from, but a masked count is an
-    /// intersection in row space, and row space is per slice.
-    slice: String,
+    /// intersection in row space, and row space is per view.
+    view: String,
     /// Optional, on [`ItemReq::idset`]'s argument.
     #[serde(default)]
     idset: Option<u32>,
@@ -1382,7 +1382,7 @@ async fn artifact(
         let _gate_permits = gate_permits;
         state
             .engine
-            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.slice)
+            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.view)
             .map_err(crate::error::map_engine_error)
     })
     .await

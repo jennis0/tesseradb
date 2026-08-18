@@ -71,7 +71,7 @@ only address by which the layer can later be suppressed.
 {
   "name": "clusters/hdbscan-2026-08",
   "title": "HDBSCAN clusters",
-  "slices": ["s0"],
+  "views": ["s0"],
   "membership": "enumerated",
   "access": { "label": null, "artifacts_carry_own": false },
   "visible_when": { "min_visible": 25 },
@@ -80,7 +80,7 @@ only address by which the layer can later be suppressed.
 ```
 
 `content`, `depends_on` and `levels` default; everything else is required and unknown fields are
-refused. `slices` must name a slice the bundle actually carries — read it from `/v1/meta`, don't
+refused. `views` must name a view the bundle actually carries — read it from `/v1/meta`, don't
 assume `"s0"`.
 
 - `access.label` gates the layer: a principal whose terms do not satisfy it is told the layer does
@@ -138,7 +138,7 @@ cluster (one fsync each).
 
 ### Reading it back — `GET /v1/meta`
 
-Already carries a **per-principal** `layers` array: `name`, `title`, `slices`, `membership`,
+Already carries a **per-principal** `layers` array: `name`, `title`, `views`, `membership`,
 `hierarchy{kind, prune_children}`, `levels`, `derived_content`, `supplied_content`, `depends_on`,
 `version`. It never carries the artifact count and never the gate label. This is the right place for
 the client to learn which layers to offer as toggles.
@@ -150,7 +150,7 @@ the client to learn which layers to offer as toggles.
 Two new optional request fields:
 
 ```json
-{ "slice": "s0", "zoom": 4, "bbox": [...], "k": 200,
+{ "view": "s0", "zoom": 4, "bbox": [...], "k": 200,
   "layers": ["clusters/hdbscan-2026-08"],
   "artifact_budget": 500 }
 ```
@@ -216,9 +216,9 @@ server does not send them and it should stay that way.
 
 ### Drilling down — `POST /v1/artifacts/{tessera_id}`
 
-Session token, body `{"slice": "s0", "idset": <optional>}`. The slice is **required**, unlike
+Session token, body `{"view": "s0", "idset": <optional>}`. The view is **required**, unlike
 `/v1/items`: a point's record is the same wherever it is read from, but a masked count is an
-intersection in row space and row space is per slice.
+intersection in row space and row space is per view.
 
 ```json
 { "layer": "clusters/hdbscan-2026-08", "stable_key": "c-0001", "masked_count": 143 }

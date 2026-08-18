@@ -54,7 +54,7 @@ async fn c_revoke_then_viewport_is_rejected() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -92,7 +92,7 @@ async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
     let token = auth["token"].as_str().unwrap();
 
     let body = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
         "pin": { "prefix": "v99999", "segments_version": 999 }
     });
     let resp = server
@@ -118,7 +118,7 @@ async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -154,7 +154,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -191,7 +191,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
             "pin": pin
         }))
         .send()
@@ -249,7 +249,7 @@ async fn revoke_prunes_the_token() {
             .post(server.viewer_url("/v1/viewport"))
             .bearer_auth(auth["token"].as_str().unwrap())
             .json(&serde_json::json!({
-                "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
             }))
             .send()
             .await
@@ -290,7 +290,7 @@ async fn revoke_prunes_the_token() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(survivor["token"].as_str().unwrap())
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -561,7 +561,7 @@ async fn the_sweep_keeps_every_live_session() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(sessions[0]["token"].as_str().unwrap())
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -622,7 +622,7 @@ async fn revocation_takes_effect_without_waiting_for_a_sweep() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(doomed["token"].as_str().unwrap())
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -636,7 +636,7 @@ async fn revocation_takes_effect_without_waiting_for_a_sweep() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(survivor["token"].as_str().unwrap())
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -684,7 +684,7 @@ async fn an_expired_session_is_refused_while_still_retained() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(auth["token"].as_str().unwrap())
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await

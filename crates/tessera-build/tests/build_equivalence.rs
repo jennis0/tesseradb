@@ -350,7 +350,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         pairs: pairs.to_path_buf(),
         out,
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -753,10 +753,10 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     let single = temp.path().join("single");
     build(&args_for(&points, &pairs, single.clone())).unwrap();
     let batched_perm =
-        std::fs::read(streaming_out.join("v00000/partitions/default/slices/s0/permutation.bin"))
+        std::fs::read(streaming_out.join("v00000/partitions/default/views/s0/permutation.bin"))
             .unwrap();
     let single_perm =
-        std::fs::read(single.join("v00000/partitions/default/slices/s0/permutation.bin")).unwrap();
+        std::fs::read(single.join("v00000/partitions/default/views/s0/permutation.bin")).unwrap();
     assert_ne!(
         batched_perm, single_perm,
         "two batches must produce a different (per-batch) assignment than one"
@@ -910,7 +910,7 @@ fn reference_build_at_scale() {
             y_min: 0.0,
             y_max: 65536.0,
         },
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: Some(limit),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),

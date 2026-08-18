@@ -142,7 +142,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         pairs,
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -179,7 +179,7 @@ fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
 fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u32 {
     let row = UnallocatedRow {
         external_id: Some(tag.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 10.0,
         y: 10.0,

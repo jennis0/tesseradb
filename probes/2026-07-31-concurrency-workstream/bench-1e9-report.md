@@ -24,7 +24,7 @@ cleaned up.
 
 ```
 tessera build --points geometry.parquet --pairs categories-subclass.pairs.parquet \
-  --out data/bench-fixtures/1e9 --extent 0,65536,0,65536 --slice s0 --limit 1000000000 \
+  --out data/bench-fixtures/1e9 --extent 0,65536,0,65536 --view s0 --limit 1000000000 \
   --mint-external-ids --id-key 000102030405060708090a0b0c0d0e0f --epoch 1
 ```
 

@@ -21,7 +21,7 @@ use tessera_store::{fold_external_id_runs, open_bundle, ExternalIdSidecar};
 use tessera_types::{EntityId, IdentityKey, ROW_ABSENT};
 
 mod fixture;
-use fixture::{build_bundle, PARTITION, SLICE};
+use fixture::{build_bundle, PARTITION, VIEW};
 
 const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
 
@@ -62,7 +62,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
     write_flush_segment(
         &root.join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id,
             rows,
@@ -76,8 +76,8 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
     .expect("the input segment writes");
     root.join("v00000/partitions")
         .join(PARTITION)
-        .join("slices")
-        .join(SLICE)
+        .join("views")
+        .join(VIEW)
         .join("segments")
         .join(seg_id)
         .join("external-ids.arrow")
@@ -297,7 +297,7 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
     let out = write_flush_segment(
         &prefix,
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id: "post-fold-flush",
             rows: vec![

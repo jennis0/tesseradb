@@ -122,7 +122,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
             y_min: 0.0,
             y_max: 1000.0,
         },
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),

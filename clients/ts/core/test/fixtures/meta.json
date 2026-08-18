@@ -352,7 +352,7 @@
       "levels": [],
       "membership": "enumerated",
       "name": "clusters/golden",
-      "slices": [
+      "views": [
         "s0"
       ],
       "supplied_content": [],
@@ -375,7 +375,7 @@
     "max_underlay_offset": 4,
     "theta_target_marks": 16
   },
-  "slices": [
+  "views": [
     {
       "display_name": "s0",
       "id": "s0"

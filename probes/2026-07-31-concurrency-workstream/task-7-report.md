@@ -23,7 +23,7 @@ runs on the engine's shared D-D pool rather than rayon's global default.
    `TILE_PAR_MIN_LEN`), so an unlucky worker landing a mostly-sentinel chunk doesn't stall the
    others.
 3. `entities.par_chunks(chunk_len)` → map each chunk through `slots` (read-only `&[u32]`,
-   never copied — the mmap-backed slice is only borrowed) → per-chunk `Vec<u32>` of hit rows,
+   never copied — the mmap-backed view is only borrowed) → per-chunk `Vec<u32>` of hit rows,
    skipping `ROW_ABSENT` sentinels and out-of-bound entities exactly as the serial code did
    (`slots.get(..)` returns `None` for out-of-bound, filtered by `filter_map`).
 4. `.concat()` the per-chunk vectors into one `rows: Vec<u32>`.
@@ -49,7 +49,7 @@ The `get_or_build` closure's body:
 ```rust
 probe.mark_projection_built();
 self.pool
-    .install(|| RowProjection::new(&session.fragment, &slice_data.permutation))
+    .install(|| RowProjection::new(&session.fragment, &view_data.permutation))
 ```
 Only the `RowProjection::new` call is wrapped, not the whole `get_or_build` — keeps the
 single-flight map lock's O(1) hold time (D-G) unaffected by the pool boundary; `pool.install` is

@@ -225,7 +225,7 @@ it's about not restreaming, and more importantly for the backend, not having to
 re-read, points the client already has."*
 
 Stability is conditional and the precise form matters, because the protocol depends on
-it: `served(viewport)` is stable within **(mask, overlay version, slice, k, idset)**.
+it: `served(viewport)` is stable within **(mask, overlay version, view, k, idset)**.
 §7.2 accepts θ movement on overlay swap; contracts §2.6 makes row order key-dependent.
 Those five coordinates are the **view key** (§6). The viewport is not one of them, and
 that is the whole point of the concept: a served viewport is stable *across* viewports
@@ -276,7 +276,7 @@ field keeps rediscovering, which is a stronger and more checkable claim than nov
 
 **Declarations key on tile identity, not row ranges.** A row range dies at every
 compaction (I11); a Morton prefix is a **permanently** stable address — under decision 0040
-quantisation is slice-scoped index configuration, immutable at runtime, and compaction
+quantisation is view-scoped index configuration, immutable at runtime, and compaction
 carries it forward byte-for-byte, so not even a re-quantisation moves it.
 
 **What it saves:** the column gather and the wire bytes. Not the `tessera_id` read —
@@ -382,7 +382,7 @@ view-key-scoped URLs for safe browser caching, deepscatter needs reload scoping,
 Mosaic-extract needs a consistent snapshot, deck.gl needs an `updateTriggers` key. So
 the view key is an **integration requirement**, not an internal optimisation.
 
-The view key is the five coordinates of §5 — mask, overlay version, slice, *k*, idset —
+The view key is the five coordinates of §5 — mask, overlay version, view, *k*, idset —
 and it is the coordinate within which `served(viewport)` is stable. **The viewport is
 not one of its components**, and that exclusion is the concept: a served viewport is
 stable *across* viewports, so every pan and every zoom within one view key answers from
@@ -884,7 +884,7 @@ integrator, two further demands are clear, and both follow from **P6** — the n
 correct, so an obligation a naive client gets wrong is a defect to design out rather than a line in
 the obligations list.
 
-**(1) The request should carry a mark budget, not a zoom.** `{slice, bbox, budget, k}` with the
+**(1) The request should carry a mark budget, not a zoom.** `{view, bbox, budget, k}` with the
 server choosing the depth, alongside the existing `zoom` form.
 
 *Why it is the highest-leverage change available.* Depth choice is the single hardest thing the
@@ -1468,7 +1468,7 @@ archive is forbidden.*
   **The reconcile table cannot be written until this is chosen.**
 - **Licence review** for any Grafana or Metabase plugin work (both AGPLv3: a plugin is
   standard practice, embedding or forking the host is an AGPL event).
-- **Multi-slice comparison** has no client-architecture position yet.
+- **Multi-view comparison** has no client-architecture position yet.
 - **Sort, for table-shaped consumers** *(survey, 2026-08-01; owner: record, do not decide)*.
   Enterprise grids match the drill-down cursor almost exactly — AG Grid's server-side row
   model, or TanStack Table's manual mode (MIT; AG Grid's server-side model is
@@ -1497,7 +1497,7 @@ archive is forbidden.*
 
 **r2 (2026-08-01) applies two decisions and changes no mechanism.** Decision
 [0029](../decisions/0029-view-key.md) names the composite this document is largely about: the
-coordinate **(mask, overlay version, slice, *k*, idset)** within which `served(viewport)` is
+coordinate **(mask, overlay version, view, *k*, idset)** within which `served(viewport)` is
 stable was a fourth thing called "epoch", and is now the **view key** (§6). *Key* rather than
 *state* because the viewport is deliberately **not** one of its components — a served viewport is
 stable *across* viewports within one view key — and a name that needed a disclaimer in every

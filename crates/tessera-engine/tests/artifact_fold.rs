@@ -31,7 +31,7 @@ fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
         title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         access: LayerAccess {
             label: None,
@@ -334,7 +334,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
         external_id: Some(external_id.to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,

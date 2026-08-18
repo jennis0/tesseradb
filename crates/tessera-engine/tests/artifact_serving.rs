@@ -25,7 +25,7 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
     LayerDeclaration {
         name: name.into(),
         title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         access: LayerAccess {
             label: None,

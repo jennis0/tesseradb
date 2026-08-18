@@ -186,7 +186,7 @@ from .verification import (
 #: visible rows and every surface has content.
 GRANT_TERMS = tuple(range(64, 72))
 GRANTS = tuple(str(t) for t in GRANT_TERMS)
-SLICE_ID = "s0"
+VIEW_ID = "s0"
 BBOX = (0.0, 0.0, 65536.0, 65536.0)
 #: The per-tile cap (contracts §3.2's cap clause, not a per-request ceiling).
 #:
@@ -387,8 +387,8 @@ def read_bundle(bundle_root: Path) -> BundleView:
                 prefix_dir
                 / "partitions"
                 / partition
-                / "slices"
-                / seg["slice"]
+                / "views"
+                / seg["view"]
                 / "segments"
                 / seg["seg_id"]
             )
@@ -865,7 +865,7 @@ def test_endurance_long_life(tmp_path_factory):
     files = materialise_corpus(p.seed, p.base, work / "corpus", ingest=p.ingest_range)
     declaration = Declaration.load(files.schema)
     bundle_root = work / "bundle"
-    build_bundle(files, bundle_root, slice_id=SLICE_ID)
+    build_bundle(files, bundle_root, view_id=VIEW_ID)
 
     with ipc.open_stream(io.BytesIO(files.ingest.read_bytes())) as reader:
         ingest_table = reader.read_all().combine_chunks()
@@ -901,7 +901,7 @@ def test_endurance_long_life(tmp_path_factory):
         bundle_root=bundle_root,
         run_dir=tmp_path_factory.mktemp("endurance-run"),
         grants=GRANTS,
-        slice_id=SLICE_ID,
+        view_id=VIEW_ID,
         bbox=BBOX,
         k=K,
         filters={"bay": {"eq": "cedar"}},

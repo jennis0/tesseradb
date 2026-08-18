@@ -516,8 +516,8 @@ impl LocatorSlot {
             // or genuinely beyond the allocator high-water. Not this module's error to raise.
             return Ok(None);
         }
-        let slice = self.get_or_load()?;
-        let ord = slice[idx as usize];
+        let view = self.get_or_load()?;
+        let ord = view[idx as usize];
         if ord == LOCATOR_NONE {
             Ok(None)
         } else {

@@ -71,7 +71,7 @@ fn random_grant(all: &[String], w: usize, seed: u64) -> Vec<String> {
 }
 
 /// See `calibration_sweep::true_rows_in_ranges`'s doc — same fix, same reasoning.
-fn true_rows_in_ranges(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
+fn true_rows_in_ranges(bundle: &Bundle, view: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
     let q = bundle.manifest.quantisation;
     let extent = Bounds {
         x_min: q.x_min,
@@ -80,12 +80,12 @@ fn true_rows_in_ranges(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -
         y_max: q.y_max,
     };
     let tiles = tiles_for_bbox(bbox, zoom, &extent);
-    let slice_data = bundle
+    let view_data = bundle
         .partitions
         .values()
-        .find_map(|p| p.slices.get(slice))
-        .expect("slice should exist");
-    let segment = slice_data.segments.first().expect("one segment (R4)");
+        .find_map(|p| p.views.get(view))
+        .expect("view should exist");
+    let segment = view_data.segments.first().expect("one segment (R4)");
     let ranges = tile_ranges_all(segment, &tiles);
     let rows: u64 = ranges.iter().map(|r| r.len() as u64).sum();
     (tiles.len() as u64, rows)

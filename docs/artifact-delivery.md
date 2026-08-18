@@ -81,8 +81,8 @@ its content, content before the events that can invalidate it.
 and both removal rules; the record blob (where supplied content lives); row space, the permutation
 and the fold; the composed mask and `and_cardinality`; the filter tree and the token index. **What
 does not exist** — anything artifact-shaped at all, and the WAL'd registry pattern the layer
-lifecycle is specified against: `slices-and-multi-table.md` §3 is a *design*, not code, so the layer
-registry is the first implementation of that shape rather than a reuse of it, and slices will
+lifecycle is specified against: `views-and-multi-table.md` §3 is a *design*, not code, so the layer
+registry is the first implementation of that shape rather than a reuse of it, and views will
 inherit it.
 
 ## 2. Stage 0 — what must be settled, and what it blocks
@@ -139,7 +139,7 @@ dropped permanently — with no artifacts in it at all.
   overlay. One entity ID per layer, so layer suppression rides `/control/changes`.
 - Reserved entity runs per level as a **list** of 2¹⁶-aligned blocks, never one block.
 - `/v1/meta` carries the gate-filtered registry — identity, structure, zoom-to-level map, declared
-  derived vocabulary, slices, supplied-content kinds. **Never the artifact cardinality.**
+  derived vocabulary, views, supplied-content kinds. **Never the artifact cardinality.**
 - Layer reachability keyed on the layer version, with a live `verdict` check ahead of it.
 
 **The check:** a layer is visible to one principal and, to another, indistinguishable — in outcome
@@ -314,7 +314,7 @@ never the cluster's size.
   entries. The extent list is held as complete current state and assigned, which is the posture the
   deny list already takes for the same reason.
 - ✔ The derived **row-space** operator, built member-wise and never range-wise, cached per
-  `(slice, layer, level)` and rebuilt when the prefix, the segments version or the store's own
+  `(view, layer, level)` and rebuilt when the prefix, the segments version or the store's own
   version moves. Replace-on-mismatch rather than an LRU: the key names the only generation a
   projection is valid for, so a stale entry has no value to keep warm.
 - ✔ The visibility predicate in one place, overlay first: `verdict` → layer gate → own terms ∧
@@ -467,7 +467,7 @@ Stage 5, which is now closed; the Stage 3, 4 and 5 handovers are all retired.
       bundles this route exists for were exactly the ones that could never compact. Stage 4's
       artifact pass rewrites them instead, and it does not care which route wrote them.
   - Found in the doing: **a generating set can lose members on the way into row space.** The set is
-    entity-space and permanent; row space holds only what this slice has folded in, so a member
+    entity-space and permanent; row space holds only what this view has folded in, so a member
     awaiting a fold projects to nothing and drops silently out of the test — leaving a viewer
     contained in a *smaller* set than the caller wrote. The projected set now travels with the size
     it should have had, and one that lost members contains nobody.
@@ -882,7 +882,7 @@ unsatisfiable, and filtering `G` and recomputing `|G|` is the shrink the design 
 **re-declared** per scale from the members that scale has.
 
 **Membership goes to disk in entity space**, whatever the campaign says about row space. Row space
-is per slice and derived; a fixture that ships the row form has frozen a projection and will be
+is per view and derived; a fixture that ships the row form has frozen a projection and will be
 wrong after the first fold.
 
 ### 5.5 Who writes what
@@ -901,7 +901,7 @@ allocated here rather than left as a list:
 
 | Owed | Stage | Why it could refute something |
 |---|---|---|
-| ✔ **Residency** — **measured 2026-08-16**: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts, so **6.16×** serialised on contiguous membership and **7.79×** on the synthetic arm. 794 MB is ~4.9–6.2 GB resident; the pessimistic arm at 10⁷ artifacts does not fit in 47 GB. [The probe](../probes/2026-08-16-membership-residency/README.md) | 2 ✔, re-measured at 8 | the slice budget still has no line for the multipliers, which stand on top of this |
+| ✔ **Residency** — **measured 2026-08-16**: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts, so **6.16×** serialised on contiguous membership and **7.79×** on the synthetic arm. 794 MB is ~4.9–6.2 GB resident; the pessimistic arm at 10⁷ artifacts does not fit in 47 GB. [The probe](../probes/2026-08-16-membership-residency/README.md) | 2 ✔, re-measured at 8 | the view budget still has no line for the multipliers, which stand on top of this |
 | ✔ **The fold's artifact pass** — **measured 2026-08-16**: projecting per artifact through the new permutation beats riding pass 1 on memory (**+3.5 GB against +9.2 GB**, page cache against anonymous), and threads where riding cannot (**32.8 s on eight threads against 101.3 s** at 10⁹ rows / 10⁷ artifacts, linear in rows). Half the comparison dissolved on re-posing: membership is entity-canonical, so no `old_row → new_row` table exists to build. [The probe](../probes/2026-08-16-fold-artifact-pass/README.md) | 4 | `plan_fold`'s ~9–10 GB anonymous peak **stays where it is** — the pass adds the output row forms and page cache |
 | **The three arms** — flush-union, merge-rebase, fold-rebuild | 4 | the merge arm's bound is proportional to the merged span, not to the artifact population |
 | **Σ\|G\| and containment per request** | 3 | ~4 B/member *assumed*; refuted if a real deployment's Σ\|G\| approaches membership's order |
@@ -929,7 +929,7 @@ against 94.0 resident, so a form usable *in place* — mapped rather than deseri
 its disk size and moves the cost from anonymous memory to reclaimable page cache. That is a ~6×
 argument for the frozen-format option, and it is now measured rather than aesthetic.
 
-**What is not answered** is the multipliers: by slice, by level, and by two during a replace. The
+**What is not answered** is the multipliers: by view, by level, and by two during a replace. The
 engine also holds two resident copies today — the entity-space store and the row-space projection —
 so the design's point is 3.6 GB *per copy* before any multiplier. Re-measured at Stage 8.
 

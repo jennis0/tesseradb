@@ -133,7 +133,7 @@ subprocess.run(
         "--artifact-members", str(SRC / "members.parquet"),
         "--values", f"archive={SRC / 'archive.parquet'}",
         "--values", f"primary_category={SRC / 'primary_category.parquet'}",
-        "--out", str(bundle), "--slice", "s0",
+        "--out", str(bundle), "--view", "s0",
         "--extent", "0,65536,0,65536", "--mint-id-key",
     ],
     check=True, capture_output=True,
@@ -212,7 +212,7 @@ try:
         # mints is the per-principal one the viewer plane takes.
         token = json.loads(post(SESSION_PORT, "/session/authorise", {"auth_data": cred},
                                 bearer=env["TESSERA_SESSION_CRED"]).read())["token"]
-        req = {"slice": "s0", "zoom": 0, "bbox": [0, 65536, 0, 65536], "k": 1,
+        req = {"view": "s0", "zoom": 0, "bbox": [0, 65536, 0, 65536], "k": 1,
                "layers": [LAYER]}
         if budget is not None:
             req["artifact_budget"] = budget

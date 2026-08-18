@@ -120,7 +120,7 @@ tessera build --points data/scaled/attrs/points.parquet \
               --schema data/scaled/attrs/schema.toml \
               --values archive=data/scaled/attrs/archive.parquet \
               --values primary_category=data/scaled/attrs/primary_category.parquet \
-              --extent 0,65536,0,65536 --slice s0 --limit 2422486 \
+              --extent 0,65536,0,65536 --view s0 --limit 2422486 \
               --mint-external-ids --id-key 000102030405060708090a0b0c0d0e0f --idset 1 \
               --out /tmp/tessera-attrs-2m4-<set>
 cargo run --release -p tessera-bench --bin category_membership -- /tmp/tessera-attrs-2m4-<set>

@@ -261,7 +261,7 @@ before racing it: one cheap prior `Engine::viewport` call (`zoom = 0`, no underl
 row projection without doing any of the expensive underlay sweep) against the *same* session,
 before the barrier + flip. This removes the one genuinely slow, uncontrolled stage
 (row-projection build) that could precede the checkpoints regardless of anything this task
-controls, so the remaining pre-tile-loop work (generation load, pin check, slice lookup, a cache
+controls, so the remaining pre-tile-loop work (generation load, pin check, view lookup, a cache
 *hit*, `compose`, `visible_total`) is cheap, in-process, sub-tile-length work — biasing the flip
 toward landing during the 16-tile loop rather than guaranteeing it. I chose (b) over (a) alone
 because it strictly improves the test's evidentiary value (a warmed race is closer to what a real

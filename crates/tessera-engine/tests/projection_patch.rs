@@ -61,7 +61,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
 fn ingest(engine: &Engine, external_id: &str, x: f32, y: f32) {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x,
         y,

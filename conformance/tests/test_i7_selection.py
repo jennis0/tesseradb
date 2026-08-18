@@ -51,7 +51,7 @@ from oracle import viewport as vp
 from oracle.bundle import Bundle
 from oracle.wire import decode_viewport
 
-SLICE = cat.SLICE_ID
+VIEW = cat.VIEW_ID
 
 # `(x0, y0, x1, y1)`, the request's bbox order — NOT `Bundle.extent`'s order for the same four
 # numbers. Defined in `oracle/catalogue.py` beside the extent it is derived from; imported rather
@@ -79,8 +79,8 @@ def _oracle_state(bundle: Bundle, case, depth: int):
     makes every density assertion circular.
     """
     mask = set(case.entities)
-    v_total = vp.visible_total(bundle, mask, SLICE)
-    return mask, v_total, vp.Selection(bundle, mask, SLICE, depth)
+    v_total = vp.visible_total(bundle, mask, VIEW)
+    return mask, v_total, vp.Selection(bundle, mask, VIEW, depth)
 
 
 def _server_view(server, token: str, depth: int, k: int):
@@ -98,7 +98,7 @@ def _server_view(server, token: str, depth: int, k: int):
     *rounded* coordinate could — rarely, but not never — fall the other side of a tile edge. A
     tile is now a prefix of the code, so it cannot.
     """
-    raw = server.viewport(token, SLICE, depth, FULL_VIEWPORT, k=k)
+    raw = server.viewport(token, VIEW, depth, FULL_VIEWPORT, k=k)
     tiles, points = decode_viewport(raw)
 
     per_tile: dict[int, list[tuple[float, float]]] = {}

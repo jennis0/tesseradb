@@ -7,7 +7,7 @@
 //! already there.
 //!
 //! **Why the build plane exists for this at all.** A 10⁷-artifact level is a build job for the same
-//! reason `--attach-slice` is: volume that must not ride the trickle path, where every batch is an
+//! reason `--attach-view` is: volume that must not ride the trickle path, where every batch is an
 //! fsync and the log is pinned from the first publication until a manifest carries it
 //! (`annotation-representation.md` §5.0). The control plane stays the route for a correction, an
 //! interactive selection, and anything that must take effect against a running node.
@@ -92,7 +92,7 @@ struct LayersFile {
 struct LayerEntry {
     name: String,
     title: String,
-    slices: Vec<String>,
+    views: Vec<String>,
     membership: tessera_types::layer::MembershipSource,
     /// The access label a viewer must satisfy to know this layer exists at all.
     #[serde(default)]
@@ -170,7 +170,7 @@ impl LayerEntry {
         Ok(LayerDeclaration {
             name: self.name,
             title: self.title,
-            slices: self.slices,
+            views: self.views,
             membership: self.membership,
             access: tessera_types::layer::LayerAccess {
                 label,
@@ -525,7 +525,7 @@ pub fn publish(
     high_water: u64,
     prefix_dir: &Path,
     partition: &str,
-    slice: &str,
+    view: &str,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
     let mut alloc = Allocator::new(high_water);
@@ -533,13 +533,13 @@ pub fn publish(
 
     for declaration in &plan.declarations {
         let name = declaration.name.clone();
-        // **A slice this build does not write is a refusal, not a layer that waits.** A layer
-        // appears only in the slices it declares, so a mistyped slice name would produce a bundle
+        // **A view this build does not write is a refusal, not a layer that waits.** A layer
+        // appears only in the views it declares, so a mistyped view name would produce a bundle
         // whose layer is registered, reachable, and serves nothing — indistinguishable, from every
         // client, from a layer whose artifacts all failed their existence criterion.
-        if let Some(unknown) = declaration.slices.iter().find(|s| s.as_str() != slice) {
+        if let Some(unknown) = declaration.views.iter().find(|s| s.as_str() != view) {
             return Err(BuildError::Invalid(format!(
-                "layer {name} declares slice {unknown}, and this build writes slice {slice}; a                  layer in a slice that does not exist is registered, reachable and empty, which no                  client can tell from one whose artifacts were all withheld"
+                "layer {name} declares view {unknown}, and this build writes view {view}; a                  layer in a view that does not exist is registered, reachable and empty, which no                  client can tell from one whose artifacts were all withheld"
             )));
         }
         let record = registry

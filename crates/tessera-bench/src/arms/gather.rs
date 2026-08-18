@@ -226,10 +226,10 @@ pub fn run(
         let Some(partition) = bundle.partitions.values().next() else {
             continue;
         };
-        let Some(slice) = partition.slices.values().next() else {
+        let Some(view) = partition.views.values().next() else {
             continue;
         };
-        let Some(segment) = slice.segments.first() else {
+        let Some(segment) = view.segments.first() else {
             continue;
         };
         let total_rows = segment.columns.row_count();
@@ -248,7 +248,7 @@ pub fn run(
             }
             // Entity space -> row space, once, outside every timed loop (I4's only bridge).
             let entity_mask = crate::postings::union(&postings, &grant.terms)?;
-            let row_mask: Bitmap = slice.row_space.project(&entity_mask);
+            let row_mask: Bitmap = view.row_space.project(&entity_mask);
             let containers = crate::metrics::containers(&row_mask);
             let run_ratio = crate::metrics::run_ratio(&row_mask, total_rows as u64);
 

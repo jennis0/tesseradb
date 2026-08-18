@@ -66,7 +66,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
         }))
         .send()
         .await
@@ -115,7 +115,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
             .post(server.viewer_url("/v1/viewport"))
             .bearer_auth(token)
             .json(&serde_json::json!({
-                "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
             }))
             .send()
             .await
@@ -157,7 +157,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(other["token"].as_str().unwrap())
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
         }))
         .send()
         .await
@@ -210,22 +210,22 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
 
     // Both: refused rather than silently preferring one.
     let resp = post(serde_json::json!({
-        "slice": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "tiles": [0], "k": 5
+        "view": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "tiles": [0], "k": 5
     }))
     .await;
     assert_eq!(resp.status(), 422);
 
     // Neither: there is no tile set to answer for.
-    let resp = post(serde_json::json!({"slice": "s0", "zoom": 1, "k": 5})).await;
+    let resp = post(serde_json::json!({"view": "s0", "zoom": 1, "k": 5})).await;
     assert_eq!(resp.status(), 422);
 
     // A prefix with bits above the request's own depth names a tile at a depth nobody asked about.
-    let resp = post(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": [64], "k": 5})).await;
+    let resp = post(serde_json::json!({"view": "s0", "zoom": 1, "tiles": [64], "k": 5})).await;
     assert_eq!(resp.status(), 422);
 
     // And the list, alone and well-formed, is served.
     let resp =
-        post(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": [0, 1, 2, 3], "k": 5})).await;
+        post(serde_json::json!({"view": "s0", "zoom": 1, "tiles": [0, 1, 2, 3], "k": 5})).await;
     assert_eq!(resp.status(), 200);
 }
 
@@ -274,7 +274,7 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
 
     // Every depth-1 tile, by bbox — the whole corpus.
     let (all_tiles, all_points) = fetch(serde_json::json!({
-        "slice": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 500
+        "view": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 500
     }))
     .await;
     assert!(!all_tiles.is_empty());
@@ -284,7 +284,7 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let repeated = listed[0];
     listed.extend([repeated, repeated]);
     let (dedup_tiles, dedup_points) = fetch(serde_json::json!({
-        "slice": "s0", "zoom": 1, "tiles": listed, "k": 500
+        "view": "s0", "zoom": 1, "tiles": listed, "k": 500
     }))
     .await;
     assert_eq!(
@@ -299,7 +299,7 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let kept: Vec<u64> = all_tiles.iter().skip(1).map(|t| t.0).collect();
     if !kept.is_empty() {
         let (subset_tiles, subset_points) =
-            fetch(serde_json::json!({"slice": "s0", "zoom": 1, "tiles": kept, "k": 500})).await;
+            fetch(serde_json::json!({"view": "s0", "zoom": 1, "tiles": kept, "k": 500})).await;
         assert_eq!(subset_tiles.len(), all_tiles.len() - 1);
         assert!(
             !subset_tiles.iter().any(|t| t.0 == dropped.0),
@@ -347,7 +347,7 @@ async fn i_item_404s_identically_for_unknown_and_invisible() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token_a)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
         }))
         .send()
         .await
@@ -412,7 +412,7 @@ async fn b_missing_or_garbage_token_is_401() {
     .await;
 
     let body = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
 
     let resp_missing = server
@@ -436,7 +436,7 @@ async fn b_missing_or_garbage_token_is_401() {
 }
 
 #[tokio::test]
-async fn d_unknown_slice_404_and_malformed_bbox_422() {
+async fn d_unknown_view_404_and_malformed_bbox_422() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -458,7 +458,7 @@ async fn d_unknown_slice_404_and_malformed_bbox_422() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "does-not-exist", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "does-not-exist", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -472,7 +472,7 @@ async fn d_unknown_slice_404_and_malformed_bbox_422() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [1000.0, 0.0, 0.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [1000.0, 0.0, 0.0, 1000.0]
         }))
         .send()
         .await
@@ -526,7 +526,7 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 
 // --- Authentication and disclosure regressions ---
 
-/// `GET /v1/meta` must require a valid session token — it discloses bundle extents, slices and the
+/// `GET /v1/meta` must require a valid session token — it discloses bundle extents, views and the
 /// declared-scalar schema.
 #[tokio::test]
 async fn viewer_meta_requires_bearer() {
@@ -634,7 +634,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
         }))
         .send()
         .await
@@ -724,7 +724,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
         }))
         .send()
         .await
@@ -810,13 +810,13 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 /// to hold the compute permit for long enough to deterministically observe saturation.
 fn slow_viewport_body() -> serde_json::Value {
     serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
         "underlay_offset": 12
     })
 }
 
 fn fast_viewport_body() -> serde_json::Value {
-    serde_json::json!({ "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1 })
+    serde_json::json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1 })
 }
 
 /// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s own
@@ -1253,7 +1253,7 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 /// run.
 fn slow_multi_tile_viewport_body() -> serde_json::Value {
     serde_json::json!({
-        "slice": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+        "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
         "underlay_offset": 9
     })
 }
@@ -1268,7 +1268,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 /// **Warm-session scope, deliberately.** A single-flight row-projection build is non-cancellable
 /// bounded work by design: its result serves later arrivals, so it always runs to completion. A
 /// COLD first viewport's build cost would dominate this test's timing regardless of cancellation
-/// and would prove nothing about the per-tile checks. A fast warm-up request first, on the SAME token, gets this token/slice's row projection
+/// and would prove nothing about the per-tile checks. A fast warm-up request first, on the SAME token, gets this token/view's row projection
 /// to `Ready` before either slow request below, so the slow request's cost is entirely its
 /// (cancellation-interruptible, per-tile) [`slow_multi_tile_viewport_body`] sweep.
 ///
@@ -1317,7 +1317,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
 
-    // Warm-session scope (see this test's doc): warms this token/slice's row-projection cache
+    // Warm-session scope (see this test's doc): warms this token/view's row-projection cache
     // before either slow request below.
     let warm = server
         .client
@@ -1492,7 +1492,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     // response's tile-order/point-concatenation ordering is actually exercised, plus an underlay
     // request so that per-tile path runs across tiles too.
     let body = serde_json::json!({
-        "slice": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 50,
+        "view": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 50,
         "underlay_offset": 2
     });
 
@@ -1627,7 +1627,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
     let bbox = [0.0, 0.0, 1000.0, 1000.0];
     let zoom = 8;
     let body = serde_json::json!({
-        "slice": "s0", "zoom": zoom, "bbox": bbox, "k": 50
+        "view": "s0", "zoom": zoom, "bbox": bbox, "k": 50
     });
     let candidate_tiles = tiles_for_bbox(bbox, zoom, &extent()).len();
 
@@ -1722,7 +1722,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
                 .post(url)
                 .bearer_auth(token)
                 .json(&serde_json::json!({
-                    "slice": "s0", "zoom": 4, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+                    "view": "s0", "zoom": 4, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
                 }))
                 .send()
                 .await
@@ -1806,7 +1806,7 @@ async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content
     .await;
 
     let body = serde_json::json!({
-        "slice": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 64
+        "view": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 64
     });
     let mut decoded = Vec::new();
     for server in [&chunked, &whole] {
@@ -1868,7 +1868,7 @@ async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup(
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 4
+            "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 4
         }))
         .send()
         .await
@@ -1888,7 +1888,7 @@ async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup(
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 2, "tiles": with_duplicate, "k": 4
+            "view": "s0", "zoom": 2, "tiles": with_duplicate, "k": 4
         }))
         .send()
         .await
@@ -1976,7 +1976,7 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     let token = auth["token"].as_str().unwrap();
 
     let big_request = serde_json::json!({
-        "slice": "s0", "zoom": 6, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        "view": "s0", "zoom": 6, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
     });
 
     // Observed through `TestServer::state` after driving the requests over HTTP — the

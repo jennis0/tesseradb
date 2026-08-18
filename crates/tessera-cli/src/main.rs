@@ -34,9 +34,9 @@ enum Command {
         /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
         #[arg(long, value_parser = parse_extent)]
         extent: Bounds,
-        /// Slice identifier for this build's segment.
-        #[arg(long = "slice")]
-        slice_id: String,
+        /// View identifier for this build's segment.
+        #[arg(long = "view")]
+        view_id: String,
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
@@ -74,7 +74,7 @@ enum Command {
         /// where a null variation is the artifact's membership and `k` is variation *k*'s
         /// generating set. Needs `--layers`.
         ///
-        /// **Publishing at volume is a build job** for the same reason attaching a slice is: the
+        /// **Publishing at volume is a build job** for the same reason attaching a view is: the
         /// control plane's route is one fsync per batch with the log pinned until a manifest
         /// carries it, which a 10⁷-artifact level must not ride.
         ///
@@ -650,7 +650,7 @@ fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// Warns on what §2.3 names as breaking in practice — which is now one thing, not three.
 ///
 /// `discovered` + `u8` is unreachable while discovered vocabularies are refused at parse, and
-/// `render_in` is refused outright, so its every-slice consequence is stated once rather than per
+/// `render_in` is refused outright, so its every-view consequence is stated once rather than per
 /// column.
 ///
 /// **Dense codes under `listing = "per_viewer"` is deliberately not warned about** (owner ruling,
@@ -686,8 +686,8 @@ fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) 
         None => eprintln!("schema: {columns} column(s), variable width per row"),
     }
     eprintln!(
-        "        every column materialises in EVERY slice — including ones whose items carry no \
-         value for it (§3.9). Per-slice columns need contracts §2.6's per-slice enumeration"
+        "        every column materialises in EVERY view — including ones whose items carry no \
+         value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration"
     );
 }
 
@@ -880,7 +880,7 @@ fn main() -> ExitCode {
             pairs,
             out,
             extent,
-            slice_id,
+            view_id,
             limit,
             schema,
             values,
@@ -1006,7 +1006,7 @@ fn main() -> ExitCode {
                 pairs,
                 out: out.clone(),
                 extent,
-                slice_id,
+                view_id,
                 limit,
                 identity_key: identity.key,
                 identity_key_hex: identity.hex,
@@ -1077,12 +1077,12 @@ fn main() -> ExitCode {
         Command::Verify { bundle, deep } => {
             let print_shallow = |report: &tessera_build::VerifyReport| {
                 println!(
-                    "OK {} ({}): {} partition(s), {} slice(s), {} segment(s), {} rows, \
+                    "OK {} ({}): {} partition(s), {} view(s), {} segment(s), {} rows, \
                      entity_id_high_water {}",
                     bundle.display(),
                     report.prefix,
                     report.partitions,
-                    report.slices,
+                    report.views,
                     report.segments,
                     report.rows,
                     report.entity_id_high_water

@@ -228,8 +228,8 @@ pub(crate) fn plan_coalesce(
     // locator extent covers one span `[lo, hi]`, and `external_id_of_checked` finds an extent by
     // the first span that contains the entity — so a span overlapping another extent's would
     // answer one entity's ordinal against another's run. Ascending and non-overlapping is what
-    // makes the union a single well-formed span; it is satisfied trivially at one slice per
-    // partition, and it is what keeps two slices' interleaved flushes from being coalesced
+    // makes the union a single well-formed span; it is satisfied trivially at one view per
+    // partition, and it is what keeps two views' interleaved flushes from being coalesced
     // together.
     let locator_size = |extent: &LocatorExtent| -> Option<u64> {
         (!is_build(&extent.path) && !is_build(&extent.external_id_run))
@@ -1148,7 +1148,7 @@ mod tests {
             files: BTreeMap::new(),
         };
         for i in 0..flushes {
-            let seg = format!("partitions/{PARTITION}/slices/s0/segments/flush-{i}-1");
+            let seg = format!("partitions/{PARTITION}/views/s0/segments/flush-{i}-1");
             for name in [
                 "delta.arrow",
                 "external-ids.arrow",
@@ -1275,9 +1275,9 @@ mod tests {
         assert_eq!(
             dicts,
             [
-                format!("partitions/{PARTITION}/slices/s0/segments/flush-0-1/terms-0.dict"),
-                format!("partitions/{PARTITION}/slices/s0/segments/flush-1-1/terms-0.dict"),
-                format!("partitions/{PARTITION}/slices/s0/segments/flush-2-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/views/s0/segments/flush-0-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/views/s0/segments/flush-1-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/views/s0/segments/flush-2-1/terms-0.dict"),
             ],
             "the carried extents coalesce, and the base dictionary is not among them"
         );

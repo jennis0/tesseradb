@@ -393,7 +393,7 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
             };
             rows.push(UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 x,
                 y,
                 scalars: Vec::new(),
@@ -506,7 +506,7 @@ fn probe_codes(
 /// Assert identity resolves in both directions and the entity has a row — for every sample.
 fn assert_identity(engine: &Engine, samples: &[Planted]) {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].slices["s0"].row_space;
+    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
     for planted in samples {
         assert_eq!(
             engine
@@ -603,7 +603,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
             timings.ack,
             timings.publish,
             timings.refresh,
-            engine.generation().bundle.partitions["default"].slices["s0"]
+            engine.generation().bundle.partitions["default"].views["s0"]
                 .segments
                 .len(),
             engine.generation().bundle.partitions["default"]
@@ -617,7 +617,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         // per live segment, so the request cost is the product — and the product is what stays
         // flat if the cost model holds. A raw per-request figure grows for two reasons at once
         // (more occupied tiles, more segments) and cannot tell which moved.
-        let segments = engine.generation().bundle.partitions["default"].slices["s0"]
+        let segments = engine.generation().bundle.partitions["default"].views["s0"]
             .segments
             .len();
         // **The write-path stage split, at scale.** Zero without `bench-timing`. A microbenchmark
@@ -682,7 +682,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     eprintln!(
         "  settled: segments={}, deltas={}, runs={}, dict extents={}, locators={} \
          (merges={}, coalesces={}, refreshes={}, full builds={})",
-        partition.slices["s0"].segments.len(),
+        partition.views["s0"].segments.len(),
         manifest.deltas.len(),
         manifest.external_id_runs.len(),
         manifest.dict_extents.len(),
@@ -721,9 +721,9 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         "maintenance must not be failing its way to a low segment count: {stats:?}"
     );
     assert!(
-        partition.slices["s0"].segments.len() < rounds + 1,
+        partition.views["s0"].segments.len() < rounds + 1,
         "the segment axis is unbounded at scale: {} segments after {rounds} flushes",
-        partition.slices["s0"].segments.len()
+        partition.views["s0"].segments.len()
     );
 
     // ---- properties 1-4, against everything that has happened --------------------------------
@@ -1069,7 +1069,7 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
             let descriptors = vec![b"0".to_vec()];
             rows.push(UnallocatedRow {
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 x,
                 y,
                 scalars: Vec::new(),
@@ -1279,7 +1279,7 @@ fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
     // latency under IO contention; a session's update path is P2's subject, not this one's.
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let on_disc = bundle_bytes(&root);
-    let segments = engine.generation().bundle.partitions["default"].slices["s0"]
+    let segments = engine.generation().bundle.partitions["default"].views["s0"]
         .segments
         .len();
     // **The regime, stated before the figures, because the figures mean nothing without it.**
@@ -1799,7 +1799,7 @@ fn p1_one_scale(base: u64) {
     }
     eprintln!("  {} deletions accepted", doomed.len());
 
-    let segments_before = engine.generation().bundle.partitions["default"].slices["s0"]
+    let segments_before = engine.generation().bundle.partitions["default"].views["s0"]
         .segments
         .len();
     let on_disc_before = bundle_bytes(&root);
@@ -1867,7 +1867,7 @@ fn p1_one_scale(base: u64) {
     let passes_delta = passes_peak.saturating_sub(baseline_rss);
     let publish_delta = publish_peak.saturating_sub(publish_baseline);
 
-    let segments_after = engine.generation().bundle.partitions["default"].slices["s0"]
+    let segments_after = engine.generation().bundle.partitions["default"].views["s0"]
         .segments
         .len();
     let live_after = live_bytes(&engine);
@@ -1933,7 +1933,7 @@ fn p1_one_scale(base: u64) {
     );
     assert_eq!(
         segments_after, 1,
-        "a fold leaves one base segment per partition-slice; anything else means it folded a \
+        "a fold leaves one base segment per partition-view; anything else means it folded a \
          subset and its cost is a subset's"
     );
     assert_eq!(
@@ -1977,7 +1977,7 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
             let descriptors = vec![b"0".to_vec()];
             rows.push(UnallocatedRow {
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 x,
                 y,
                 scalars: Vec::new(),

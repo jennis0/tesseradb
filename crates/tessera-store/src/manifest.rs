@@ -411,9 +411,9 @@ impl IdentityDescriptor {
     }
 }
 
-/// `slices` entry.
+/// `views` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SliceDescriptor {
+pub struct ViewDescriptor {
     pub id: String,
     pub display_name: String,
 }
@@ -449,7 +449,7 @@ pub struct Manifest {
     pub quantisation: Quantisation,
     pub entity_id_high_water: u64,
     pub identity: IdentityDescriptor,
-    pub slices: Vec<SliceDescriptor>,
+    pub views: Vec<ViewDescriptor>,
     pub partitions: Vec<PartitionDescriptor>,
     #[serde(default)]
     pub provenance: serde_json::Value,
@@ -492,7 +492,7 @@ impl Manifest {
 /// One entry of `SEGMENTS-<n>.json`'s `segments` array — one build (or streamed) segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
-    pub slice: String,
+    pub view: String,
     pub seg_id: String,
     pub row_count: u32,
     pub entity_lo: u64,
@@ -607,7 +607,7 @@ pub struct AttrExtent {
 ///
 /// **A separate list from [`AttrExtent`] because the shape genuinely differs**, as the record
 /// blob's does. Every other indexed family stores one value per entity, so its extent is a value
-/// slice plus presence with the dictionary beside it; a text field has *many* terms per entity, so
+/// view plus presence with the dictionary beside it; a text field has *many* terms per entity, so
 /// there is no per-entity slot to store and the postings are the whole index. Widening `AttrExtent`
 /// instead would make `values` optional for one family and force every reader of every other family
 /// to handle an absence that cannot occur.

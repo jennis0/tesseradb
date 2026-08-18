@@ -6,7 +6,7 @@
 //! arithmetic:
 //!
 //! ```text
-//! marks(d) ≈ m_target · f · 4^d          f = fraction of the slice in view
+//! marks(d) ≈ m_target · f · 4^d          f = fraction of the view in view
 //! tiles    = f · 4^d = B / m_target      INDEPENDENT of zoom and of f
 //! ```
 //!
@@ -101,11 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bundle = open_bundle(&args.fixture)?;
     let q = bundle.manifest.quantisation;
-    let slice_id = bundle
+    let view_id = bundle
         .partitions
         .values()
         .next()
-        .and_then(|p| p.slices.keys().next().cloned())
+        .and_then(|p| p.views.keys().next().cloned())
         .unwrap_or_else(|| "s0".to_string());
     drop(bundle);
 
@@ -148,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(session) = engine.authorise(auth_json(&terms).as_bytes()) else {
             continue;
         };
-        let out = engine.viewport(&session, ViewportRequest::new(&slice_id, 0, full, 1))?;
+        let out = engine.viewport(&session, ViewportRequest::new(&view_id, 0, full, 1))?;
         let visible: u64 = out.tiles.iter().map(|t| t.visible).sum();
         if visible > 0 {
             measured.push((term.clone(), visible));
@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .authorise(auth_json(terms).as_bytes())
                             .expect("authorise");
                         let _ = engine
-                            .viewport(&s, ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS))
+                            .viewport(&s, ViewportRequest::new(&view_id, 0, full, K_MAX_MARKS))
                             .expect("warm-up");
                         s
                     })
@@ -203,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .iter()
                         .map(|session| {
                             let engine = &engine;
-                            let slice_id = &slice_id;
+                            let view_id = &view_id;
                             scope.spawn(move || {
                                 let mut lat = Vec::with_capacity(args.iterations);
                                 let mut marks = 0u64;
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .viewport(
                                             session,
                                             ViewportRequest::new(
-                                                slice_id,
+                                                view_id,
                                                 depth,
                                                 full,
                                                 K_MAX_MARKS,
@@ -267,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // seconds. Every other harness in this crate excludes it; so does this one.
         let warm = engine.viewport(
             &session,
-            ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS),
+            ViewportRequest::new(&view_id, 0, full, K_MAX_MARKS),
         )?;
         let visible_total: u64 = warm.tiles.iter().map(|t| t.visible).sum();
         eprintln!(
@@ -304,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let start = Instant::now();
                     let out = engine.viewport(
                         &session,
-                        ViewportRequest::new(&slice_id, depth, bbox, K_MAX_MARKS),
+                        ViewportRequest::new(&view_id, depth, bbox, K_MAX_MARKS),
                     )?;
                     totals.push(start.elapsed().as_micros() as u64);
                     last = Some(out);

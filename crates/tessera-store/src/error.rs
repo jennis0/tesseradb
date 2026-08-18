@@ -88,7 +88,7 @@ pub enum StoreError {
         fields: Vec<&'static str>,
         detail: String,
     },
-    /// A manifest referenced a partition/slice/segment directory structure that doesn't exist
+    /// A manifest referenced a partition/view/segment directory structure that doesn't exist
     /// or doesn't match the expected `columns.arrow` / `morton.u32` / `permutation.bin` shape.
     MalformedBundle { detail: String },
     /// A file the loader is about to open has no corresponding entry in either the chosen
@@ -104,7 +104,7 @@ pub enum StoreError {
     /// match on free text to tell "refused, and nothing was deleted" from any other malformed-input
     /// error is one string edit away from not noticing when the refusal stops firing.
     ReclaimRefused { prefix: String, current: String },
-    /// A manifest-derived path component (partition `phash`, slice/segment id, or a `files`
+    /// A manifest-derived path component (partition `phash`, view/segment id, or a `files`
     /// map key) was rejected before ever being joined onto a filesystem path — empty, `.`,
     /// `..`, absolute, or containing a path separator where a single opaque component was
     /// expected. Bundle contents are trusted for shape but never for path escape.

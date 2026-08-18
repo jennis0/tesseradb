@@ -23,7 +23,7 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(external_id.to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 0.5,
         y: 0.5,

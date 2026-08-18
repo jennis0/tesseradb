@@ -233,7 +233,7 @@ def plan_results(tmp_path_factory, private_catalogue_bundle) -> dict[str, StageR
         bundle_root=private_catalogue_bundle("stage-invariance"),
         run_dir=tmp_path_factory.mktemp("stage-invariance-run"),
         grants=GRANTS,
-        slice_id=cat.SLICE_ID,
+        view_id=cat.VIEW_ID,
         bbox=BBOX,
         k=K,
         filters={"department": {"eq": FILTER_DEPARTMENT}},

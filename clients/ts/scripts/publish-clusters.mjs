@@ -183,12 +183,12 @@ const token = await authorise(publisherTerms);
 const metaResp = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bearer ${token}`}});
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
-const slice = meta.slices[0].id;
+const view = meta.views[0].id;
 const q = meta.quantisation;
 
 console.log(`sampling points at depth ${SAMPLE_DEPTH}, k=${SAMPLE_K}, as the publishing principal`);
 const sampled = await viewport(token, {
-  slice,
+  view,
   zoom: SAMPLE_DEPTH,
   bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
   k: SAMPLE_K,
@@ -293,7 +293,7 @@ console.log(
 const declaration = {
   name: layerName,
   title: args.title ?? `k-means over ${ids.length.toLocaleString()} sampled points`,
-  slices: [slice],
+  views: [view],
   membership: 'enumerated',
   // `artifacts_carry_own: true` would serve nothing at this stage — the per-artifact label arrives
   // with content at Stage 3, so a layer declaring it has nothing to satisfy and every artifact is
@@ -376,7 +376,7 @@ if (labelLayer) {
   console.log(`sampling as the term-${labelTerm} principal, for the per-term variation`);
   const termToken = await authorise([labelTerm]);
   const termSample = await viewport(termToken, {
-    slice,
+    view,
     zoom: SAMPLE_DEPTH,
     bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
     k: SAMPLE_K,
@@ -391,7 +391,7 @@ if (labelLayer) {
   const labelDeclaration = {
     name: labelLayer,
     title: args['labels-title'] ?? `toponymy over ${layerName}`,
-    slices: [slice],
+    views: [view],
     membership: 'enumerated',
     access: {label: null, artifacts_carry_own: false},
     visible_when: null,
@@ -513,7 +513,7 @@ if (presets) {
   for (const preset of presets) {
     const t = await authorise(preset.terms);
     const served = await viewport(t, {
-      slice,
+      view,
       zoom: 3,
       bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
       k: 1,

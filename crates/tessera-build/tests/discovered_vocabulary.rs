@@ -123,7 +123,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         pairs: pairs.to_path_buf(),
         out,
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -189,14 +189,14 @@ fn department_key_of(
 ) -> Option<String> {
     let bundle = open_bundle(out).unwrap();
     let part = bundle.partitions.values().next().unwrap();
-    let slice = &part.slices["s0"];
+    let view = &part.views["s0"];
     let entity = entity_of_source[&source_id];
-    let row = slice
+    let row = view
         .row_space
         .row_of(EntityId::new(entity))
         .expect("every entity has a row")
         .raw() as usize;
-    let segment = &slice.segments[0];
+    let segment = &view.segments[0];
     let code = match segment
         .columns
         .scalar("department")

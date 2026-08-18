@@ -75,7 +75,7 @@ When a bundle contains compartmented partitions, the parent process is a *router
 
 **The router holds** the bundle-level term dictionary (descriptors are opaque policy-side identifiers, not corpus data — D11), the plugin host, token state, and the label *presence registry* (§2.3). It holds no postings, no masks, no columns, no entity IDs.
 
-**Each worker holds** its partition's term postings, mask *fragments* (built and cached locally, never shipped), columns, permutation, overlay, watermark, WAL, external-ID sidecar, node membership, generating-set slices and label text.
+**Each worker holds** its partition's term postings, mask *fragments* (built and cached locally, never shipped), columns, permutation, overlay, watermark, WAL, external-ID sidecar, node membership, generating-set views and label text.
 
 **Authorise fans out.** The router runs `terms_of_auth`, interns to term IDs, computes the reachable partition set by testing required sets from the manifest, and sends the satisfied-term list to each reachable worker, which builds (or content-address-hits) its fragment and acks with no payload. A worker restart loses its fragment cache only; the next query rebuilds it transparently.
 
@@ -91,7 +91,7 @@ The presence registry (label id → presence set; no text, no entity IDs, no car
 
 ### 2.4 What this does not decide
 
-Sharding by Morton range (§13.3) stays out of scope and unforeclosed: nothing here assumes a single global mask, and the router/worker protocol is the shape a shard fan-out will need. Slices are data, not processes: all temporal slices of a partition are served by one worker, selected per request.
+Sharding by Morton range (§13.3) stays out of scope and unforeclosed: nothing here assumes a single global mask, and the router/worker protocol is the shape a shard fan-out will need. Views are data, not processes: all temporal views of a partition are served by one worker, selected per request.
 
 ## 3. Crate decomposition
 
@@ -214,7 +214,7 @@ bundle/
                                    and scalars; small-term threshold; quantisation bounds
                                    (so every artifact producer shares one grid); entity-ID
                                    high-water; the identity block (construction, rounds,
-                                   key, shard, idset — §4.5); slice and partition lists;
+                                   key, shard, idset — §4.5); view and partition lists;
                                    build provenance, including the batch size when the
                                    build batched (§6.1); per-file digests and sizes
     dictionary/terms-<k>.dict      immutable extents, logically concatenated — ONE
@@ -233,7 +233,7 @@ bundle/
                                    direct scan rather than from postings
       entities/external-ids-<k>.arrow   caller external ID → entity, byte-sorted **within each run**; runs are not ordered against one another
       entities/ext-locator.u32          entity → ordinal in the above, for drill-down
-      slices/<slice_id>/
+      views/<view_id>/
         permutation.bin            entity→row, one direction only
         segments/<seg_id>/
           columns.arrow            tessera_id, residual, priority, declared scalars
@@ -265,11 +265,11 @@ HTTP on every surface, Arrow IPC bodies for anything columnar, JSON for control 
 
 | Verb | Request | Response |
 |---|---|---|
-| `GET /v1/meta` | — | slices, coordinate bounds, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
-| `POST /v1/viewport` | slice, zoom, tile range or bbox, filter set, k (server-capped), optional geometry stamp | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; the geometry stamp answered from, and whether the presented one is stale |
+| `GET /v1/meta` | — | views, coordinate bounds, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
+| `POST /v1/viewport` | view, zoom, tile range or bbox, filter set, k (server-capped), optional geometry stamp | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; the geometry stamp answered from, and whether the presented one is stale |
 | `POST /v1/items/{tessera_id}` | drill-down; the identifier is assumed current (§6.8) — there is no rotation parameter | item detail |
-| `POST /v1/labels` | slice, viewport, filter set, optional geometry stamp | frontier nodes with at most one gated label each, plus tier |
-| `POST /v1/region` | slice, polygon or box, filter set, optional pin | exact masked count; sampled preview; masked breakdowns |
+| `POST /v1/labels` | view, viewport, filter set, optional geometry stamp | frontier nodes with at most one gated label each, plus tier |
+| `POST /v1/region` | view, polygon or box, filter set, optional pin | exact masked count; sampled preview; masked breakdowns |
 
 > **⊘ Specified, not implemented.** Three verbs are mounted: `/v1/meta`, `/v1/viewport`, `/v1/items/{tessera_id}`. `/v1/labels` and `/v1/region` are absent — not stubbed, so a caller gets a 404 rather than an empty or partial answer, which is the right failure. Both depend on machinery (the node table, the label ladder) that does not exist.
 
@@ -349,7 +349,7 @@ flowchart LR
 
 Two properties of that path are worth stating because a reader reconstructing it from the design would get them backwards.
 
-**Projection happens once per session, not once per request** — and it is the *fragment* that is projected, not the composed mask. The strategy and the two clamps it requires are design §10.4's, stated normatively there; this document does not restate them. What belongs here is only where they live: `RowProjection` and `compose` in `tessera-engine`, with the projection cached per `(token, slice, segments_version)` and the diffs applied per request.
+**Projection happens once per session, not once per request** — and it is the *fragment* that is projected, not the composed mask. The strategy and the two clamps it requires are design §10.4's, stated normatively there; this document does not restate them. What belongs here is only where they live: `RowProjection` and `compose` in `tessera-engine`, with the projection cached per `(token, view, segments_version)` and the diffs applied per request.
 
 **A pin is a value threaded by ownership through every call.** No ambient "current version" static exists (I11). A pin fixes row-space geometry and never authorisation state: a suppression applies to a pinned request the moment it is accepted.
 
@@ -584,7 +584,7 @@ The binary and its HTTP surfaces are the product. `tessera serve -c tessera.toml
 
 > **⊘ Specified, not implemented.** There is no `python/` directory, no wheel, no SDK and no supervisor. Python appears only as the test-only oracle (`reference/`) and the conformance harness (`conformance/`). A reader must not assume `pip install tessera` exists, and the supervisor hygiene an earlier revision specified — port 0, a watchdog pipe, a pidfile — has no implementation to be hygienic about.
 
-**What the integrator owns**, because the service cannot check it: consistent plugin functions (I5), a stable projection across slices, stable cluster node identity, honest generating sets (C12), unique external IDs, and a token-refresh policy (I6). `tessera verify` runs what *is* mechanisable — digest verification, manifest and plugin-hash agreement, permutation bijectivity, declared-bounds conformance.
+**What the integrator owns**, because the service cannot check it: consistent plugin functions (I5), a stable projection across views, stable cluster node identity, honest generating sets (C12), unique external IDs, and a token-refresh policy (I6). `tessera verify` runs what *is* mechanisable — digest verification, manifest and plugin-hash agreement, permutation bijectivity, declared-bounds conformance.
 
 ## 9. Observability and failure
 
@@ -594,7 +594,7 @@ The session figures are there because the registry sheds expired sessions on a g
 
 **Executor posture is a four-state monotone readiness signal** feeding `/readyz`: `not-started`, `running`, `wal-poisoned`, `dead`. The interesting state is the third — **`wal-poisoned` keeps the executor alive and still applying denies**, which is a deliberate choice between two fail-closed answers: exiting would stop suppressions being applied to the in-memory state that requests actually read. The spellings are operator-facing and a test pins them, so renaming a Rust variant cannot silently change a scraped field.
 
-Metrics would map to named risks so dashboards read in the design's vocabulary: mask-fragment build latency, fragment cardinality and frozen size, overlay size, watermark lag, WAL depth and fsync latency, over-bound warn count, segment and delta counts per slice, **posting fragmentation per partition** (§11.1's signature runs erode with every small ingest batch and nothing repairs them, so the erosion is only visible if measured), invalidation-queue depth, partition-creation events (alarm), and C4's timing spread — measured from day one so "quantify before treating as acceptable" actually happens.
+Metrics would map to named risks so dashboards read in the design's vocabulary: mask-fragment build latency, fragment cardinality and frozen size, overlay size, watermark lag, WAL depth and fsync latency, over-bound warn count, segment and delta counts per view, **posting fragmentation per partition** (§11.1's signature runs erode with every small ingest batch and nothing repairs them, so the erosion is only visible if measured), invalidation-queue depth, partition-creation events (alarm), and C4's timing spread — measured from day one so "quantify before treating as acceptable" actually happens.
 
 > **⊘ Specified, not implemented.** There is no metrics emitter: no Prometheus dependency, no `/metrics` route, no metrics listener. `/control/status` is the substitute, and it is a pull-only JSON snapshot on the admin plane rather than a time series — so *rates*, including the fragmentation trend the paragraph above exists to catch, must be derived by whatever scrapes it. The fragmentation figure is emitted, but over commit-window allocation rather than the per-partition base-plus-delta quantity named above; contracts §3.4 marks it partially implemented and states what that narrowing costs a reader.
 
@@ -619,14 +619,14 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 9. **Disclosure controls have no defaults.**
 10. **One binary for daemon and CLI.**
 11. **One term-interning namespace, bundle-level.** Descriptors are opaque policy-side identifiers, and the isolation property covers entity IDs and bitmaps, which never leave a worker. Rejected: per-partition namespaces — they dissolve byte-equality of descriptors as the I5 mechanism, and break required-set gating at the router.
-12. **Label presence sets are first-class**: generating sets stored as per-partition slices, each carrying the label's full presence set; the router withholds unless presence ⊆ reachable and every presence partition affirms containment.
+12. **Label presence sets are first-class**: generating sets stored as per-partition views, each carrying the label's full presence set; the router withholds unless presence ⊆ reachable and every presence partition affirms containment.
 13. **WAL-before-ack durability; deny-disposition changes are never load-shed.** An unpersisted overlay fails open, so deletion and suppression must be both durable and always accepted.
 14. **Caller-supplied external IDs are the admin-plane identity.** They give `/control/changes` an addressee, ingest an idempotency story, and the admin plane an identifier that is neither an entity ID (I10) nor a viewer identity.
 15. **Watermark patching is lazy stamp advance, never in-place mutation.** Correctness comes from I1's live-set composition; patching is an amortised cost optimisation.
 16. **A point's wire identity is a stable, keyed `tessera_id`, not a per-session handle.** Stability is what lets a client bookmark, share and reconcile a point; the handle bought nothing the permutation's opacity does not, and after the entity-ID column left `columns.arrow` no artifact the gather reads stores an entity ID. Per-session handles are retained for Phase 3 node handles, where the identity genuinely is per-session. C17 records what linkability across sessions and principals costs.
 17. **One thread owns the WAL, by value; the commit window sets the signature-sort scope at the server.** Ordering stops being a discipline defended by a comment and becomes a property of there being nowhere else for the steps to happen — and the sort scope stops being whatever chunk a client happened to POST.
 
-**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
+**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across views (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
 

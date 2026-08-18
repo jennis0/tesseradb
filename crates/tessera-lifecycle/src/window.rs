@@ -681,7 +681,7 @@ mod tests {
     fn row(external_id: Option<&str>, terms: &[u32]) -> UnallocatedRow {
         UnallocatedRow {
             external_id: external_id.map(|s| s.as_bytes().to_vec()),
-            slice: "default".to_string(),
+            view: "default".to_string(),
             descriptors: vec![b"d".to_vec()],
             x: 1.0,
             y: 2.0,

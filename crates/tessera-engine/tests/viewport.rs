@@ -269,7 +269,7 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     );
 
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let segment = &bundle.partitions["default"].views["s0"].segments[0];
     let ids = segment.columns.tessera_id();
 
     // The definition's answer, computed independently of the engine: the three smallest identities
@@ -604,7 +604,7 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         .unwrap();
 
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let segment = &bundle.partitions["default"].views["s0"].segments[0];
     let tessera_ids = segment.columns.tessera_id();
 
     let tiles = tiles_for_bbox(bbox, ZOOM, &extent());
@@ -781,7 +781,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         pairs: tmp.path().join("pairs.parquet"),
         out: bundle_root.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1017,7 +1017,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
             rows: vec![tessera_lifecycle::WalRow {
                 external_id: None,
                 entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,
@@ -1146,7 +1146,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
                 y_min: 0.0,
                 y_max: 65536.0,
             },
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1638,7 +1638,7 @@ fn the_zoom_zero_count_equals_the_anchor_a_client_could_solve_for() {
             .unwrap();
         assert_eq!(
             narrow.tiles[0].visible, expected,
-            "zoom 0 must report the whole slice's composed total regardless of bbox"
+            "zoom 0 must report the whole view's composed total regardless of bbox"
         );
     }
 }
@@ -1656,7 +1656,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
         &tmp.path().join("pairs.parquet"),
     );
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let segment = &bundle.partitions["default"].views["s0"].segments[0];
 
     for parent_depth in 0..5u8 {
         for offset in 1..=3u8 {
@@ -1706,7 +1706,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // thread-wake jitter.
 
 /// D-G / decision 0058: every concurrent arrival on the same
-/// `(token_id, slice, segments_version)` key is served, off **one** build.
+/// `(token_id, view, segments_version)` key is served, off **one** build.
 ///
 /// **This test asserted the opposite until 0058**, and the shape of the change is the point. It
 /// used to require that losers received `EngineError::ProjectionBuilding`, and it could not assert

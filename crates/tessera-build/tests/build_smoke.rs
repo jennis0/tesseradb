@@ -187,7 +187,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         pairs: pairs.clone(),
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -214,8 +214,8 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert_eq!(bundle.manifest.partitions.len(), 1);
     assert_eq!(bundle.manifest.partitions[0].phash, "default");
     assert!(bundle.manifest.partitions[0].required_terms.is_empty());
-    assert_eq!(bundle.manifest.slices.len(), 1);
-    assert_eq!(bundle.manifest.slices[0].id, "s0");
+    assert_eq!(bundle.manifest.views.len(), 1);
+    assert_eq!(bundle.manifest.views[0].id, "s0");
     assert_eq!(bundle.manifest.quantisation.x_max, 1000.0);
     assert!(!bundle.manifest.data_plugin_hash.is_empty());
     assert_eq!(
@@ -228,7 +228,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert_eq!(part.manifest.watermark, N_ITEMS);
     assert_eq!(part.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(part.manifest.segments.len(), 1);
-    assert_eq!(part.manifest.segments[0].slice, "s0");
+    assert_eq!(part.manifest.segments[0].view, "s0");
     assert_eq!(part.manifest.segments[0].row_count, N_ITEMS as u32);
     assert_eq!(part.manifest.segments[0].entity_lo, 0);
     assert_eq!(part.manifest.segments[0].entity_hi, N_ITEMS - 1);
@@ -258,10 +258,10 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/terms/pairs.parquet",
         "partitions/default/entities/external-ids-0.arrow",
         "partitions/default/entities/ext-locator.u32",
-        "partitions/default/slices/s0/permutation.bin",
-        "partitions/default/slices/s0/row-entity.u32",
-        "partitions/default/slices/s0/segments/seg-0/columns.arrow",
-        "partitions/default/slices/s0/segments/seg-0/morton.u32",
+        "partitions/default/views/s0/permutation.bin",
+        "partitions/default/views/s0/row-entity.u32",
+        "partitions/default/views/s0/segments/seg-0/columns.arrow",
+        "partitions/default/views/s0/segments/seg-0/morton.u32",
     ] {
         assert!(
             bundle.manifest.files.contains_key(rel),
@@ -455,11 +455,11 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         .is_some());
 
     // ---- permutation is a bijection over the segment's rows ------------------------------
-    let slice = &part.slices["s0"];
-    assert_eq!(slice.row_space.base().bound(), N_ITEMS);
+    let view = &part.views["s0"];
+    assert_eq!(view.row_space.base().bound(), N_ITEMS);
     let mut rows: BTreeSet<u32> = BTreeSet::new();
     for e in 0..N_ITEMS {
-        let row = slice
+        let row = view
             .row_space
             .row_of(tessera_types::EntityId::new(e))
             .expect("every entity has a row");
@@ -481,7 +481,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         pairs,
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -517,7 +517,7 @@ fn build_rejects_an_empty_selection() {
         pairs,
         out: tmp.path().join("bundle"),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: Some(0),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -555,7 +555,7 @@ fn morton_input_requires_the_identity_extent() {
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
         extent,
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -600,7 +600,7 @@ fn morton_input_requires_the_identity_extent() {
         pairs,
         out: out.clone(),
         extent: identity,
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -619,7 +619,7 @@ fn morton_input_requires_the_identity_extent() {
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
     let mut got: Vec<u64> =
-        std::fs::read(out.join("v00000/partitions/default/slices/s0/segments/seg-0/morton.u32"))
+        std::fs::read(out.join("v00000/partitions/default/views/s0/segments/seg-0/morton.u32"))
             .unwrap()
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
@@ -635,7 +635,7 @@ fn morton_input_requires_the_identity_extent() {
 }
 
 #[test]
-fn build_rejects_an_unsafe_slice_id() {
+fn build_rejects_an_unsafe_view_id() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
@@ -646,7 +646,7 @@ fn build_rejects_an_unsafe_slice_id() {
         pairs,
         out: tmp.path().join("bundle"),
         extent: extent(),
-        slice_id: "../escape".to_string(),
+        view_id: "../escape".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -691,7 +691,7 @@ fn limit_filters_the_source_entity_id_prefix() {
         pairs,
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: Some(100),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -730,7 +730,7 @@ fn verify_accepts_a_freshly_built_bundle() {
         pairs,
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -772,7 +772,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         pairs,
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -790,7 +790,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     })
     .unwrap();
 
-    let columns_rel = "partitions/default/slices/s0/segments/seg-0/columns.arrow".to_string();
+    let columns_rel = "partitions/default/views/s0/segments/seg-0/columns.arrow".to_string();
     let columns_path = out.join(&report.prefix).join(&columns_rel);
 
     // ---- corrupt row 0's tessera_id, keeping the schema and every other value intact --------
@@ -1063,7 +1063,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
             pairs,
             out: out.clone(),
             extent: tessera_build::input::IDENTITY_EXTENT,
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: None,
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),

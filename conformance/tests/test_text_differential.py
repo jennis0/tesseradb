@@ -208,7 +208,7 @@ def unfiltered(catalogue_server, cases):
         if case_name not in baseline:
             case = cases[case_name]
             token = catalogue_server.authorise(list(case.grants))["token"]
-            raw = catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+            raw = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
             baseline[case_name] = _tiles_by_id(decode_viewport(raw)[0])
         return baseline[case_name]
 
@@ -341,7 +341,7 @@ def test_meta_publishes_text_with_exactly_its_two_operands(catalogue_server, cas
         ),
     ]:
         resp = catalogue_server.viewport_request(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=body
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=body
         )
         assert resp.status_code == 422, f"{why} must be refused: {resp.text}"
 
@@ -350,7 +350,7 @@ def test_meta_publishes_text_with_exactly_its_two_operands(catalogue_server, cas
     # would be indistinguishable from a corpus where nothing matches.
     resp = catalogue_server.viewport_request(
         token,
-        cat.SLICE_ID,
+        cat.VIEW_ID,
         ZOOM,
         cat.FULL_VIEWPORT,
         filters={"none_of": [{"abstract": {"match": "archive"}}]},
@@ -393,7 +393,7 @@ def test_the_engine_and_the_oracle_name_the_same_entities(
     case = cases[principal]
     token = catalogue_server.authorise(list(case.grants))["token"]
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
     tiles, _ = decode_viewport(raw)
     got = _served_entities(raw, entity_of_fx)
@@ -433,7 +433,7 @@ def test_a_phrase_is_a_strict_subset_of_its_own_conjunction(
         ("phrase", {"abstract": {"phrase": "quiet harbour"}}),
     ]:
         raw = catalogue_server.viewport(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
         )
         served[name] = _served_entities(raw, entity_of_fx)
 
@@ -465,7 +465,7 @@ def test_a_word_no_document_carries_answers_and_answers_empty(
     def body(token, word):
         return catalogue_server.viewport(
             token,
-            cat.SLICE_ID,
+            cat.VIEW_ID,
             ZOOM,
             cat.FULL_VIEWPORT,
             filters={"abstract": {"match": word}},
@@ -511,7 +511,7 @@ def test_text_operands_compose_under_the_tree(
     case = cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=COMPOSED_EXPR
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=COMPOSED_EXPR
     )
     got = _served_entities(raw, entity_of_fx)
 
@@ -563,7 +563,7 @@ def test_a_suppressed_entity_is_not_served_though_its_terms_are_in_the_postings(
 
     def served(expr):
         raw = catalogue_server.viewport(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
         )
         return _served_entities(raw, entity_of_fx)
 

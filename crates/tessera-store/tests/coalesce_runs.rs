@@ -17,7 +17,7 @@ mod fixture;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, BinaryArray, UInt32Array};
-use fixture::{build_bundle, PARTITION, SLICE};
+use fixture::{build_bundle, PARTITION, VIEW};
 use tessera_store::coalesce_external_id_runs;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use tessera_store::manifest::Quantisation;
@@ -52,7 +52,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
     write_flush_segment(
         &root.join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id,
             rows,
@@ -66,8 +66,8 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
     .expect("the input segment writes");
     root.join("v00000/partitions")
         .join(PARTITION)
-        .join("slices")
-        .join(SLICE)
+        .join("views")
+        .join(VIEW)
         .join("segments")
         .join(seg_id)
         .join("external-ids.arrow")

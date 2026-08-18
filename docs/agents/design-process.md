@@ -23,7 +23,7 @@ normative**. "For review" alone is not enough; the reader needs to know what the
 and brief it to review against the invariants and the existing corpus rather than against taste.
 Where a design is invariant-bearing, use two or three reviewers with distinct lenses — security,
 performance, implementability — rather than several with the same one. Redundant reviewers agree
-with each other; diverse reviewers find different failures. The slices design took three lenses
+with each other; diverse reviewers find different failures. The views design took three lenses
 and all three found something the others did not.
 
 The reviewer's job is to try to break the design. A review that returns approval without having

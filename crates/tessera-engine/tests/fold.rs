@@ -114,7 +114,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         pairs: pairs_path.to_path_buf(),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
         // and an empty schema is what `common`'s builder uses for the same reason.
         schema: Default::default(),
@@ -287,7 +287,7 @@ fn ingest_with_descriptors(
 ) -> Result<EntityId, tessera_engine::AcceptError> {
     let row = UnallocatedRow {
         external_id: Some(external_id),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: descriptors.to_vec(),
         x: 5.0,
         y: 5.0,
@@ -379,7 +379,7 @@ fn all_three_halves_of_one_deletion() {
     );
 
     let bundle = open_bundle(&root).expect("the folded bundle opens on its own");
-    let row_space = &bundle.partitions["default"].slices["s0"].row_space;
+    let row_space = &bundle.partitions["default"].views["s0"].row_space;
     assert!(
         row_space.row_of(deleted).is_none(),
         "the folded entity has no row in the new base"
@@ -441,15 +441,15 @@ fn every_surviving_row_keeps_its_own_identity_and_row_space_is_dense() {
     fold(&engine);
 
     let bundle = open_bundle(&root).expect("the folded bundle opens");
-    let slice = &bundle.partitions["default"].slices["s0"];
-    let row_space = &slice.row_space;
+    let view = &bundle.partitions["default"].views["s0"];
+    let row_space = &view.row_space;
     assert_eq!(
         row_space.total_rows(),
         N_ITEMS - deleted.len() as u64,
         "row space holds exactly the survivors"
     );
 
-    let segment = &slice.segments[0];
+    let segment = &view.segments[0];
     let mut rows_seen = std::collections::BTreeSet::new();
     for source in 0..N_ITEMS {
         let entity = EntityId::new(source_to_entity[&source]);
@@ -1299,7 +1299,7 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
 ///
 /// **Mutations this kill:** dropping carried segments from the assembled manifest (the mid-flight
 /// item is invisible and its external id resolves to nothing); listing the carried segment *before*
-/// the fold's own base (the reader takes the first segment of a slice as the base
+/// the fold's own base (the reader takes the first segment of a view as the base
 /// `permutation.bin` addresses, so the bundle either refuses to open or serves the wrong row
 /// space); listing the carried run before the folded run 0 (the sidecar derives the base locator's
 /// path from `external_id_runs[0]`, so it takes a flush's entity-range extent for the full-length
@@ -1340,12 +1340,12 @@ fn a_flush_inside_the_folds_flight_is_carried_forward() {
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert_eq!(
-        partition.slices["s0"].row_space.extent_count(),
+        partition.views["s0"].row_space.extent_count(),
         1,
         "one carried-forward extent above the folded base"
     );
     assert!(
-        partition.slices["s0"].row_space.row_of(entity).is_some(),
+        partition.views["s0"].row_space.row_of(entity).is_some(),
         "whose rows the base permutation does not claim"
     );
 }
@@ -1428,7 +1428,7 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert!(
-        partition.slices["s0"]
+        partition.views["s0"]
             .row_space
             .row_of(mid_flight)
             .is_some(),
@@ -1436,7 +1436,7 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
          name it"
     );
     assert!(
-        partition.slices["s0"].row_space.row_of(folded).is_none(),
+        partition.views["s0"].row_space.row_of(folded).is_none(),
         "and the pre-snapshot one lost its row, so the fold did fold something"
     );
     assert!(
@@ -1995,7 +1995,7 @@ fn term_ordinals_are_stable_across_a_fold() {
     // from "coincidentally unchanged".
     let novel_row = UnallocatedRow {
         external_id: Some(b"novel-holder".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"novel".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -2497,9 +2497,9 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
     assert_eq!(engine.generation().prefix, "v00001");
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     assert_eq!(
-        bundle.partitions["default"].slices["s0"].segments.len(),
+        bundle.partitions["default"].views["s0"].segments.len(),
         1,
-        "and the fold did what the gauge asked for: one segment per partition-slice"
+        "and the fold did what the gauge asked for: one segment per partition-view"
     );
 }
 

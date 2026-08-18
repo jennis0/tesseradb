@@ -82,7 +82,7 @@ fn entity_of_source(root: &Path, source_id: u64) -> EntityId {
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,

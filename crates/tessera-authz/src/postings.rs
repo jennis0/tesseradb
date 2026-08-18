@@ -492,7 +492,7 @@ pub fn decode_single_batch(buffer: &Buffer, what: &str) -> io::Result<RecordBatc
     let trailer_start = buffer.len() - FOOTER_TRAILER_LEN;
     let trailer: [u8; FOOTER_TRAILER_LEN] = buffer[trailer_start..]
         .try_into()
-        .expect("slice length matches FOOTER_TRAILER_LEN");
+        .expect("view length matches FOOTER_TRAILER_LEN");
     let footer_len =
         read_footer_length(trailer).map_err(|e| invalid_data(format!("{what}: {e}")))?;
     if footer_len > trailer_start {

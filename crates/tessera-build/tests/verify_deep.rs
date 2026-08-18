@@ -107,7 +107,7 @@ fn flushed_bundle(root: &Path) {
         pairs,
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -190,7 +190,7 @@ fn flushed_bundle(root: &Path) {
 
     // The flushed entities' postings live in a delta tier the base `pairs.parquet` has never
     // seen — the state the pairs check must not refuse.
-    let delta_rel = "partitions/default/slices/s0/segments/flush-1/delta.arrow".to_string();
+    let delta_rel = "partitions/default/views/s0/segments/flush-1/delta.arrow".to_string();
     let delta_path = prefix_dir.join(&delta_rel);
     tessera_authz::write_delta_tier(
         &delta_path,
@@ -290,7 +290,7 @@ fn refresh_digest(root: &Path, rel: &str) {
 /// The false-refusal direction (§18 obligation 10): a valid bundle that has flushed and
 /// re-ingested must verify — shallow and deep. Before the row-offset fix the shallow verifier
 /// refused every such bundle: its bijection sweep counted only the base permutation's rows and
-/// its identity loop restarted the row index at zero per segment while indexing a slice-wide
+/// its identity loop restarted the row index at zero per segment while indexing a view-wide
 /// array.
 #[test]
 fn a_flushed_and_reingested_bundle_verifies_shallow_and_deep() {
@@ -374,7 +374,7 @@ fn a_segment_whose_column_is_one_row_short_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/slices/s0/segments/flush-1/columns.arrow";
+    let rel = "partitions/default/views/s0/segments/flush-1/columns.arrow";
     let path = root.join("v00000").join(rel);
 
     let reader =
@@ -400,7 +400,7 @@ fn a_segment_whose_morton_column_is_out_of_order_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/slices/s0/segments/flush-1/morton.u32";
+    let rel = "partitions/default/views/s0/segments/flush-1/morton.u32";
     let path = root.join("v00000").join(rel);
 
     let mut bytes = fs::read(&path).unwrap();

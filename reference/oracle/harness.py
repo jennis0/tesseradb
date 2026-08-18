@@ -36,7 +36,7 @@ DEFAULT_POINTS = "data/scaled/geometry.parquet"
 DEFAULT_PAIRS = "data/scaled/pairs/categories-subclass.pairs.parquet"
 DEFAULT_LIMIT = 250_000
 DEFAULT_EXTENT = "0,65536,0,65536"
-DEFAULT_SLICE = "s0"
+DEFAULT_VIEW = "s0"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -181,7 +181,7 @@ def ensure_fixture_bundle(
     pairs: str = DEFAULT_PAIRS,
     limit: int | None = DEFAULT_LIMIT,
     extent: str = DEFAULT_EXTENT,
-    slice_id: str = DEFAULT_SLICE,
+    view_id: str = DEFAULT_VIEW,
 ) -> None:
     """Build a bundle at `bundle_root` via the CLI, if one doesn't already exist there.
 
@@ -213,7 +213,7 @@ def ensure_fixture_bundle(
     so the next flag added here cannot be forgotten by the reuse test.
     """
     args = _fixture_build_argv(
-        bundle_root, points=points, pairs=pairs, limit=limit, extent=extent, slice_id=slice_id
+        bundle_root, points=points, pairs=pairs, limit=limit, extent=extent, view_id=view_id
     )
     wanted = fixture_recipe(args)
     if _fixture_bundle_is_usable(bundle_root, wanted):
@@ -238,7 +238,7 @@ def _fixture_build_argv(
     pairs: str,
     limit: int | None,
     extent: str,
-    slice_id: str,
+    view_id: str,
 ) -> list[str]:
     args = [
         str(CLI_BIN),
@@ -249,8 +249,8 @@ def _fixture_build_argv(
         pairs,
         "--extent",
         extent,
-        "--slice",
-        slice_id,
+        "--view",
+        view_id,
         "--out",
         str(bundle_root),
     ]
@@ -379,7 +379,7 @@ class Server:
     def viewport(
         self,
         token: str,
-        slice_id: str,
+        view_id: str,
         zoom: int,
         bbox,
         k: int | None = None,
@@ -389,7 +389,7 @@ class Server:
         """Returns the raw framed body (matches the pre-refactor `reference/tests/conftest.py`
         behaviour exactly — the differential suite depends on getting bytes back here)."""
         return self.viewport_response(
-            token, slice_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
+            token, view_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
         ).content
 
     def meta(self, token: str) -> dict:
@@ -407,7 +407,7 @@ class Server:
     def viewport_response(
         self,
         token: str,
-        slice_id: str,
+        view_id: str,
         zoom: int,
         bbox,
         k: int | None = None,
@@ -417,7 +417,7 @@ class Server:
         """Like `viewport`, but returns the full `requests.Response` — for callers that need
         headers (e.g. `x-tessera-pin`) alongside the body."""
         resp = self.viewport_request(
-            token, slice_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
+            token, view_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
         )
         resp.raise_for_status()
         return resp
@@ -425,7 +425,7 @@ class Server:
     def viewport_request(
         self,
         token: str,
-        slice_id: str,
+        view_id: str,
         zoom: int,
         bbox,
         k: int | None = None,
@@ -435,7 +435,7 @@ class Server:
         """[`viewport_response`] without the raise — for tests whose subject *is* the refusal
         (contracts §3.2: an unknown filter column is a `422`, `none_of` is a `422`), where
         `raise_for_status` would convert the assertion target into a harness exception."""
-        body = {"slice": slice_id, "zoom": zoom, "bbox": list(bbox)}
+        body = {"view": view_id, "zoom": zoom, "bbox": list(bbox)}
         if k is not None:
             body["k"] = k
         if underlay_offset is not None:

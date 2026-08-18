@@ -47,7 +47,7 @@ use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
     IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
@@ -65,7 +65,7 @@ pub use observer::{BuildObserver, BuildStage, NoopObserver};
 const PREFIX: &str = "v00000";
 /// This build writes exactly one partition: there are no compartments.
 const PHASH: &str = "default";
-/// One segment per (partition, slice) at build (contracts §2.1).
+/// One segment per (partition, view) at build (contracts §2.1).
 const SEG_ID: &str = "seg-0";
 
 /// Arguments to [`build`].
@@ -79,8 +79,8 @@ pub struct BuildArgs {
     pub out: PathBuf,
     /// The quantisation extent Morton codes are computed against (contracts §2.5).
     pub extent: Bounds,
-    /// The slice this build's segment belongs to.
-    pub slice_id: String,
+    /// The view this build's segment belongs to.
+    pub view_id: String,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
     pub limit: Option<u64>,
     /// The deployment's identity key (contracts §2.2). **Not** per bundle: it must be carried
@@ -178,7 +178,7 @@ impl std::fmt::Debug for BuildArgs {
             .field("pairs", &self.pairs)
             .field("out", &self.out)
             .field("extent", &self.extent)
-            .field("slice_id", &self.slice_id)
+            .field("view_id", &self.view_id)
             .field("limit", &self.limit)
             .field("identity_key", &self.identity_key)
             .field(
@@ -200,7 +200,7 @@ impl std::fmt::Debug for BuildArgs {
 #[derive(Debug, Clone)]
 pub struct BuildReport {
     pub prefix: String,
-    pub slice_id: String,
+    pub view_id: String,
     pub seg_id: String,
     /// Number of items (= `entity_id_high_water`, since the bootstrap build allocates from 0).
     pub items: u64,
@@ -246,7 +246,7 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
                 .into(),
         ));
     }
-    for (what, value) in [("slice id", args.slice_id.as_str())] {
+    for (what, value) in [("view id", args.view_id.as_str())] {
         if value.is_empty()
             || value.contains('/')
             || value.contains('\\')
@@ -447,9 +447,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let slice_dir = partition_dir.join("slices").join(&args.slice_id);
-    let segment_dir = slice_dir.join("segments").join(SEG_ID);
-    for dir in [&terms_dir, &entities_dir, &slice_dir, &segment_dir] {
+    let view_dir = partition_dir.join("views").join(&args.view_id);
+    let segment_dir = view_dir.join("segments").join(SEG_ID);
+    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
 
@@ -634,9 +634,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&segment_dir.join("columns.arrow"))?;
     fsync_file(&segment_dir.join("morton.u32"))?;
 
-    let permutation_path = slice_dir.join("permutation.bin");
+    let permutation_path = view_dir.join("permutation.bin");
     let row_order: Vec<EntityId> = entity_ids;
-    // `bound` is the partition slice's max entity ID + 1. The bootstrap build allocates a dense
+    // `bound` is the partition view's max entity ID + 1. The bootstrap build allocates a dense
     // 0..n, so that is exactly the item count.
     write_permutation(&permutation_path, &row_order, n)
         .map_err(|e| BuildError::io(&permutation_path, e))?;
@@ -645,7 +645,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // The other direction, for the filtered viewport's per-tile route
     // (`tessera_store::row_entity`). `row_order` is already the row→entity vector, so this writes
     // what the permutation was just scattered from rather than deriving anything.
-    let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
     let rows_by_index: Vec<u32> = row_order.iter().map(|e| e.raw() as u32).collect();
     tessera_store::write_row_entity(&row_entity_path, &rows_by_index)
         .map_err(|e| BuildError::io(&row_entity_path, e))?;
@@ -674,7 +674,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 n,
                 &args.out.join(PREFIX),
                 PHASH,
-                &args.slice_id,
+                &args.view_id,
             )?
         }
     };
@@ -803,7 +803,7 @@ fn write_manifests(
         membership_extents: published_layers.membership_extents.clone(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
-            slice: args.slice_id.clone(),
+            view: args.view_id.clone(),
             seg_id: SEG_ID.to_string(),
             row_count: n as u32,
             entity_lo: 0,
@@ -926,9 +926,9 @@ fn write_manifests(
             shard_id: args.shard_id,
             idset: args.idset,
         },
-        slices: vec![SliceDescriptor {
-            id: args.slice_id.clone(),
-            display_name: args.slice_id.clone(),
+        views: vec![ViewDescriptor {
+            id: args.view_id.clone(),
+            display_name: args.view_id.clone(),
         }],
         partitions: vec![PartitionDescriptor {
             phash: PHASH.to_string(),
@@ -958,7 +958,7 @@ fn write_manifests(
 
     Ok(BuildReport {
         prefix: PREFIX.to_string(),
-        slice_id: args.slice_id.clone(),
+        view_id: args.view_id.clone(),
         seg_id: SEG_ID.to_string(),
         items: n,
         terms: term_count,
@@ -972,7 +972,7 @@ fn write_manifests(
 pub struct VerifyReport {
     pub prefix: String,
     pub partitions: usize,
-    pub slices: usize,
+    pub views: usize,
     pub segments: usize,
     pub rows: u64,
     pub entity_id_high_water: u64,
@@ -1000,14 +1000,14 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
     let shard_id = bundle.manifest.identity.shard_id;
 
-    let mut slices = 0usize;
+    let mut views = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
     for partition in bundle.partitions.values() {
-        for (slice_id, slice) in &partition.slices {
-            slices += 1;
-            segments += slice.segments.len();
-            let total_rows = slice.row_space.total_rows();
+        for (view_id, view) in &partition.views {
+            views += 1;
+            segments += view.segments.len();
+            let total_rows = view.row_space.total_rows();
             rows += total_rows;
             // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
             // every extent (no aliasing, no out-of-range row). The remaining half of
@@ -1018,43 +1018,43 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
             // bundle as "not a bijection" (the false refusal §18 obligation 10 names). Built as
             // a row-indexed array (rather than just a count) so the identity check below can
             // reuse it instead of inverting the row space a second time.
-            slice
+            view
                 .row_space
                 .base()
-                .validate_rows(slice.row_space.base_rows())?;
-            let entity_bound = slice
+                .validate_rows(view.row_space.base_rows())?;
+            let entity_bound = view
                 .row_space
                 .extents()
                 .last()
                 .map(|extent| extent.entity_hi + 1)
-                .unwrap_or_else(|| slice.row_space.base().bound());
+                .unwrap_or_else(|| view.row_space.base().bound());
             let total_rows_usize = usize::try_from(total_rows).map_err(|_| {
                 BuildError::Invalid(format!(
-                    "slice '{slice_id}': {total_rows} rows does not fit usize"
+                    "view '{view_id}': {total_rows} rows does not fit usize"
                 ))
             })?;
             let mut entity_of_row: Vec<Option<u64>> = vec![None; total_rows_usize];
             let mut claimed = 0u64;
             for entity in 0..entity_bound {
-                if let Some(row) = slice.row_space.row_of(tessera_types::EntityId::new(entity)) {
+                if let Some(row) = view.row_space.row_of(tessera_types::EntityId::new(entity)) {
                     entity_of_row[row.raw() as usize] = Some(entity);
                     claimed += 1;
                 }
             }
             if claimed != total_rows {
                 return Err(BuildError::Invalid(format!(
-                    "slice '{slice_id}': the row space claims {claimed} rows but the segments \
+                    "view '{view_id}': the row space claims {claimed} rows but the segments \
                      hold {total_rows} — not a bijection"
                 )));
             }
 
             // The identity column, per segment **at that segment's own row offset**. A segment's
-            // `columns.arrow` rows are local `0..row_count`; in the slice's row space they begin
+            // `columns.arrow` rows are local `0..row_count`; in the view's row space they begin
             // at the extent's `row_base` (the base segment's at 0). The offset is looked up from
             // the row space rather than accumulated in iteration order, so this cannot silently
             // depend on the segment list's ordering.
-            for segment in &slice.segments {
-                let row_base = slice
+            for segment in &view.segments {
+                let row_base = view
                     .row_space
                     .extents()
                     .iter()
@@ -1069,7 +1069,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
                         .flatten()
                         .ok_or_else(|| {
                             BuildError::Invalid(format!(
-                                "slice '{slice_id}' segment '{}' row {local}: no entity claims \
+                                "view '{view_id}' segment '{}' row {local}: no entity claims \
                                  this row",
                                 segment.seg_id
                             ))
@@ -1080,7 +1080,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
                         .raw();
                     if *id != expected {
                         return Err(BuildError::Invalid(format!(
-                            "slice '{slice_id}' segment '{}' row {local}: tessera_id {id:#x} \
+                            "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} \
                              does not match identity.key's derivation {expected:#x} for entity \
                              {entity}",
                             segment.seg_id
@@ -1098,7 +1098,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
     let report = VerifyReport {
         prefix: current.prefix,
         partitions: bundle.partitions.len(),
-        slices,
+        views,
         segments,
         rows,
         entity_id_high_water: bundle.manifest.entity_id_high_water,
@@ -1470,7 +1470,7 @@ mod tests {
                 y_min: 0.0,
                 y_max: 1.0,
             },
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).unwrap(),
             identity_key_hex: KEY_HEX.to_string(),

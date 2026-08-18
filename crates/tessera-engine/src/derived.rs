@@ -64,7 +64,7 @@ impl DerivedContent {
     }
 }
 
-/// The segments of one slice, ascending in `row_base`, resolving a slice row to the segment holding
+/// The segments of one view, ascending in `row_base`, resolving a view row to the segment holding
 /// it.
 ///
 /// The same reverse-scan shape [`crate::select::SelectionParts::resolve_indexed`] uses, and for the
@@ -82,7 +82,7 @@ impl<'a> RowLocator<'a> {
         RowLocator { segments }
     }
 
-    /// The position of one slice row, in grid units, or `None` for a row past every segment's
+    /// The position of one view row, in grid units, or `None` for a row past every segment's
     /// extent.
     ///
     /// **`None` is dropped by the caller rather than defaulted**, because a position of `(0, 0)` is

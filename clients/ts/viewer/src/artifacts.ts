@@ -126,7 +126,7 @@ export class ArtifactChannel {
   }
 
   private async request(): Promise<void> {
-    const {session, slice, artifactLayer} = this.store.state;
+    const {session, view: viewId, artifactLayer} = this.store.state;
     const view = this.view;
     if (!session || !view) return;
     this.inFlight?.abort();
@@ -152,7 +152,7 @@ export class ArtifactChannel {
       const response = await this.client.viewport(
         session.token,
         {
-          slice,
+          view: viewId,
           zoom: view.depth,
           bbox: rectToRequestBbox(tileRectOfBbox(view.bbox, view.depth), view.depth, this.quantisation),
           // The counts and the artifacts frame, and no points at all: this channel draws none, and

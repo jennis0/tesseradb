@@ -5,7 +5,7 @@
         <text x="20" y="26" font-size="15" font-weight="600" fill="#101820">Static sampling, worked: sixteen rows, four tiles, two zoom levels</text>
         <text x="20" y="46" font-size="11.5" fill="#5b6a75">every item keeps one fixed draw priority for life — a 2-digit ID here, the leading 16 bits of its keyed public ID in reality; there is no randomness at query time</text>
 
-        <text x="96" y="82" font-size="11" fill="#5b6a75">one slice&#8217;s rows, in Morton order — so each tile below is a contiguous run (plates 04–05); two rows are outside this viewer&#8217;s mask</text>
+        <text x="96" y="82" font-size="11" fill="#5b6a75">one view&#8217;s rows, in Morton order — so each tile below is a contiguous run (plates 04–05); two rows are outside this viewer&#8217;s mask</text>
         <g stroke="#b7c2c9">
           <rect x="96"  y="92" width="44" height="36" fill="#ffffff"/><rect x="140" y="92" width="44" height="36" fill="#ffffff"/>
           <rect x="184" y="92" width="44" height="36" fill="#ffffff"/><rect x="228" y="92" width="44" height="36" fill="#ffffff"/>

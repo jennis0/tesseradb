@@ -33,7 +33,7 @@ const LAYERS_TOML: &str = r#"
 [[layer]]
 name = "clusters/a"
 title = "clusters"
-slices = ["s0"]
+views = ["s0"]
 membership = "enumerated"
 ungated = true
 artifacts_carry_own = false
@@ -43,7 +43,7 @@ content = { derived = ["centroid"] }
 [[layer]]
 name = "topics/x"
 title = "topics"
-slices = ["s0"]
+views = ["s0"]
 membership = "enumerated"
 ungated = true
 artifacts_carry_own = false
@@ -159,7 +159,7 @@ fn fixture() -> Fixture {
         pairs,
         out: root.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -336,7 +336,7 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
         .register_layer(tessera_types::layer::LayerDeclaration {
             name: "clusters/online".into(),
             title: "registered against the running node".into(),
-            slices: vec!["s0".into()],
+            views: vec!["s0".into()],
             membership: tessera_types::layer::MembershipSource::Enumerated,
             access: tessera_types::layer::LayerAccess {
                 label: None,

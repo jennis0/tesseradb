@@ -376,7 +376,7 @@ def layers(tmp_path_factory, private_catalogue_bundle, base_column):
 
     def observe(name: str, expected_visible: int) -> None:
         token = srv.authorise([*case.grants, INGEST_ACCESS])["token"]
-        plain = srv.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+        plain = srv.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
         unfiltered = _served_fx(plain)
         assert len(unfiltered) == expected_visible, (
             f"{name}: this principal was served {len(unfiltered)} points where the corpus it "
@@ -385,7 +385,7 @@ def layers(tmp_path_factory, private_catalogue_bundle, base_column):
         )
         served = {
             label: _served_fx(
-                srv.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
+                srv.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
             )
             for label, expr, _query, _minimum, _phrase in LAYER_EXPRESSIONS
         }
@@ -470,7 +470,7 @@ def test_the_three_states_are_reached_and_are_distinct(layers):
     below is made against a corpus that never grew a second layer.
 
     The fold's evidence is the segment count collapsing: a fold rewrites the corpus into one
-    segment per partition-slice, where two flushes had left three. The text column's own
+    segment per partition-view, where two flushes had left three. The text column's own
     single-layer-again claim is not visible from here — it is an artefact fact, and
     `tests/fold_text.rs` opens the artefacts to assert it — and what this suite can check is that
     every answer is still right afterwards, which the tests below do.

@@ -166,7 +166,7 @@ impl Timing {
 pub struct Stages {
     pub generation_resolve_ns: u64,
     pub stamp_compare_ns: u64,
-    pub slice_lookup_ns: u64,
+    pub view_lookup_ns: u64,
     pub row_projection_ns: u64,
     pub compose_ns: u64,
     /// §7.2's θ anchor. `#[serde(default)]` so runs recorded before this stage existed still parse.
@@ -196,7 +196,7 @@ impl Stages {
         Stages {
             generation_resolve_ns: t.generation_resolve_ns,
             stamp_compare_ns: t.stamp_compare_ns,
-            slice_lookup_ns: t.slice_lookup_ns,
+            view_lookup_ns: t.view_lookup_ns,
             row_projection_ns: t.row_projection_ns,
             compose_ns: t.compose_ns,
             theta_anchor_ns: t.theta_anchor_ns,

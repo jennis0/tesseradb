@@ -213,7 +213,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
         let external = format!("novel-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"novel".to_vec()],
             x: 10.0 + i as f32,
             y: 10.0 + i as f32,
@@ -326,7 +326,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
         let external = format!("refresh-novel-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"novel".to_vec()],
             x: 10.0 + i as f32,
             y: 10.0 + i as f32,

@@ -48,7 +48,7 @@ def _stamped(bundle_root: Path, recipe: dict) -> None:
         ("ONE_TILE_TY", 3),
         ("ONE_TILE_DEPTH", 5),
         ("EXTENT_ARG", "0,1024,0,1024"),
-        ("SLICE_ID", "s9"),
+        ("VIEW_ID", "s9"),
         ("CATALOGUE_ID_KEY_HEX", "0102030405060708090a0b0c0d0e0f10"),
         ("N_ITEMS", 1234),
         ("_LAYOUT", [("only", 10)]),
@@ -170,7 +170,7 @@ def test_regenerating_an_input_in_place_changes_the_recipe(work_dir: Path):
                 pairs=str(pairs),
                 limit=250_000,
                 extent="0,65536,0,65536",
-                slice_id="s0",
+                view_id="s0",
             )
         )
 
@@ -207,7 +207,7 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
         pairs="q.parquet",
         limit=250_000,
         extent="0,65536,0,65536",
-        slice_id="s0",
+        view_id="s0",
     )
     recipe = harness.fixture_recipe(argv)["build_argv"]
 
@@ -222,7 +222,7 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
             pairs="q.parquet",
             limit=None,
             extent="0,65536,0,65536",
-            slice_id="s0",
+            view_id="s0",
         )
     )
     assert without_limit["build_argv"] != recipe, (

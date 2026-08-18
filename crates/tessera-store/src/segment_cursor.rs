@@ -101,7 +101,7 @@ pub(crate) fn gather_scalars(
     schema
         .iter()
         .map(|(name, declared)| {
-            let slice = columns
+            let view = columns
                 .scalar(name)
                 .ok_or_else(|| StoreError::MalformedBundle {
                     detail: format!(
@@ -120,7 +120,7 @@ pub(crate) fn gather_scalars(
             // into each other, with the row count and every type still agreeing.
             macro_rules! pairs {
                 ($(($variant:ident, $value:ident)),* $(,)?) => {
-                    match (slice, declared) {
+                    match (view, declared) {
                         $((ScalarSlice::$variant(v), ScalarType::$variant) => {
                             Ok(ScalarValue::$value(v[row]))
                         })*

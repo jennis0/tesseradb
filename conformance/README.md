@@ -132,7 +132,7 @@ cost. `reference/tests` still uses that corpus and is a separate question.
   the flush it means to see is kept: it is good practice independently, and each layering module
   still asserts the principal's unfiltered corpus size at every stage, so a generation disagreement
   fails as its own precondition rather than as an unexplained filter result.
-- **`x-tessera-slice`**: unimplemented per the ledger note (Phase 1 ships exactly one slice); not
+- **`x-tessera-view`**: unimplemented per the ledger note (Phase 1 ships exactly one view); not
   exercised.
 - **Task 6's bit-flipped-`.frag`-is-a-cache-miss check**: added as a Rust unit test,
   `crates/tessera-authz/tests/fragment.rs::bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds`,

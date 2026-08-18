@@ -39,10 +39,10 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
         let Some(partition) = bundle.partitions.values().next() else {
             continue;
         };
-        let Some(slice) = partition.slices.values().next() else {
+        let Some(view) = partition.views.values().next() else {
             continue;
         };
-        let Some(segment) = slice.segments.first() else {
+        let Some(segment) = view.segments.first() else {
             continue;
         };
 
@@ -76,7 +76,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
             let fragment = crate::postings::union(&postings, &grant.terms)?;
             let containers = crate::metrics::containers(&fragment);
             let frozen = frozen_fragment(&postings, &grant.terms)?;
-            let projection = Arc::new(RowProjection::new(&frozen, &slice.row_space));
+            let projection = Arc::new(RowProjection::new(&frozen, &view.row_space));
             let satisfied: rustc_hash::FxHashSet<tessera_types::TermId> =
                 grant.terms.iter().copied().collect();
 
@@ -89,7 +89,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
                 &Overlay::new(),
                 &IngestBuffer::new(),
                 Arc::clone(&projection),
-                &slice.row_space,
+                &view.row_space,
                 // Nothing denied: this arm measures tile enumeration and counting, and the deny
                 // mask's own cost is one `andnot` regardless of depth.
                 &croaring::Bitmap::new(),

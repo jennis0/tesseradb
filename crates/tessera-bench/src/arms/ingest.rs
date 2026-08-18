@@ -239,7 +239,7 @@ pub fn run_build(
                     y_min: 0.0,
                     y_max: 65536.0,
                 },
-                slice_id: "s0".to_string(),
+                view_id: "s0".to_string(),
                 limit: Some(scale),
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
                 identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -365,7 +365,7 @@ pub(crate) fn synth_rows(
             let n = start + i as u64;
             UnallocatedRow {
                 external_id: Some(format!("bench-{n}").into_bytes()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: descriptors.to_vec(),
                 x: ((n * 37) % 65536) as f32,
                 y: ((n * 53) % 65536) as f32,
@@ -597,11 +597,11 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
 
         let bundle = open_bundle(&fixture.root)?;
         let extent_span = bundle.manifest.quantisation.x_max - bundle.manifest.quantisation.x_min;
-        let slice_id = bundle
+        let view_id = bundle
             .partitions
             .values()
             .next()
-            .and_then(|p| p.slices.keys().next().cloned())
+            .and_then(|p| p.views.keys().next().cloned())
             .unwrap_or_else(|| "s0".to_string());
         drop(bundle);
 
@@ -651,7 +651,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         let probe = gen_viewports(200, extent_span, seed, &[8]);
         let mut best = (0u64, probe[0]);
         for (z, bbox) in &probe {
-            let out = engine.viewport(&session, ViewportRequest::new(&slice_id, *z, *bbox, 0))?;
+            let out = engine.viewport(&session, ViewportRequest::new(&view_id, *z, *bbox, 0))?;
             if out.timings.sigma_visible > best.0 {
                 best = (out.timings.sigma_visible, (*z, *bbox));
             }
@@ -659,7 +659,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         let (rz, rbbox) = best.1;
         // Warm the row-projection cache before any sample (the first viewport of a session pays
         // for the whole entity->row crossing).
-        engine.viewport(&session, ViewportRequest::new(&slice_id, rz, rbbox, k))?;
+        engine.viewport(&session, ViewportRequest::new(&view_id, rz, rbbox, k))?;
 
         let mut buffered = 0u64;
         let mut next_id = 0u64;
@@ -687,7 +687,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
             let mut last = None;
             let read_samples = crate::metrics::repeat(ctx.repeat, || {
                 let out = engine
-                    .viewport(&session, ViewportRequest::new(&slice_id, rz, rbbox, k))
+                    .viewport(&session, ViewportRequest::new(&view_id, rz, rbbox, k))
                     .expect("viewport");
                 last = Some(out.timings);
                 out
@@ -1078,7 +1078,7 @@ fn rate_rows(
                 .collect();
             UnallocatedRow {
                 external_id: Some(format!("rate-{n}").into_bytes()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: picks.iter().map(|&k| pool_descriptors[k].clone()).collect(),
                 x: ((n * 37) % 65536) as f32,
                 y: ((n * 53) % 65536) as f32,

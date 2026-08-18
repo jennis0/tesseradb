@@ -49,7 +49,7 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
     default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,
-    SliceSegments,
+    ViewSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
@@ -204,7 +204,7 @@ pub struct Generation {
     /// must never mint, because two handlers racing one novel key would draw two codes for it and
     /// split its rows between them.
     pub vocabularies: Arc<Vocabularies>,
-    /// **The deny mask**: per slice, the row-space image of `deleted ∪ suppressed`, subtracted
+    /// **The deny mask**: per view, the row-space image of `deleted ∪ suppressed`, subtracted
     /// from every composed mask (I1).
     ///
     /// **Derived, never persisted, never a second source of truth.** The three entity-space stores
@@ -224,7 +224,7 @@ pub struct Generation {
     /// deleted item. `publish` re-derives in debug and asserts equality, so a build site that gets
     /// it wrong fails in the test suite rather than in a viewer's map.
     ///
-    /// Keyed by slice, because row space is. A slice the bundle carries always has an entry, empty
+    /// Keyed by view, because row space is. A view the bundle carries always has an entry, empty
     /// when nothing is denied; a missing entry means the mask and the bundle disagree about what
     /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
     /// denied".
@@ -299,7 +299,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
             shard_id: 0,
             idset: 1,
         },
-        slices: vec![],
+        views: vec![],
         partitions: vec![],
         provenance: serde_json::json!({}),
         files: std::collections::BTreeMap::new(),
@@ -321,7 +321,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
     )
 }
 
-/// Per-slice row-space deny masks — see [`Generation::denied`].
+/// Per-view row-space deny masks — see [`Generation::denied`].
 pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;
 
 /// The process-wide handle to the current generation. A request must load this pointer exactly

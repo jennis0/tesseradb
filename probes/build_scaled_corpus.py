@@ -29,8 +29,8 @@ Filtering a sorted array preserves relative order, so the rows surviving
     row_id = np.arange(keep.sum())                    # its Morton ranks
 
 The stored `row_id` column is the full-corpus rank; smaller scales
-derive theirs as above. This is §5.1's "each slice assigns its own row
-IDs; the permutation is per-slice" with scale standing in for slice.
+derive theirs as above. This is §5.1's "each view assigns its own row
+IDs; the permutation is per-view" with scale standing in for view.
 
 **Replicas are not copies.** Each is an affine transform (rotate,
 reflect, scale, translate) plus jitter, placed so the composite has

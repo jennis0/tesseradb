@@ -26,7 +26,7 @@ export type RequestFailure = {tileId: string; code: string; detail: string; at: 
 export type AppState = {
   meta: Meta | null;
   session: Session | null;
-  slice: string;
+  view: string;
   /** Which of `datasets.json`'s entries is being served — see `panels/source.ts`. */
   datasetId: string;
   /**

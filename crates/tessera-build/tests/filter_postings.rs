@@ -174,7 +174,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         pairs: pairs.to_path_buf(),
         out,
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -649,8 +649,8 @@ fn the_manifest_records_the_placement_the_tail_was_built_from() {
     assert_eq!(declared, vec!["department", "title"]);
     // Only one is in the tail, and it is exactly what the segment carries.
     assert_eq!(tail, vec!["department"]);
-    let slice = &bundle.partitions.values().next().unwrap().slices["s0"];
-    let columns = &slice.segments[0].columns;
+    let view = &bundle.partitions.values().next().unwrap().views["s0"];
+    let columns = &view.segments[0].columns;
     assert!(columns.scalar("department").is_some());
     assert!(columns.scalar("title").is_none());
 }
@@ -677,8 +677,8 @@ fn a_filter_only_column_is_absent_from_the_hot_column() {
     .unwrap();
 
     let bundle = open_bundle(&out).unwrap();
-    let slice = &bundle.partitions.values().next().unwrap().slices["s0"];
-    let columns = &slice.segments[0].columns;
+    let view = &bundle.partitions.values().next().unwrap().views["s0"];
+    let columns = &view.segments[0].columns;
     assert!(
         columns.scalar("department").is_some(),
         "a render column is in the tail"

@@ -154,7 +154,7 @@ def unfiltered(catalogue_server, cases):
         if case_name not in baseline:
             case = cases[case_name]
             token = catalogue_server.authorise(list(case.grants))["token"]
-            raw = catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+            raw = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
             baseline[case_name] = _tiles_by_id(decode_viewport(raw)[0])
         return baseline[case_name]
 
@@ -254,7 +254,7 @@ def test_meta_publishes_the_keyword_family_and_never_a_range(catalogue_server, c
     session = catalogue_server.authorise(list(case.grants))["token"]
     resp = catalogue_server.viewport_request(
         session,
-        cat.SLICE_ID,
+        cat.VIEW_ID,
         ZOOM,
         cat.FULL_VIEWPORT,
         filters={"submitter": {"range": {"gte": 0, "lte": 10}}},
@@ -288,7 +288,7 @@ def test_every_operator_agrees_with_the_oracle_over_the_base_build(
     case = cases[case_name]
     token = catalogue_server.authorise(list(case.grants))["token"]
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
 
     m_auth = set(case.entities)
@@ -330,11 +330,11 @@ def test_a_keyword_leaf_composes_with_the_other_families(
     assert m_sel < m_auth, "the composed expression selects everything — composition is untested"
 
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=COMPOSED_EXPR
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=COMPOSED_EXPR
     )
     assert _served_entities(raw, entity_of_fx) == m_sel
 
-    expected = vp.counts(catalogue_bundle, m_sel, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    expected = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     tiles = _tiles_by_id(decode_viewport(raw)[0])
     assert {t: m for t, (_v, m, _s) in tiles.items() if m} == expected
 
@@ -372,7 +372,7 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
         for operator in ("eq", "prefix"):
             expr = {"submitter": {operator: value}}
             raw = catalogue_server.viewport(
-                token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+                token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
             )
             served = _served_entities(raw, entity_of_fx)
             assert served == filt.evaluate(expr, catalogue_filter_columns, m_auth)
@@ -412,7 +412,7 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
         ("contains", {"submitter": {"contains": ABSENT_NEEDLE}}),
     ]:
         resp = catalogue_server.viewport_request(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
         )
         assert resp.status_code == 200, (
             f"{label}: {resp.status_code} — a needle no dictionary holds is answered, never "
@@ -429,7 +429,7 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
 
     control = {"submitter": {"eq": SINGLE_CARRIER}}
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=control
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=control
     )
     assert _served_entities(raw, entity_of_fx) == {SINGLE_CARRIER_ID}, (
         "the control failed — a value one visible entity holds was not served, so the four empty "

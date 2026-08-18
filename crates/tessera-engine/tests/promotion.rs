@@ -111,7 +111,7 @@ fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> Ent
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,

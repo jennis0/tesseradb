@@ -66,7 +66,7 @@ from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built
 N_BASE_ITEMS = 400
 N_TERMS = 6
 EXTENT = "0,65536,0,65536"
-SLICE_ID = "s0"
+VIEW_ID = "s0"
 SEED = 20260729
 # One fixed identity key for BOTH bundles. See the build-args comment below for why an independent
 # per-bundle key made the point-set comparison vacuous under identity-ordered selection. The value
@@ -183,8 +183,8 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 str(pairs_path),
                 "--extent",
                 EXTENT,
-                "--slice",
-                SLICE_ID,
+                "--view",
+                VIEW_ID,
                 "--out",
                 str(out_dir),
                 # Contracts r6 refuses to build unless a human names the identity key's lineage.
@@ -250,8 +250,8 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
     # pay for a bundle read they are not doing.
 
     failures: list[str] = []
-    free = Bundle(free_bundle).segment(SLICE_ID)
-    canary = Bundle(canary_bundle).segment(SLICE_ID)
+    free = Bundle(free_bundle).segment(VIEW_ID)
+    canary = Bundle(canary_bundle).segment(VIEW_ID)
     if free.tessera_id is None or canary.tessera_id is None:
         return ["a canary bundle has no stored tessera_id column (pre-r6 build)"]
 

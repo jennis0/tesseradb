@@ -57,7 +57,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> E
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -140,7 +140,7 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
     let reopened = engine_at(tmp.path(), &root, 3600);
     let bundle = tessera_store::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
-    let has_geometry = partition.slices["s0"].row_space.row_of(second).is_some();
+    let has_geometry = partition.views["s0"].row_space.row_of(second).is_some();
     assert!(
         reopened.generation().buffer.contains(second) || has_geometry,
         "an acked ingest was silently lost: entity {} is in neither the buffer nor a segment after \
@@ -230,7 +230,7 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     let bundle = tessera_store::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert!(
-        partition.slices["s0"].row_space.row_of(deleted).is_none(),
+        partition.views["s0"].row_space.row_of(deleted).is_none(),
         "and it acquired no geometry on the way out"
     );
     assert!(

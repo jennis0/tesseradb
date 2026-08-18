@@ -150,11 +150,11 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
         let bundle = open_bundle(&fixture.root)?;
         let q = bundle.manifest.quantisation;
         let full_bbox = [q.x_min, q.y_min, q.x_max, q.y_max];
-        let slice_id = bundle
+        let view_id = bundle
             .partitions
             .values()
             .next()
-            .and_then(|p| p.slices.keys().next().cloned())
+            .and_then(|p| p.views.keys().next().cloned())
             .unwrap_or_else(|| "s0".to_string());
         drop(bundle);
 
@@ -223,7 +223,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
             // the arithmetic below is exact. Also warms the row-projection cache, which must not
             // land in any sample.
             let baseline = engine
-                .viewport(&session, ViewportRequest::new(&slice_id, 0, full_bbox, 0))?
+                .viewport(&session, ViewportRequest::new(&view_id, 0, full_bbox, 0))?
                 .timings
                 .sigma_visible;
 
@@ -263,7 +263,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                 let mut last = None;
                 let read_samples = crate::metrics::repeat(ctx.repeat, || {
                     let out = engine
-                        .viewport(&session, ViewportRequest::new(&slice_id, 0, full_bbox, 0))
+                        .viewport(&session, ViewportRequest::new(&view_id, 0, full_bbox, 0))
                         .expect("viewport");
                     last = Some(out.timings);
                     out

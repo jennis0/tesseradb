@@ -5,7 +5,7 @@
 //! are the build's two inputs; [`Corpus::schema_toml`] is the declaration `tessera build --schema`
 //! compiles; [`Corpus::ingest_batch`] is `/control/ingest`'s body, in the **wire** shape —
 //! `(external_id, x, y, access, the declared scalars)` — and deliberately not any engine type.
-//! The executor's `UnallocatedRow` carries resolved term ids and a slice, is constructed after
+//! The executor's `UnallocatedRow` carries resolved term ids and a view, is constructed after
 //! admission, and lives in a crate §13 forbids: a corpus that could speak it would have stopped
 //! being a second statement of the corpus.
 //!

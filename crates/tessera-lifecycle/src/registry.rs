@@ -755,7 +755,7 @@ impl LayerRegistry {
     ///
     /// Satisfaction is **intersection** with the principal's satisfied set, never a conservative
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every
-    /// principal. That error has been made once already in this codebase, in the slice gate, and
+    /// principal. That error has been made once already in this codebase, in the view gate, and
     /// was caught in review.
     pub fn resolve_for(
         &self,
@@ -850,7 +850,7 @@ mod tests {
         LayerDeclaration {
             name: name.into(),
             title: name.into(),
-            slices: vec!["default".into()],
+            views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
             access: LayerAccess {
                 label: None,

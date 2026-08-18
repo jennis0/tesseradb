@@ -51,7 +51,7 @@ export type CategoryDescriptor = {
 export type DeclaredScalar = {
   /**
    * The column's name, which is also its **identifier**: it addresses the column in
-   * `/v1/categories/{column}`. Unique bundle-wide, and not slice-qualified.
+   * `/v1/categories/{column}`. Unique bundle-wide, and not view-qualified.
    */
   name: string;
   arrowType: ArrowType;
@@ -132,8 +132,8 @@ export type Layer = {
   /** The layer's identity, and what a viewport request names to select it. */
   name: string;
   title: string;
-  /** Which slices the layer appears in. A layer is not answerable in a slice it does not name. */
-  slices: string[];
+  /** Which views the layer appears in. A layer is not answerable in a view it does not name. */
+  views: string[];
   membership: 'enumerated' | 'spatial' | 'attribute';
   /**
    * Where the layer's lineage lives, and the **default** cut depth — not its only setting, since a
@@ -157,7 +157,7 @@ export type Layer = {
 export type Meta = {
   apiVersion: number;
   idset: number;
-  slices: {id: string; displayName: string}[];
+  views: {id: string; displayName: string}[];
   quantisation: Quantisation;
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
@@ -202,7 +202,7 @@ export type CategoryValue = {
 };
 
 export type ViewportRequest = {
-  slice: string;
+  view: string;
   zoom: number;
   /**
    * The region to answer for. Send exactly one of this and {@link ViewportRequest.tiles} — the
@@ -235,7 +235,7 @@ export type ViewportRequest = {
    *
    * **A filter narrows what is served without changing the response's identity key**, which is the
    * one thing a caller holding a replica has to know: the key partitions by principal, credential,
-   * mask and slice, so bands held under one filter are *renderable* under another and will be
+   * mask and view, so bands held under one filter are *renderable* under another and will be
    * served as if they belonged. A client that changes this must drop what it holds itself — the
    * server cannot tell it to.
    */
@@ -433,7 +433,7 @@ export type ViewportResponse = {
   /**
    * Whether a held band may be **rendered at all** — the replica's partition key.
    *
-   * Over the idset, the credential, the mask fragment's identity and the slice. A cache keyed more
+   * Over the idset, the credential, the mask fragment's identity and the view. A cache keyed more
    * loosely than this serves one principal's authorised data to another, which is a disclosure and
    * not a staleness bug (decision 0029), so a client drops everything held when it changes.
    */

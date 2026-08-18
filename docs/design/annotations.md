@@ -4,7 +4,7 @@
 **Status:** **Normative for the annotation model** — what an artifact, an edge and a layer *are*, and what governs whether one is served. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). The two amendments owed to the normative architecture are **performed** — §7.5's descent and §7.7's ladder, architecture r43, which also carries the register rows this design owes. `architecture.md` remains the specification and wins every conflict; [`annotation-write-cycle.md`](annotation-write-cycle.md) owns the write cycle, and where this document disagrees with it, that one wins.
 **⊘ Five things are open inside a normative document, each due at the stage that needs it** — this is deliberate, and they are marked ⊘ at their sites rather than held against promotion: search's containment gate (the review's ruling 5 — Stage 8), the filter axis (§11 — Stage 8), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4 — Stage 2), the proportional criterion's denominator for predicate membership (§5 — Stage 6), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). None of them blocks the spine, and each is named where an implementer meets it. The measurements [`annotation-representation.md`](annotation-representation.md) §11.3 lists are owed on the same terms — allocated to stages, not to promotion.
 **Supersedes** the retired `derived-artifact-gating.md`, whose taxonomy this collapses — three gates become one containment test plus one existence criterion (§4, §5); that document is deleted (2026-08-15). What existed nowhere else is carried here: the point-scale cardinality argument for edges and the structural form of an edge gate (§5), and the induced-subgraph sampling problem, parked by name (§11).
-**Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), [0006](../decisions/0006-per-session-handles-retired.md), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md).
+**Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`views-and-multi-table.md`](views-and-multi-table.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), [0006](../decisions/0006-per-session-handles-retired.md), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are cited as **spec §n**.
 
 > **⊘ Almost none of this is built.** There are no artifacts, no layers and no membership structure.
@@ -30,7 +30,7 @@ Four requirements have arrived since that are not answerable from the gate alone
 - A point need not belong to any cluster, and several clusterings may coexist over the same points.
 - An artifact may carry its own security label — **instead of** or **in addition to** its members'.
 - There may be 10<sup>7</sup> artifacts, not the 10<sup>5</sup> that document assumes.
-- Artifact identity must work across slices.
+- Artifact identity must work across views.
 
 And one shape the model must express: **hierarchies that do not cover in either direction.** A
 cluster's children need not exhaust its points, and a child may hold points its parent does not.
@@ -42,7 +42,7 @@ three questions.
 
 ```mermaid
 flowchart TB
-  F["<b>Layer</b><br/>gate · lifecycle · hierarchy kind · slices"]
+  F["<b>Layer</b><br/>gate · lifecycle · hierarchy kind · views"]
   F --> L0["<b>Level</b> — a resolution<br/>ordinal space · zoom range"]
   F --> L1["<b>Level</b>"]
   L0 -->|"declares"| A["<b>Artifact</b><br/>identity · membership · gate"]
@@ -102,7 +102,7 @@ layers share nothing.
 | lifecycle: create, drop, replace, tombstoned name | its representation and membership source |
 | hierarchy kind — flat, nested, stacked or tiered | its advisory zoom range |
 | the **own-terms flag** and **existence criterion** its artifacts use (§5) | its containment-verification result |
-| which slices it appears in | |
+| which views it appears in | |
 | relations to other layers | |
 
 **A flat layer has exactly one level**, and nothing about it is special-cased: a hand-built selection
@@ -327,7 +327,7 @@ hull or a build-time count for such an artifact discloses the members the gate d
 ### 4.1 Two axes, not a type enumeration
 
 *"A cluster has a centroid and a count"* is not a fact about clusters. It is a fact about having a
-membership set and coordinates in a slice, and every artifact with those has the same derived
+membership set and coordinates in a view, and every artifact with those has the same derived
 vocabulary available to it. **The derived properties follow from what an artifact has, never from
 what kind of thing it is called** — which is what stops the model needing a type enum, and stops the
 fourth artifact type being a code change.
@@ -386,14 +386,14 @@ layer "clusters/2026-08"           layer "boundaries/uk-2026"
   criterion  absolute 50              criterion  none
   structure  hierarchical, 3 levels   structure  hierarchical, LSOA→MSOA→LAD
   pruning    on, level 1→2            pruning    off
-  slices     [embedding-2026-08]      slices     [geographic]
+  views     [embedding-2026-08]      views     [geographic]
   derived    [centroid, hull]         derived    [centroid]
   supplied   []                       supplied   [shape: corpus-independent]
 ```
 
 **`public` is a distinguished value, and an empty term list is refused at parse.** All three reviewers
 caught an earlier revision writing `terms = []` here to mean *everyone* — two paragraphs after §5
-recounts that empty-required-set-admits-everyone was the slice-gate error caught in review. Under
+recounts that empty-required-set-admits-everyone was the view-gate error caught in review. Under
 §5's intersection semantics an empty list denies everyone, so the sketch was only readable as
 empty-means-admit-all: the caught error, reintroduced in the illustration. The model had no way to
 say *public*, which is why the reach for `[]` was inevitable.
@@ -471,7 +471,7 @@ Composition is **conjunction, never disjunction**, in the same shape as `M_sel =
 Satisfaction of an artifact's own gate label is the item-visibility predicate verbatim (§6.1) —
 intersection with the principal's satisfied set, not a conservative label join, which yields an
 empty required set for a disjunctive gate and admits everyone. That error has been made once
-already, in the slice gate, and was caught in review.
+already, in the view gate, and was caught in review.
 
 **A layer has a gate too, and it governs reachability.** Whether a viewer may know this clustering
 exists at all, independent of any member. Resolved once per session and keyed on the layer version —
@@ -481,9 +481,9 @@ resolve-once-at-authorise rule an earlier revision stated here: that rule held e
 a pre-edit gate for the session's remaining life). The request-time check is a set-membership lookup
 identical in work for a gate-failed name and a never-registered one; a request naming an unreachable
 layer is indistinguishable in outcome and in work from naming one that never existed. This is the
-slice gate's mechanism ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3) applied to a
+view gate's mechanism ([`views-and-multi-table.md`](views-and-multi-table.md) §3) applied to a
 second object, cited rather than re-derived — **⊘ and the mechanism cited is itself provisional and
-unbuilt**: the slice registry design is not normative and has no code behind it, so this imports a
+unbuilt**: the view registry design is not normative and has no code behind it, so this imports a
 shape, not machinery. It narrows and never widens.
 
 **Edges are filtered like everything else.** A viewer learns a child or a label exists only if they

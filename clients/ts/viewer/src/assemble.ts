@@ -97,7 +97,7 @@ function assembleScalar(name: string, pieces: readonly StandInPiece[], total: nu
       for (const i of piece.indices) out[o++] = source[i];
     } else {
       (out as unknown as {set(v: ArrayLike<number>, o: number): void}).set(
-        (column.values as unknown as {slice(a: number, b: number): ArrayLike<number>}).slice(0, len),
+        (column.values as unknown as {view(a: number, b: number): ArrayLike<number>}).slice(0, len),
         o
       );
       o += len;

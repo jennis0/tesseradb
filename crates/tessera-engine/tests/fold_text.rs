@@ -143,7 +143,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         pairs,
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -184,7 +184,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         let external = format!("fresh-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 10.0 + i as f32,
             y: 10.0 + i as f32,
@@ -536,7 +536,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
         let external = "flight-0".to_string();
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 20.0,
             y: 20.0,
@@ -608,7 +608,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
     let ingest = |engine: &Engine, name: &str, value: WalScalar| {
         let row = UnallocatedRow {
             external_id: Some(name.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 30.0,
             y: 30.0,

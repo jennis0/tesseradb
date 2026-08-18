@@ -4,7 +4,7 @@
 **Status:** **Normative for the annotation representation** — what the model is made of: storage, addressing, the visibility predicate's evaluation, the fold's artifact pass, and serving. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). Companion to [`annotations.md`](annotations.md), which owns the *model*. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. `architecture.md` remains the specification and wins every conflict.
 **⊘ Four things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), the filter axis (§6.3 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
-**Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
+**Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`views-and-multi-table.md`](views-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
 
 > **⊘ None of this is built.** No artifacts, no layers, no membership structure. Figures are marked
@@ -47,7 +47,7 @@ Eight questions decide the representation. They are answered in order, and §2 d
 **Every figure in this table is serialised bytes.** Resident cost is a separate measured quantity —
 ~80–94 B per Roaring container, so **6.16× these numbers on contiguous membership and 7.79× on the
 synthetic arm** (§11.3, and the [probe](../../probes/2026-08-16-membership-residency/README.md)).
-The 794 MB above is therefore ~4.9–6.2 GB in memory, before the per-slice and per-level multipliers.
+The 794 MB above is therefore ~4.9–6.2 GB in memory, before the per-view and per-level multipliers.
 
 **Size per member, not per artifact.** An earlier revision read three scale points as *"~80 bytes per
 artifact, flat"* and built the formula `(rows × width)/(80 × artifacts)` on it. All three held
@@ -172,7 +172,7 @@ extent by panning. **The box is deleted, not repaired** — no representation he
 fault, which is a better outcome than a rule forbidding it.
 
 **Disk holds the entity form, memory holds the row form.** Entity space is the canonical,
-slice-invariant record; row space is per slice, derived, and rebuilt on the generation key exactly as
+view-invariant record; row space is per view, derived, and rebuilt on the generation key exactly as
 projected mask fragments already are. An ingest appends an extent rather than renumbering
 ([`permutation.rs`](../../crates/tessera-store/src/permutation.rs)), so an append invalidates
 nothing — and the resident membership form is bounded at base rows, a member whose row is still in a
@@ -259,13 +259,13 @@ membership was never materialised. The tiebreak is irrelevant to it in both dire
 entity-space set to compact, and no fragmentation to accumulate.
 
 **One question this raises that the campaign did not, and it needs a ruling.** A point may belong to
-several slices with independent coordinates, so *"the Morton code"* is not well defined for a
-multi-slice corpus: an entity has one per slice, and an entity ID is allocated once. The tiebreak
-therefore optimises **one** slice's spatial order, and a corpus with several slices collects it only
-in whichever slice the ordering was taken from — the others are back to arbitrary. Options are a
-declared primary slice, or the first slice an entity joins, and neither is obviously right. ⊘
+several views with independent coordinates, so *"the Morton code"* is not well defined for a
+multi-view corpus: an entity has one per view, and an entity ID is allocated once. The tiebreak
+therefore optimises **one** view's spatial order, and a corpus with several views collects it only
+in whichever view the ordering was taken from — the others are back to arbitrary. Options are a
+declared primary view, or the first view an entity joins, and neither is obviously right. ⊘
 **Undecided**; recorded in §12 beside the tiebreak itself, because taking the tiebreak without
-answering it picks a slice by accident.
+answering it picks a view by accident.
 
 ### 2.3 The ordinal space, and what survives of it
 
@@ -291,7 +291,7 @@ is the obvious design and will be proposed again.
 ```
 artifacts/<layer>/
   registry.json                     # gate, structure, default cut depth, derived vocabulary,
-                                    #   slices, declared levels, zoom→level map where levels exist
+                                    #   views, declared levels, zoom→level map where levels exist
   levels/<k>/meta.json              # artifact count, entity_base, zoom range,
                                     #   membership source, containment verification result
   levels/<k>/members/<ordinal>.roaring   # enumerated membership, entity space (§2, §2.1)
@@ -572,7 +572,7 @@ callers should be told so plainly rather than discovering it.
 **Replacement is a layer lifecycle event, not 10⁷ deletions.** Pushing a replaced clustering
 through the deny lane would deliver 20× the `overlay_soft_limit` (500,000, write-path §7) as a single
 event, into a lane sized for trickle denies, retiring at a fold with no artifact pass. Instead, the
-slice lifecycle applies unchanged ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3 — ⊘
+view lifecycle applies unchanged ([`views-and-multi-table.md`](views-and-multi-table.md) §3 — ⊘
 itself provisional and unbuilt, so this cites a shape, not machinery):
 create is a WAL'd registry entry, drop is a WAL'd tombstone, the artifacts become garbage collected
 at the next fold, and **the name stays tombstoned against reuse** — a recreated `clusters/2026-08`
@@ -607,7 +607,7 @@ bitmaps a point is simply in no published artifact, publishing more artifacts is
 nothing is asserted that later becomes false.
 
 **Bulk publication is operational, not semantic.** A 10⁷-artifact level is a build-plane job for the
-same reason `tessera build --attach-slice` is — volume that must not ride the trickle path — and a
+same reason `tessera build --attach-view` is — volume that must not ride the trickle path — and a
 level published in pieces is coherent at every step, merely incomplete. It matters because the
 atomic reading would have forced a rebuild for a one-artifact correction. ✔ Built 2026-08-16: the
 build takes a declaration file and two Parquet files, resolves members through its own assignment,
@@ -810,7 +810,7 @@ clusters they were not generated from, which is worse than an outage and is exac
 ### 5.1 Runtime-created artifacts
 
 A selection assembled mid-session cannot ride `/control/ingest`, whose row carries a
-`{slice → (x, y)}` coordinate map and an entity's terms. An artifact has no coordinates, and carries
+`{view → (x, y)}` coordinate map and an entity's terms. An artifact has no coordinates, and carries
 a membership reference, a layer binding and a gate. It needs its own control verb, which the write
 cycle now defines — `(layer, membership, gate, content, stable key?)`, a WAL record, eligibility at
 ack ([`annotation-write-cycle.md`](annotation-write-cycle.md) §5) — with the contract shape still
@@ -1109,7 +1109,7 @@ its options in that document's §11.
 
 ## 9. Metadata
 
-`/v1/meta` carries the layer registry, **gate-filtered per principal** — the slice registry's
+`/v1/meta` carries the layer registry, **gate-filtered per principal** — the view registry's
 mechanism, resolved per session and keyed on the layer version, a gate edit bumping the key and a
 live suppression check on the layer's own entity running ahead of the cached resolution
 ([`annotation-write-cycle.md`](annotation-write-cycle.md) §6, which supersedes the
@@ -1118,7 +1118,7 @@ never-registered name stay indistinguishable in outcome and in work.
 
 Per layer: identity, structure (whether it carries edges, and its declared levels if any), the
 zoom-to-level map where levels exist, the default cut depth, the declared derived vocabulary, which
-slices it appears in, and what kinds of supplied content its artifacts carry.
+views it appears in, and what kinds of supplied content its artifacts carry.
 
 **Never the artifact cardinality.** A count of artifacts in a layer is a corpus-wide count over
 objects the principal may not individually see, which is C8's row.
@@ -1285,8 +1285,8 @@ and needs nothing.)
   synthetic arm**, both flat. **794 MB therefore costs ~4.9–6.2 GB resident**, and the measured
   point closest to the design's — 10⁷ artifacts of four runs each — is 3.6 GB against 582 MB
   serialised. The pessimistic arm at 10⁷ does not fit in 47 GB at all and is OOM-killed.
-  The multipliers stand unmeasured on top of that figure: by slice, by level, and by two during a
-  replace. `slices-and-multi-table.md` §3 exists to price per-slice multipliers and does not carry
+  The multipliers stand unmeasured on top of that figure: by view, by level, and by two during a
+  replace. `views-and-multi-table.md` §3 exists to price per-view multipliers and does not carry
   this one. **The row-space choice earns its keep twice over**: §2 justifies it on storage, and the
   same contiguity pays again in RAM at a constant the storage argument did not predict.
   The working model is `resident ≈ 90 B × artifacts × runs per artifact`, linear over 1–100 runs
@@ -1357,7 +1357,7 @@ criterion's denominator for predicate membership (model §5), and:
   path is row space, so this is disk and projection input. Two things the decision carries that this
   section did not: the build's signature sort holds a 12-byte record under an enforced batch
   residency model, so the code is a fourth field and the record layout is a real choice; and §2.2.1's
-  multi-slice question is **deferred rather than answered**, which is safe only while one slice
+  multi-view question is **deferred rather than answered**, which is safe only while one view
   exists.
 - ✔ **What a point deletion does to the content generated from it** — **ruled**, via the write
   cycle ([`annotation-write-cycle.md`](annotation-write-cycle.md) §9, owner 2026-08-15): `G` is

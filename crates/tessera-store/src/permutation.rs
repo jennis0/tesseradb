@@ -5,7 +5,7 @@
 //!
 //! ## Row space is that file plus an ordered extent list
 //!
-//! A build writes one segment per (partition, slice) and one `permutation.bin` covering it. A
+//! A build writes one segment per (partition, view) and one `permutation.bin` covering it. A
 //! flush appends a segment beside it, and [`RowSpace`] is what makes the pair addressable as one
 //! row space: the base file below the build bound, an ordered list of [`SegmentExtent`]s above it.
 //!
@@ -15,7 +15,7 @@
 //! sees `row_of` and `project`; which segment answered is this module's business.
 //!
 //! Two bounds hold by construction and are checked at the one place an extent enters
-//! ([`RowSpace::with_extent`]): total rows per slice stay under 2³², and the extent list is
+//! ([`RowSpace::with_extent`]): total rows per view stay under 2³², and the extent list is
 //! bounded by the live segment count, which the merge policy bounds.
 
 use std::fs::File;
@@ -102,14 +102,14 @@ impl Permutation {
                 detail: "bad magic (expected 'TSPM')".to_string(),
             });
         }
-        let version = u16::from_le_bytes(mmap[4..6].try_into().expect("2-byte slice"));
+        let version = u16::from_le_bytes(mmap[4..6].try_into().expect("2-byte view"));
         if version != PERMUTATION_VERSION {
             return Err(StoreError::InvalidPermutation {
                 path: path.to_path_buf(),
                 detail: format!("unsupported version {version} (expected {PERMUTATION_VERSION})"),
             });
         }
-        let bound = u64::from_le_bytes(mmap[8..16].try_into().expect("8-byte slice"));
+        let bound = u64::from_le_bytes(mmap[8..16].try_into().expect("8-byte view"));
         // Checked, not `as usize`: on a 32-bit target (or an adversarial 64-bit `bound` value)
         // a truncating cast would silently shrink `bound` instead of failing closed.
         let bound_usize = usize::try_from(bound).map_err(|_| StoreError::InvalidPermutation {
@@ -159,7 +159,7 @@ impl Permutation {
 
     /// Validate that every non-sentinel slot addresses a row within `row_count`, and that no
     /// two entities claim the same row (a permutation is a bijection onto `[0, row_count)`,
-    /// not merely a function into it). Called once per slice at bundle open, against the row
+    /// not merely a function into it). Called once per view at bundle open, against the row
     /// count of the single build segment this permutation addresses (R4) — **not** on any
     /// per-viewport path (this is an `O(bound)` scan, same cost class as [`Self::project`]).
     /// A corrupt or hand-edited `permutation.bin` that points rows out of range, or that
@@ -219,7 +219,7 @@ impl Permutation {
     /// **Cost (shared-context constraint 8):** this touches every set bit in `mask` and reads the
     /// slot array end to end, which is over a second at 10⁹ — **1 277 ms** single-threaded over a
     /// 25% grant (`probes/2026-08-14-project-decomposition/`). Never call it on the per-viewport
-    /// path; the engine caches the result per `(token, slice, pin)` and reuses it across viewports
+    /// path; the engine caches the result per `(token, view, pin)` and reuses it across viewports
     /// within a session.
     ///
     /// # One pass, and why the shape is not the obvious one
@@ -545,7 +545,7 @@ impl SegmentExtent {
     }
 }
 
-/// One slice's whole entity→row mapping: the built base permutation, plus the extents flush has
+/// One view's whole entity→row mapping: the built base permutation, plus the extents flush has
 /// appended and merge has collapsed since.
 ///
 /// **Constructed incrementally, never rebuilt.** [`Self::with_extent`] and [`Self::collapsing`]
@@ -559,8 +559,8 @@ impl SegmentExtent {
 #[derive(Debug, Clone)]
 pub struct RowSpace {
     base: Arc<Permutation>,
-    /// `row-entity.u32` for the base, when the slice published one — the row→entity direction, for
-    /// the filtered viewport's per-tile route ([`crate::row_entity`]). `None` where a slice has no
+    /// `row-entity.u32` for the base, when the view published one — the row→entity direction, for
+    /// the filtered viewport's per-tile route ([`crate::row_entity`]). `None` where a view has no
     /// table, in which case [`Self::entity_of`] answers `None` and the caller falls back to the
     /// projecting route rather than to a wrong answer.
     base_inverse: Option<Arc<crate::row_entity::RowToEntity>>,
@@ -611,7 +611,7 @@ impl RowSpace {
     }
 
     /// The entity occupying `row`, or `None` when this row space cannot answer — either `row` is
-    /// out of range, or the slice published no `row-entity.u32` and the base cannot be inverted
+    /// out of range, or the view published no `row-entity.u32` and the base cannot be inverted
     /// without one.
     ///
     /// **`None` is "ask another way", not "no entity".** Every row has an entity by construction;
@@ -674,7 +674,7 @@ impl RowSpace {
             return None;
         }
         let total_rows = self.total_rows + u64::from(extent.row_count());
-        // Row ids are `u32` (bundle_format 1), so a slice that would cross 2^32 rows must fail
+        // Row ids are `u32` (bundle_format 1), so a view that would cross 2^32 rows must fail
         // here rather than at the first `row_base + slot` that wraps.
         if total_rows > u64::from(u32::MAX) {
             return None;
@@ -761,7 +761,7 @@ impl RowSpace {
         self.extents[i].row_of(raw)
     }
 
-    /// Project an entity-space bitmap into this slice's row space: the base projection unioned
+    /// Project an entity-space bitmap into this view's row space: the base projection unioned
     /// with each extent's own. The parts are disjoint — an extent's rows lie at or above
     /// `row_base`, which is where every earlier part ended — so the union is exact rather than
     /// merely a superset, and that is what lets a flush patch a cached projection instead of
@@ -811,7 +811,7 @@ impl RowSpace {
         &self.extents
     }
 
-    /// Every row this slice holds, across the base and every extent.
+    /// Every row this view holds, across the base and every extent.
     pub fn total_rows(&self) -> u64 {
         self.total_rows
     }

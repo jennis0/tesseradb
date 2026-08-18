@@ -36,7 +36,7 @@ pub use permutation::{Permutation, RowSpace, SegmentExtent};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 pub use read::{
     open_bundle, open_written_prefix, tile_ranges, tile_ranges_all, tile_ranges_within, Bundle,
-    ColumnsRef, MortonSlice, PartitionData, ScalarSlice, SegmentData, SliceData,
+    ColumnsRef, MortonSlice, PartitionData, ScalarSlice, SegmentData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix};
 pub use sidecar::ExternalIdSidecar;

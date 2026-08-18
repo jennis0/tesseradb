@@ -99,7 +99,7 @@ async function viewport(token, body) {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
     body: JSON.stringify({
-      slice: meta.slices[0].id,
+      view: meta.views[0].id,
       zoom: 0,
       bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
       ...body
@@ -210,7 +210,7 @@ if (dryRun) {
 await register({
   name: clusterLayer,
   title: 'write-cycle demo clusters',
-  slices: [meta.slices[0].id],
+  views: [meta.views[0].id],
   membership: 'enumerated',
   content: {derived: ['centroid'], supplied: [], on_member_deletion: 'withdraw_content'},
   access: {label: null, artifacts_carry_own: false},
@@ -220,7 +220,7 @@ await register({
 await register({
   name: labelLayer,
   title: 'write-cycle demo labels',
-  slices: [meta.slices[0].id],
+  views: [meta.views[0].id],
   membership: 'enumerated',
   content: {
     derived: [],

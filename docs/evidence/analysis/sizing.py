@@ -14,14 +14,14 @@ def distinct_pages(k, pages_spanned):
     return P * (1 - (1 - 1/P)**k)
 
 def sizes(N, leaf_cap=10_000, k=30, cand_mult=4, hot_bytes=20,
-          mask_density=0.10, run_compress=1.0, slices=1):
+          mask_density=0.10, run_compress=1.0, views=1):
     leaves, depth, nodes = quadtree(N, leaf_cap)
     cand_w = cand_mult * k
     # rep group entry: x,y float32 + priority u32 + rowid u32
     rep_entry = 4+4+4+4
     rep = nodes * cand_w * rep_entry
     hot = N * hot_bytes
-    perm = N * 4 * slices
+    perm = N * 4 * views
     # roaring mask: containers of 2^16 over universe N
     containers = N / 65536
     # dense containers -> 8KB bitmap; run_compress models spatial clustering

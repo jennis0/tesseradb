@@ -98,7 +98,7 @@ repository blurb, the sentence at the top of a deck. Why each part:
   in which a query region is a small number of contiguous ranges and the
   hierarchy nests) rather than a domain. Honest caveat: 1D is the
   machinery's shape, not a shipped axis — valid-time is the uncommitted
-  Appendix F, and §9's temporal slices are discrete partitions, not an
+  Appendix F, and §9's temporal views are discrete partitions, not an
   ordered axis. This is the clause someone will eventually hold us to.
 - *per-item access control* — the established phrasing, and more precise
   than "per-viewer": predicates live on items, masks are per viewer.

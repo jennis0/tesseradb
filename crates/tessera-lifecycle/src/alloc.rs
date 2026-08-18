@@ -510,7 +510,7 @@ mod tests {
             declaration: tessera_types::layer::LayerDeclaration {
                 name: format!("l{entity}"),
                 title: "l".into(),
-                slices: Vec::new(),
+                views: Vec::new(),
                 membership: MembershipSource::Enumerated,
                 access: LayerAccess {
                     label: None,
@@ -613,7 +613,7 @@ mod tests {
             rows: vec![crate::wal::WalRow {
                 external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
-                slice: "default".to_string(),
+                view: "default".to_string(),
                 descriptors: Vec::new(),
                 x: 0.0,
                 y: 0.0,

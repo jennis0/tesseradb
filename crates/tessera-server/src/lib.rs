@@ -73,7 +73,7 @@ pub struct Prepared {
 /// against distinct grant sets — and their constants say so.
 ///
 /// **This is a floor, not a sizing.** `DEFAULT_ROW_PROJECTION_CACHE_BYTES` carries a further 2× for
-/// entry-count headroom (a second slice, or a generation swap's transient duplicate); passing this
+/// entry-count headroom (a second view, or a generation swap's transient duplicate); passing this
 /// check at exactly 1× is admissible but leaves none. And neither bound is a memory *budget*: peak
 /// is `bound + compute_admission × per_entry`, which at 48-way admission is another ~6 GB — see
 /// `tessera_engine`'s `RowProjectionCache` doc, where that arithmetic lives with its operand.
@@ -139,7 +139,7 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
 /// references (§5.3). **The base is not excluded by a rule; it is excluded by this bound**, which
 /// is why the bound is validated rather than assumed.
 ///
-/// The base segment is the largest in each slice — a flush segment is one tick's arrivals — so the
+/// The base segment is the largest in each view — a flush segment is one tick's arrivals — so the
 /// comparison is against the largest segment the deployment holds.
 fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), BoxError> {
     let generation = engine.generation();
@@ -147,7 +147,7 @@ fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), 
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.slices.values())
+        .flat_map(|p| p.views.values())
         .flat_map(|s| s.segments.iter())
         .map(|s| s.columns.byte_len() + s.morton.byte_len())
         .max()

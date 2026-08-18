@@ -22,7 +22,7 @@
 //!
 //! Where every entity carries a value, the entity id *is* the array index and no addressing
 //! structure is stored. Where presence is partial — the ordinary case once commit windows interleave
-//! slices, which makes an entity range ascending-*with-holes* (write-path §4.2) — a Roaring presence
+//! views, which makes an entity range ascending-*with-holes* (write-path §4.2) — a Roaring presence
 //! bitmap accompanies a compact value array, the *k*-th set bit's value at slot *k*.
 //!
 //! Two layouts were measured and refused (`probes/2026-08-08-filter-layout/`). An explicit
@@ -1159,7 +1159,7 @@ impl ValueColumn {
     ///
     /// **The presence bitmap is read into memory either way, and only the values are mapped.** The
     /// asymmetry is the measured size ratio: at 10⁹ the values are 1 GB per byte of declared width
-    /// while the presence bitmap is 36 KB for the slice-blocked shape and 125 MB at its scattered
+    /// while the presence bitmap is 36 KB for the view-blocked shape and 125 MB at its scattered
     /// worst (probe `2026-08-08-filter-layout`). Roaring also wants its own owned representation to
     /// answer a rank in the scan's inner loop, so mapping it would buy little and cost the run-merge
     /// its structure.

@@ -381,7 +381,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
-            slices: vec![],
+            views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
             files: BTreeMap::new(),
@@ -406,7 +406,7 @@ mod tests {
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),
             buffer: Arc::new(IngestBuffer::new()),
-            // The fixture bundle carries no slices, so a fresh derivation is empty.
+            // The fixture bundle carries no views, so a fresh derivation is empty.
             denied: Arc::new(crate::DenyMask::default()),
         }
     }

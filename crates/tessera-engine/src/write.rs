@@ -654,7 +654,7 @@ pub struct ExecutorStats {
     pub merges: u64,
     pub merge_failures: u64,
     /// Compaction folds published, and the ones discarded — the observable behind "deletions
-    /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-slice".
+    /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-view".
     pub folds: u64,
     pub fold_failures: u64,
     /// Whether a `POST /control/compact` is awaiting the next tick.
@@ -1583,7 +1583,7 @@ impl LiveState {
     /// A layer's own entity — where its suppression lands — without cloning its declaration.
     ///
     /// The attachment term asks this per attached artifact of a response, and a declaration carries
-    /// a name, a title, a slice list and a content vocabulary; cloning all of it to read one `u64`
+    /// a name, a title, a view list and a content vocabulary; cloning all of it to read one `u64`
     /// would put the cost of the term on the wrong side of the argument that it is one lookup.
     pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
         lock_recover(&self.registry).get(name).map(|layer| layer.entity)
@@ -1811,7 +1811,7 @@ impl std::error::Error for ExecutorStartError {}
 pub enum AcceptError {
     Submit(SubmitError),
     Exec(ExecError),
-    /// A row's coordinates fall outside the slice's declared quantisation extent, so the point has
+    /// A row's coordinates fall outside the view's declared quantisation extent, so the point has
     /// no cell to occupy — refused **before anything is acked or WAL-durable**, and refused rather
     /// than clamped (see [`Quantisation::contains`]).
     ///
@@ -1877,11 +1877,11 @@ impl std::fmt::Display for AcceptError {
                 quantisation: q,
             } => write!(
                 f,
-                "ingest row {index} at ({x}, {y}) is outside this slice's declared extent (x {}..{}, \
+                "ingest row {index} at ({x}, {y}) is outside this view's declared extent (x {}..{}, \
                  y {}..{}). Coordinates are quantised against that extent, which is fixed for the \
-                 slice's life (decision 0040), so an out-of-extent point has no cell to occupy; it \
+                 view's life (decision 0040), so an out-of-extent point has no cell to occupy; it \
                  is refused here rather than clamped, because a clamped point at the boundary \
-                 cannot be told from one that belongs there. The remedy is to rebuild the slice \
+                 cannot be told from one that belongs there. The remedy is to rebuild the view \
                  under a corrected extent, which is a migration",
                 q.x_min, q.x_max, q.y_min, q.y_max
             ),
@@ -2138,9 +2138,9 @@ impl WritePath {
         //
         // **The test is `row_of`, not a watermark.** A watermark is a cheap scalar proxy for "has a
         // row", exact only while entity-allocation order and flush order coincide — that is, while
-        // there is one slice per partition, which write-path §4.3 records as load-bearing and unenforced.
+        // there is one view per partition, which write-path §4.3 records as load-bearing and unenforced.
         // The predicate below is what the watermark approximates, so it stays exact at any number of
-        // slices and needs no per-slice bookkeeping anywhere.
+        // views and needs no per-view bookkeeping anywhere.
         //
         // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
         // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
@@ -3413,7 +3413,7 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
+/// Every view the bundle holds, across partitions. A flush plans per view, because a segment's
 /// entity range is contiguous only within one (§2.1).
 /// Replace a manifest's deny fields with the overlay's live state.
 ///
@@ -3521,7 +3521,7 @@ mod segment_schema_tests {
                 shard_id: 0,
                 idset: 1,
             },
-            slices: vec![],
+            views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
             files: std::collections::BTreeMap::new(),
@@ -3690,7 +3690,7 @@ fn plan_to_dispatch(
 ) -> Option<(String, crate::flush::FlushPlan)> {
     plans.into_iter().min_by_key(|(_, plan)| {
         // `items` is ascending by entity id and I9 issues ids monotonically, so the first is this
-        // slice's oldest waiting row. An empty plan cannot occur (`plan_flush` returns
+        // view's oldest waiting row. An empty plan cannot occur (`plan_flush` returns
         // `NothingToFlush`), and sorting it last rather than first keeps a hypothetical one from
         // winning every tick.
         plan.items
@@ -3933,37 +3933,37 @@ fn free_disc(_path: &Path) -> Option<u64> {
     None
 }
 
-/// The largest live segment count across this generation's slices — compaction §9's segment gauge.
+/// The largest live segment count across this generation's views — compaction §9's segment gauge.
 ///
-/// The **max** rather than the sum, because the gauge is per (partition, slice): a tile resolves to
-/// one contiguous range per live segment *of the slice it is in*, so one slice at 64 segments is
+/// The **max** rather than the sum, because the gauge is per (partition, view): a tile resolves to
+/// one contiguous range per live segment *of the view it is in*, so one view at 64 segments is
 /// what a viewport there pays, whatever the others hold.
 ///
-/// ⊘ **Untestable today, and stated rather than claimed**: no build emits a second slice
+/// ⊘ **Untestable today, and stated rather than claimed**: no build emits a second view
 /// (compaction §6.3), so max and sum agree on every bundle that exists and no case here
-/// distinguishes them. It is written this way because the slices fold-in is what makes the
+/// distinguishes them. It is written this way because the views fold-in is what makes the
 /// difference real, not because a test caught it.
 fn live_segments_of(generation: &Generation) -> usize {
     generation
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.slices.values())
-        .map(|slice| slice.segments.len())
+        .flat_map(|partition| partition.views.values())
+        .map(|view| view.segments.len())
         .max()
         .unwrap_or(0)
 }
 
-fn slices_of(generation: &Generation) -> Vec<String> {
-    let mut slices: Vec<String> = generation
+fn views_of(generation: &Generation) -> Vec<String> {
+    let mut views: Vec<String> = generation
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.slices.keys().cloned())
+        .flat_map(|p| p.views.keys().cloned())
         .collect();
-    slices.sort_unstable();
-    slices.dedup();
-    slices
+    views.sort_unstable();
+    views.dedup();
+    views
 }
 
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
@@ -4363,23 +4363,23 @@ impl Executor {
         // this tick, which stays at zero on a gated node and grows on one whose flush is failing.
         let mut flushable = 0usize;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
-        for slice in slices_of(&generation) {
+        for view in views_of(&generation) {
             match crate::flush::plan_flush(
                 &generation,
-                &slice,
+                &view,
                 self.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
             ) {
                 Ok(plan) => {
                     flushable += plan.items.len();
-                    plans.push((slice, plan));
+                    plans.push((view, plan));
                 }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(gate) => {
                     // Per tick, and deliberately: a gated node is gated until an operator acts, and
                     // the tick is the interval at which that is worth repeating.
                     tracing::warn!(
-                        slice = %slice,
+                        view = %view,
                         gate = ?gate,
                         "flush skipped: this node publishes no geometry in this state"
                     );
@@ -4654,7 +4654,7 @@ impl Executor {
             .collect();
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
-            &completed.plan.slice,
+            &completed.plan.view,
             &consumed,
             completed.segment,
             completed.output.extent,
@@ -4721,7 +4721,7 @@ impl Executor {
     ///
     /// Every gauge is read off the generation this tick loaded, so they agree with each other and
     /// with the plan the dispatch is about to take. **Three of the four are field reads** — a `len`
-    /// per slice, a bitmap cardinality, a sum of row counts — which is what lets this run at every
+    /// per view, a bitmap cardinality, a sum of row counts — which is what lets this run at every
     /// tick rather than on a cadence of its own.
     ///
     /// **The fourth is a directory walk, and it is a closure for that reason.** `due` calls it only
@@ -5081,19 +5081,19 @@ impl Executor {
         // fails this — which the suspension in `dispatch_merge`/`dispatch_coalesce` makes a
         // crash-and-race path rather than the steady one.
         let consumed_segments: FxHashSet<(&str, &str)> = plan
-            .slices
+            .views
             .iter()
-            .flat_map(|slice| {
-                slice
+            .flat_map(|view| {
+                view
                     .segments
                     .iter()
-                    .map(move |segment| (slice.slice.as_str(), segment.seg_id.as_str()))
+                    .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
             })
             .collect();
         let listed_segments: FxHashSet<(&str, &str)> = live_manifest
             .segments
             .iter()
-            .map(|d| (d.slice.as_str(), d.seg_id.as_str()))
+            .map(|d| (d.view.as_str(), d.seg_id.as_str()))
             .collect();
         if !consumed_segments.is_subset(&listed_segments)
             || !plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
@@ -5138,7 +5138,7 @@ impl Executor {
         let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
             .segments
             .iter()
-            .filter(|d| !consumed_segments.contains(&(d.slice.as_str(), d.seg_id.as_str())))
+            .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
             .collect();
         let carried_tiers: Vec<String> = live_manifest
             .deltas
@@ -5208,7 +5208,7 @@ impl Executor {
             .cloned()
             .collect();
 
-        // **Every carried-forward extent must begin at or above the fold's own base**, per slice.
+        // **Every carried-forward extent must begin at or above the fold's own base**, per view.
         // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
         // `ExternalIdSidecar` gives the base locator absolute priority below its own length — so a
         // violation here is a prefix that either will not open or answers "this item has no
@@ -5217,22 +5217,22 @@ impl Executor {
         // checked before anything is written. The relation holds for every publication that
         // cleared the live row space's own floor; this refuses to be the place it is assumed.
         for descriptor in &carried_segments {
-            let Some(slice) = plan.slices.iter().find(|s| s.slice == descriptor.slice) else {
-                discard("a carried-forward segment names a slice the fold has no base for");
+            let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
+                discard("a carried-forward segment names a view the fold has no base for");
                 return;
             };
-            if descriptor.entity_lo < slice.permutation_bound {
+            if descriptor.entity_lo < view.permutation_bound {
                 discard("a carried-forward segment begins below the fold's own base permutation");
                 return;
             }
         }
-        // **Partition-wide here where the segment loop above is per-slice, and that is correct
+        // **Partition-wide here where the segment loop above is per-view, and that is correct
         // rather than a coarsening.** `ext-locator.u32` is one array per partition (§3, pass 3), so
-        // there is no per-slice bound to compare against — but the reason it cannot falsely fire is
+        // there is no per-view bound to compare against — but the reason it cannot falsely fire is
         // the allocator, not the file: entity ids are issued monotonically from **one** bundle-wide
         // high-water (I9), so a locator extent published after the fold's snapshot begins above
-        // every entity that had a row at it, in every slice. `plan.entity_bound` is the maximum of
-        // those per-slice bounds and is therefore at or below that high-water. A slice whose own
+        // every entity that had a row at it, in every view. `plan.entity_bound` is the maximum of
+        // those per-view bounds and is therefore at or below that high-water. A view whose own
         // bound is lower cannot produce an extent beneath the maximum, because it does not get to
         // choose its ids.
         if carried_locators
@@ -5341,8 +5341,8 @@ impl Executor {
 
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
-        // Each slice's fold base first and its carried extents after it, because the reader takes
-        // the first segment listed for a slice as the one `permutation.bin` addresses and every
+        // Each view's fold base first and its carried extents after it, because the reader takes
+        // the first segment listed for a view as the one `permutation.bin` addresses and every
         // later one as an extent above it.
         let mut segments = Vec::with_capacity(completed.segments.len() + carried_segments.len());
         for base in &completed.segments {
@@ -5350,7 +5350,7 @@ impl Executor {
             segments.extend(
                 carried_segments
                     .iter()
-                    .filter(|d| d.slice == base.slice)
+                    .filter(|d| d.view == base.view)
                     .map(|d| (*d).clone()),
             );
         }
@@ -5484,8 +5484,8 @@ impl Executor {
         let mut carried_rels: BTreeSet<String> = BTreeSet::new();
         for descriptor in &carried_segments {
             let segment_prefix = format!(
-                "partitions/{}/slices/{}/segments/{}",
-                plan.partition, descriptor.slice, descriptor.seg_id
+                "partitions/{}/views/{}/segments/{}",
+                plan.partition, descriptor.view, descriptor.seg_id
             );
             for name in ["morton.u32", "columns.arrow"] {
                 carried_rels.insert(format!("{segment_prefix}/{name}"));
@@ -5833,7 +5833,7 @@ impl Executor {
             staircase_rss,
             attr_bytes_read = completed.attr_bytes_read,
             attr_bytes_written = completed.attr_bytes_written,
-            "a compaction fold published: the bundle is one base segment per partition-slice, one \
+            "a compaction fold published: the bundle is one base segment per partition-view, one \
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"
         );
@@ -6276,38 +6276,38 @@ impl Executor {
         // behind it at the format boundary. The rest re-plan at the next tick, against a
         // `segments_version` the winner has advanced.
         //
-        // **Chosen by oldest unflushed row, not by slice name.** `slices_of` sorts
+        // **Chosen by oldest unflushed row, not by view name.** `views_of` sorts
         // lexicographically, so taking the first would let a continuously-fed `s0` deny `s1` a
         // flush for ever. `items` is ascending by entity id and I9 issues ids monotonically, so
         // `items.first()` is an age key needing no cursor state — which turns starvation into a
-        // bound: with `s` slices, ack→visibility is at most `s × flush_max_age_secs`.
+        // bound: with `s` views, ack→visibility is at most `s × flush_max_age_secs`.
         //
-        // **Unreachable today**: `tessera build` emits one slice, and a plan naming a slice this
+        // **Unreachable today**: `tessera build` emits one view, and a plan naming a view this
         // bundle does not carry is dropped just below.
         let deferred = plans.len().saturating_sub(1);
-        let Some((slice, plan)) = plan_to_dispatch(plans) else {
+        let Some((view, plan)) = plan_to_dispatch(plans) else {
             return;
         };
         if deferred > 0 {
             tracing::warn!(
                 deferred,
-                dispatched = %slice,
-                "a flush unit is per slice and every plan in a dispatch shares one side-manifest \
-                 name, so one slice publishes per tick; the rest re-plan at the next one"
+                dispatched = %view,
+                "a flush unit is per view and every plan in a dispatch shares one side-manifest \
+                 name, so one view publishes per tick; the rest re-plan at the next one"
             );
         }
 
         let mut contexts = Vec::with_capacity(1);
         {
-            let Some(slice_data) = partition_data.slices.get(&slice) else {
+            let Some(view_data) = partition_data.views.get(&view) else {
                 return;
             };
-            let Ok(row_base) = u32::try_from(slice_data.row_space.total_rows()) else {
-                // Row ids are `u32` (bundle_format 1). A slice that has crossed 2^32 rows cannot
+            let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
+                // Row ids are `u32` (bundle_format 1). A view that has crossed 2^32 rows cannot
                 // take another segment, and saying so is better than wrapping into row 0.
                 tracing::error!(
-                    slice = %slice,
-                    "ALARM: this slice's row space has reached the u32 ceiling; no further flush \
+                    view = %view,
+                    "ALARM: this view's row space has reached the u32 ceiling; no further flush \
                      can address it. The deployment must be compacted or re-sharded"
                 );
                 return;
@@ -6341,7 +6341,7 @@ impl Executor {
                 crate::flush::FlushContext {
                     prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
-                    slice: slice.clone(),
+                    view: view.clone(),
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
                     // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
                     // alone repeats whenever a flush is planned twice before it publishes, and the
@@ -7881,9 +7881,9 @@ impl Executor {
     /// ([`ExecutorHealth::apply_nanos_total`], already on `/control/status`, so no counter is added
     /// for this).
     ///
-    /// Changes are applied in slice order, which is the window's entries order, which is the deny
+    /// Changes are applied in view order, which is the window's entries order, which is the deny
     /// lane's FIFO arrival order — so a `suppress` and a later `unsuppress` of the same item resolve
-    /// as they would have as two separate commands. The slice is iterated once, forwards.
+    /// as they would have as two separate commands. The view is iterated once, forwards.
     ///
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
@@ -7948,12 +7948,12 @@ impl Executor {
         } else {
             let mut denied = (*generation.denied).clone();
             for partition in generation.bundle.partitions.values() {
-                for (slice, slice_data) in &partition.slices {
-                    let Some(rows) = denied.get_mut(slice) else {
+                for (view, view_data) in &partition.views {
+                    let Some(rows) = denied.get_mut(view) else {
                         continue;
                     };
                     for entity in &newly_denied {
-                        if let Some(row) = slice_data.row_space.row_of(*entity) {
+                        if let Some(row) = view_data.row_space.row_of(*entity) {
                             rows.add(row.raw());
                         }
                     }
@@ -8191,7 +8191,7 @@ impl Executor {
         // Refused rather than guessed. Which partition should own an artifact's content, or whether
         // the rows should be split across them by some rule, is a layout question a multi-partition
         // bundle has to answer and nothing here can: writing to the first partition alone would
-        // leave the content unreadable from a slice carried by another, and writing to all of them
+        // leave the content unreadable from a view carried by another, and writing to all of them
         // is the overlap above. No such bundle exists today (nothing splits one), which is why this
         // is a refusal with an alarm rather than a design.
         if partitions > 1 {
@@ -8376,7 +8376,7 @@ impl Executor {
     /// alternative is not a cache miss but a stall, and it lands on a request rather than on
     /// maintenance. Cheap everywhere else — a deployment with no artifacts iterates nothing.
     ///
-    /// **Errors are impossible to have here and absences are not**: a slice the generation does not
+    /// **Errors are impossible to have here and absences are not**: a view the generation does not
     /// carry is simply not warmed, and its first request builds what it needs, which is the same
     /// outcome this method exists to avoid but not a wrong one.
     fn warm_artifact_projections(&self) {
@@ -8394,17 +8394,17 @@ impl Executor {
         let store_version = self.live.with_artifacts(|store| store.version());
         let mut built = 0usize;
         for partition in generation.bundle.partitions.values() {
-            for (slice, slice_data) in &partition.slices {
+            for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
                     self.live.with_artifacts(|store| {
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
-                            slice,
+                            view,
                             layer,
                             *level,
                             store,
                             store_version,
-                            &slice_data.row_space,
+                            &view_data.row_space,
                         )
                     });
                     built += 1;
@@ -8692,7 +8692,7 @@ impl Executor {
 
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
-            &completed.slice,
+            &completed.view,
             completed.segment,
             completed.extent,
             tessera_store::read::PublishedManifest {
@@ -9370,7 +9370,7 @@ mod retry_after_tests {
 }
 
 /// The two rules the promotion design added to publication (`2026-08-03-descriptor-promotion-design`
-/// §2), tested where they are decided rather than through a second slice no build produces.
+/// §2), tested where they are decided rather than through a second view no build produces.
 #[cfg(test)]
 mod dispatch_rules_tests {
     use super::*;
@@ -9379,7 +9379,7 @@ mod dispatch_rules_tests {
     fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
         let item = BufferedItem {
             terms: Vec::new(),
-            slice: "s".to_string(),
+            view: "s".to_string(),
             x: 0.5,
             y: 0.5,
             scalars: Vec::new(),
@@ -9392,8 +9392,8 @@ mod dispatch_rules_tests {
     }
 
     /// **Obligation 9.** Every context a dispatch builds shares `next_n`, so only one can commit
-    /// its side-manifest. The one sent is the slice whose oldest waiting row is oldest — not the
-    /// first by name, which is what `slices_of`'s lexicographic sort would give and which would
+    /// its side-manifest. The one sent is the view whose oldest waiting row is oldest — not the
+    /// first by name, which is what `views_of`'s lexicographic sort would give and which would
     /// let a continuously-fed `s0` deny `s1` a flush for ever.
     ///
     /// **Mutation:** replace this with `plans.into_iter().next()` and the assertion below fails —
@@ -9405,8 +9405,8 @@ mod dispatch_rules_tests {
             ("s1".to_string(), plan_from(100)),
             ("s2".to_string(), plan_from(500)),
         ];
-        let (slice, plan) = plan_to_dispatch(plans).expect("one of three");
-        assert_eq!(slice, "s1", "oldest row wins, not lowest slice id");
+        let (view, plan) = plan_to_dispatch(plans).expect("one of three");
+        assert_eq!(view, "s1", "oldest row wins, not lowest view id");
         assert_eq!(plan.items[0].0.raw(), 100);
     }
 

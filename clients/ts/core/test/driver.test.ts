@@ -122,7 +122,7 @@ function harness(opts: {
       return opts.respond ? opts.respond() : emptyResponse();
     },
     Q,
-    {slice: 's', now: () => clock.now(), revalidateAfterMs: opts.revalidateAfterMs ?? Infinity}
+    {view: 's', now: () => clock.now(), revalidateAfterMs: opts.revalidateAfterMs ?? Infinity}
   );
   replica.reset();
   const driver = new Driver(

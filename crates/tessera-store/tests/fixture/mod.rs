@@ -18,7 +18,7 @@ use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -27,7 +27,7 @@ use tessera_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 pub const PARTITION: &str = "default";
-pub const SLICE: &str = "main";
+pub const VIEW: &str = "main";
 
 fn synthetic_tessera_id(seed: u64) -> TesseraId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
@@ -72,25 +72,25 @@ pub fn build_bundle(root: &Path, n: u64) {
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join(PARTITION);
-    let slice_dir = partition_dir.join("slices").join(SLICE);
-    let seg_dir = slice_dir.join("segments").join("seg0");
+    let view_dir = partition_dir.join("views").join(VIEW);
+    let seg_dir = view_dir.join("segments").join("seg0");
     fs::create_dir_all(&seg_dir).expect("mkdir");
 
     write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
-    write_permutation(&slice_dir.join("permutation.bin"), &entity_ids, n).expect("permutation");
+    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n).expect("permutation");
 
     let mut files = BTreeMap::new();
     for (rel, path) in [
         (
-            format!("partitions/{PARTITION}/slices/{SLICE}/permutation.bin"),
-            slice_dir.join("permutation.bin"),
+            format!("partitions/{PARTITION}/views/{VIEW}/permutation.bin"),
+            view_dir.join("permutation.bin"),
         ),
         (
-            format!("partitions/{PARTITION}/slices/{SLICE}/segments/seg0/columns.arrow"),
+            format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/columns.arrow"),
             seg_dir.join("columns.arrow"),
         ),
         (
-            format!("partitions/{PARTITION}/slices/{SLICE}/segments/seg0/morton.u32"),
+            format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/morton.u32"),
             seg_dir.join("morton.u32"),
         ),
     ] {
@@ -106,7 +106,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         membership_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
-            slice: SLICE.to_string(),
+            view: VIEW.to_string(),
             seg_id: "seg0".to_string(),
             row_count: n as u32,
             entity_lo: 0,
@@ -152,9 +152,9 @@ pub fn build_bundle(root: &Path, n: u64) {
             shard_id: 0,
             idset: 1,
         },
-        slices: vec![SliceDescriptor {
-            id: SLICE.to_string(),
-            display_name: SLICE.to_string(),
+        views: vec![ViewDescriptor {
+            id: VIEW.to_string(),
+            display_name: VIEW.to_string(),
         }],
         partitions: vec![PartitionDescriptor {
             phash: PARTITION.to_string(),
@@ -189,7 +189,7 @@ pub fn flush_segment(
     entity_lo: u64,
     count: u64,
 ) -> (SegmentData, SegmentExtent) {
-    let row_base = bundle.partitions[PARTITION].slices[SLICE]
+    let row_base = bundle.partitions[PARTITION].views[VIEW]
         .row_space
         .total_rows() as u32;
     let seg_id = format!("seg-{entity_lo}-{count}");
@@ -198,7 +198,7 @@ pub fn flush_segment(
     let out = write_flush_segment(
         &root.join("v00000"),
         PARTITION,
-        SLICE,
+        VIEW,
         FlushInput {
             seg_id: &seg_id,
             rows: (entity_lo..entity_lo + count)
@@ -227,8 +227,8 @@ pub fn flush_segment(
     let seg_dir = root
         .join("v00000/partitions")
         .join(PARTITION)
-        .join("slices")
-        .join(SLICE)
+        .join("views")
+        .join(VIEW)
         .join("segments")
         .join(&seg_id);
     let segment = SegmentData {

@@ -30,7 +30,7 @@ fn clusters(gate: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
         name: CLUSTERS.into(),
         title: "clusters".into(),
-        slices: vec!["s0".into()],
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         access: LayerAccess {
             label: gate.map(str::to_string),
@@ -55,7 +55,7 @@ fn labels() -> LayerDeclaration {
     LayerDeclaration {
         name: LABELS.into(),
         title: "topics".into(),
-        slices: vec!["s0".into()],
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         access: LayerAccess {
             label: None,

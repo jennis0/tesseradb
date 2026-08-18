@@ -159,19 +159,19 @@ pub enum WalScalar {
 /// to make that identity durable. `None` here must never collide with `None` elsewhere, and must
 /// never be treated as "an external id happens to be empty".
 ///
-/// `slice` names the row space the row's future row belongs to. It is durable rather than
-/// re-derived because a flush segment covers a contiguous entity range only *within one slice*:
-/// with more than one slice a commit window's entity range interleaves across them, and a
+/// `view` names the row space the row's future row belongs to. It is durable rather than
+/// re-derived because a flush segment covers a contiguous entity range only *within one view*:
+/// with more than one view a commit window's entity range interleaves across them, and a
 /// segment's range becomes ascending-with-holes. The row is the only place that fact survives a
 /// restart, and the WAL is append-only — so the field goes in while the layout is still being
 /// revised, not once a published segment depends on it. The handler resolves it against the
-/// bundle's declared slices and refuses anything else; nothing defaults it, because a defaulted
-/// slice is how a row silently joins the wrong row space.
+/// bundle's declared views and refuses anything else; nothing defaults it, because a defaulted
+/// view is how a row silently joins the wrong row space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
-    pub slice: String,
+    pub view: String,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f32,
     pub y: f32,
@@ -488,7 +488,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// the header itself — and on any change to a record's *field* layout or the variant table, since
 /// postcard encodes struct fields and enum discriminants positionally and would otherwise decode
 /// a missing field or shifted variant as whatever bytes follow it. Version 2 added
-/// [`WalRow::slice`]; version 3 made the log a sequence and put each member's number and base
+/// [`WalRow::view`]; version 3 made the log a sequence and put each member's number and base
 /// position in its header; version 4 deleted the `Lease` and `Flush` variants — the first was
 /// written by nothing (allocation rides `IngestBatch` rows), the second was written and read by
 /// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
@@ -1689,7 +1689,7 @@ mod tests {
             rows: vec![WalRow {
                 external_id: None,
                 entity_id: EntityId::new(1),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,
@@ -1731,7 +1731,7 @@ mod tests {
             declaration: LayerDeclaration {
                 name: "boundaries/uk-2026".into(),
                 title: "UK administrative boundaries".into(),
-                slices: vec!["geographic".into()],
+                views: vec!["geographic".into()],
                 membership: MembershipSource::Spatial,
                 access: LayerAccess {
                     label: Some("public".into()),

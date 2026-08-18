@@ -320,11 +320,11 @@ impl Schema {
             if decl.render_in.is_some() {
                 return Err(schema_error(format!(
                     "attribute '{}': `render_in` is specified and not built \
-                     (per-point-attributes §3.9). A per-slice hot column needs contracts §2.6 to \
-                     enumerate columns per slice, which slices §53 permits and the format does \
+                     (per-point-attributes §3.9). A per-view hot column needs contracts §2.6 to \
+                     enumerate columns per view, which views §53 permits and the format does \
                      not yet carry — `MANIFEST.declared_scalars` is one flat bundle-wide list. \
-                     Accepting it would put the column in every slice anyway, silently, which is \
-                     the opposite of what it asks for. Omit it: every slice is the current \
+                     Accepting it would put the column in every view anyway, silently, which is \
+                     the opposite of what it asks for. Omit it: every view is the current \
                      behaviour and the documented default",
                     decl.name
                 )));
@@ -1261,8 +1261,8 @@ listing = "per_viewer"
     ///
     /// The distinction is the whole point of the case. `MANIFEST.declared_scalars` is one flat
     /// bundle-wide list, so a build that accepted `render_in = ["a"]` would write the column into
-    /// every slice — the opposite of what was asked for, with no error and nothing downstream able
-    /// to notice. Omitting it still means every slice, which is honest because that is what
+    /// every view — the opposite of what was asked for, with no error and nothing downstream able
+    /// to notice. Omitting it still means every view, which is honest because that is what
     /// happens.
     #[test]
     fn render_in_is_refused_rather_than_silently_ignored() {
@@ -1270,7 +1270,7 @@ listing = "per_viewer"
         let message = err(&text);
         assert!(message.contains("§3.9"), "{message}");
         assert!(
-            message.contains("every slice anyway"),
+            message.contains("every view anyway"),
             "the refusal must say what accepting it would actually do: {message}"
         );
         // And the omitted case is unaffected — it is the documented default, not a workaround.

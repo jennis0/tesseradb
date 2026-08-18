@@ -98,7 +98,7 @@ pub trait ViewportSink {
     /// Sweep complete: every tile's counts and the underlay. Exactly once, before any points.
     /// `sub_cells` is `None` when the request did not ask for the underlay, `Some` (possibly
     /// empty) when it did — the frame-presence rule (§2) needs the distinction, and an empty
-    /// slice cannot carry it.
+    /// view cannot carry it.
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult;
     /// One flush chunk: whole tiles' points, response order. Zero or more times.
     fn points(&mut self, chunk: PointColumns) -> SinkResult;
@@ -242,7 +242,7 @@ and is unaffected. No `?stream=0` mode: two framings is two conformance surfaces
   `payload.rs`** — the module name is load-bearing, because `check-layers.sh`'s I10 rule greps
   that file by name and a rename would leave the rule permanently green (review finding 7). The
   monolithic `viewport_ipc` is deleted (0048 — artifacts recreated, no reader outside this
-  repo). The I10 layering is unchanged: plain `tessera_id`/scalar slices in, bytes out.
+  repo). The I10 layering is unchanged: plain `tessera_id`/scalar views in, bytes out.
 - `tessera-engine`: `tile_sweep`/gather split, `ViewportSink`, `viewport_stream`,
   `Engine::viewport` as collector; emit-phase cancellation checks; stats accounting for the
   emit pass (`gather_ns` moves there, bracketing gather only — §6; per-tile sweep stats

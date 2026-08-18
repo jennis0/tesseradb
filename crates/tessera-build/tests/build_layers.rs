@@ -85,7 +85,7 @@ const LAYERS_TOML: &str = r#"
 [[layer]]
 name = "clusters/a"
 title = "clusters"
-slices = ["s0"]
+views = ["s0"]
 membership = "enumerated"
 gate = "0"
 artifacts_carry_own = false
@@ -96,7 +96,7 @@ content = { derived = ["centroid"] }
 [[layer]]
 name = "topics/x"
 title = "topics"
-slices = ["s0"]
+views = ["s0"]
 membership = "enumerated"
 ungated = true
 artifacts_carry_own = false
@@ -269,7 +269,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         pairs: inputs.pairs.clone(),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -516,18 +516,18 @@ fn a_layer_omitting_its_existence_criterion_is_refused() {
     assert!(format!("{err}").contains("visible_when"), "{err}");
 }
 
-/// A layer in a slice this build does not write would be registered, reachable and empty — which
+/// A layer in a view this build does not write would be registered, reachable and empty — which
 /// no client can tell from a layer whose artifacts were all withheld. Refused.
 #[test]
-fn a_layer_naming_a_slice_this_build_does_not_write_is_refused() {
+fn a_layer_naming_a_view_this_build_does_not_write_is_refused() {
     let inputs = inputs();
     std::fs::write(
         &inputs.layers,
-        LAYERS_TOML.replace(r#"slices = ["s0"]"#, r#"slices = ["s7"]"#),
+        LAYERS_TOML.replace(r#"views = ["s0"]"#, r#"views = ["s7"]"#),
     )
     .unwrap();
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("a slice that does not exist is a refusal");
+    let err = build(&args(&inputs, &out)).expect_err("a view that does not exist is a refusal");
     assert!(format!("{err}").contains("s7"), "{err}");
 }
 
@@ -554,7 +554,7 @@ const TREED_LAYERS_TOML: &str = r#"
 [[layer]]
 name = "clusters/tree"
 title = "a hierarchy"
-slices = ["s0"]
+views = ["s0"]
 membership = "enumerated"
 gate = "0"
 artifacts_carry_own = false
@@ -816,7 +816,7 @@ const TIERED_LAYERS_TOML: &str = r#"
 [[layer]]
 name = "admin/boundaries"
 title = "administrative boundaries"
-slices = ["s0"]
+views = ["s0"]
 membership = "enumerated"
 gate = "0"
 artifacts_carry_own = false

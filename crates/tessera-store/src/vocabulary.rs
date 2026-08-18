@@ -54,7 +54,7 @@ const DRAW_ATTEMPTS: usize = 64;
 pub enum MintError {
     /// **The empty string is not a value.** It is what an unset field, a trimmed whitespace-only
     /// cell and a client bug all produce, so minting it would let a typo become a category with
-    /// properties and a visibility consequence — the creation slices §80 rules out. Refused loudly
+    /// properties and a visibility consequence — the creation views §80 rules out. Refused loudly
     /// rather than mapped to [`ABSENT_CODE`], which would silently accept the same defect.
     EmptyKey { vocabulary: String },
     /// **The width's code space is full.** Never widen and never wrap: both recolour rows that
@@ -169,7 +169,7 @@ impl Minted {
 /// The live binding set for one vocabulary: key → code, plus every code ever spent.
 ///
 /// **Vocabulary-scoped, not column-scoped.** A `ManifestVocabulary` is a named object several
-/// columns may share (§3.9); codes are shared with it so that cross-column and cross-slice legends
+/// columns may share (§3.9); codes are shared with it so that cross-column and cross-view legends
 /// compose. Two columns sharing a discovered vocabulary mint into one code space through one of
 /// these.
 #[derive(Debug, Clone)]

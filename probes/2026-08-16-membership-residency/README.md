@@ -92,10 +92,10 @@ Two consequences, neither of which the ratio alone shows:
 
 ## Multipliers this figure does not include
 
-§11.3's warning stands and is not measured here: the figure **multiplies by slice, by level, and by
+§11.3's warning stands and is not measured here: the figure **multiplies by view, by level, and by
 two during a replace**. And the engine currently holds *two* resident copies of every membership —
 the entity-space store (`ArtifactStore`, the durable form) and the row-space projection
-(`ArtifactRows`, per slice). At the design's point on the realistic arm that is 3.6 GB per copy
+(`ArtifactRows`, per view). At the design's point on the realistic arm that is 3.6 GB per copy
 before any multiplier.
 
 ## What this does not measure, stated so it is not read as settled

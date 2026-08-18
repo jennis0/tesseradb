@@ -52,7 +52,7 @@ build from a file*, never *required to declare*.
 | `source` | R | a logical key bound by `--file` |
 | `fields` | D | canonical `entity_id`, `x`, `y`, or `morton` + `residual` — the geometry shapes are mutually exclusive (§7) |
 | `point_visibility` | R | `{ field, default }` — where each point's label is, and what a point carrying none gets |
-| `visibility` | ⊘ | the view's own gate; specified, not implemented (slices §3) |
+| `visibility` | ⊘ | the view's own gate; specified, not implemented (views §3) |
 
 **`[[vocabulary]]`** — a named value set. Repeatable.
 
@@ -321,7 +321,7 @@ arbitrary.**
 |---|---|
 | Artifacts, layers | **Yes, today.** That is the control plane's whole job; the build plane exists only so a 10⁷-artifact level need not ride the trickle path (`annotation-write-cycle.md` §6.1) |
 | Vocabulary values | **By design, no endpoint.** Appending a value and retiring one are both safe — a new code is assigned, a retired one moves to `reserved` and is never reassigned (`per-point-attributes.md` §2.2) — but ⊘ `/control/categories` is still owed, so today the route exists on paper only |
-| Views | ⊘ **Specified, not implemented.** Creation is a control verb carrying `{name, gate, projection provenance}`, WAL'd and materialised at the next flush (slices §5); a bundle has one coordinate system, so nothing evaluates it yet |
+| Views | ⊘ **Specified, not implemented.** Creation is a control verb carrying `{name, gate, projection provenance}`, WAL'd and materialised at the next flush (views §5); a bundle has one coordinate system, so nothing evaluates it yet |
 | Attributes | **Deliberately not online.** Adding `index` is a build pass with no row rewrite; adding `render` rewrites every segment; changing a width or a type is refused outright. The convention is Elasticsearch's, and stolen on purpose: *mappings are immutable; you reindex* |
 
 ⊘ **Declaring a wholly new attribute after a build is not specified**, as distinct from altering an

@@ -274,7 +274,7 @@ zoomed-out overview is expensive because of mask materialisation and
 shard fan-out, not because of counting.
 
 The **permutation into row space is the expensive step** — 8.8 s for a
-69M-item mask. That is exactly why §10.4 caches it per *(token, slice,
+69M-item mask. That is exactly why §10.4 caches it per *(token, view,
 pin)*, and the number makes the consequence concrete: if it ever drifts
 onto the per-viewport path, the system dies.
 

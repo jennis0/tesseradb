@@ -241,7 +241,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         pairs,
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -335,8 +335,8 @@ fn segment_dirs(root: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|segment| {
             prefix
-                .join("partitions/default/slices")
-                .join(&segment.slice)
+                .join("partitions/default/views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id)
         })
@@ -407,10 +407,10 @@ impl Home {
         let attrs = partition.join("attrs");
         match self {
             Home::Row => {
-                let slice = partition.join("slices/s0");
+                let view = partition.join("views/s0");
                 vec![
-                    slice.join("permutation.bin"),
-                    slice.join(tessera_store::ROW_ENTITY_FILE),
+                    view.join("permutation.bin"),
+                    view.join(tessera_store::ROW_ENTITY_FILE),
                 ]
             }
             Home::RenderColumn => segment_dirs(root)
@@ -483,7 +483,7 @@ fn every_home_byte(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// `Home::Row`: the row this entity resolves to, through the only legal entity → row path (I4).
 fn row_of(root: &Path, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].slices["s0"]
+    bundle.partitions["default"].views["s0"]
         .row_space
         .row_of(entity)
         .map(|row| row.raw())

@@ -940,7 +940,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // Per-ordinal signature starts (u32: the plan caps any batch's pairs well below
         // 2^32), the long-signature bitset, and the pre-sort keys — today's stage 4 over one
         // batch, with `starts` subsuming the old long-only start index because the band emit
-        // below needs every item's slice, not only the long ones.
+        // below needs every item's view, not only the long ones.
         let mut starts: Vec<u32> = Vec::with_capacity(batch_len + 1);
         let mut long_sig: Vec<u64> = vec![0; batch_len.div_ceil(64)];
         let mut recs: Vec<SortRec> = Vec::with_capacity(batch_len);
@@ -1053,9 +1053,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let slice_dir = partition_dir.join("slices").join(&args.slice_id);
-    let segment_dir = slice_dir.join("segments").join(SEG_ID);
-    for dir in [&terms_dir, &entities_dir, &slice_dir, &segment_dir] {
+    let view_dir = partition_dir.join("views").join(&args.view_id);
+    let segment_dir = view_dir.join("segments").join(SEG_ID);
+    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
 
@@ -1275,7 +1275,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 n,
                 &args.out.join(crate::PREFIX),
                 crate::PHASH,
-                &args.slice_id,
+                &args.view_id,
             )?
         }
     };
@@ -1353,7 +1353,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
         .map_err(|e| BuildError::io(&morton_path, e))?;
 
-    let permutation_path = slice_dir.join("permutation.bin");
+    let permutation_path = view_dir.join("permutation.bin");
     write_permutation_iter(
         &permutation_path,
         rows.iter().map(|r| EntityId::new(r.entity as u64)),
@@ -1364,7 +1364,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted rows
     // the permutation was scattered from.
-    let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
     // Collected **once** and kept: this is the row→entity permutation, and the attribute tail
     // below wants the same vector. It used to be gathered here and again there, so 4 B per row was
     // held twice for the whole segment write — 1 GB at 2.5×10⁸ and 4 GB at 10⁹, for two passes over
@@ -1942,7 +1942,7 @@ pub(crate) fn write_record_blob(
     let n = by_entity.first().map_or(0, EntityColumn::len);
     let mut fields: Vec<RecordField> = Vec::with_capacity(blob_columns.len());
     // A range loop on purpose: each entity gathers across *several* parallel columns, which is
-    // not the single-slice shape `needless_range_loop`'s rewrite fits.
+    // not the single-view shape `needless_range_loop`'s rewrite fits.
     #[allow(clippy::needless_range_loop)]
     for entity in 0..n {
         fields.clear();

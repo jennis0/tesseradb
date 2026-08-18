@@ -74,7 +74,7 @@ use tessera_store::permutation::RowSpace;
 
 use crate::compose::MaskedSet;
 
-/// One layer's membership in the row space of one slice, built at open and rebuilt when the
+/// One layer's membership in the row space of one view, built at open and rebuilt when the
 /// generation moves.
 ///
 /// **Built member-wise, and this is a disclosure rule.** Projecting an entity *range* to a row
@@ -89,7 +89,7 @@ pub struct ArtifactRows {
     /// the size it had in entity space.
     ///
     /// **Both, because a projection that lost a member must not read as containment.** A generating
-    /// set is entity-space and permanent; row space holds only what this slice has folded in, so a
+    /// set is entity-space and permanent; row space holds only what this view has folded in, so a
     /// member awaiting a fold projects to nothing and would silently drop out of the test — leaving
     /// a viewer contained in a *smaller* set than the caller declared, which is the whole
     /// disclosure. Carrying the declared size makes the loss detectable, and a lossy projection
@@ -278,7 +278,7 @@ impl ArtifactRows {
 ///
 /// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
 ///   over the old one names other people's documents;
-/// - the **slice**, because row space is per slice;
+/// - the **view**, because row space is per view;
 /// - the **store version**, because a publication adds memberships the projection has never seen —
 ///   and a cached projection that silently omitted them would serve a level with its newest
 ///   clusters absent, indistinguishable from clusters that failed their criterion.
@@ -293,11 +293,11 @@ impl ArtifactRows {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectionKey {
     prefix: String,
-    slice: String,
+    view: String,
     store_version: u64,
 }
 
-/// One row-space projection per `(slice, layer, level)`, rebuilt when its [`ProjectionKey`] moves.
+/// One row-space projection per `(view, layer, level)`, rebuilt when its [`ProjectionKey`] moves.
 ///
 /// **Costly to build and therefore never built on a request that can reuse one.**
 /// `RowSpace::project` decodes a whole membership; at corpus scale that is the "seconds, not
@@ -306,9 +306,9 @@ struct ProjectionKey {
 ///
 /// **Replace-on-mismatch, not an LRU.** The key names the only generation a projection is valid
 /// for, so a stale entry has no value to retain — keeping one would be keeping a wrong answer
-/// warm. The map is therefore bounded by the number of live `(slice, layer, level)` triples rather
+/// warm. The map is therefore bounded by the number of live `(view, layer, level)` triples rather
 /// than by a capacity anyone has to tune.
-/// `(slice, layer, level)` — what one cached projection is *for*, as against the
+/// `(view, layer, level)` — what one cached projection is *for*, as against the
 /// [`ProjectionKey`] that says when it stops being valid.
 type LevelAddress = (String, String, u32);
 
@@ -332,7 +332,7 @@ impl ArtifactProjections {
     pub fn get_or_build(
         &self,
         prefix: &str,
-        slice: &str,
+        view: &str,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -341,10 +341,10 @@ impl ArtifactProjections {
     ) -> Arc<ArtifactRows> {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
-            slice: slice.to_string(),
+            view: view.to_string(),
             store_version,
         };
-        let map_key = (slice.to_string(), layer.to_string(), level);
+        let map_key = (view.to_string(), layer.to_string(), level);
 
         if let Some((held, rows)) = self.cached.lock().unwrap_or_else(|e| e.into_inner()).get(&map_key)
         {
@@ -419,13 +419,13 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// The viewer's satisfied terms — the same set the item-visibility predicate uses. Satisfaction
     /// is **intersection** with this set, never a conservative label join: a join yields an empty
     /// required set for a disjunctive gate and admits every principal, which is an error this
-    /// codebase has made once already, in the slice gate.
+    /// codebase has made once already, in the view gate.
     pub satisfied: &'a FxHashSet<TermId>,
     /// Whether the viewer reaches the layer at all. Resolved once per session by the registry, and
     /// passed in rather than recomputed — but see [`ArtifactView::verdict`]: the *overlay* half is
     /// never cached, only this.
     pub layer_reachable: bool,
-    /// This slice's row form of the layer's membership.
+    /// This view's row form of the layer's membership.
     pub rows: &'a ArtifactRows,
     /// The gate half of the attachment term: the target layer's own entity where this viewer
     /// reaches that layer, and `None` where they do not.
@@ -575,7 +575,7 @@ mod tests {
         LayerDeclaration {
             name: "clusters/a".into(),
             title: "A".into(),
-            slices: vec!["s0".into()],
+            views: vec!["s0".into()],
             membership: MembershipSource::Enumerated,
             access: LayerAccess {
                 label: None,
@@ -944,7 +944,7 @@ mod tests {
 
     /// **A generating set that lost members in projection fails for everybody.**
     ///
-    /// Row space holds what this slice has folded in; a member awaiting a fold projects to nothing.
+    /// Row space holds what this view has folded in; a member awaiting a fold projects to nothing.
     /// Testing the projected set alone would let a viewer be contained in a *smaller* set than the
     /// caller declared — containment passing on a set the caller never wrote.
     #[test]

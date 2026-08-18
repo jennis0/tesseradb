@@ -15,7 +15,7 @@ use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{open_bundle, tile_ranges, StoreError};
@@ -59,7 +59,7 @@ fn file_digest(path: &Path) -> FileDigest {
     }
 }
 
-/// Build a tiny bundle at `root` with one partition ("default"), one slice ("main"), one
+/// Build a tiny bundle at `root` with one partition ("default"), one view ("main"), one
 /// segment ("seg0"), `n` entities `0..n`. Returns the sorted items (row order) and their
 /// morton codes, so the test can independently recompute expectations.
 fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
@@ -78,8 +78,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join("default");
-    let slice_dir = partition_dir.join("slices").join("main");
-    let seg_dir = slice_dir.join("segments").join("seg0");
+    let view_dir = partition_dir.join("views").join("main");
+    let seg_dir = view_dir.join("segments").join("seg0");
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
@@ -87,7 +87,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     let row_order_entities: Vec<EntityId> = entity_ids.clone();
     let bound = n;
     write_permutation(
-        &slice_dir.join("permutation.bin"),
+        &view_dir.join("permutation.bin"),
         &row_order_entities,
         bound,
     )
@@ -97,15 +97,15 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     // added since MANIFEST.
     let mut segments_files = BTreeMap::new();
     segments_files.insert(
-        "partitions/default/slices/main/permutation.bin".to_string(),
-        file_digest(&slice_dir.join("permutation.bin")),
+        "partitions/default/views/main/permutation.bin".to_string(),
+        file_digest(&view_dir.join("permutation.bin")),
     );
     segments_files.insert(
-        "partitions/default/slices/main/segments/seg0/columns.arrow".to_string(),
+        "partitions/default/views/main/segments/seg0/columns.arrow".to_string(),
         file_digest(&seg_dir.join("columns.arrow")),
     );
     segments_files.insert(
-        "partitions/default/slices/main/segments/seg0/morton.u32".to_string(),
+        "partitions/default/views/main/segments/seg0/morton.u32".to_string(),
         file_digest(&seg_dir.join("morton.u32")),
     );
 
@@ -118,7 +118,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         membership_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
-            slice: "main".to_string(),
+            view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
             entity_lo: 0,
@@ -161,7 +161,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
             shard_id: 0,
             idset: 1,
         },
-        slices: vec![SliceDescriptor {
+        views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),
         }],
@@ -199,9 +199,9 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);
 
-    let slice = partition.slices.get("main").expect("main slice");
-    assert_eq!(slice.segments.len(), 1);
-    let seg = &slice.segments[0];
+    let view = partition.views.get("main").expect("main view");
+    assert_eq!(view.segments.len(), 1);
+    let seg = &view.segments[0];
     assert_eq!(seg.seg_id, "seg0");
     assert_eq!(seg.row_count, items.len() as u32);
 
@@ -234,7 +234,7 @@ fn permutation_project_matches_per_entity_row_of_loop() {
     let (items, _codes) = build_bundle(dir.path(), 500);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let slice = &bundle.partitions["default"].slices["main"];
+    let view = &bundle.partitions["default"].views["main"];
 
     // A mask over roughly half the entity space, including a few IDs outside [0, n) — those
     // must be silently skipped (no row here), not treated as an error.
@@ -244,12 +244,12 @@ fn permutation_project_matches_per_entity_row_of_loop() {
     }
     mask.add(10_000); // out of bound: must be dropped, not panic
 
-    let projected = slice.row_space.project(&mask);
+    let projected = view.row_space.project(&mask);
 
     // Independently recompute the expected row set via `row_of`, one entity at a time.
     let mut expected_rows: Vec<u32> = Vec::new();
     for e in mask.iter() {
-        if let Some(row) = slice.row_space.row_of(EntityId::new(e as u64)) {
+        if let Some(row) = view.row_space.row_of(EntityId::new(e as u64)) {
             expected_rows.push(row.raw());
         }
     }
@@ -269,7 +269,7 @@ fn tile_ranges_agrees_with_linear_scan_of_morton_array() {
     let (_items, codes) = build_bundle(dir.path(), 300);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    let seg = &bundle.partitions["default"].views["main"].segments[0];
 
     // A handful of tiles at different depths, including the whole-grid tile (depth 0).
     for tile in [
@@ -320,7 +320,7 @@ fn tile_ranges_covers_the_whole_segment_at_depth_zero() {
     let (_items, codes) = build_bundle(dir.path(), 300);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    let seg = &bundle.partitions["default"].views["main"].segments[0];
 
     let whole = tile_ranges(
         seg,
@@ -404,7 +404,7 @@ fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json:
 /// for this candidate and no other. Any digest will do: the file cannot be opened, so it never
 /// reaches the comparison.
 fn name_a_missing_file(value: &mut serde_json::Value) {
-    value["files"]["partitions/default/slices/main/segments/seg-unsynced/columns.arrow"] =
+    value["files"]["partitions/default/views/main/segments/seg-unsynced/columns.arrow"] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
 }
 
@@ -517,7 +517,7 @@ fn a_deny_alongside_deltas_is_not_stepped_past_either() {
     add_segments_manifest(dir.path(), 1, |value| {
         value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
         value["deltas"] =
-            serde_json::json!(["partitions/p/slices/s0/segments/flush-1-1/delta.arrow"]);
+            serde_json::json!(["partitions/p/views/s0/segments/flush-1-1/delta.arrow"]);
         name_a_missing_file(value);
     });
 
@@ -584,7 +584,7 @@ fn a_candidate_with_no_deny_state_steps_down_and_serves() {
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
         value["deltas"] =
-            serde_json::json!(["partitions/p/slices/s0/segments/flush-1-1/delta.arrow"]);
+            serde_json::json!(["partitions/p/views/s0/segments/flush-1-1/delta.arrow"]);
         name_a_missing_file(value);
     });
 
@@ -596,7 +596,7 @@ fn a_candidate_with_no_deny_state_steps_down_and_serves() {
         "must have stepped down to SEGMENTS-0, not opened SEGMENTS-1"
     );
     assert_eq!(
-        partition.slices["main"].segments[0].row_count, 50,
+        partition.views["main"].segments[0].row_count, 50,
         "and the stepped-down state must actually serve"
     );
 
@@ -625,7 +625,7 @@ fn every_candidate_failing_verification_exhausts_the_candidate_list() {
     build_bundle(dir.path(), 50);
     edit_segments_manifest(dir.path(), name_a_missing_file);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["files"]["partitions/default/slices/main/segments/seg-newest/columns.arrow"] =
+        value["files"]["partitions/default/views/main/segments/seg-newest/columns.arrow"] =
             serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
     });
 
@@ -671,7 +671,7 @@ fn open_bundle_fails_closed_on_a_corrupted_columns_arrow_byte() {
 
     let columns_path = dir
         .path()
-        .join("v00000/partitions/default/slices/main/segments/seg0/columns.arrow");
+        .join("v00000/partitions/default/views/main/segments/seg0/columns.arrow");
     let mut bytes = fs::read(&columns_path).expect("read columns.arrow");
     // Flip a byte roughly in the middle of the file — inside the record batch body, not the
     // footer/magic, so this is a content corruption a naive length-only check would miss.
@@ -720,7 +720,7 @@ fn open_bundle_rejects_a_segments_manifest_that_omits_columns_arrow_from_files()
         value["files"]
             .as_object_mut()
             .expect("files is an object")
-            .remove("partitions/default/slices/main/segments/seg0/columns.arrow");
+            .remove("partitions/default/views/main/segments/seg0/columns.arrow");
     });
 
     let err = open_bundle(dir.path())
@@ -744,7 +744,7 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
 
     let perm_path = dir
         .path()
-        .join("v00000/partitions/default/slices/main/permutation.bin");
+        .join("v00000/partitions/default/views/main/permutation.bin");
     let mut bytes = fs::read(&perm_path).expect("read permutation.bin");
 
     // Header is 16 bytes (magic + version + reserved + bound); slot 0 starts right after.
@@ -759,7 +759,7 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
     // defences (one catches bit-flips, the other catches internally-consistent-but-wrong data).
     let corrected = file_digest(&perm_path);
     edit_segments_manifest(dir.path(), |value| {
-        let entry = &mut value["files"]["partitions/default/slices/main/permutation.bin"];
+        let entry = &mut value["files"]["partitions/default/views/main/permutation.bin"];
         entry["size"] = serde_json::json!(corrected.size);
         entry["sha256"] = serde_json::json!(corrected.sha256);
     });
@@ -853,7 +853,7 @@ fn tile_ranges_all_agrees_with_the_full_column_search_over_depths_bboxes_and_ord
     // tile's *end* rather than its *start* begins to lie.
     let (_items, _codes) = build_bundle(dir.path(), 5_000);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    let seg = &bundle.partitions["default"].views["main"].segments[0];
     let extent = unit_extent();
 
     // Every bbox shape a viewport request can produce a tile set from, including the ones a
@@ -900,7 +900,7 @@ fn tile_ranges_all_agrees_with_the_full_column_search_for_arbitrary_tile_sets() 
     let dir = tempfile::tempdir().expect("tempdir");
     let (_items, _codes) = build_bundle(dir.path(), 5_000);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    let seg = &bundle.partitions["default"].views["main"].segments[0];
 
     // Randomised rather than `proptest`-generated so the bundle fixture (tempdir, Arrow write,
     // real SHA-256 digests) is built once instead of once per generated case. The seed is fixed,
@@ -920,7 +920,7 @@ fn tile_ranges_all_over_an_empty_tile_set_is_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 64);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    let seg = &bundle.partitions["default"].views["main"].segments[0];
     assert!(tessera_store::tile_ranges_all(seg, &[]).is_empty());
 }
 
@@ -942,8 +942,8 @@ fn a_just_written_prefix_opens_to_the_same_bundle_without_re_verifying_it() {
         .expect("a prefix this process wrote");
 
     // Same bundle, by every structure a request reads.
-    let a = &verified.partitions["default"].slices["main"].segments[0];
-    let b = &trusted.partitions["default"].slices["main"].segments[0];
+    let a = &verified.partitions["default"].views["main"].segments[0];
+    let b = &trusted.partitions["default"].views["main"].segments[0];
     assert_eq!(a.seg_id, b.seg_id);
     assert_eq!(a.row_count, items.len() as u32);
     assert_eq!(b.row_count, a.row_count);
@@ -973,7 +973,7 @@ fn a_just_written_prefix_skips_the_digest_sweep_and_open_bundle_does_not() {
 
     let columns_path = dir
         .path()
-        .join("v00000/partitions/default/slices/main/segments/seg0/columns.arrow");
+        .join("v00000/partitions/default/views/main/segments/seg0/columns.arrow");
     let mut bytes = fs::read(&columns_path).expect("read columns.arrow");
     // Mid-file, inside the record batch body rather than the footer, so the file still *parses*:
     // the only thing that separates it from the original is the digest, which is exactly the check

@@ -87,7 +87,7 @@ fn a_build_with_no_identity_key_decision_refuses_and_writes_nothing() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .output()
         .expect("failed to run tessera binary");
 
@@ -130,7 +130,7 @@ fn mint_then_carry_reproduces_the_same_key_and_idset() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_a)
-        .args(["--extent", "0,10,0,10", "--slice", "s0", "--mint-id-key"])
+        .args(["--extent", "0,10,0,10", "--view", "s0", "--mint-id-key"])
         .output()
         .unwrap();
     assert!(
@@ -146,7 +146,7 @@ fn mint_then_carry_reproduces_the_same_key_and_idset() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_b)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--carry-id-key-from"])
         .arg(&out_a)
         .output()
@@ -168,13 +168,13 @@ fn mint_then_carry_reproduces_the_same_key_and_idset() {
     let columns_a = std::fs::read(
         out_a
             .join(current_prefix(&out_a))
-            .join("partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+            .join("partitions/default/views/s0/segments/seg-0/columns.arrow"),
     )
     .unwrap();
     let columns_b = std::fs::read(
         out_b
             .join(current_prefix(&out_b))
-            .join("partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+            .join("partitions/default/views/s0/segments/seg-0/columns.arrow"),
     )
     .unwrap();
     assert_eq!(
@@ -202,7 +202,7 @@ fn disagreeing_key_sources_refuse_without_rotate_and_succeed_with_it() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_a)
-        .args(["--extent", "0,10,0,10", "--slice", "s0", "--id-key", key_a])
+        .args(["--extent", "0,10,0,10", "--view", "s0", "--id-key", key_a])
         .output()
         .unwrap();
     assert!(first.status.success());
@@ -214,7 +214,7 @@ fn disagreeing_key_sources_refuse_without_rotate_and_succeed_with_it() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_b)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--carry-id-key-from"])
         .arg(&out_a)
         .args(["--id-key", key_b])
@@ -233,7 +233,7 @@ fn disagreeing_key_sources_refuse_without_rotate_and_succeed_with_it() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_b)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--carry-id-key-from"])
         .arg(&out_a)
         .args(["--id-key", key_b, "--rotate-id-key"])
@@ -268,7 +268,7 @@ fn the_key_file_carries_the_idset_and_idset_flag_overrides_it() {
             .arg(&pairs)
             .args(["--out"])
             .arg(out)
-            .args(["--extent", "0,10,0,10", "--slice", "s0"])
+            .args(["--extent", "0,10,0,10", "--view", "s0"])
             .args(["--id-key-file"])
             .arg(key_file)
             .args(extra);
@@ -349,7 +349,7 @@ fn disagreeing_idset_sources_refuse_until_idset_is_stated() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_a)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--id-key-file"])
         .arg(&key_file)
         .output()
@@ -372,7 +372,7 @@ fn disagreeing_idset_sources_refuse_until_idset_is_stated() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_b)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--carry-id-key-from"])
         .arg(&out_a)
         .args(["--id-key-file"])
@@ -393,7 +393,7 @@ fn disagreeing_idset_sources_refuse_until_idset_is_stated() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_b)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--carry-id-key-from"])
         .arg(&out_a)
         .args(["--id-key-file"])
@@ -429,7 +429,7 @@ fn the_rotation_refusal_prints_fingerprints_not_keys() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_a)
-        .args(["--extent", "0,10,0,10", "--slice", "s0", "--id-key", key_a])
+        .args(["--extent", "0,10,0,10", "--view", "s0", "--id-key", key_a])
         .output()
         .unwrap()
         .status
@@ -442,7 +442,7 @@ fn the_rotation_refusal_prints_fingerprints_not_keys() {
         .arg(&pairs)
         .args(["--out"])
         .arg(&out_b)
-        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--extent", "0,10,0,10", "--view", "s0"])
         .args(["--carry-id-key-from"])
         .arg(&out_a)
         .args(["--id-key", key_b])

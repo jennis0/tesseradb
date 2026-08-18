@@ -94,7 +94,7 @@ if [[ ! -d "$BUNDLE" ]]; then
     --artifact-members "$OUT/members.parquet" \
     --values "archive=$OUT/archive.parquet" \
     --values "primary_category=$OUT/primary_category.parquet" \
-    --out "$BUNDLE" --slice s0 --extent 0,65536,0,65536 --mint-id-key
+    --out "$BUNDLE" --view s0 --extent 0,65536,0,65536 --mint-id-key
 
   # **The build's own report on the hierarchy.** Every split that keeps members none of its
   # children hold is named here, which is what makes a cluster appearing without its children a
@@ -230,7 +230,7 @@ Then ask the same question as each, and compare the count beside one cluster:
 
   curl -s -X POST http://127.0.0.1:$VIEWER_PORT/v1/viewport \\
     -H "authorization: Bearer \$BROAD" -H 'content-type: application/json' \\
-    -d '{"slice":"s0","zoom":0,"bbox":[0,65536,0,65536],"k":1,
+    -d '{"view":"s0","zoom":0,"bbox":[0,65536,0,65536],"k":1,
          "layers":["clusters/hdbscan"],"artifact_budget":20}' --output -
 
 The response is a streamed frame sequence, not JSON — frame kind 5 carries the artifacts. The
@@ -339,7 +339,7 @@ auth = base64.b64encode(json.dumps({"terms": top}).encode()).decode()
 token = json.loads(post(f"http://127.0.0.1:{session_port}/session/authorise",
                         {"auth_data": auth}, cred))["token"]
 body = post(f"http://127.0.0.1:{viewer_port}/v1/viewport",
-            {"slice": "s0", "zoom": 0, "bbox": [0, 65536, 0, 65536], "k": 1}, token)
+            {"view": "s0", "zoom": 0, "bbox": [0, 65536, 0, 65536], "k": 1}, token)
 visible, at = 0, 0
 while at < len(body):
     kind = body[at]

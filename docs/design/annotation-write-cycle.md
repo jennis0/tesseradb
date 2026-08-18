@@ -22,7 +22,7 @@ deferred edit pass (Stage 7) and the proportional criterion's denominator for pr
 (Stage 6).
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
 [`write-path.md`](write-path.md) §2–§5 (**normative** for the write path); [`compaction.md`](compaction.md)
-§3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3;
+§3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`views-and-multi-table.md`](views-and-multi-table.md) §3;
 decisions [0047](../decisions/0047-edit-is-delete-plus-reingest.md),
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
 [0043](../decisions/0043-geometry-maintenance-never-blocks-a-request.md),
@@ -305,7 +305,7 @@ may withhold an artifact's service, never end the object.
 | Event | Enumerated | Spatial predicate | Attribute predicate |
 |---|---|---|---|
 | **Ingest** | **nothing** — membership is frozen at declaration (I8's shape); the point is in no artifact until the layer is refreshed. Safe: counts only ever *understate* what a refresh would show — fail-closed, stale-not-unsafe (rep §2.2.1) | **nothing stored; the point is a member at its flush** — membership is derived per request from the geometry, so the row's arrival is the whole event (rep §2.0). Earlier than flush is impossible: counts are row-space and the point has no row | as spatial: the value column's flush extents carry it; the filter machinery answers per request ([`filter-index.md`](filter-index.md)) |
-| **Delete** | at accept: the entity leaves every composed mask, so every masked count, hull and criterion test is correct with no artifact work. At the fold: the row form drops the member's bit in translation (spec §4.1) | at accept: the row leaves `denied[slice]`'s complement; `range_cardinality` over the mask is correct immediately. At the fold: rows renumber and the ranges re-derive per request — nothing stored, nothing stale | at accept: composed verdict excludes it (filter-index §6.1). At the fold: the attribute pass blanks the slot (filter-index §6.2). All existing machinery |
+| **Delete** | at accept: the entity leaves every composed mask, so every masked count, hull and criterion test is correct with no artifact work. At the fold: the row form drops the member's bit in translation (spec §4.1) | at accept: the row leaves `denied[view]`'s complement; `range_cardinality` over the mask is correct immediately. At the fold: rows renumber and the ranges re-derive per request — nothing stored, nothing stale | at accept: composed verdict excludes it (filter-index §6.1). At the fold: the attribute pass blanks the slot (filter-index §6.2). All existing machinery |
 | **Suppress** | **nothing artifact-side** — the member leaves the composed mask at accept; counts fall, hulls recompute without it, an artifact may drop below its criterion and vanish. Rule S: no stored structure changes, postings and membership untouched | same — the mask is the only operand that moves | same |
 | **Unsuppress** | **nothing** — the member returns to the composed mask at accept; counts restore. Reappearance above a *cached* criterion decision lags fail-closed (spec §4.4) | same | same |
 | **Update** (delete + re-ingest) | the union of the two rows: the old life leaves masks at accept and leaves the row form at the fold; the new life is a new entity, in no enumerated membership until the layer is refreshed. **A caller must expect enumerated counts to drift down under churn** — a refresh is the repair (⊘ by replacement today, by edit once that pass lands) | the old row leaves, the new life's row is inside or outside the shape on its own coordinates from its flush — a point that moved across a boundary changes membership correctly, no artifact work | same, via the new value |
@@ -390,7 +390,7 @@ merged span at a merge, rebuild at the fold — and named the merge arm as the o
 out, fail-open when left out because a merged span's row ids name different entities afterwards. A
 form that references no extent row has no such state: a flush appends rows it does not hold and a
 merge renumbers rows it does not hold, so **the fold is the only operation that invalidates it**,
-and the fold rebuilds it inline (rep §5.0.3). The projection is therefore keyed by prefix, slice and
+and the fold rebuilds it inline (rep §5.0.3). The projection is therefore keyed by prefix, view and
 store version and *not* by the segments version — keying on the version a flush moves would rebuild
 every level on every flush, tens of seconds per level at 10⁷ artifacts, for a set of bits that did
 not move.
@@ -495,8 +495,8 @@ exists for every entity (I10). Contradicts the model's addressing as read; rulin
 
 | Operation | Route | What is durable | Refused when |
 |---|---|---|---|
-| **Layer create** | control verb; the slice lifecycle's shape verbatim ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — `tessera build --layers` writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
-| **Level publish** (bulk) | build plane, `--attach-slice`'s shape: `tessera build --artifacts`/`--artifact-members`, members named by source id and resolved through the build's own assignment, packed into the same membership and record extents a control-plane publication writes | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
+| **Layer create** | control verb; the view lifecycle's shape verbatim ([`views-and-multi-table.md`](views-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — `tessera build --layers` writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
+| **Level publish** (bulk) | build plane, `--attach-view`'s shape: `tessera build --artifacts`/`--artifact-members`, members named by source id and resolved through the build's own assignment, packed into the same membership and record extents a control-plane publication writes | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
 | **Layer suppress / unsuppress** | `/control/changes` **on the layer's own entity** — which is why it has one. Rule S applies; the reachability check gains one live `verdict` lookup ahead of the session's resolved set | the existing deny machinery, end to end | never for load |
 | **Layer drop** | WAL'd registry tombstone; vanishes from discovery at ack; artifacts reclaimed at the fold; **the name stays tombstoned for ever** | the tombstone | — |
 | **Replace** (wholesale — changing the analysis, not refreshing it; [decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) | create successor, then drop predecessor — never 10⁷ denies through a lane sized for trickle (rep §5). **Nothing carries across**: new identities are new objects, so suppressions, edges and bookmarks end with the predecessor, correctly — a replacement that strands live suppressions is **reported**, not refused (rep §5.0.2; ⊘ the report is unbuilt). **Not atomic, deliberately**: if the drop fails after the create, both generations serve — each individually gated and sound, so the intermediate state is duplication, never disclosure, and the caller retries the drop. The reverse order has an outage window and is not used. ⊘ Until the edit pass lands this is the only refresh, and callers should be told what it loses | the two registry records | the dangling-dependent refusal (rep §5.0.4), which binds replacement only |
@@ -693,7 +693,7 @@ Nothing here is measured; each figure names what would refute it.
   reversibly, with deny-grade durability, for one ID and one bitmap check per request.
 
   The ruling raised a wider question, **deliberately not answered here**: whether *every* addressable
-  object — slices, levels, edges — should carry an entity ID, so that one deny lane, one WAL and one
+  object — views, levels, edges — should carry an entity ID, so that one deny lane, one WAL and one
   removal rule serve all of them, and so that mixed object types can share a single bitmap. It is
   attractive and it is not this document's to settle, because the binding constraint is neither
   layout nor uniformity but **budget**: entity IDs are `u32`, reuse is settled and unbuilt
@@ -703,7 +703,7 @@ Nothing here is measured; each figure names what would refute it.
   edit, once that pass lands, spends nothing
   ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). Daily
   replacement spends the space in about a
-  year *before* levels, edges and slices are added to it, and widening past `u32` leaves the 32-bit
+  year *before* levels, edges and views are added to it, and widening past `u32` leaves the 32-bit
   Roaring substrate every figure in the campaign was measured on. ⊘ **Needs its own design pass, and
   the question to put to it is what the entity budget is, not where type bits go.**
 

@@ -163,7 +163,7 @@ for scale in "${SCALES[@]}"; do
     # (memo 2026-07-30 §3.2 D1 — the default build is now spec-conformant and writes none).
     if "$TESSERA" build \
         --points "$GEOMETRY" --pairs "$pairs" --out "$out" \
-        --extent "$EXTENT" --slice s0 --limit "$scale" \
+        --extent "$EXTENT" --view s0 --limit "$scale" \
         --mint-external-ids \
         --id-key "$KEY" --idset 1 >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))

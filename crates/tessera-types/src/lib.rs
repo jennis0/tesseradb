@@ -57,9 +57,9 @@ define_id_newtype!(Handle, u32);
 define_id_newtype!(Priority, u16);
 define_id_newtype!(MortonCode, u32);
 
-/// String newtype for slice identifiers
+/// String newtype for view identifiers
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct SliceId(pub String);
+pub struct ViewId(pub String);
 
 /// String newtype for segment identifiers
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

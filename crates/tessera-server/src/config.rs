@@ -438,7 +438,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::StreamFlushBytesZero => write!(
                 f,
                 "serve.stream_flush_bytes = 0 would flush every gathered tile as its own frame; \
-                 set the flush threshold the client should decode per slice (default 1 MiB)"
+                 set the flush threshold the client should decode per view (default 1 MiB)"
             ),
             ConfigError::StreamWriteStallZero => write!(
                 f,
@@ -1461,7 +1461,7 @@ const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
 // `flush_max_items` is deleted, not inert (decision 0045). "Marks the buffer flush-ready" had no
 // consumer: the tick never skips a non-empty buffer and a flush consumes everything buffered for
-// its slice, so the key could not have an effect. The buffer's real bound is
+// its view, so the key could not have an effect. The buffer's real bound is
 // `ingest_buffer_max_items`; the tick's is `flush_max_age_secs`.
 
 /// **The flush tick**, and therefore the bound on how stale an acknowledged item's absence may be:
@@ -1496,13 +1496,13 @@ const DEFAULT_COMPACTION_WINDOW_START_SECS: u32 = 0;
 /// the quiet period still folds, short enough that one down all night does not start at breakfast.
 const DEFAULT_COMPACTION_WINDOW_SECS: u32 = 4 * 3_600;
 
-/// Eight live segments in any one slice. **Assumed, not sized** (compaction §14): decision 0049
+/// Eight live segments in any one view. **Assumed, not sized** (compaction §14): decision 0049
 /// measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, so this
 /// is where a fold begins to be worth its flip cost and is otherwise a guess. Probe P1 calibrates
 /// it.
 const DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS: usize = 8;
 
-/// Sixty-four live segments in any one slice, **at any hour** — compaction §9's own default, and
+/// Sixty-four live segments in any one view, **at any hour** — compaction §9's own default, and
 /// the ceiling above which deferring segment growth to the next window costs more than folding now.
 ///
 /// **The one threshold here with a measurement behind it, though not at this value**: decision 0049
@@ -1576,9 +1576,9 @@ const DEFAULT_COALESCE_WIDTH: usize = 8;
 ///    to sparse, array-container-dominated masks, which are small in absolute terms anyway.
 /// 2. It is the 10⁹ figure, so a smaller corpus leaves the bounds below over-provisioned rather
 ///    than wrong.
-/// 3. It is **per (session, slice, segments_version) entry**, not per session — the cache key's
+/// 3. It is **per (session, view, segments_version) entry**, not per session — the cache key's
 ///    three components (see `tessera_engine`'s `RowProjectionKey`). "Eight sessions, eight
-///    entries" holds only while one partition emits one slice, which is true today and silently
+///    entries" holds only while one partition emits one view, which is true today and silently
 ///    false the moment a build emits two: the same eight sessions then occupy sixteen entries.
 pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 
@@ -1599,8 +1599,8 @@ pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 /// apply at the dense bound this cache is sized against, where the mask is bitmap-container
 /// dominated and in-memory size equals serialised size — so anyone reaching for that justification
 /// is reaching for the wrong one. What the margin buys is the two ways the entry count exceeds the
-/// session count: **more than one slice per session** (the key is
-/// `(token_id, slice, segments_version)`, so a two-slice bundle doubles the entries at unchanged
+/// session count: **more than one view per session** (the key is
+/// `(token_id, view, segments_version)`, so a two-view bundle doubles the entries at unchanged
 /// concurrency), and **a generation swap**, during which a pinned request's old-`segments_version`
 /// entry coexists with the new one until `prune_generation` runs at drain-list reclaim. Both are
 /// entry-count effects, and at this bound either one alone still fits.
@@ -1619,8 +1619,8 @@ const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// bounds hold the same-shaped Roaring object at the same measured per-entry size, so `1 ×` here
 /// against `2 ×` there is a real difference and needs its reason stated rather than inferred: this
 /// cache's entry count is bounded by **distinct grant sets in flight**, not by sessions, so the
-/// row-projection margin's two justifications (a slice multiplier per session, and a generation
-/// swap's transient duplicate) do not apply — a slice does not appear in this key at all, and a
+/// row-projection margin's two justifications (a view multiplier per session, and a generation
+/// swap's transient duplicate) do not apply — a view does not appear in this key at all, and a
 /// fragment outlives a bundle swap. Eight *entries* here is therefore eight distinct policies.
 ///
 /// A deployment whose principals genuinely span more than eight distinct grant sets should raise
@@ -2052,7 +2052,7 @@ fn parse(text: &str) -> Result<Config> {
             .compaction_window_min_segments
             .unwrap_or(DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS),
         "a zero threshold makes every night's window fold a bundle that is already one segment \
-         per slice — the ungated timer compaction §9 declines, reached by setting a gauge to a \
+         per view — the ungated timer compaction §9 declines, reached by setting a gauge to a \
          value nothing can be below",
     )?;
     // The floor must sit strictly below the ceiling or the window can never open — see
@@ -2334,7 +2334,7 @@ mod tests {
     // ---- the compaction schedule (compaction §9, decision 0056) ------------------------------
 
     /// **The shipped defaults are the ones compaction §9 states**, and a deployment that writes no
-    /// `[ingest]` section gets them: a fold at midnight UTC for four hours once a slice reaches
+    /// `[ingest]` section gets them: a fold at midnight UTC for four hours once a view reaches
     /// eight segments, an unwindowed fold at `overlay_soft_limit` deletions, and one fold a day.
     ///
     /// **Mutations this kills:** defaulting the window off (a deployment gets a mechanism only if
@@ -2585,7 +2585,7 @@ compaction_after_deletions = 9000
     }
 
     /// A zero segment threshold makes every night's window fold a bundle that is already one
-    /// segment per slice — the same ungated timer, reached through the gauge instead.
+    /// segment per view — the same ungated timer, reached through the gauge instead.
     #[test]
     fn a_zero_segment_threshold_is_refused() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
@@ -3458,7 +3458,7 @@ compaction_after_deletions = 9000
         assert!(
             DEFAULT_ROW_PROJECTION_CACHE_BYTES >= 2 * working_set,
             "the projection bound must carry its 2× entry-count headroom: the key is \
-             (token_id, slice, segments_version), so a second slice or a generation swap doubles \
+             (token_id, view, segments_version), so a second view or a generation swap doubles \
              the entries at unchanged session concurrency"
         );
     }

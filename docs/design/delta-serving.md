@@ -57,7 +57,7 @@ a cache that is still sound or honours a declaration that is not.
 
 | | Components | Governs |
 |---|---|---|
-| **Identity key** | idset, auth-data hash, mask-fragment identity in design §8.5's canonical form *(bundle manifest digest, auth-plugin hash, satisfied term set)*, slice | whether a held band may be **rendered at all** |
+| **Identity key** | idset, auth-data hash, mask-fragment identity in design §8.5's canonical form *(bundle manifest digest, auth-plugin hash, satisfied term set)*, view | whether a held band may be **rendered at all** |
 | **Content key** | the identity key, the **watermark of the geometry actually served**, the overlay version, and a per-process nonce | whether a held band may be **declared** |
 
 Both are opaque to the client: minted server-side, echoed back, compared for equality and nothing
@@ -126,7 +126,7 @@ rows in a tile that had none.
 
 ### Omission — the client, for a tile it has fetched at this depth
 
-θ is viewport-invariant: `P_d` is a function of the mask, the generation and the slice, never of
+θ is viewport-invariant: `P_d` is a function of the mask, the generation and the view, never of
 the bounding box or the zoom (design §7.2). So at a fixed content key and a fixed depth, `m(T)`
 does not move — and the server has already told the client what it is, in the tile stream's
 `served` column. Two exact tests:
@@ -335,10 +335,10 @@ remain open, and the first blocks elision:
    version, which 0029's view key includes. A declaration's truth depends only on `vis(T)`, which *k*
    does not move, so a client keeps its cache across a *k* change — and raising *k* then fetches only
    the band between the old `m(T)` and the new. Cross-principal safety is unaffected, since the idset,
-   the auth-data hash, the fragment identity and the slice together identify what a principal may see.
+   the auth-data hash, the fragment identity and the view together identify what a principal may see.
    0029 is Settled and its warning is aimed at client authors, so this wants a decision file rather
    than a recording.
-5. **The budget-form request** (`{slice, bbox, budget, k}`, client-interaction §8.6). Omission is
+5. **The budget-form request** (`{view, bbox, budget, k}`, client-interaction §8.6). Omission is
    structurally incompatible with a server-chosen tile set, though cuts and counts are compatible with
    one. Record the relationship now or the budget form arrives shaped against this contract.
 

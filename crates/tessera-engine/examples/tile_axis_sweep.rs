@@ -66,7 +66,7 @@ const WARMUP: usize = 3;
 /// before it chooses a branch (`tiles_for_bbox` then `tile_ranges_all`, summed pre-mask), against
 /// the bundle opened directly with no session involved. See `calibration_sweep.rs`'s module doc
 /// for why `StageTimings::rows_in_ranges` must not be used for this.
-fn true_predictors(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
+fn true_predictors(bundle: &Bundle, view: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
     let q = bundle.manifest.quantisation;
     let extent = Bounds {
         x_min: q.x_min,
@@ -75,12 +75,12 @@ fn true_predictors(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -> (u
         y_max: q.y_max,
     };
     let tiles = tiles_for_bbox(bbox, zoom, &extent);
-    let slice_data = bundle
+    let view_data = bundle
         .partitions
         .values()
-        .find_map(|p| p.slices.get(slice))
-        .expect("slice should exist");
-    let segment = slice_data.segments.first().expect("one segment (R4)");
+        .find_map(|p| p.views.get(view))
+        .expect("view should exist");
+    let segment = view_data.segments.first().expect("one segment (R4)");
     let ranges = tile_ranges_all(segment, &tiles);
     let rows: u64 = ranges.iter().map(|r| r.len() as u64).sum();
     (tiles.len() as u64, rows)
@@ -354,8 +354,8 @@ fn main() {
         let sd = bundle
             .partitions
             .values()
-            .find_map(|p| p.slices.get("s0"))
-            .expect("slice s0");
+            .find_map(|p| p.views.get("s0"))
+            .expect("view s0");
         sd.segments.first().expect("one segment (R4)").row_count as u64
     };
     let (terms, mode) = match target_coverage {
@@ -406,16 +406,16 @@ fn main() {
     //
     // Outside every timed region; costs one extra projection.
     {
-        let slice_data = bundle
+        let view_data = bundle
             .partitions
             .values()
-            .find_map(|p| p.slices.get("s0"))
-            .expect("slice s0");
-        let segment = slice_data.segments.first().expect("one segment (R4)");
+            .find_map(|p| p.views.get("s0"))
+            .expect("view s0");
+        let segment = view_data.segments.first().expect("one segment (R4)");
         let universe = segment.row_count as u64;
         let view = session1.fragment.view();
         let ent: &Bitmap = &view;
-        let proj = RowProjection::new(&session1.fragment, &slice_data.row_space);
+        let proj = RowProjection::new(&session1.fragment, &view_data.row_space);
         let rows = proj.bitmap();
         let ent_card = ent.cardinality();
         let row_card = rows.cardinality();
