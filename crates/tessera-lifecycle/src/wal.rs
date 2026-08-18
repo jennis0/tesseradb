@@ -368,8 +368,8 @@ pub struct PublishedArtifact {
     /// stable key, and replay applies the address that was decided rather than re-resolving a key
     /// whose target may since have been dropped.
     pub attached_to: Option<PublishedAttachment>,
-    /// This artifact's parent in its own level's hierarchy, as an ordinal — resolved from the key
-    /// the caller named, on `attached_to`'s argument.
+    /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
+    /// on `attached_to`'s argument.
     ///
     /// **Only the parent direction is durable.** The child direction is the same relation read the
     /// other way, and a level's child index is built from these at open exactly as its row-space
@@ -377,11 +377,24 @@ pub struct PublishedArtifact {
     /// fact agreeing across every deletion — the bookkeeping that has produced a defect in each of
     /// the last two stages — in exchange for a lookup the serving path already builds per level.
     ///
-    /// **No layer qualifier and no entity.** An edge relates two artifacts of one level
-    /// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)),
-    /// so the level is the reader's own; and unlike an attachment this is not a visibility term —
-    /// a node's verdict is its own (decision 0080) — so there is no target entity to test.
-    pub parent_ordinal: Option<u32>,
+    /// **A level as well as an ordinal, because a layer's edges are one of two shapes.** A nested
+    /// layer's run within one level and a coarser view is an ancestor; an administrative layer's
+    /// run *between* levels, from a coarser to a finer one. Which shape a layer has is declared,
+    /// never inferred, and it may not mix them.
+    ///
+    /// **No layer qualifier and no entity.** An edge relates two artifacts of one *layer*, so the
+    /// layer is the reader's own; and unlike an attachment this is not a visibility term — a
+    /// node's verdict is its own (decision 0080) — so there is no target entity to test.
+    pub parent: Option<ParentRef>,
+}
+
+/// The resolved parent of an artifact, inside its own layer.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRef {
+    pub level: u32,
+    pub ordinal: u32,
 }
 
 /// The resolved target of an attachment inside a [`PublishedArtifact`] — see
@@ -1806,7 +1819,7 @@ mod tests {
                     members: serialise_members(&first),
                     variations: Vec::new(),
                     attached_to: None,
-                    parent_ordinal: None,
+                    parent: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
                 // absent `stable_key` is the other optional field — both under postcard, which
@@ -1832,8 +1845,10 @@ mod tests {
                     // The fourth optional field, and the one that decodes *after* the attachment
                     // — so a shape that lost a byte in the attachment would land here and read a
                     // parent out of the wrong offset. Set on the artifact that also carries the
-                    // attachment, which is where the two can be told apart.
-                    parent_ordinal: Some(65_535),
+                    // attachment, which is where the two can be told apart, and with a **level
+                    // that is not this artifact's own**: a cross-level parent is the shape whose
+                    // two words could be read in either order without either looking wrong.
+                    parent: Some(ParentRef { level: 2, ordinal: 65_535 }),
                 },
             ],
         };

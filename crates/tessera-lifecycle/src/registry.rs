@@ -91,13 +91,19 @@ pub enum RegistryError {
         level: u32,
         key: String,
     },
-    /// A parent/child edge named a parent this level does not hold — in the batch or already
-    /// published. An edge relates two artifacts of one level, so there is nowhere else to look.
+    /// A parent/child edge named a parent the layer does not hold where its declared shape says
+    /// to look: the same level for a nested layer, a coarser one for an administrative layer.
     NoSuchParent {
         layer: String,
         level: u32,
         key: String,
     },
+    /// An edge published into a layer that declares no lineage at all.
+    EdgesOnUntreedLayer { layer: String, kind: String },
+    /// An administrative layer whose parent key names an artifact in more than one coarser level.
+    /// Refused rather than resolved by search order, which would make the edge's meaning depend on
+    /// how the levels were walked.
+    AmbiguousParent { layer: String, key: String },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
 }
@@ -153,9 +159,21 @@ impl std::fmt::Display for RegistryError {
             ),
             RegistryError::NoSuchParent { layer, level, key } => write!(
                 f,
-                "{layer} publishes an artifact whose parent is {key}, which level {level} does \
-                 not hold — a hierarchy's edges relate two artifacts of one level, so a parent \
-                 that is neither in this batch nor already published names nothing"
+                "{layer} publishes an artifact in level {level} whose parent is {key}, which the \
+                 layer does not hold where its declared shape says to look — the same level for a \
+                 nested layer, a coarser level for an administrative one"
+            ),
+            RegistryError::EdgesOnUntreedLayer { layer, kind } => write!(
+                f,
+                "{layer} is declared {kind} and so has no lineage, but an artifact names a \
+                 parent: declare the layer nested if its edges run within a level, or \
+                 administrative if they run between levels"
+            ),
+            RegistryError::AmbiguousParent { layer, key } => write!(
+                f,
+                "{layer} publishes an artifact whose parent {key} exists in more than one coarser \
+                 level; which level the edge meant would depend on the search order, so it is \
+                 refused rather than resolved"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -477,38 +495,89 @@ impl LayerRegistry {
         let first_ordinal = store.next_ordinal(layer_name, level) as u64;
         let needed = first_ordinal + incoming.len() as u64;
 
-        // **Parents, resolved against this batch first and the level second.** A hierarchy's edges
-        // relate artifacts of one level, and a level is normally published in one batch — so a
-        // child's parent is usually a sibling in `incoming` that has no ordinal until this call
-        // assigns one. Resolving the batch by position and falling through to the store is what
-        // lets a level arrive whole or in pieces without the caller having to know which.
+        // **Parents, and which direction an edge may run is the layer's declaration.**
+        //
+        // A nested layer's edges relate artifacts of one level, and a level is normally published
+        // in one batch — so a child's parent is usually a sibling in `incoming` that has no ordinal
+        // until this call assigns one. Resolving the batch by position and falling through to the
+        // store is what lets a level arrive whole or in pieces without the caller having to know
+        // which.
+        //
+        // An administrative layer's edges run the other way: from a **coarser level** to this one.
+        // Its parent was published in an earlier batch, so only the store can answer, and the
+        // search runs over the levels above this one. A key found in two of them is a refusal
+        // rather than a first-match, because which one an edge meant would then depend on the
+        // search order.
+        //
+        // **A layer may not mix the two**, which is what makes the question answerable at all: the
+        // declared kind says which shape its edges have, and an edge of the other shape refuses.
+        let cross_level = matches!(
+            layer.declaration.hierarchy.kind,
+            tessera_types::layer::HierarchyKind::Administrative
+        );
+        let edges_allowed = cross_level
+            || matches!(
+                layer.declaration.hierarchy.kind,
+                tessera_types::layer::HierarchyKind::Nested
+            );
         let batch_ordinal = |key: &str| {
             incoming
                 .iter()
                 .position(|a| a.stable_key.as_deref() == Some(key))
                 .map(|i| first_ordinal as u32 + i as u32)
         };
-        let parents: Vec<Option<u32>> = incoming
+        let parents: Vec<Option<crate::wal::ParentRef>> = incoming
             .iter()
             .map(|artifact| {
                 let Some(key) = artifact.parent_key.as_deref() else {
                     return Ok(None);
                 };
-                if artifact.stable_key.as_deref() == Some(key) {
-                    return Err(RegistryError::NoSuchParent {
+                let missing = || RegistryError::NoSuchParent {
+                    layer: layer_name.to_string(),
+                    level,
+                    key: key.to_string(),
+                };
+                if !edges_allowed {
+                    return Err(RegistryError::EdgesOnUntreedLayer {
                         layer: layer_name.to_string(),
-                        level,
-                        key: key.to_string(),
+                        kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
                     });
                 }
+                if artifact.stable_key.as_deref() == Some(key) {
+                    return Err(missing());
+                }
+
+                if cross_level {
+                    let mut found = None;
+                    for coarser in 0..level {
+                        if let Some(ordinal) = store.ordinal_of_key(layer_name, coarser, key) {
+                            if found.is_some() {
+                                return Err(RegistryError::AmbiguousParent {
+                                    layer: layer_name.to_string(),
+                                    key: key.to_string(),
+                                });
+                            }
+                            found = Some(crate::wal::ParentRef {
+                                level: coarser,
+                                ordinal,
+                            });
+                        }
+                    }
+                    // A key that exists only at this level or a finer one is an edge running the
+                    // wrong way — refused rather than reinterpreted, since an administrative
+                    // layer's whole guarantee is that lineage never runs against the levels.
+                    return found.map(Some).ok_or_else(missing);
+                }
+
                 batch_ordinal(key)
                     .or_else(|| store.ordinal_of_key(layer_name, level, key))
-                    .map(Some)
-                    .ok_or_else(|| RegistryError::NoSuchParent {
-                        layer: layer_name.to_string(),
-                        level,
-                        key: key.to_string(),
+                    .map(|ordinal| {
+                        Some(crate::wal::ParentRef {
+                            level,
+                            ordinal,
+                        })
                     })
+                    .ok_or_else(missing)
             })
             .collect::<Result<_, _>>()?;
 
@@ -562,7 +631,7 @@ impl LayerRegistry {
                             entity: a.entity,
                         }
                     }),
-                    parent_ordinal: parents[i],
+                    parent: parents[i],
                 }
             })
             .collect();

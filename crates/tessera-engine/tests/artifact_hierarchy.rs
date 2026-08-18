@@ -585,3 +585,142 @@ fn an_ancestors_count_is_its_own_and_not_the_sum_of_its_children() {
         "the root holds 100 members neither child does, so its count exceeds their sum"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The administrative shape: levels carry the resolution, edges carry the structure
+// ---------------------------------------------------------------------------------------------
+
+/// A levelled layer whose edges run between its levels — countries, states, counties.
+fn administrative(name: &str, levels: u32) -> LayerDeclaration {
+    let mut d = declaration(name, None, false);
+    d.hierarchy.kind = HierarchyKind::Administrative;
+    d.levels = (0..levels)
+        .map(|level| tessera_types::layer::LevelDeclaration {
+            level,
+            title: format!("level {level}"),
+            zoom: None,
+        })
+        .collect();
+    d
+}
+
+fn levelled_artifacts_of(
+    engine: &Engine,
+    credential: &[u8],
+    budget: Option<u32>,
+    layer: &str,
+) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+                .artifact_budget(budget)
+                .layers(Some(&[layer])),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+}
+
+/// **A budget is inert on an administrative layer, and that is the ruling rather than an
+/// oversight** (2026-08-18). Its edges are information about what contains what, not a ladder to
+/// coarsen along: climbing them would substitute a state for its counties and draw one large
+/// polygon across a region whose neighbours are still counties. Resolution is the client choosing
+/// a level.
+///
+/// An over-large response is the artifact ceiling's business, which refuses rather than
+/// truncating. The cut must never start sampling to reach a number.
+#[test]
+fn a_budget_is_inert_on_an_administrative_layer() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, 0..300)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![
+                node(&fx, "state-a", Some("country"), 0..100),
+                node(&fx, "state-b", Some("country"), 100..200),
+            ],
+        )
+        .unwrap();
+
+    let credential = full_coverage_credential();
+    let whole = keys(&levelled_artifacts_of(&engine, &credential, None, "admin/boundaries"));
+    assert_eq!(whole, vec!["country", "state-a", "state-b"]);
+
+    // A budget of one would have climbed a tree to its root. Here there is nothing to climb: the
+    // levels are the resolution, and the response is unchanged.
+    assert_eq!(
+        keys(&levelled_artifacts_of(&engine, &credential, Some(1), "admin/boundaries")),
+        whole,
+        "a budget has no depth to trade on a levelled layer, so it takes nothing"
+    );
+}
+
+/// **The counts are per artifact on every level**, and a parent's is its own rather than the sum
+/// of its children's — 200..300 belong to the country and to neither state.
+#[test]
+fn an_administrative_parents_count_is_its_own() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, 0..300)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![node(&fx, "state-a", Some("country"), 0..100)],
+        )
+        .unwrap();
+
+    let served = levelled_artifacts_of(
+        &engine,
+        &full_coverage_credential(),
+        None,
+        "admin/boundaries",
+    );
+    let count = |key: &str| {
+        served
+            .iter()
+            .find(|a| a.stable_key.as_deref() == Some(key))
+            .expect("served")
+            .masked_count
+    };
+    assert_eq!(count("state-a"), 100);
+    assert_eq!(count("country"), 300);
+}
+
+/// An edge running within one level is not an administrative edge, and the publish refuses it —
+/// the layer's guarantee is that lineage never runs against the levels.
+#[test]
+fn an_administrative_edge_within_one_level_is_refused_at_publish() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    let err = engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![
+                node(&fx, "state-a", None, 0..100),
+                node(&fx, "state-b", Some("state-a"), 100..200),
+            ],
+        )
+        .expect_err("a same-level parent is not an administrative edge");
+    assert!(format!("{err}").contains("coarser"), "{err}");
+}

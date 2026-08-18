@@ -233,7 +233,7 @@ pub struct ArtifactRecord {
     /// target's disposition and reachability as well as on its own conjuncts, on **every** route —
     /// see [`Attachment`].
     pub attached_to: Option<Attachment>,
-    /// This artifact's parent in its own level's hierarchy, by ordinal.
+    /// This artifact's parent in its layer's hierarchy.
     ///
     /// **The opposite of an attachment in the one way that matters**: it is *not* a visibility term.
     /// A node's verdict is its own masked count against its own criterion, with no input from its
@@ -244,7 +244,12 @@ pub struct ArtifactRecord {
     ///
     /// A parent whose ordinal is now a hole leaves this node a root, which serves it: correct, since
     /// it passed its own test, and the reason the fold does not have to rewrite these.
-    pub parent_ordinal: Option<u32>,
+    ///
+    /// **The level is carried because a layer's edges are one of two shapes.** A nested layer's run
+    /// within one level, and the cut climbs them; an administrative layer's run between levels, and
+    /// the cut does not — those are information about what contains what, not a ladder to coarsen
+    /// along (owner ruling, 2026-08-18).
+    pub parent: Option<crate::wal::ParentRef>,
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -464,7 +469,7 @@ impl ArtifactStore {
                         ordinal: a.ordinal,
                         entity: a.entity,
                     }),
-                    parent_ordinal: published.parent_ordinal,
+                    parent: published.parent,
                 },
             );
         }
@@ -988,11 +993,12 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
     // *this node is a root* and *this reader does not know whether it had a parent* cannot encode
     // the same. Here the second answer would serve a child beside the ancestor that should have
     // replaced it — a duplicate on the map rather than a disclosure, but wrong either way.
-    match record.parent_ordinal {
+    match record.parent {
         None => out.push(0),
-        Some(ordinal) => {
+        Some(parent) => {
             out.push(1);
-            out.extend_from_slice(&ordinal.to_le_bytes());
+            out.extend_from_slice(&parent.level.to_le_bytes());
+            out.extend_from_slice(&parent.ordinal.to_le_bytes());
         }
     }
     out
@@ -1058,9 +1064,12 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
         }
         _ => return None,
     };
-    let parent_ordinal = match take(1)?[0] {
+    let parent = match take(1)?[0] {
         0 => None,
-        1 => Some(u32::from_le_bytes(take(4)?.try_into().ok()?)),
+        1 => Some(crate::wal::ParentRef {
+            level: u32::from_le_bytes(take(4)?.try_into().ok()?),
+            ordinal: u32::from_le_bytes(take(4)?.try_into().ok()?),
+        }),
         _ => return None,
     };
     // **Trailing bytes are a decode failure**, not slack to ignore: a blob longer than its own
@@ -1075,7 +1084,7 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
         members,
         variations,
         attached_to,
-        parent_ordinal,
+        parent,
     })
 }
 
@@ -1110,7 +1119,7 @@ mod tests {
             members: Bitmap::of(members),
             variations: Vec::new(),
             attached_to: None,
-            parent_ordinal: None,
+            parent: None,
         }
     }
 

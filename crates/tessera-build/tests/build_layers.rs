@@ -569,6 +569,42 @@ content = { derived = ["centroid"] }
 /// child direction is derived from it — a fixture that wrote both would be testing whether two
 /// hand-written columns agree, which is not a property of the system.
 fn write_treed_artifacts(path: &Path, child_parent: &[(&str, Option<&str>)]) {
+    write_edged_artifacts(path, "clusters/tree", &child_parent
+        .iter()
+        .map(|(k, p)| (0u32, *k, *p))
+        .collect::<Vec<_>>())
+}
+
+/// The same with an explicit level per artifact, for a layer whose edges run between levels.
+fn write_edged_artifacts(path: &Path, layer: &str, rows: &[(u32, &str, Option<&str>)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("level", DataType::UInt32, true),
+        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("parent_key", DataType::Utf8, true),
+    ]));
+    let layers = StringArray::from(vec![layer; rows.len()]);
+    let levels = UInt32Array::from(rows.iter().map(|(l, ..)| Some(*l)).collect::<Vec<_>>());
+    let keys = StringArray::from(rows.iter().map(|(_, k, _)| *k).collect::<Vec<_>>());
+    let parents = StringArray::from(rows.iter().map(|(.., p)| *p).collect::<Vec<_>>());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(layers) as ArrayRef,
+            Arc::new(levels),
+            Arc::new(keys),
+            Arc::new(parents),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+#[allow(dead_code)]
+fn write_treed_artifacts_unused(path: &Path, child_parent: &[(&str, Option<&str>)]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("stable_key", DataType::Utf8, false),
@@ -765,4 +801,159 @@ fn edges_holding_a_cycle_are_refused() {
     );
     let err = result.expect_err("a cycle is a refusal");
     assert!(format!("{err}").contains("cycle"), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The administrative shape: levels, and edges that run between them
+// ---------------------------------------------------------------------------------------------
+
+/// Countries, states, counties — one layer, three levels, containment edges between them.
+///
+/// **Its edges are information, not roll-up.** The levels carry the resolution: a client picks
+/// "states" rather than asking the server to coarsen for it, and the cut never climbs these edges.
+/// What they are for is telling a client what contains what.
+const ADMIN_LAYERS_TOML: &str = r#"
+[[layer]]
+name = "admin/boundaries"
+title = "administrative boundaries"
+slices = ["s0"]
+membership = "enumerated"
+gate = "0"
+artifacts_carry_own = false
+visible_when = { min_visible = 1 }
+hierarchy = { kind = "administrative", prune_children = false }
+content = { derived = ["centroid"] }
+
+[[layer.levels]]
+level = 0
+title = "countries"
+
+[[layer.levels]]
+level = 1
+title = "states"
+
+[[layer.levels]]
+level = 2
+title = "counties"
+"#;
+
+fn admin_build(
+    rows: &[(u32, &str, Option<&str>)],
+    membership: &[(u32, &str, Vec<u64>)],
+) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+    let inputs = inputs();
+    std::fs::write(&inputs.layers, ADMIN_LAYERS_TOML).unwrap();
+    write_edged_artifacts(&inputs.artifacts, "admin/boundaries", rows);
+    write_levelled_members(&inputs.members, "admin/boundaries", membership);
+    let out = inputs.dir.join("bundle");
+    let result = build(&args(&inputs, &out)).map(|_| ());
+    (result, out, inputs._tmp)
+}
+
+fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Vec<u64>)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("layer", DataType::Utf8, false),
+        Field::new("level", DataType::UInt32, true),
+        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("member", DataType::UInt64, false),
+    ]));
+    let (mut layers, mut levels, mut keys, mut member) = (vec![], vec![], vec![], vec![]);
+    for (level, key, members) in membership {
+        for &m in members {
+            layers.push(layer.to_string());
+            levels.push(Some(*level));
+            keys.push(key.to_string());
+            member.push(m);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(layers)) as ArrayRef,
+            Arc::new(UInt32Array::from(levels)),
+            Arc::new(StringArray::from(keys)),
+            Arc::new(UInt64Array::from(member)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// **The headline for the administrative shape: it builds, and its containment is checked across
+/// levels exactly as a tree's is within one.**
+#[test]
+fn an_administrative_layer_publishes_edges_between_its_levels() {
+    let (result, out, _tmp) = admin_build(
+        &[
+            (0, "country", None),
+            (1, "state-a", Some("country")),
+            (1, "state-b", Some("country")),
+            (2, "county-a1", Some("state-a")),
+        ],
+        &[
+            (0, "country", (0..40).collect()),
+            (1, "state-a", (0..20).collect()),
+            (1, "state-b", (20..30).collect()),
+            (2, "county-a1", (0..10).collect()),
+        ],
+    );
+    result.expect("an administrative layer builds");
+
+    let report = containment_report(&out);
+    assert_eq!(report["violations"].as_array().unwrap().len(), 0);
+    let splits = &report["splits"];
+    // The country (two states) and state-a (one county) are both internal.
+    assert_eq!(splits["total"], 2);
+    // The country keeps 30..40 away from both its states, so its split is non-covering.
+    let country = splits["by_stray_members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["parent"] == "country")
+        .expect("the country's split is reported");
+    assert_eq!(country["members"], 40);
+    assert_eq!(country["stray_members"], 10);
+}
+
+/// **An edge running against the resolution is refused rather than reinterpreted.** An
+/// administrative layer's whole guarantee is that lineage never runs from a finer level to a
+/// coarser one; accepting one would make "a level is a scale" untrue without anything saying so.
+#[test]
+fn an_administrative_edge_within_one_level_is_refused() {
+    let (result, _out, _tmp) = admin_build(
+        &[(1, "state-a", None), (1, "state-b", Some("state-a"))],
+        &[
+            (1, "state-a", (0..10).collect()),
+            (1, "state-b", (10..20).collect()),
+        ],
+    );
+    let err = result.expect_err("a same-level parent is not an administrative edge");
+    assert!(format!("{err}").contains("coarser"), "{err}");
+}
+
+/// A layer that declares no lineage may carry no edges — refused rather than silently ignored,
+/// since an ignored edge is a hierarchy the caller believes they published and nobody has.
+#[test]
+fn edges_on_a_layer_declaring_no_lineage_are_refused() {
+    let inputs = inputs();
+    std::fs::write(
+        &inputs.layers,
+        ADMIN_LAYERS_TOML.replace(r#"kind = "administrative""#, r#"kind = "stacked""#),
+    )
+    .unwrap();
+    write_edged_artifacts(
+        &inputs.artifacts,
+        "admin/boundaries",
+        &[(0, "country", None), (1, "state-a", Some("country"))],
+    );
+    write_levelled_members(
+        &inputs.members,
+        "admin/boundaries",
+        &[(0, "country", (0..20).collect()), (1, "state-a", (0..10).collect())],
+    );
+    let out = inputs.dir.join("bundle");
+    let err = build(&args(&inputs, &out)).expect_err("a stacked layer has no lineage");
+    assert!(format!("{err}").contains("no lineage"), "{err}");
 }

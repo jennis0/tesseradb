@@ -3431,12 +3431,23 @@ impl Engine {
                 // The level's lineage, read from the parent pointers of **every** artifact and not
                 // only the passing ones: an ancestor that failed its own criterion is still an
                 // ancestor, and a cut blind to it would keep a node its descendant covers.
+                //
+                // **Within-level edges only, and that is the whole of the administrative case's
+                // treatment here** (owner ruling, 2026-08-18). An administrative layer's edges run
+                // between levels and are *information* — what contains what, so a client can nest
+                // what it draws or filter to one subtree — rather than a ladder to coarsen along.
+                // Climbing them would substitute a state for its counties and draw one large
+                // polygon across a region whose neighbours are still counties. So the cut does not
+                // see them, such a layer's lineage is empty here, and its budget is inert exactly
+                // as a flat layer's is.
                 let lineage = self.write.with_artifacts(|store| {
-                    crate::cut::Lineage::new(
-                        store
-                            .level(&name, level)
-                            .map(|(ordinal, record)| (ordinal, record.parent_ordinal)),
-                    )
+                    crate::cut::Lineage::new(store.level(&name, level).map(|(ordinal, record)| {
+                        let within = record
+                            .parent
+                            .filter(|parent| parent.level == level)
+                            .map(|parent| parent.ordinal);
+                        (ordinal, within)
+                    }))
                 });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in

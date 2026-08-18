@@ -634,21 +634,80 @@ fn verify_hierarchies(
     // depend on iteration order.
     let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
     // Children grouped under their parent, so containment and coverage are one pass over each
-    // parent's membership rather than one per edge.
-    let mut children_of: BTreeMap<Address, Vec<&str>> = BTreeMap::new();
+    // parent's membership rather than one per edge. **Each child by its full address**, because an
+    // administrative layer's child sits at a different level from its parent and a bare key would
+    // then be looked up in the wrong one.
+    let mut children_of: BTreeMap<Address, Vec<Address>> = BTreeMap::new();
+
+    // Which shape each layer's edges have, from its declaration and never from the edges
+    // themselves. A layer that declares no lineage may carry none; a nested layer's edges stay
+    // within a level; an administrative layer's run from a coarser level to a finer one, and it is
+    // the levels that carry the resolution rather than the edges.
+    let kind_of: BTreeMap<&str, tessera_types::layer::HierarchyKind> = plan
+        .declarations
+        .iter()
+        .map(|d| (d.name.as_str(), d.hierarchy.kind))
+        .collect();
 
     for ((layer, level, key), artifact) in &plan.artifacts {
         let Some(parent_key) = artifact.parent_key.as_deref() else {
             continue;
         };
-        let parent_address = (layer.clone(), *level, parent_key.to_string());
-        if !plan.artifacts.contains_key(&parent_address) {
+        let kind = kind_of.get(layer.as_str()).copied().unwrap_or(
+            tessera_types::layer::HierarchyKind::Flat,
+        );
+        let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Administrative);
+        if !cross_level && !matches!(kind, tessera_types::layer::HierarchyKind::Nested) {
             return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key} names parent {parent_key}, which this level \
-                 does not declare — an edge relates two artifacts of one level, and a parent that \
-                 does not exist would leave the child a root of a tree nobody wrote"
+                "{layer} is declared {kind:?} and so has no lineage, but {key} names a parent — \
+                 declare it nested if its edges run within a level, or administrative if they run \
+                 between levels"
             )));
         }
+
+        // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
+        // two directions, which is what makes an edge's meaning independent of the data: an
+        // administrative layer's parent is in a strictly coarser level, and a key that resolves
+        // only at this level or a finer one is an edge running against the resolution — refused
+        // rather than reinterpreted.
+        let parent_address = if cross_level {
+            let mut found = None;
+            for coarser in 0..*level {
+                let candidate = (layer.clone(), coarser, parent_key.to_string());
+                if plan.artifacts.contains_key(&candidate) {
+                    if found.is_some() {
+                        return Err(BuildError::Invalid(format!(
+                            "{layer} artifact {key} names parent {parent_key}, which exists in \
+                             more than one coarser level; which level the edge meant would depend \
+                             on the search order, so it is refused rather than resolved"
+                        )));
+                    }
+                    found = Some(candidate);
+                }
+            }
+            match found {
+                Some(address) => address,
+                None => {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level} artifact {key} names parent {parent_key}, which no \
+                         coarser level declares — an administrative layer's edges run from a \
+                         coarser level to a finer one, so a parent at this level or below is an \
+                         edge running against the resolution"
+                    )))
+                }
+            }
+        } else {
+            let address = (layer.clone(), *level, parent_key.to_string());
+            if !plan.artifacts.contains_key(&address) {
+                return Err(BuildError::Invalid(format!(
+                    "{layer} level {level} artifact {key} names parent {parent_key}, which this \
+                     level does not declare — a nested layer's edges relate two artifacts of one \
+                     level, and a parent that does not exist would leave the child a root of a \
+                     tree nobody wrote"
+                )));
+            }
+            address
+        };
         if parent_key == key {
             return Err(BuildError::Invalid(format!(
                 "{layer} level {level} artifact {key} names itself as its parent"
@@ -660,7 +719,10 @@ fn verify_hierarchies(
                  a child has one lineage or the cut that walks it depends on iteration order"
             )));
         }
-        children_of.entry(parent_address).or_default().push(key);
+        children_of
+            .entry(parent_address)
+            .or_default()
+            .push((layer.clone(), *level, key.clone()));
     }
 
     let mut violations = Vec::new();
@@ -675,8 +737,9 @@ fn verify_hierarchies(
         let mut covered: std::collections::HashSet<u64> =
             std::collections::HashSet::with_capacity(held.len());
 
-        for child_key in children {
-            let child = &plan.artifacts[&(layer.clone(), *level, child_key.to_string())];
+        for child_address in children {
+            let child = &plan.artifacts[child_address];
+            let (_, child_level, child_key) = child_address;
             let mut escaping = 0u64;
             for member in &child.members {
                 if held.contains(member) {
@@ -689,8 +752,10 @@ fn verify_hierarchies(
             if escaping > 0 {
                 violations.push(ContainmentViolation {
                     layer: layer.clone(),
-                    level: *level,
-                    child: (*child_key).to_string(),
+                    // The **child's** level, which is the one an operator needs to find it; for a
+                    // nested layer it is the parent's too, and for an administrative one it is not.
+                    level: *child_level,
+                    child: child_key.clone(),
                     parent: parent_key.clone(),
                     escaping_members: escaping,
                 });
@@ -715,6 +780,11 @@ fn verify_hierarchies(
 ///
 /// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
 /// longer than that has revisited a node, whatever the shape of the loop.
+///
+/// **Only a nested layer can hold one, so only its edges are walked.** An administrative layer's
+/// edges each step to a strictly coarser level, and the levels are finite and bounded below by
+/// zero, so a cycle is not expressible — the same-level lookup here simply finds nothing and the
+/// walk ends, which is the right answer rather than a gap.
 fn detect_cycles(plan: &LayerPlan) -> Result<()> {
     for (layer, level, key) in plan.artifacts.keys() {
         let bound = plan

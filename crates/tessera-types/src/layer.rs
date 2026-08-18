@@ -126,6 +126,24 @@ pub enum HierarchyKind {
     /// different analysis rather than an ancestor, so switching to it replaces one claim with
     /// another rather than coarsening the first.
     Stacked,
+    /// Levels **and** containment edges between them — the administrative case. A ward is a ward
+    /// everywhere on the map, so the resolution is semantic and balanced, and an edge always runs
+    /// from a coarser level to a finer one.
+    ///
+    /// **Its edges are information, not roll-up** *(owner ruling, 2026-08-18)*, and that is the
+    /// whole difference from [`Nested`](HierarchyKind::Nested). A treed layer's edges are what a
+    /// budget climbs: substituting a parent cluster for its children is an honest coarsening,
+    /// because a cluster is an abstract blob. Substituting a state for its counties is not — it
+    /// draws one large polygon across a region whose neighbours are still drawn as counties, an
+    /// inconsistent map from a server trying to be helpful. So the cut never climbs these edges,
+    /// **resolution is the client choosing a level**, and what the edges are for is telling a
+    /// client what contains what: nesting the features it draws, or filtering to one subtree while
+    /// still drawing the rest.
+    ///
+    /// A budget is therefore **inert** on such a layer, exactly as it is on a flat one — there is
+    /// no depth to trade. An over-large response is the artifact ceiling's business, which refuses
+    /// rather than truncating; the cut must never start sampling to reach a number.
+    Administrative,
 }
 
 /// How a layer's artifacts relate to each other, and what a response does when several pass.
@@ -437,6 +455,9 @@ pub enum DeclarationError {
     TreeWithLevels,
     /// A stacked layer with no levels — its levels *are* its analyses, so it has declared nothing.
     StackedWithoutLevels,
+    /// An administrative layer with no levels. Its edges run *between* levels, so with none
+    /// declared there is nowhere for one to run.
+    AdministrativeWithoutLevels,
     /// Levels that repeat a number or do not start at 0 and run consecutively. Ordinals are
     /// level-local over a contiguous entity run, so a gap would reserve a run nothing addresses.
     LevelsNotDense,
@@ -472,6 +493,12 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::StackedWithoutLevels => write!(
                 f,
                 "a stacked layer's levels are its analyses, so it must declare at least one"
+            ),
+            DeclarationError::AdministrativeWithoutLevels => write!(
+                f,
+                "an administrative layer's edges run between its levels, so it must declare them: \
+                 declare the levels, or declare the layer nested if its lineage is a tree at one \
+                 resolution"
             ),
             DeclarationError::LevelsNotDense => write!(
                 f,
@@ -516,12 +543,20 @@ impl LayerDeclaration {
             return Err(DeclarationError::SelfDependency);
         }
 
+        // **A layer's edges are all within a level or all between levels, never a mix**, and which
+        // it is follows from the declared kind rather than from inspecting the edges (§6.2: a layer
+        // declares its structure, and it is never inferred from whether edges happen to exist).
+        // The publish path and the build both enforce the direction; this is where the shape that
+        // makes the question answerable at all is checked.
         match self.hierarchy.kind {
             HierarchyKind::Nested if !self.levels.is_empty() => {
                 return Err(DeclarationError::TreeWithLevels)
             }
             HierarchyKind::Stacked if self.levels.is_empty() => {
                 return Err(DeclarationError::StackedWithoutLevels)
+            }
+            HierarchyKind::Administrative if self.levels.is_empty() => {
+                return Err(DeclarationError::AdministrativeWithoutLevels)
             }
             _ => {}
         }
