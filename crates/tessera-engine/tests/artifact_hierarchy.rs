@@ -587,13 +587,13 @@ fn an_ancestors_count_is_its_own_and_not_the_sum_of_its_children() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The administrative shape: levels carry the resolution, edges carry the structure
+// The tiered shape: levels carry the resolution, edges carry the structure
 // ---------------------------------------------------------------------------------------------
 
-/// A levelled layer whose edges run between its levels — countries, states, counties.
-fn administrative(name: &str, levels: u32) -> LayerDeclaration {
+/// A tiered layer: levels, with edges running between them — countries, states, counties.
+fn tiered(name: &str, levels: u32) -> LayerDeclaration {
     let mut d = declaration(name, None, false);
-    d.hierarchy.kind = HierarchyKind::Administrative;
+    d.hierarchy.kind = HierarchyKind::Tiered;
     d.levels = (0..levels)
         .map(|level| tessera_types::layer::LevelDeclaration {
             level,
@@ -622,7 +622,7 @@ fn levelled_artifacts_of(
         .artifacts
 }
 
-/// **A budget is inert on an administrative layer, and that is the ruling rather than an
+/// **A budget is inert on a tiered layer, and that is the ruling rather than an
 /// oversight** (2026-08-18). Its edges are information about what contains what, not a ladder to
 /// coarsen along: climbing them would substitute a state for its counties and draw one large
 /// polygon across a region whose neighbours are still counties. Resolution is the client choosing
@@ -631,10 +631,10 @@ fn levelled_artifacts_of(
 /// An over-large response is the artifact ceiling's business, which refuses rather than
 /// truncating. The cut must never start sampling to reach a number.
 #[test]
-fn a_budget_is_inert_on_an_administrative_layer() {
+fn a_budget_is_inert_on_a_tiered_layer() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
     engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -669,10 +669,10 @@ fn a_budget_is_inert_on_an_administrative_layer() {
 /// **The counts are per artifact on every level**, and a parent's is its own rather than the sum
 /// of its children's — 200..300 belong to the country and to neither state.
 #[test]
-fn an_administrative_parents_count_is_its_own() {
+fn a_tiered_parents_count_is_its_own() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
     engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -705,13 +705,13 @@ fn an_administrative_parents_count_is_its_own() {
     assert_eq!(count("country"), 300);
 }
 
-/// An edge running within one level is not an administrative edge, and the publish refuses it —
+/// An edge running within one level is not a tiered edge, and the publish refuses it —
 /// the layer's guarantee is that lineage never runs against the levels.
 #[test]
-fn an_administrative_edge_within_one_level_is_refused_at_publish() {
+fn a_tiered_edge_within_one_level_is_refused_at_publish() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
     let err = engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -721,7 +721,7 @@ fn an_administrative_edge_within_one_level_is_refused_at_publish() {
                 node(&fx, "state-b", Some("state-a"), 100..200),
             ],
         )
-        .expect_err("a same-level parent is not an administrative edge");
+        .expect_err("a same-level parent is not a tiered edge");
     assert!(format!("{err}").contains("coarser"), "{err}");
 }
 
@@ -731,14 +731,14 @@ fn an_administrative_edge_within_one_level_is_refused_at_publish() {
 
 /// **A client is given the structure of what it was served, and nothing else.**
 ///
-/// An administrative layer's whole purpose is this: the client receives countries and states and
+/// A tiered layer's whole purpose is this: the client receives countries and states and
 /// can tell which states are in which country, so it can nest what it draws or filter to one
 /// subtree while still drawing the rest of the map.
 #[test]
 fn a_served_artifact_names_its_parent_when_the_parent_is_also_served() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
     engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -800,7 +800,7 @@ fn a_withheld_parent_is_named_no_differently_from_a_root() {
         .count() as f64;
     let bar = (visible / parent_sources.len() as f64 + 1.0) / 2.0;
 
-    let mut declaration = administrative("admin/boundaries", 2);
+    let mut declaration = tiered("admin/boundaries", 2);
     declaration.visible_when = Some(ExistenceCriterion::MinFraction(bar));
     engine.register_layer(declaration).unwrap();
     engine
@@ -882,7 +882,7 @@ fn a_pruned_response_carries_no_parent_links() {
 fn a_levelled_layer_may_carry_one_key_at_two_levels() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(administrative("taxonomy/arxiv", 2)).unwrap();
+    engine.register_layer(tiered("taxonomy/arxiv", 2)).unwrap();
     engine
         .publish_artifacts(
             "taxonomy/arxiv".into(),

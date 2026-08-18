@@ -38,7 +38,7 @@
 //! [`Hierarchy::kind`] says where a layer's lineage lives; [`LayerDeclaration::levels`] says what
 //! resolutions it declares. **Neither carries the other** (decision 0082). A clustering is a tree in
 //! its edges and declares no levels, because a condensed tree is unbalanced and a level number would
-//! say nothing about position in the lineage. An administrative geography declares both, and they
+//! say nothing about position in the lineage. A tiered geography declares both, and they
 //! agree, because a ward is a ward everywhere on the map — which is the only shape in which reading
 //! one as the other is safe.
 
@@ -126,9 +126,16 @@ pub enum HierarchyKind {
     /// different analysis rather than an ancestor, so switching to it replaces one claim with
     /// another rather than coarsening the first.
     Stacked,
-    /// Levels **and** containment edges between them — the administrative case. A ward is a ward
-    /// everywhere on the map, so the resolution is semantic and balanced, and an edge always runs
-    /// from a coarser level to a finer one.
+    /// Levels **and** containment edges between them: each tier sits inside the one above it. A
+    /// ward is a ward everywhere on the map, so the resolution is semantic and balanced, and an
+    /// edge always runs from a coarser level to a finer one.
+    ///
+    /// **Named for the structure rather than for a domain.** Administrative boundaries are the
+    /// motivating case and the map industry's own word for their levels is *admin level* — but a
+    /// subject taxonomy and a biological classification are the same shape, and the first layer
+    /// published against this one is arXiv's category tree. `stacked` and `tiered` are the two
+    /// levelled shapes, and the difference is audible: piled up independently, against ordered
+    /// strata that relate.
     ///
     /// **Its edges are information, not roll-up** *(owner ruling, 2026-08-18)*, and that is the
     /// whole difference from [`Nested`](HierarchyKind::Nested). A treed layer's edges are what a
@@ -143,7 +150,7 @@ pub enum HierarchyKind {
     /// A budget is therefore **inert** on such a layer, exactly as it is on a flat one — there is
     /// no depth to trade. An over-large response is the artifact ceiling's business, which refuses
     /// rather than truncating; the cut must never start sampling to reach a number.
-    Administrative,
+    Tiered,
 }
 
 /// How a layer's artifacts relate to each other, and what a response does when several pass.
@@ -263,7 +270,7 @@ pub struct ContentDeclaration {
 }
 
 /// One declared resolution. Present only on layers whose resolutions are semantic and balanced —
-/// an administrative geography — or whose levels are independent analyses. **A treed layer declares
+/// a tiered geography — or whose levels are independent analyses. **A treed layer declares
 /// none** and sits entirely at level 0 (decision 0082).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LevelDeclaration {
@@ -455,9 +462,9 @@ pub enum DeclarationError {
     TreeWithLevels,
     /// A stacked layer with no levels — its levels *are* its analyses, so it has declared nothing.
     StackedWithoutLevels,
-    /// An administrative layer with no levels. Its edges run *between* levels, so with none
-    /// declared there is nowhere for one to run.
-    AdministrativeWithoutLevels,
+    /// A tiered layer with no levels. Its edges run *between* levels, so with none declared there
+    /// is nowhere for one to run.
+    TieredWithoutLevels,
     /// Levels that repeat a number or do not start at 0 and run consecutively. Ordinals are
     /// level-local over a contiguous entity run, so a gap would reserve a run nothing addresses.
     LevelsNotDense,
@@ -494,11 +501,10 @@ impl std::fmt::Display for DeclarationError {
                 f,
                 "a stacked layer's levels are its analyses, so it must declare at least one"
             ),
-            DeclarationError::AdministrativeWithoutLevels => write!(
+            DeclarationError::TieredWithoutLevels => write!(
                 f,
-                "an administrative layer's edges run between its levels, so it must declare them: \
-                 declare the levels, or declare the layer nested if its lineage is a tree at one \
-                 resolution"
+                "a tiered layer's edges run between its levels, so it must declare them: declare \
+                 the levels, or declare the layer nested if its lineage is a tree at one resolution"
             ),
             DeclarationError::LevelsNotDense => write!(
                 f,
@@ -555,8 +561,8 @@ impl LayerDeclaration {
             HierarchyKind::Stacked if self.levels.is_empty() => {
                 return Err(DeclarationError::StackedWithoutLevels)
             }
-            HierarchyKind::Administrative if self.levels.is_empty() => {
-                return Err(DeclarationError::AdministrativeWithoutLevels)
+            HierarchyKind::Tiered if self.levels.is_empty() => {
+                return Err(DeclarationError::TieredWithoutLevels)
             }
             _ => {}
         }
@@ -673,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn an_administrative_layer_declares_edges_and_levels_together() {
+    fn a_tiered_layer_declares_edges_and_levels_together() {
         // The case the two-name shorthand does not cover: a ward is a ward everywhere, so the
         // resolution is semantic *and* the containment lineage exists. Validation must not force a
         // caller to throw one of them away.

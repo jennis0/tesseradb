@@ -378,7 +378,7 @@ pub struct PublishedArtifact {
     /// the last two stages — in exchange for a lookup the serving path already builds per level.
     ///
     /// **A level as well as an ordinal, because a layer's edges are one of two shapes.** A nested
-    /// layer's run within one level and a coarser view is an ancestor; an administrative layer's
+    /// layer's run within one level and a coarser view is an ancestor; a tiered layer's
     /// run *between* levels, from a coarser to a finer one. Which shape a layer has is declared,
     /// never inferred, and it may not mix them.
     ///

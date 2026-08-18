@@ -246,7 +246,7 @@ pub struct ArtifactRecord {
     /// it passed its own test, and the reason the fold does not have to rewrite these.
     ///
     /// **The level is carried because a layer's edges are one of two shapes.** A nested layer's run
-    /// within one level, and the cut climbs them; an administrative layer's run between levels, and
+    /// within one level, and the cut climbs them; a tiered layer's run between levels, and
     /// the cut does not — those are information about what contains what, not a ladder to coarsen
     /// along (owner ruling, 2026-08-18).
     pub parent: Option<crate::wal::ParentRef>,

@@ -804,7 +804,7 @@ fn edges_holding_a_cycle_are_refused() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The administrative shape: levels, and edges that run between them
+// The tiered shape: levels, and edges that run between them
 // ---------------------------------------------------------------------------------------------
 
 /// Countries, states, counties — one layer, three levels, containment edges between them.
@@ -812,7 +812,7 @@ fn edges_holding_a_cycle_are_refused() {
 /// **Its edges are information, not roll-up.** The levels carry the resolution: a client picks
 /// "states" rather than asking the server to coarsen for it, and the cut never climbs these edges.
 /// What they are for is telling a client what contains what.
-const ADMIN_LAYERS_TOML: &str = r#"
+const TIERED_LAYERS_TOML: &str = r#"
 [[layer]]
 name = "admin/boundaries"
 title = "administrative boundaries"
@@ -821,7 +821,7 @@ membership = "enumerated"
 gate = "0"
 artifacts_carry_own = false
 visible_when = { min_visible = 1 }
-hierarchy = { kind = "administrative", prune_children = false }
+hierarchy = { kind = "tiered", prune_children = false }
 content = { derived = ["centroid"] }
 
 [[layer.levels]]
@@ -837,12 +837,12 @@ level = 2
 title = "counties"
 "#;
 
-fn admin_build(
+fn tiered_build(
     rows: &[(u32, &str, Option<&str>)],
     membership: &[(u32, &str, Vec<u64>)],
 ) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
-    std::fs::write(&inputs.layers, ADMIN_LAYERS_TOML).unwrap();
+    std::fs::write(&inputs.layers, TIERED_LAYERS_TOML).unwrap();
     write_edged_artifacts(&inputs.artifacts, "admin/boundaries", rows);
     write_levelled_members(&inputs.members, "admin/boundaries", membership);
     let out = inputs.dir.join("bundle");
@@ -884,8 +884,8 @@ fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Ve
 /// **The headline for the administrative shape: it builds, and its containment is checked across
 /// levels exactly as a tree's is within one.**
 #[test]
-fn an_administrative_layer_publishes_edges_between_its_levels() {
-    let (result, out, _tmp) = admin_build(
+fn a_tiered_layer_publishes_edges_between_its_levels() {
+    let (result, out, _tmp) = tiered_build(
         &[
             (0, "country", None),
             (1, "state-a", Some("country")),
@@ -899,7 +899,7 @@ fn an_administrative_layer_publishes_edges_between_its_levels() {
             (2, "county-a1", (0..10).collect()),
         ],
     );
-    result.expect("an administrative layer builds");
+    result.expect("a tiered layer builds");
 
     let report = containment_report(&out);
     assert_eq!(report["violations"].as_array().unwrap().len(), 0);
@@ -921,15 +921,15 @@ fn an_administrative_layer_publishes_edges_between_its_levels() {
 /// administrative layer's whole guarantee is that lineage never runs from a finer level to a
 /// coarser one; accepting one would make "a level is a scale" untrue without anything saying so.
 #[test]
-fn an_administrative_edge_within_one_level_is_refused() {
-    let (result, _out, _tmp) = admin_build(
+fn a_tiered_edge_within_one_level_is_refused() {
+    let (result, _out, _tmp) = tiered_build(
         &[(1, "state-a", None), (1, "state-b", Some("state-a"))],
         &[
             (1, "state-a", (0..10).collect()),
             (1, "state-b", (10..20).collect()),
         ],
     );
-    let err = result.expect_err("a same-level parent is not an administrative edge");
+    let err = result.expect_err("a same-level parent is not a tiered edge");
     assert!(format!("{err}").contains("coarser"), "{err}");
 }
 
@@ -940,7 +940,7 @@ fn edges_on_a_layer_declaring_no_lineage_are_refused() {
     let inputs = inputs();
     std::fs::write(
         &inputs.layers,
-        ADMIN_LAYERS_TOML.replace(r#"kind = "administrative""#, r#"kind = "stacked""#),
+        TIERED_LAYERS_TOML.replace(r#"kind = "tiered""#, r#"kind = "stacked""#),
     )
     .unwrap();
     write_edged_artifacts(

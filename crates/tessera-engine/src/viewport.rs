@@ -3449,8 +3449,8 @@ impl Engine {
                 // only the passing ones: an ancestor that failed its own criterion is still an
                 // ancestor, and a cut blind to it would keep a node its descendant covers.
                 //
-                // **Within-level edges only, and that is the whole of the administrative case's
-                // treatment here** (owner ruling, 2026-08-18). An administrative layer's edges run
+                // **Within-level edges only, and that is the whole of the tiered shape's
+                // treatment here** (owner ruling, 2026-08-18). A tiered layer's edges run
                 // between levels and are *information* — what contains what, so a client can nest
                 // what it draws or filter to one subtree — rather than a ladder to coarsen along.
                 // Climbing them would substitute a state for its counties and draw one large

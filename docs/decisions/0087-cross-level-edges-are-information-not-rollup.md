@@ -7,12 +7,11 @@
 [Decision 0082](0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md) separated a layer's tree
 from its levels and its summary table gave two shapes — a tree with no levels, or levels with no
 lineage. [`annotation-representation.md`](../design/annotation-representation.md) §6.2 describes
-**three**, the third being the administrative case: levels *and* containment edges, where a ward is a
-ward everywhere on the map.
+**three**, the third being levels *and* containment edges, where a ward is a ward everywhere on the map —
+described there as *the administrative case*, after its motivating example.
 
 The declaration only ever had values for two, so the third could not be expressed at all. That left
-an ambiguity nobody could resolve by reading: an administrative hierarchy's containment is naturally
-*cross-level* — a state at level 1 sits inside a country at level 0 — but the implementation
+an ambiguity nobody could resolve by reading: such a hierarchy's containment is naturally *cross-level* — a state at level 1 sits inside a country at level 0 — but the implementation
 resolved a parent within one level, so an edge like that was refused. Neither reading was wrong
 against the corpus, because the corpus had no way to say which was meant.
 
@@ -25,8 +24,8 @@ for**.
 
 - **Within a level** — `kind = "nested"`. The clustering case: every artifact at level 0, lineage
   entirely in the edges.
-- **Between levels** — `kind = "administrative"`, the shape that was missing. Every edge runs from a
-  **strictly coarser** level to a finer one. It need not step to the immediately next level: real
+- **Between levels** — `kind = "tiered"`, the shape that was missing. Each tier sits inside the one
+  above it, and every edge runs from a **strictly coarser** level to a finer one. It need not step to the immediately next level: real
   taxonomies skip, and a city sitting directly under a country because that country has no states is
   a fact about the data rather than a hole in a ladder.
 
@@ -52,11 +51,11 @@ still says something true about that region. An administrative feature is a shap
 one state where the neighbouring regions are still drawn as counties produces a map that is
 internally inconsistent, from a server trying to be helpful.
 
-**A levelled layer already has a resolution control, and it is the client's.** Picking *counties*
+**A tiered layer already has a resolution control, and it is the client's.** Picking *counties*
 rather than *states* is a deliberate semantic act. A budget that silently overrode it would answer a
 question the client did not ask, and mixing levels in one response is the visible symptom.
 
-So on such a layer a budget takes nothing, exactly as on a flat one — there is no depth to trade. An
+So on a tiered layer a budget takes nothing, exactly as on a flat one — there is no depth to trade. An
 over-large response is the **artifact ceiling's** business, which refuses rather than truncating; the
 cut must never begin sampling to reach a number
 ([decision 0083](0083-the-frontier-is-a-request-time-budget.md)).
@@ -74,6 +73,23 @@ An earlier draft of this ruling proposed answering containment as a **predicate*
 two identifiers, get back one bit. It is declined. A client rendering two hundred features would
 issue forty thousand calls to reconstruct a tree it should have been handed, and the structure is
 part of the payload rather than an oracle to consult.
+
+## The name
+
+**`tiered` names the structure; `administrative` named an example.** The other values describe
+shapes — `flat` has none, `nested` is a tree, `stacked` is levels piled up independently — and the
+map industry's own word for this one, *admin level*, belongs to a single domain. The shape does not:
+a subject taxonomy and a biological classification are the same thing, and the first layer published
+against it is arXiv's category tree, where `kind = "administrative"` reads oddly.
+
+`stacked` and `tiered` are the two levelled shapes and the difference is audible — piled up
+independently, against ordered strata that relate. Administrative boundaries remain the motivating
+example throughout the prose, which is what an example is for.
+
+Two alternatives were rejected. `subdivided` is more precise and over-promises: it implies the
+children exhaust the parent, which is true of a taxonomy and false of the general case this admits.
+`nested_levels` is unambiguous and sits one letter from `nested`, in exactly the place a confusion
+would cost most.
 
 ## What this does not change
 

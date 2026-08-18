@@ -92,7 +92,7 @@ pub enum RegistryError {
         key: String,
     },
     /// A parent/child edge named a parent the layer does not hold where its declared shape says
-    /// to look: the same level for a nested layer, a coarser one for an administrative layer.
+    /// to look: the same level for a nested layer, a coarser one for a tiered layer.
     NoSuchParent {
         layer: String,
         level: u32,
@@ -100,7 +100,7 @@ pub enum RegistryError {
     },
     /// An edge published into a layer that declares no lineage at all.
     EdgesOnUntreedLayer { layer: String, kind: String },
-    /// An administrative layer whose parent key names an artifact in more than one coarser level.
+    /// A tiered layer whose parent key names an artifact in more than one coarser level.
     /// Refused rather than resolved by search order, which would make the edge's meaning depend on
     /// how the levels were walked.
     AmbiguousParent { layer: String, key: String },
@@ -161,13 +161,13 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "{layer} publishes an artifact in level {level} whose parent is {key}, which the \
                  layer does not hold where its declared shape says to look — the same level for a \
-                 nested layer, a coarser level for an administrative one"
+                 nested layer, a coarser level for a tiered one"
             ),
             RegistryError::EdgesOnUntreedLayer { layer, kind } => write!(
                 f,
                 "{layer} is declared {kind} and so has no lineage, but an artifact names a \
                  parent: declare the layer nested if its edges run within a level, or \
-                 administrative if they run between levels"
+                 tiered if they run between levels"
             ),
             RegistryError::AmbiguousParent { layer, key } => write!(
                 f,
@@ -503,7 +503,7 @@ impl LayerRegistry {
         // store is what lets a level arrive whole or in pieces without the caller having to know
         // which.
         //
-        // An administrative layer's edges run the other way: from a **coarser level** to this one.
+        // A tiered layer's edges run the other way: from a **coarser level** to this one.
         // Its parent was published in an earlier batch, so only the store can answer, and the
         // search runs over the levels above this one. A key found in two of them is a refusal
         // rather than a first-match, because which one an edge meant would then depend on the
@@ -513,7 +513,7 @@ impl LayerRegistry {
         // declared kind says which shape its edges have, and an edge of the other shape refuses.
         let cross_level = matches!(
             layer.declaration.hierarchy.kind,
-            tessera_types::layer::HierarchyKind::Administrative
+            tessera_types::layer::HierarchyKind::Tiered
         );
         let edges_allowed = cross_level
             || matches!(
@@ -569,7 +569,7 @@ impl LayerRegistry {
                         }
                     }
                     // A key that exists only at this level or a finer one is an edge running the
-                    // wrong way — refused rather than reinterpreted, since an administrative
+                    // wrong way — refused rather than reinterpreted, since a tiered
                     // layer's whole guarantee is that lineage never runs against the levels.
                     return found.map(Some).ok_or_else(missing);
                 }

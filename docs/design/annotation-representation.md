@@ -903,7 +903,8 @@ was noise in the coarse run may join a cluster in the fine one. A coarser view i
 not an ancestor, and switching to it does not coarsen a claim, it **replaces one analysis with a
 different one**. `reach` is undefined across levels because there are no edges to close over.
 
-***Both, and they agree — the administrative case.*** A ward is a ward everywhere on the map, so the
+***Both, and they agree — the tiered case, of which administrative boundaries are the motivating
+example.*** A ward is a ward everywhere on the map, so the
 resolution is semantic and balanced: the layer declares levels *and* carries containment edges, and a
 coarser feature is both an ancestor and a level up. This is what levels were for, and the only case in
 which reading one as the other is safe.
@@ -911,7 +912,9 @@ which reading one as the other is safe.
 **Its edges run between levels, and they are information rather than roll-up**
 ([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)). A layer's edges
 are all within a level or all between them — declared, never inferred, and a layer may not mix them —
-and which shape it has decides what they are *for*. Within a level they are the ladder a cut climbs:
+and which shape it has decides what they are *for*. **The value is `tiered` rather than
+`administrative`**: the other kinds name structures, and a subject taxonomy or a biological
+classification is this same shape without being administrative at all. Within a level they are the ladder a cut climbs:
 substituting a parent cluster for its children is an honest coarsening, because a cluster is an
 abstract blob. Between levels they are not, because substituting a state for its counties draws one
 shape across a region whose neighbours are still counties. So the cut never climbs them, **an
@@ -925,9 +928,9 @@ country has no states is a fact about the data rather than a gap in a ladder; wh
 edge running *against* the levels, from a finer to a coarser one, which is the guarantee that makes a
 level a scale.
 
-| | A tree | Stacked levels | Administrative |
+| | A tree | Stacked levels | Tiered |
 |---|---|---|---|
-| Declared | `kind = "nested"` | `kind = "stacked"` | `kind = "administrative"` |
+| Declared | `kind = "nested"` | `kind = "stacked"` | `kind = "tiered"` |
 | The lineage is in | edges, **within** a level | absent — the levels are independent | edges, **between** the levels |
 | Levels declared | none; every artifact at level 0 | one per analysis | one per scale |
 | A coarser view is | an ancestor | a different analysis | either, interchangeably |

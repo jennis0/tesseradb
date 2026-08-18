@@ -635,13 +635,13 @@ fn verify_hierarchies(
     let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
     // Children grouped under their parent, so containment and coverage are one pass over each
     // parent's membership rather than one per edge. **Each child by its full address**, because an
-    // administrative layer's child sits at a different level from its parent and a bare key would
+    // tiered layer's child sits at a different level from its parent and a bare key would
     // then be looked up in the wrong one.
     let mut children_of: BTreeMap<Address, Vec<Address>> = BTreeMap::new();
 
     // Which shape each layer's edges have, from its declaration and never from the edges
     // themselves. A layer that declares no lineage may carry none; a nested layer's edges stay
-    // within a level; an administrative layer's run from a coarser level to a finer one, and it is
+    // within a level; a tiered layer's run from a coarser level to a finer one, and it is
     // the levels that carry the resolution rather than the edges.
     let kind_of: BTreeMap<&str, tessera_types::layer::HierarchyKind> = plan
         .declarations
@@ -656,18 +656,18 @@ fn verify_hierarchies(
         let kind = kind_of.get(layer.as_str()).copied().unwrap_or(
             tessera_types::layer::HierarchyKind::Flat,
         );
-        let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Administrative);
+        let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
         if !cross_level && !matches!(kind, tessera_types::layer::HierarchyKind::Nested) {
             return Err(BuildError::Invalid(format!(
                 "{layer} is declared {kind:?} and so has no lineage, but {key} names a parent — \
-                 declare it nested if its edges run within a level, or administrative if they run \
-                 between levels"
+                 declare it nested if its edges run within a level, or tiered if they run between \
+                 levels"
             )));
         }
 
         // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
         // two directions, which is what makes an edge's meaning independent of the data: an
-        // administrative layer's parent is in a strictly coarser level, and a key that resolves
+        // tiered layer's parent is in a strictly coarser level, and a key that resolves
         // only at this level or a finer one is an edge running against the resolution — refused
         // rather than reinterpreted.
         let parent_address = if cross_level {
@@ -690,8 +690,8 @@ fn verify_hierarchies(
                 None => {
                     return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} names parent {parent_key}, which no \
-                         coarser level declares — an administrative layer's edges run from a \
-                         coarser level to a finer one, so a parent at this level or below is an \
+                         coarser level declares — a tiered layer's edges run from a coarser \
+                         level to a finer one, so a parent at this level or below is an \
                          edge running against the resolution"
                     )))
                 }
@@ -757,7 +757,7 @@ fn verify_hierarchies(
                 violations.push(ContainmentViolation {
                     layer: layer.clone(),
                     // The **child's** level, which is the one an operator needs to find it; for a
-                    // nested layer it is the parent's too, and for an administrative one it is not.
+                    // nested layer it is the parent's too, and for a tiered one it is not.
                     level: *child_level,
                     child: child_key.clone(),
                     parent: parent_key.clone(),
@@ -785,7 +785,7 @@ fn verify_hierarchies(
 /// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
 /// longer than that has revisited a node, whatever the shape of the loop.
 ///
-/// **Only a nested layer can hold one, and only its edges are walked.** An administrative layer's
+/// **Only a nested layer can hold one, and only its edges are walked.** A tiered layer's
 /// edges each step to a strictly coarser level, and the levels are finite and bounded below by
 /// zero, so a cycle is not expressible there.
 ///

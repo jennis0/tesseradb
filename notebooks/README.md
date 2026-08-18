@@ -50,9 +50,9 @@ system's subject rather than the clustering's:
 
 | Layer | Shape | A coarser view is | A budget |
 |---|---|---|---|
-| `clusters/kmeans` | flat | nothing — every cluster is a peer | inert |
-| `clusters/hdbscan` | a tree, edges within one level | an **ancestor**, and the cut climbs to it | trades depth for count |
-| `taxonomy/arxiv` | two levels, edges **between** them | **another level**, which the client picks | inert |
+| `clusters/kmeans` | `flat` | nothing — every cluster is a peer | inert |
+| `clusters/hdbscan` | `nested` — a tree, edges within one level | an **ancestor**, and the cut climbs to it | trades depth for count |
+| `taxonomy/arxiv` | `tiered` — two levels, edges **between** them | **another level**, which the client picks | inert |
 
 The two hierarchies differ in a way worth seeing on a 50 000-paper run. The clustering's splits
 lose members — **124 of its 131** keep points that none of their children hold, because HDBSCAN

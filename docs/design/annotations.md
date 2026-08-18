@@ -100,7 +100,7 @@ layers share nothing.
 | identity and name — what a registry lists | its artifact set |
 | the **gate**: whether a viewer may know this analysis exists | its ordinal space and reserved entity run |
 | lifecycle: create, drop, replace, tombstoned name | its representation and membership source |
-| hierarchy kind — flat, nested, stacked or administrative | its advisory zoom range |
+| hierarchy kind — flat, nested, stacked or tiered | its advisory zoom range |
 | the **own-terms flag** and **existence criterion** its artifacts use (§5) | its containment-verification result |
 | which slices it appears in | |
 | relations to other layers | |
