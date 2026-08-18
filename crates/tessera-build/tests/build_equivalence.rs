@@ -177,26 +177,32 @@ fn write_pairs(path: &Path) {
 /// items — and a keyed postings file that disagreed on code order or on which empty postings it
 /// dropped would still open and still answer, just not the same set.
 const ATTRIBUTED_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "archive"
+width      = "u8"
+value_set  = "closed"
+# `public` is only what a closed set can safely publish (§3.8), so this fixture covers both.
+visibility = "public"
+
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name       = "archive"
 type       = "category"
-width      = "u8"
 render     = true
 index      = true
-vocabulary = "declared"
-values_key = "archive"
-# `public` is only reachable with `declared` (§3.8), so this fixture covers both listings.
-listing    = "public"
+vocabulary = "archive"
 
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u16"
 render     = true
 index      = true
-vocabulary = "discovered"
-listing    = "per_viewer"
-values_key = "department"
+vocabulary = "department"
 
 [[attribute]]
 name     = "author_count"
@@ -231,7 +237,7 @@ const DEPARTMENT_VALUES: &[(&str, u32)] = &[
     ("sales", 1_559),
 ];
 
-/// A `values_key` seed file: `key`/`code`, no `label` (per-point-attributes §4.4).
+/// A bound vocabulary file: `key`/`code`, no `title` (configuration.md §1).
 fn write_values(path: &Path, values: &[(&str, u32)]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
@@ -259,18 +265,18 @@ fn write_values(path: &Path, values: &[(&str, u32)]) {
 /// **Both vocabularies are seeded with every key the data uses**, which is what keeps this
 /// fixture byte-reproducible: a seeded key returns its pinned code without touching the draw, so
 /// nothing here consumes entropy.
-fn attributed_schema(dir: &Path) -> tessera_build::schema::Schema {
+fn attributed_schema(dir: &Path) -> tessera_build::config::Schema {
     let archive = dir.join("archive-values.parquet");
     let department = dir.join("department-values.parquet");
     write_values(&archive, ARCHIVE_VALUES);
     write_values(&department, DEPARTMENT_VALUES);
-    let schema_path = dir.join("schema.toml");
+    let schema_path = dir.join("config.toml");
     std::fs::write(&schema_path, ATTRIBUTED_SCHEMA).unwrap();
     let values = HashMap::from([
         ("archive".to_string(), archive),
         ("department".to_string(), department),
     ]);
-    tessera_build::schema::Schema::parse(&schema_path, &values).expect("the fixture schema parses")
+    tessera_build::config::Config::parse(&schema_path, &values).expect("the fixture schema parses").schema
 }
 
 /// `write_points`'s geometry with `ATTRIBUTED_SCHEMA`'s six columns beside it.
@@ -356,7 +362,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -916,7 +922,7 @@ fn reference_build_at_scale() {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

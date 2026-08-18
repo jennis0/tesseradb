@@ -33,7 +33,7 @@ make the mechanism unaffordable at exactly the sizes it exists for.
 
 ## Materialisation — the shim, and why it exists
 
-The corpus reaches the build as files — points, pairs, `schema.toml` — written by the crate's own
+The corpus reaches the build as files — points, pairs, `config.toml` — written by the crate's own
 materialisers, and **the CLI carries no verb that writes them**: `tessera corpus` has `items` and
 `census` only, which answer expectations but cannot produce the build's inputs, and §12.1's
 "the corpus emits a batch and the driver posts it" names no route from Python to
@@ -67,7 +67,7 @@ from it.
   absence and decision 0064's wire half is deferred — so the expected side maps an absent render
   number to 0 on both the points tail and the drill-down. A category's absence is its reserved
   code 0 on the tail and an omitted field at drill-down, which the declaration's own key→code
-  table decides ([`Declaration`], parsed from the materialised `schema.toml` rather than restated
+  table decides ([`Declaration`], parsed from the materialised `config.toml` rather than restated
   here).
 - **The points tail is read positionally, not by name.** The tail's buffers are the render columns
   in manifest order, but the wire currently labels them with the first *k* names of the **full**
@@ -150,7 +150,7 @@ fn main() -> ExitCode {
     let corpus = tessera_corpus::Corpus::new(seed, n, extent).expect("corpus");
     corpus.write_points_parquet(&out.join("points.parquet")).expect("points");
     corpus.write_pairs_parquet(&out.join("pairs.parquet")).expect("pairs");
-    std::fs::write(out.join("schema.toml"), corpus.schema_toml()).expect("schema");
+    std::fs::write(out.join("config.toml"), corpus.config_toml()).expect("config");
     if hi > lo {
         let batch = corpus.ingest_batch(lo..hi);
         let file = std::fs::File::create(out.join("ingest.arrows")).expect("ingest file");
@@ -248,7 +248,7 @@ def materialise_corpus(
         ingest_hi=hi,
         points=out_dir / "points.parquet",
         pairs=out_dir / "pairs.parquet",
-        schema=out_dir / "schema.toml",
+        schema=out_dir / "config.toml",
         ingest=(out_dir / "ingest.arrows") if hi > lo else None,
     )
 
@@ -263,7 +263,7 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") 
             str(CLI_BIN), "build",
             "--points", str(files.points),
             "--pairs", str(files.pairs),
-            "--schema", str(files.schema),
+            "--config", str(files.schema),
             "--extent", GRID_EXTENT_ARG,
             "--view", view_id,
             "--out", str(bundle_root),
@@ -293,21 +293,26 @@ class ColumnDecl:
 
 @dataclass(frozen=True)
 class Declaration:
-    """The corpus's declared columns, read from the `schema.toml` the build compiled — so the
+    """The corpus's declared columns, read from the `config.toml` the build compiled — so the
     expected shapes below and the bundle's manifest share one source."""
 
     columns: tuple[ColumnDecl, ...]
 
     @classmethod
-    def load(cls, schema_path: Path) -> "Declaration":
-        raw = tomllib.loads(schema_path.read_text())
+    def load(cls, config_path: Path) -> "Declaration":
+        # A category's value table lives on the `[[vocabulary]]` block it names, not on the column
+        # — `width`, `value_set` and `visibility` belong to the code space rather than to any one
+        # attribute (configuration.md §1). The column is resolved through the reference here so the
+        # expected shapes go on reading one table per column.
+        raw = tomllib.loads(config_path.read_text())
+        vocabularies = {v["name"]: v for v in raw.get("vocabulary", ())}
         columns = tuple(
             ColumnDecl(
                 name=a["name"],
                 type=a["type"],
                 render=bool(a.get("render", False)),
                 index=bool(a.get("index", False)),
-                values=a.get("values"),
+                values=vocabularies.get(a.get("vocabulary", ""), {}).get("values"),
             )
             for a in raw["attribute"]
         )

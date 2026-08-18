@@ -39,7 +39,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::command::UnallocatedRow;
@@ -53,17 +53,21 @@ use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 /// lands somewhere legal. Different widths make a positional slip a type mismatch the readers
 /// refuse, and make the `columns.arrow` byte size a check in its own right.
 const SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+vocabulary = "band"
 
 [[attribute]]
 name     = "ingested_at"
@@ -141,7 +145,7 @@ fn write_points_with_attributes(path: &Path, n: u64) {
 fn parse_schema(tmp: &Path) -> Schema {
     let path = tmp.join("schema.toml");
     std::fs::write(&path, SCHEMA_TOML).unwrap();
-    Schema::parse(&path, &std::collections::HashMap::new()).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
 }
 
 /// Build a fixture bundle carrying the attribute tail.
@@ -161,7 +165,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -378,7 +382,7 @@ fn both_build_implementations_write_the_same_tail() {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -765,6 +769,16 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 /// fixtures cannot. The widths differ for the file-header reason: a positional slip is a type
 /// mismatch, never a plausible value.
 const NON_PREFIX_SCHEMA_TOML: &str = r#"
+[[vocabulary]]
+name       = "band"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  low = 1
+  mid = 2
+  high = 3
+
 [[attribute]]
 name  = "audit"
 type  = "i64"
@@ -773,14 +787,8 @@ index = true
 [[attribute]]
 name       = "band"
 type       = "category"
-width      = "u8"
 render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  low = 1
-  mid = 2
-  high = 3
+vocabulary = "band"
 
 [[attribute]]
 name   = "score"
@@ -851,7 +859,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -859,7 +867,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
+        schema: Config::parse(&schema_path, &std::collections::HashMap::new()).map(|c| c.schema)
             .expect("the non-prefix fixture schema parses"),
     };
     build(&args).expect("a build whose render set is not a declaration prefix succeeds");
@@ -1094,17 +1102,31 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
 /// blob. Two widths in the blob for the same reason the hot tail's fixture has three: a tag slip
 /// must be a type mismatch, not a plausible value.
 const RECORD_SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[vocabulary]]
+name       = "tier"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  bronze = 1
+  silver = 2
+  gold   = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+vocabulary = "band"
 
 [[attribute]]
 name = "note"
@@ -1117,17 +1139,11 @@ type = "i64"
 # **A `public` category with neither flag.** §4.2's entity-space floor belongs to a category's
 # *readers* — `/v1/categories` and the `per_viewer` gate — so this shape has no reader, no floor,
 # and no home but the blob. Declared last so the existing field tags do not move.
+
 [[attribute]]
 name       = "tier"
 type       = "category"
-width      = "u8"
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  bronze = 1
-  silver = 2
-  gold   = 3
-
+vocabulary = "tier"
 "#;
 
 fn note_of(source: u64) -> String {
@@ -1234,7 +1250,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -1242,7 +1258,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
+        schema: Config::parse(&schema_path, &std::collections::HashMap::new()).map(|c| c.schema)
             .expect("the record fixture schema parses"),
     };
     build(&args).expect("a build with blob-resident columns succeeds");

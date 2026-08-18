@@ -137,7 +137,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: FIXTURE_IDSET,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

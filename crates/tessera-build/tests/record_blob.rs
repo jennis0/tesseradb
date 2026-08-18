@@ -19,7 +19,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::{Attribute, Schema};
+use tessera_build::config::{Attribute, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{Access, RecordBlob, RecordValue};
 use tessera_spatial::tiler::ScalarType;
@@ -130,10 +130,11 @@ fn write_empty_pairs(path: &Path) {
 fn blob_schema() -> Schema {
     let neither = |name: &str, ty: ScalarType| Attribute {
         name: name.to_string(),
+        title: None,
         ty,
         analyser: None,
         vocabulary: None,
-        vocabulary_kind: None,
+        value_set: None,
         index: false,
         render: false,
     };
@@ -144,10 +145,11 @@ fn blob_schema() -> Schema {
             neither("count", ScalarType::I64),
             Attribute {
                 name: "flag".to_string(),
+                title: None,
                 ty: ScalarType::I64,
                 analyser: None,
                 vocabulary: None,
-                vocabulary_kind: None,
+                value_set: None,
                 index: false,
                 render: true,
             },
@@ -187,7 +189,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

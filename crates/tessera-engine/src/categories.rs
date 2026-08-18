@@ -68,7 +68,7 @@ use crate::Engine;
 #[derive(Debug, Clone)]
 pub struct CategoryColumn {
     /// The declared column name, which is also its identifier in `/v1/categories/{column}`.
-    /// Unique bundle-wide — `tessera_build::schema` refuses a duplicate — and restricted to a
+    /// Unique bundle-wide — `tessera_build::config` refuses a duplicate — and restricted to a
     /// path-safe character set for that reason.
     pub column: String,
     pub vocabulary: String,

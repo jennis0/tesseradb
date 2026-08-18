@@ -41,28 +41,24 @@ const N: u64 = 64;
 /// cuts a page: taking the page first and filtering it after would return two values and stop.
 /// `d00` is declared and carried by nothing at all — the empty-value case, offered to nobody.
 const SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "archive"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   astro = 11
   cond = 22
   hep = 33
   math = 44
   quant = 55
 
-[[attribute]]
+[[vocabulary]]
 name       = "department"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "per_viewer"
-  [attribute.values]
+value_set  = "closed"
+visibility = "derived"
+  [vocabulary.values]
   d00 = 100
   d01 = 101
   d02 = 102
@@ -74,6 +70,18 @@ listing    = "per_viewer"
   d08 = 108
   d09 = 109
   d10 = 110
+
+[[attribute]]
+name       = "archive"
+type       = "category"
+render     = true
+vocabulary = "archive"
+
+[[attribute]]
+name       = "department"
+type       = "category"
+render     = true
+vocabulary = "department"
 
 [[attribute]]
 name     = "score"
@@ -157,7 +165,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: FIXTURE_IDSET,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -165,7 +173,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: tessera_build::schema::Schema::parse(&schema_path, &Default::default()).unwrap(),
+        schema: tessera_build::config::Config::parse(&schema_path, &Default::default()).unwrap().schema,
     };
     build(&args).expect("fixture build should succeed");
 }

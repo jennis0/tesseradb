@@ -18,7 +18,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{Access, Codes, SortedDict, ValueColumn, DICT_FILE};
 use tessera_spatial::Bounds;
@@ -110,7 +110,7 @@ fn parse_schema(text: &str) -> Schema {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, text).unwrap();
-    Schema::parse(&path, &HashMap::new()).expect("schema parses")
+    Config::parse(&path, &HashMap::new()).expect("schema parses").schema
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
@@ -125,7 +125,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

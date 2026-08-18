@@ -17,7 +17,7 @@ use tessera_lifecycle::membership::IncomingVariation;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_spatial::morton::fixed32;
 use tessera_types::layer::{
-    ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::EntityId;
@@ -30,19 +30,17 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: None,
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: derived.iter().map(|d| (*d).to_string()).collect(),
+            computed: derived.iter().map(|d| (*d).to_string()).collect(),
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -331,7 +329,7 @@ fn a_layer_declaring_a_property_the_engine_does_not_compute_is_refused() {
     // The declaration itself refuses before any engine state is touched.
     assert!(matches!(
         declaration("clusters/a", &["hulls"]).validate(),
-        Err(DeclarationError::UnknownDerived(name)) if name == "hulls"
+        Err(DeclarationError::UnknownComputed(name)) if name == "hulls"
     ));
 }
 
@@ -340,8 +338,13 @@ fn a_layer_declaring_a_property_the_engine_does_not_compute_is_refused() {
 fn label_layer(name: &str, corpus_derived: bool) -> LayerDeclaration {
     let mut d = declaration(name, &[]);
     d.content.supplied = vec![tessera_types::layer::SuppliedContent {
-        kind: "label_text".into(),
-        corpus_derived,
+        name: "topic".into(),
+        ty: "text".into(),
+        require_member_visibility: if corpus_derived {
+            tessera_types::layer::SuppliedRequirement::All
+        } else {
+            tessera_types::layer::SuppliedRequirement::Inherited
+        },
     }];
     d
 }

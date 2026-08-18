@@ -19,13 +19,13 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+pub mod config;
 pub mod deep;
 pub mod error;
 pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
-pub mod schema;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
@@ -110,15 +110,15 @@ pub struct BuildArgs {
     /// realistically, per the owner ruling that made it a representative cost rather than a
     /// reduction target.
     pub mint_external_ids: bool,
-    /// `layers.toml`: annotation layers to register into this bundle's manifest, in registration
-    /// order (`layers`). Omit for a bundle with no layers, which is what every build wrote before
-    /// this input existed.
+    /// The config's `[[layer]]` blocks, compiled, in declaration order — which is registration
+    /// order, a layer having to follow every layer it names in `depends_on`. Empty for a bundle
+    /// with no layers, which is what every build wrote before this input existed.
     ///
-    /// **A build input on `schema`'s terms** — it compiles into the manifest, and the engine seeds
-    /// its registry from there before replaying a WAL record. What it is *not* is a second
+    /// **A build input on the schema's terms** — it compiles into the manifest, and the engine
+    /// seeds its registry from there before replaying a WAL record. What it is *not* is a second
     /// authority: the declarations run through the same registry and the same allocator the
     /// control plane uses, so both routes refuse the same declarations and place the same ids.
-    pub layers: Option<PathBuf>,
+    pub layers: Vec<tessera_types::layer::LayerDeclaration>,
     /// Parquet of one row per `(artifact, variation)`: `layer`, `stable_key`, and optionally
     /// `level`, `variation`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
     /// [`BuildArgs::layers`].
@@ -155,15 +155,16 @@ pub struct BuildArgs {
     /// alone); band boundaries never affect output bytes, only transient memory. `None`
     /// derives from the budget.
     pub band_rows: Option<u64>,
-    /// The compiled `schema.toml`: the per-item columns this build writes into `columns.arrow`'s
-    /// tail, in declared order (`--schema`, bound values via `--values`).
+    /// The config's entity-space half: the per-item columns this build writes into
+    /// `columns.arrow`'s tail, in declared order, and the vocabularies they draw on (`--config`,
+    /// bound value files via `--values`).
     ///
-    /// **Default-empty, and that case must stay byte-identical.** Every bundle built before
-    /// `--schema` existed declared no scalar, and an empty schema must go on producing exactly the
+    /// **Default-empty, and that case must stay byte-identical.** Every bundle built before a
+    /// config existed declared no scalar, and an empty schema must go on producing exactly the
     /// bytes it did — `tessera-cli`'s identity test asserts a byte-identical `columns.arrow`
     /// across rebuilds carrying one key, and a schema that widened the fixed table by default
     /// would break it for reasons unrelated to identity.
-    pub schema: crate::schema::Schema,
+    pub schema: crate::config::Schema,
 }
 
 /// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
@@ -240,9 +241,10 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     // resolvable. Refused rather than ignored: a build that quietly dropped the artifacts would
     // produce a bundle whose clusters are absent, which no viewer can tell from clusters that
     // failed their existence criterion.
-    if args.layers.is_none() && (args.artifacts.is_some() || args.artifact_members.is_some()) {
+    if args.layers.is_empty() && (args.artifacts.is_some() || args.artifact_members.is_some()) {
         return Err(BuildError::Invalid(
-            "--artifacts and --artifact-members name artifacts in layers, so they need --layers"
+            "--artifacts and --artifact-members name artifacts in layers, and the config declares \
+             no `[[layer]]` block for them to belong to"
                 .into(),
         ));
     }
@@ -515,7 +517,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // Its final state — carried past this block — is what `write_manifests` records into
     // `MANIFEST.vocabularies` below, so a rebuild and the serving path see exactly what this
     // build minted.
-    let mut minters = args.schema.discovered_minters();
+    let mut minters = args.schema.open_minters();
     if !args.schema.is_empty() {
         let position_of_source: HashMap<u64, usize> = staged
             .iter()
@@ -655,11 +657,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
     // named by source id resolves, and the row-less region can be allocated against a settled
     // point mark.
-    let published_layers = match &args.layers {
-        None => crate::layers::PublishedLayers::default(),
-        Some(path) => {
+    let published_layers = if args.layers.is_empty() {
+        crate::layers::PublishedLayers::default()
+    } else {
+        {
             let plan = crate::layers::read(
-                path,
+                &args.layers,
                 args.artifacts.as_deref(),
                 args.artifact_members.as_deref(),
             )?;
@@ -715,7 +718,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 /// a column's width — which would produce two bundles the byte-equality oracle calls different
 /// for a reason that is not the entity assignment it exists to check.
 fn scalar_schema_of(
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     // Render columns only — the segment's tail and `permute_attribute_tail`'s output must name the
     // same columns in the same order, or every row's values land under the wrong headings.
@@ -860,9 +863,10 @@ fn write_manifests(
         // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
         // — which are under a digest.
         //
-        // A **declared** vocabulary's values are exactly what the schema pinned (`v.codes`,
-        // unchanged). A **discovered** one's values come from `minters[&v.name]` instead — the
-        // schema's pinned seed *plus* every code this build minted for a key the seed lacked —
+        // A **closed** vocabulary's values are exactly what the config declared (`v.codes`,
+        // unchanged — pinned or assigned alike). An **open** one's values come from
+        // `minters[&v.name]` instead — the declaration's codes *plus* every code this build
+        // minted for a key the declaration lacked —
         // because `v.codes` alone would silently omit everything minted during the scan. Either
         // way the values are read back sorted by key ([`tessera_store::vocabulary::values_of`]),
         // so the bytes here do not depend on a `BTreeMap`'s or a minter's internal order.
@@ -876,7 +880,7 @@ fn write_manifests(
                         Some(minter) => tessera_store::vocabulary::values_of(minter)
                             .into_iter()
                             .map(|value| ManifestVocabularyValue {
-                                label: v.labels.get(&value.key).cloned(),
+                                label: v.titles.get(&value.key).cloned(),
                                 ..value
                             })
                             .collect(),
@@ -886,23 +890,24 @@ fn write_manifests(
                             .map(|(key, &code)| ManifestVocabularyValue {
                                 key: key.clone(),
                                 code,
-                                label: v.labels.get(key).cloned(),
+                                label: v.titles.get(key).cloned(),
                             })
                             .collect(),
                     };
                     ManifestVocabulary {
                         name: v.name.clone(),
-                        // The schema's kind, carried verbatim: it is what ingest consults to
-                        // decide whether a key nothing has bound is a typo or a new value.
-                        kind: match v.kind {
-                            crate::schema::VocabularyKind::Declared => {
+                        // The declaration's value set, carried verbatim: it is what ingest
+                        // consults to decide whether a key nothing has bound is a typo or a new
+                        // value. The manifest keeps its own two words for it.
+                        kind: match v.value_set {
+                            crate::config::ValueSet::Closed => {
                                 tessera_store::manifest::VocabularyKind::Declared
                             }
-                            crate::schema::VocabularyKind::Discovered => {
+                            crate::config::ValueSet::Open => {
                                 tessera_store::manifest::VocabularyKind::Discovered
                             }
                         },
-                        listing: v.listing,
+                        listing: v.visibility,
                         values,
                         reserved: v.reserved.clone(),
                     }
@@ -1476,7 +1481,7 @@ mod tests {
             identity_key_hex: KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
-            layers: None,
+            layers: Vec::new(),
             artifacts: None,
             artifact_members: None,
             mint_external_ids: true,

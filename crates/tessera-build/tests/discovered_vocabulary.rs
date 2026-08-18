@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, build_in_memory, BuildArgs};
 use tessera_spatial::Bounds;
 use tessera_store::{open_bundle, ScalarSlice};
@@ -114,7 +114,7 @@ fn parse_schema(text: &str, values: &HashMap<String, PathBuf>) -> Schema {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, text).unwrap();
-    Schema::parse(&path, values).expect("schema parses")
+    Config::parse(&path, values).expect("schema parses").schema
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
@@ -129,7 +129,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -228,13 +228,17 @@ fn department_key_of(
 }
 
 const DISCOVERED_NO_SEED: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "per_viewer"
+vocabulary = "department"
 "#;
 
 /// The refusal is gone, and a build over data with novel keys mints one code per distinct key,
@@ -361,14 +365,17 @@ fn a_values_key_seed_pins_codes_and_mints_only_the_rest() {
     write_empty_pairs(&pairs);
 
     let text = r#"
+[[vocabulary]]
+name       = "dept_seed"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "per_viewer"
-values_key = "dept_seed"
+vocabulary = "dept_seed"
 "#;
     let mut values = HashMap::new();
     values.insert("dept_seed".to_string(), seed_path);
@@ -418,16 +425,20 @@ fn a_declared_vocabulary_still_refuses_an_unknown_key() {
     write_empty_pairs(&pairs);
 
     let text = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "closed"
+visibility = "derived"
+  [vocabulary.values]
+  eng = 1
+  sales = 2
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u8"
 render = true
-vocabulary = "declared"
-listing = "per_viewer"
-  [attribute.values]
-  eng = 1
-  sales = 2
+vocabulary = "department"
 "#;
     let schema = parse_schema(text, &HashMap::new());
     let err = build(&args(&points, &pairs, out, schema)).expect_err("an unknown key must refuse");
@@ -453,13 +464,17 @@ fn exhaustion_at_build_is_a_typed_error_naming_column_and_width() {
     write_empty_pairs(&pairs);
 
     let text = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u8"
 render = true
-vocabulary = "discovered"
-listing = "per_viewer"
+vocabulary = "department"
 "#;
     let schema = parse_schema(text, &HashMap::new());
     let err = build(&args(&points, &pairs, out, schema)).expect_err("256 keys exhaust a u8 space");
@@ -477,7 +492,7 @@ listing = "per_viewer"
 
 /// **A retired code is never re-minted** (§3.4's `reserved`).
 ///
-/// `Schema::discovered_minters` seeds each minter's assigned set with the vocabulary's `reserved`
+/// `Schema::open_minters` seeds each minter's assigned set with the vocabulary's `reserved`
 /// list as well as its pinned values, and this is the only test that proves it: the minter's own
 /// unit tests in `tessera-store` exercise `seed_reserved` directly, so deleting the `reserved` loop
 /// from the *build's* seeding leaves every one of them green while every later build quietly
@@ -497,17 +512,20 @@ fn a_retired_code_is_never_minted_to_a_new_key() {
     let retired: Vec<String> = (2..=251u32).map(|c| c.to_string()).collect();
     let text = format!(
         r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "open"
+visibility = "derived"
+reserved   = [{}]
+  [vocabulary.values]
+  pinned = 1
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u8"
 render = true
-vocabulary = "discovered"
-listing = "per_viewer"
-
-[attribute.values]
-pinned = 1
-reserved = [{}]
+vocabulary = "department"
 "#,
         retired.join(", ")
     );
@@ -566,13 +584,17 @@ fn public_listing_with_a_discovered_vocabulary_builds() {
     write_empty_pairs(&pairs);
 
     let text = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "open"
+visibility = "public"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u8"
 render = true
-vocabulary = "discovered"
-listing = "public"
+vocabulary = "department"
 "#;
     let schema = parse_schema(text, &HashMap::new());
     build(&args(&points, &pairs, out, schema)).expect("public + discovered builds now");

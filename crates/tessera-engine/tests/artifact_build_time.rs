@@ -29,36 +29,43 @@ const LABELS: &str = "topics/x";
 const MEMBERS: std::ops::Range<u64> = 0..150;
 
 /// Two layers: an ungated clustering, and labels attached into it carrying corpus-derived text.
-const LAYERS_TOML: &str = r#"
+const CONFIG_TOML: &str = r#"
+[[view]]
+name             = "s0"
+point_visibility = { default = "public" }
+
 [[layer]]
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
 membership = "enumerated"
-ungated = true
-artifacts_carry_own = false
-visible_when = { min_visible = 2 }
-content = { derived = ["centroid"] }
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 2 }
+hierarchy = { kind = "flat" }
+content = { computed = ["centroid"] }
 
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
 membership = "enumerated"
-ungated = true
-artifacts_carry_own = false
-visible_when = "none"
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = "none"
+hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
 [[layer.content.supplied]]
-kind = "label_text"
-corpus_derived = true
+name = "topic"
+type = "text"
+require_member_visibility = "all"
 "#;
 
 fn write_artifacts(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("variation", DataType::UInt32, true),
         Field::new(
             "values",
@@ -94,7 +101,7 @@ fn write_artifacts(path: &Path) {
 fn write_members(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("variation", DataType::UInt32, true),
         Field::new("member", DataType::UInt64, false),
     ]));
@@ -145,12 +152,14 @@ fn fixture() -> Fixture {
     let root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
-    let layers = tmp.path().join("layers.toml");
+    let config_path = tmp.path().join("config.toml");
     let artifacts = tmp.path().join("artifacts.parquet");
     let members = tmp.path().join("members.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
-    std::fs::write(&layers, LAYERS_TOML).unwrap();
+    std::fs::write(&config_path, CONFIG_TOML).unwrap();
+    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the fixture config parses");
     write_artifacts(&artifacts);
     write_members(&members);
 
@@ -165,7 +174,7 @@ fn fixture() -> Fixture {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: Some(layers),
+        layers: config.layers,
         artifacts: Some(artifacts),
         artifact_members: Some(members),
         mint_external_ids: true,
@@ -338,11 +347,9 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
             title: "registered against the running node".into(),
             views: vec!["s0".into()],
             membership: tessera_types::layer::MembershipSource::Enumerated,
-            access: tessera_types::layer::LayerAccess {
-                label: None,
-                artifacts_carry_own: false,
-            },
-            visible_when: None,
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: None,
             hierarchy: tessera_types::layer::Hierarchy {
                 kind: tessera_types::layer::HierarchyKind::Flat,
                 prune_children: false,

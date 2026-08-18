@@ -92,7 +92,7 @@ class CategoryColumn:
     `values` maps entity id → value key, with absent entities simply missing (the fixture's
     generation function returned `None`; an absent value matches no predicate, which is the
     presence-bitmap rule arrived at from the definition side). `codes` is the fixture's own
-    `[attribute.values]` block — the declaration is the authority on codes, so resolving a code
+    `[vocabulary.values]` block — the declaration is the authority on codes, so resolving a code
     operand through it shares nothing with the bundle's stored column.
     """
 

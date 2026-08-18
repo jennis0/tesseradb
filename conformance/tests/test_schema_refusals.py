@@ -74,7 +74,7 @@ def corpus_dir(tmp_path_factory) -> Path:
 
 
 def _build(corpus_dir: Path, schema_text: str, out: Path):
-    schema_path = out.parent / f"{out.name}.schema.toml"
+    schema_path = out.parent / f"{out.name}.config.toml"
     schema_path.write_text(schema_text)
     return run_build(
         [
@@ -82,7 +82,7 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
             str(corpus_dir / "points.parquet"),
             "--pairs",
             str(corpus_dir / "pairs.parquet"),
-            "--schema",
+            "--config",
             str(schema_path),
             "--extent",
             EXTENT_ARG,

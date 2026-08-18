@@ -504,19 +504,17 @@ mod tests {
 
     fn layer_create(entity: u64, run_start: u64) -> WalRecord {
         use tessera_types::layer::{
-            EntityRun, Hierarchy, HierarchyKind, LayerAccess, MembershipSource, ReservedRuns,
+            EntityRun, Hierarchy, HierarchyKind, MembershipSource, ReservedRuns,
         };
         WalRecord::LayerCreate {
-            declaration: tessera_types::layer::LayerDeclaration {
+            declaration: Box::new(tessera_types::layer::LayerDeclaration {
                 name: format!("l{entity}"),
                 title: "l".into(),
                 views: Vec::new(),
                 membership: MembershipSource::Enumerated,
-                access: LayerAccess {
-                    label: None,
-                    artifacts_carry_own: false,
-                },
-                visible_when: None,
+                visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+                require_member_visibility: None,
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Flat,
                     prune_children: false,
@@ -524,7 +522,7 @@ mod tests {
                 content: Default::default(),
                 depends_on: Vec::new(),
                 levels: Vec::new(),
-            },
+            }),
             layer_entity: EntityId::new(entity),
             runs: vec![ReservedRuns::from_runs(vec![EntityRun {
                 start: run_start,

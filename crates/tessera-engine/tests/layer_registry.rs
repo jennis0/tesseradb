@@ -12,7 +12,7 @@ use common::*;
 use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ROWLESS_CEILING,
 };
 
@@ -22,19 +22,17 @@ fn declaration(name: &str, gate: Option<&str>) -> LayerDeclaration {
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: gate.map(str::to_string),
-            artifacts_carry_own: false,
-        },
-        visible_when: Some(ExistenceCriterion::MinVisible(50)),
+        visibility: gate.map(str::to_string),
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: Some(ExistenceCriterion::Count(50)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
             prune_children: true,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into(), "hull".into()],
+            computed: vec!["centroid".into(), "hull".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

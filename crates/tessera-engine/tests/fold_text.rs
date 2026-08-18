@@ -25,7 +25,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::schema::Schema;
+use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::Engine;
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
@@ -149,7 +149,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -157,7 +157,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &HashMap::new()).expect("the text schema parses"),
+        schema: Config::parse(&schema_path, &HashMap::new()).expect("the text schema parses").schema,
     })
     .expect("a bundle with an indexed text column builds");
 }

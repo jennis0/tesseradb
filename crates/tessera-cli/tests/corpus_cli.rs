@@ -173,9 +173,9 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
     let corpus = Corpus::new(1, 0, grid()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
-    std::fs::write(&path, corpus.schema_toml()).unwrap();
+    std::fs::write(&path, corpus.config_toml()).unwrap();
 
-    let schema = tessera_build::schema::Schema::parse(&path, &std::collections::HashMap::new())
+    let schema = tessera_build::config::Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema)
         .expect("the corpus schema must parse");
     let names: Vec<&str> = schema.attributes.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["fx_key", "weight", "seen_at", "bay", "tag", "blurb"]);

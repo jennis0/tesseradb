@@ -505,7 +505,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         }
 
         // 4. The artifact's own terms, if its layer says it carries them.
-        if self.declaration.access.artifacts_carry_own {
+        if self.declaration.artifact_visibility.carry_own() {
             match own_terms {
                 Some(term) if self.satisfied.contains(&term) => {}
                 _ => return ArtifactVerdict::Absent(Withheld::OwnTerms),
@@ -515,14 +515,14 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         // 5. The existence criterion, against the **live** masked count. The same number is
         //    returned to the caller, so the tested quantity and the served quantity cannot drift.
         let masked_count = self.rows.masked_count(ordinal, self.mask);
-        if let Some(criterion) = self.declaration.visible_when {
+        if let Some(criterion) = self.declaration.require_member_visibility {
             let clears = match criterion {
-                ExistenceCriterion::MinVisible(n) => masked_count >= n,
+                ExistenceCriterion::Count(n) => masked_count >= n,
                 // The declared, unmasked size is the denominator — a predicate input the build
                 // computes and the test consumes, with no field and no wire shape carrying it (C8).
                 // A zero denominator cannot clear a positive fraction, and saying so explicitly
                 // avoids a division nobody wants to reason about.
-                ExistenceCriterion::MinFraction(p) => {
+                ExistenceCriterion::Fraction(p) => {
                     let declared = self.declared_size(ordinal);
                     declared > 0 && (masked_count as f64) >= p * (declared as f64)
                 }
@@ -568,7 +568,7 @@ mod tests {
     use super::*;
     use tessera_lifecycle::wal::ChangeOp;
     use tessera_types::layer::{
-        ContentDeclaration, Hierarchy, HierarchyKind, LayerAccess, MembershipSource,
+        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, MembershipSource,
     };
 
     fn declaration(carry_own: bool, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
@@ -577,11 +577,13 @@ mod tests {
             title: "A".into(),
             views: vec!["s0".into()],
             membership: MembershipSource::Enumerated,
-            access: LayerAccess {
-                label: None,
-                artifacts_carry_own: carry_own,
+            visibility: None,
+            artifact_visibility: if carry_own {
+                ArtifactVisibility::carried("visibility")
+            } else {
+                ArtifactVisibility::inherited()
             },
-            visible_when: criterion,
+            require_member_visibility: criterion,
             hierarchy: Hierarchy {
                 kind: HierarchyKind::Flat,
                 prune_children: false,
@@ -704,7 +706,7 @@ mod tests {
     /// served with the *same* count that was tested.
     #[test]
     fn the_criterion_decides_existence_and_leaves_the_count_alone() {
-        let d = declaration(false, Some(ExistenceCriterion::MinVisible(5)));
+        let d = declaration(false, Some(ExistenceCriterion::Count(5)));
         let fx = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4, 5, 6]);
         assert_eq!(
             fx.view(&d, true).verdict(EntityId::new(999), 0, None),
@@ -728,7 +730,7 @@ mod tests {
     /// fifty protects a cluster of a hundred and does nothing for a cluster of ten thousand.
     #[test]
     fn the_proportional_criterion_scales_where_the_absolute_one_does_not() {
-        let d = declaration(false, Some(ExistenceCriterion::MinFraction(0.5)));
+        let d = declaration(false, Some(ExistenceCriterion::Fraction(0.5)));
 
         let small: Vec<u32> = (0..10).collect();
         let large: Vec<u32> = (0..1000).collect();
@@ -774,7 +776,7 @@ mod tests {
     /// declaring a layer *substitutive* switched the criterion off.
     #[test]
     fn the_own_terms_flag_does_not_disable_the_criterion() {
-        let d = declaration(true, Some(ExistenceCriterion::MinVisible(5)));
+        let d = declaration(true, Some(ExistenceCriterion::Count(5)));
         let mut fx = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4]);
         fx.satisfied.insert(TermId::new(7));
 

@@ -208,10 +208,10 @@ bundle_of() {
 # ------------------------------------------------------------------------------------ the builds
 
 build_scale() {
-  local scale="$1" bundle points schema
+  local scale="$1" bundle points config
   bundle="$(bundle_of "$scale")"
   points="$DATA/demo/points-$scale.parquet"
-  schema="$DATA/demo/schema-$scale.toml"
+  config="$DATA/demo/config-$scale.toml"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
   # `CURRENT` is written last, so its presence — not the directory's — is what says the build
@@ -228,7 +228,7 @@ build_scale() {
     rm -rf "$bundle"
   fi
 
-  for f in "$points" "$schema" "$DATA/demo/archive.parquet" \
+  for f in "$points" "$config" "$DATA/demo/archive.parquet" \
            "$DATA/demo/primary_category.parquet" \
            "$DATA/scaled/pairs/categories-subclass.pairs.parquet"; do
     [[ -f "$f" ]] || {
@@ -312,7 +312,7 @@ build_scale() {
   ./target/release/tessera build \
     --points "$points" \
     --pairs  "$DATA/scaled/pairs/categories-subclass.pairs.parquet" \
-    --schema "$schema" \
+    --config "$config" \
     --values "archive=$DATA/demo/archive.parquet" \
     --values "primary_category=$DATA/demo/primary_category.parquet" \
     --out "$bundle" --limit "$(items_of "$scale")" \

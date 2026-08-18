@@ -1249,18 +1249,19 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // `minters` seeds one live minter per discovered vocabulary from what the schema already
     // pins; the scan mints into it for every novel key, and its final state — carried past this
     // call — is what step 11 below records into `MANIFEST.vocabularies`.
-    let mut minters = args.schema.discovered_minters();
+    let mut minters = args.schema.open_minters();
     let attributes_by_entity =
         read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
 
     // Layers and their artifacts, resolved here for the reason the attribute tail is: this is
     // where the two structures that turn a source id into the entity this build assigned it are
     // both still alive. A member is named by source id, exactly as the pairs file's ids are.
-    let published_layers = match &args.layers {
-        None => crate::layers::PublishedLayers::default(),
-        Some(path) => {
+    let published_layers = if args.layers.is_empty() {
+        crate::layers::PublishedLayers::default()
+    } else {
+        {
             let plan = crate::layers::read(
-                path,
+                &args.layers,
                 args.artifacts.as_deref(),
                 args.artifact_members.as_deref(),
             )?;
@@ -1800,7 +1801,7 @@ fn read_attributes_by_entity(
 /// no longer adds a second copy of the column to it.
 pub(crate) fn write_filter_postings(
     partition_dir: &Path,
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
 ) -> Result<Vec<PathBuf>> {
     write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
@@ -1812,7 +1813,7 @@ use tessera_filter_write::POSTINGS_BAND_ROWS;
 
 fn write_filter_postings_banded(
     partition_dir: &Path,
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     band_rows: usize,
 ) -> Result<Vec<PathBuf>> {
@@ -1897,7 +1898,7 @@ fn write_filter_postings_banded(
 /// against the manifest without any name table in the artefact.
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
 ) -> Result<Vec<PathBuf>> {
     // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
@@ -1981,7 +1982,7 @@ pub(crate) fn write_record_blob(
 /// this column — the per-family absence rule `write_record_blob`'s doc states.
 fn record_value_of(
     value: &ScalarValue,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
 ) -> Result<Option<RecordValue>> {
     if attribute.vocabulary.is_some() {
         let code = category_code(value, &attribute.name)?;
@@ -2093,7 +2094,7 @@ fn write_column_values(
     column_dir: &Path,
     values_path: &Path,
     presence_path: &Path,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<WrittenColumn> {
     let mut present = croaring::Bitmap::new();
@@ -2216,7 +2217,7 @@ fn write_column_values(
 /// and has no upstream check, so the refusal is here, naming the column and the entity a build
 /// operator has to go and fix.
 fn keyword_values<'a>(
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &'a EntityColumn,
     present: &mut croaring::Bitmap,
     universal: &mut bool,
@@ -2269,7 +2270,7 @@ fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
 
 /// The kind of column a declared attribute stores — the type the writer is created with, before
 /// its first value arrives.
-fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
+fn column_kind(attribute: &crate::config::Attribute) -> ColumnKind {
     // A keyword's values file is an ordinal column, not a string one: the strings live once each
     // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
     // measured constants rather than at a string scan's (records §4.3).
@@ -2318,7 +2319,7 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
 fn push_numeric_chunks(
     writer: &mut ValueColumnWriter,
     values_path: &Path,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<()> {
     macro_rules! stream {
@@ -2409,7 +2410,7 @@ fn push_numeric_chunks(
 /// format rather than minting a second one is the whole reason this crate already depends on it.
 fn write_text_index(
     column_dir: &Path,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<Vec<PathBuf>> {
     // The identity was resolved at the schema parse; the name is its first component. Resolving it
@@ -2484,7 +2485,7 @@ fn write_text_index(
     Ok(vec![dict_path, postings_path])
 }
 
-fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::Attribute) -> bool {
+fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::Attribute) -> bool {
     if attribute.index {
         return true;
     }
@@ -2492,7 +2493,7 @@ fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::
         .vocabulary
         .as_ref()
         .and_then(|name| schema.vocabularies.get(name))
-        .is_some_and(|v| v.listing == crate::schema::Listing::PerViewer)
+        .is_some_and(|v| v.visibility == crate::config::Listing::PerViewer)
 }
 
 /// The vocabulary code a category column's value carries.
@@ -2519,7 +2520,7 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
 /// `residual_row` and `tessera_row` are built through, applied to the same arrays, so a row's
 /// geometry, identity and attributes cannot come from different items.
 fn permute_attribute_tail(
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: Vec<EntityColumn>,
     entity_row: &[u32],
 ) -> Result<AttributeTail> {
@@ -2973,21 +2974,23 @@ mod tests {
     /// refused the declaration — the caller declared a column and the corpus silently dropped it.
     #[test]
     fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
-        let category = crate::schema::Attribute {
+        let category = crate::config::Attribute {
             name: "department".to_string(),
+            title: None,
             ty: ScalarType::U16,
             analyser: None,
             vocabulary: Some("departments".to_string()),
-            vocabulary_kind: Some(crate::schema::VocabularyKind::Declared),
+            value_set: Some(crate::config::ValueSet::Closed),
             index: false,
             render: false,
         };
-        let note = crate::schema::Attribute {
+        let note = crate::config::Attribute {
             name: "note".to_string(),
+            title: None,
             ty: ScalarType::Keyword,
             analyser: None,
             vocabulary: None,
-            vocabulary_kind: None,
+            value_set: None,
             index: false,
             render: false,
         };
@@ -2997,12 +3000,14 @@ mod tests {
             let mut v = std::collections::HashMap::new();
             v.insert(
                 "departments".to_string(),
-                crate::schema::Vocabulary {
+                crate::config::Vocabulary {
                     name: "departments".to_string(),
-                    kind: crate::schema::VocabularyKind::Declared,
-                    listing,
+                    title: None,
+                    value_set: crate::config::ValueSet::Closed,
+                    visibility: listing,
+                    width: ScalarType::U16,
                     codes: Default::default(),
-                    labels: Default::default(),
+                    titles: Default::default(),
                     reserved: Vec::new(),
                 },
             );
@@ -3010,9 +3015,9 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = crate::schema::Schema {
+        let schema = crate::config::Schema {
             attributes: vec![category.clone(), note.clone()],
-            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
+            vocabularies: per_viewer(crate::config::Listing::PerViewer),
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
@@ -3046,9 +3051,9 @@ mod tests {
 
         // Alone, the `per_viewer` category leaves the stage with nothing to write at all.
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = crate::schema::Schema {
+        let schema = crate::config::Schema {
             attributes: vec![category.clone()],
-            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
+            vocabularies: per_viewer(crate::config::Listing::PerViewer),
         };
         let only_category =
             [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
@@ -3060,9 +3065,9 @@ mod tests {
         // But the same category under a `public` listing owes no value column and no postings, so
         // the blob is its only home and must take it.
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = crate::schema::Schema {
+        let schema = crate::config::Schema {
             attributes: vec![category],
-            vocabularies: per_viewer(crate::schema::Listing::Public),
+            vocabularies: per_viewer(crate::config::Listing::Public),
         };
         let only_category =
             [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")

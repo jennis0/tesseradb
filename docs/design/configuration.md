@@ -18,9 +18,19 @@ including the visibility semantics its §4 states; [`records-and-search.md`](rec
 artifact and member grains once it has read them. Where this and those differ on *semantics*, they
 govern; where they differ on *spelling*, this does.
 
-⊘ **Nothing in this document is built yet.** The parsers still read the two-file surface it
-replaces — `schema.toml` and `layers.toml` — and every key here is the target of a staged
-implementation, not a description of the running binary.
+⊘ **The declaration is built; acquisition is not.** `tessera build --config` reads one document and
+compiles the blocks below, with every refusal §6 states; `schema.toml`, `layers.toml`, `--schema`
+and `--layers` are gone. What is **not** built, and is refused at parse rather than accepted and
+ignored: `source`, `fields`, a layer's inline `artifacts`, an attribute's `field` and the `--file`
+binding that would give them meaning (§7) — a build still acquires through `--points`, `--pairs`,
+`--values NAME=PATH`, `--artifacts` and `--artifact-members`; the `[layer.members]` and
+`[layer.labels]` blocks, which are acquisition and expansion rather than declaration; a view's own
+`visibility`; and `withdraw_on_member_deletion = true` on a **layer** (not on its content), which
+needs a fold path. Each is a refusal naming what is absent, per
+[decision 0013](../decisions/0013-mark-specified-vs-implemented.md). ⊘ A `title` on a view, an
+attribute or a vocabulary is compiled and **not yet published** — the manifest carries no slot for
+one, and adding three is a contracts change; a level's title and a layer's are served today, as is
+each vocabulary *value*'s.
 
 ## 1. The surface in full
 
@@ -137,7 +147,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | Key | | Value |
 |---|---|---|
 | `name` | R | identity; tombstoned on drop |
-| `title` | O | human-readable |
+| `title` | R | human-readable; the metadata endpoint publishes it |
 | `views` | R | the views this layer's artifacts are drawn on |
 | `source` | R unless inline | one file per layer, so no discriminator field exists |
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row |
@@ -147,11 +157,11 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `visibility` | R | an access label, or `public` |
 | `artifact_visibility` | R | `{ field, default }`; `default` may be `inherited` |
 | `require_member_visibility` | R | `all` \| `any` \| `{ fraction = p }` \| `{ count = n }` \| `none` |
-| `withdraw_on_member_deletion` | D `false` | drop the **whole artifact** when one of its members is deleted, rather than letting its membership shrink |
+| `withdraw_on_member_deletion` | D `false` | drop the **whole artifact** when one of its members is deleted, rather than letting its membership shrink. ⊘ `true` is refused at parse: the fold has no artifact-withdrawal path (`annotation-write-cycle.md` §6.1) |
 | `depends_on` | O | layers this one's edges point into; must be declared before it |
 
-and four sub-blocks, each below: `[layer.members]` (O), `[layer.content]` (O),
-`[[layer.levels]]` (R for `stacked` and `tiered`, refused for `nested`) and `[layer.labels]` (O).
+and four sub-blocks, each below: ⊘ `[layer.members]` (O), `[layer.content]` (O),
+`[[layer.levels]]` (R for `stacked` and `tiered`, refused for `nested`) and ⊘ `[layer.labels]` (O).
 `[[layer.content.supplied]]` sits under `[layer.content]`, not under the layer.
 
 **`withdraw_on_member_deletion` exists at two levels, and their defaults differ.** On `[[layer]]`
@@ -377,7 +387,7 @@ compose as conjunction:
 
 ```toml
 visibility          = "ir:analyst"                              # the container itself
-artifact_visibility = { field = "visibility", default = "none" } # each member, and the fallback
+artifact_visibility = { field = "visibility", default = "inherited" }  # each member, and the fallback
 ```
 
 The presence of `field` is the declaration that members carry their own labels — what
@@ -411,11 +421,11 @@ title      = "Severity"
 width      = "u8"
 value_set  = "closed"                # or "open": may ingest mint a key nobody declared?
 visibility = "public"
+reserved   = [5]                     # retired codes, never reassigned
   [vocabulary.values]
   low = 1
   medium = 2
   high = 3
-  reserved = [5]
 
 [[attribute]]
 name       = "severity"
@@ -487,9 +497,6 @@ for drill-down to return.
 
 - `render` with `multi = true` — decision 0039's fence, checked first so a caller setting both
   hears the permanent refusal; and `multi = true` at all (⊘, `per-point-attributes.md` §3.7, records §5);
-- `index` on a **rendered** number or datetime (⊘ — decision 0064's render half): store-once would
-  serve that filter from the hot column, which stores an absent value as zero, so an item with no
-  value would match every range containing zero;
 - `render` on `keyword`: the hot column is served, so a rendered keyword would put either the
   value's bytes in every row at 0.93 GiB per byte per row per 10⁹, or an ordinal that is an index
   internal and never crosses the trust boundary (**I10**). `index = true` puts the string in entity
@@ -509,10 +516,16 @@ for drill-down to return.
   a label (§4). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
   in slots that admit no label.
 
+`index` on a **rendered** number or datetime is **admitted**, not refused: decision 0064's presence
+bitmap beside the hot column is what lets the row route tell an absence from a stored zero, and
+without it an item with no value would match every range containing zero
+(`per-point-attributes.md` §3.9, `filter-index.md` §2).
+
 `value_set = "open"` with `visibility = "public"` is **warned about, not refused** (`per-point-attributes.md` §3.8, owner
 ruling 2026-08-07). Every retired key — `listing`, `values_key`, `values_of`, `gate`, `ungated`,
-`artifacts_carry_own`, `corpus_derived`, `visible_when` — is refused by the parser's
-unknown-field rule rather than aliased: decision 0048's shape, replaced rather than carried.
+`artifacts_carry_own`, `corpus_derived`, `visible_when`, `on_member_deletion`, `derived`, `kind`
+and `width` on an attribute — is refused by the parser's unknown-field rule rather than aliased:
+decision 0048's shape, replaced rather than carried.
 
 ## 7. Sources, fields and the binding
 
@@ -570,6 +583,19 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-18 — the declaration half is built.** One parser reads one document
+(`tessera-build`'s `config` module); `schema.toml`, `layers.toml`, `--schema` and `--layers` are
+deleted. §1's table is a **test**: the parser's own accepted key set is read out of serde's
+unknown-field message and compared against the table block by block, so the assertion fails both
+when a key here disappears and when one this document does not name appears. Every refusal §6
+states exists and has a case, plus the three new ones — an attribute naming an undeclared
+vocabulary (at parse, before a data file opens), two vocabulary blocks of one name, and
+`value_set = "closed"` with no value source. Two corrections fell out of building it: §5 had
+`reserved` inside `[vocabulary.values]`, where a bare key array cannot carry it and where §1 does
+not put it, and §6 listed `index` on a rendered number as refused, which decision 0064's presence
+bitmap admitted and every other document already says. The acquisition half is unbuilt and refused
+rather than ignored — see the ⊘ note at the head.
 
 **2026-08-18 — the two halves are separated.** §2 is added: the surface splits into a declaration
 that is route-independent and an acquisition half that only a build reads, and a deployment writing

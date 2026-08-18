@@ -1537,19 +1537,20 @@ impl LiveState {
         lock_recover(&self.artifacts).retire(retired, &policy);
     }
 
-    /// Each layer's `on_member_deletion` declaration, resolved by name.
+    /// Each layer's `withdraw_on_member_deletion` declaration, resolved by name.
     ///
-    /// **A layer the registry cannot answer for gets the default**, which is `WithdrawContent` —
-    /// the strict one. The case is unreachable (a level exists because its layer was registered),
-    /// and the direction it fails in is the one to pick when it is not: withdrawing content nobody
-    /// asked to withdraw costs a republication, where shrinking a set nobody declared shrinkable
-    /// serves content generated from a deleted document.
-    fn deletion_policy(&self) -> impl Fn(&str) -> tessera_types::layer::OnMemberDeletion + '_ {
+    /// **A layer the registry cannot answer for gets `true`, spelled out rather than defaulted.**
+    /// `bool::default()` is `false` — the *widening* half, which shrinks the generating set and
+    /// goes on serving content generated from a deleted document — so `unwrap_or_default` here
+    /// would be a fail-open written as tidiness. The case is unreachable (a level exists because
+    /// its layer was registered), and the direction it fails in when it is not is the one that
+    /// costs a republication rather than a disclosure.
+    fn deletion_policy(&self) -> impl Fn(&str) -> bool + '_ {
         move |layer: &str| {
             lock_recover(&self.registry)
                 .get(layer)
-                .map(|registered| registered.declaration.content.on_member_deletion)
-                .unwrap_or_default()
+                .map(|registered| registered.declaration.content.withdraw_on_member_deletion)
+                .unwrap_or(true)
         }
     }
 

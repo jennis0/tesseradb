@@ -627,17 +627,26 @@ fn read_f32_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
     }
 }
 
-/// Read a vocabulary file: `(key, code)` plus an optional `label` (§4.4).
+/// Read a vocabulary file: `key`, an **optional** `code`, and an optional `title`.
 ///
 /// **Parquet, like every other build input**, so a 400-value published vocabulary is the same
 /// kind of artifact as the points and pairs files and needs no second reader.
 ///
-/// A `gate` column is **refused rather than ignored** (⊘, §3.8): an explicit gate label replaces
-/// membership-derivation for its value, which is an authorisation statement, and a build that
-/// silently dropped it would produce a bundle whose vocabulary is more visible than its author
-/// declared. There is no vocabulary-visibility evaluation yet to honour it, so refusing is the
-/// only answer that does not manufacture an assurance.
-pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schema::ValueSet> {
+/// **`code` may be absent, and its absence assigns rather than defaults** (`configuration.md` §1):
+/// a sourced value set is the same pair of choices an inline one is — where the values come from,
+/// and whether the codes are pinned. A caller who does not care which integer a value gets should
+/// not have to invent one. Absent for *some* rows and present for others is refused: which half
+/// the file meant would be decided by row order.
+///
+/// A `gate` column is **refused rather than ignored** (⊘, `per-point-attributes.md` §3.8): an
+/// explicit gate label replaces membership-derivation for its value, which is an authorisation
+/// statement, and a build that silently dropped it would produce a bundle whose vocabulary is more
+/// visible than its author declared. There is no vocabulary-visibility evaluation yet to honour
+/// it, so refusing is the only answer that does not manufacture an assurance.
+pub fn read_vocabulary_file(
+    path: &Path,
+    vocabulary: &str,
+) -> Result<crate::config::DeclaredValues> {
     use arrow::array::StringArray;
 
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -645,8 +654,8 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
     if schema.column_with_name("gate").is_some() {
-        return Err(crate::schema::schema_error(format!(
-            "attribute '{attribute}': the vocabulary at {} carries a `gate` column, which is \
+        return Err(crate::config::declaration_error(format!(
+            "vocabulary '{vocabulary}': the file at {} carries a `gate` column, which is \
              specified and not built (per-point-attributes §3.8). An explicit gate label replaces \
              membership-derivation for its value — an authorisation statement — and nothing \
              evaluates one yet. Refused rather than dropped: a dropped gate is a value more \
@@ -655,12 +664,12 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
         )));
     }
     let key_idx = column_index(path, &schema, "key")?;
-    let code_idx = column_index(path, &schema, "code")?;
-    let label_idx = schema.column_with_name("label").map(|(i, _)| i);
+    let code_idx = schema.column_with_name("code").map(|(i, _)| i);
+    let title_idx = schema.column_with_name("title").map(|(i, _)| i);
 
     let reader = builder.build().map_err(|e| BuildError::parquet(path, e))?;
 
-    let mut set = crate::schema::ValueSet::default();
+    let mut set = crate::config::DeclaredValues::default();
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let keys = batch
@@ -671,8 +680,11 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
                 path: path.to_path_buf(),
                 detail: "vocabulary column 'key' must be utf8".into(),
             })?;
-        let code_values = read_u64_column(path, &batch, code_idx, "code")?;
-        let label_values = match label_idx {
+        let code_values = match code_idx {
+            Some(idx) => Some(read_u64_column(path, &batch, idx, "code")?),
+            None => None,
+        };
+        let title_values = match title_idx {
             Some(idx) => Some(
                 batch
                     .column(idx)
@@ -680,38 +692,46 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| BuildError::Schema {
                         path: path.to_path_buf(),
-                        detail: "vocabulary column 'label' must be utf8".into(),
+                        detail: "vocabulary column 'title' must be utf8".into(),
                     })?
                     .clone(),
             ),
             None => None,
         };
-        for (row, raw) in code_values.iter().enumerate() {
+        for row in 0..batch.num_rows() {
             let key = keys.value(row).to_string();
-            let code = u32::try_from(*raw).map_err(|_| {
-                crate::schema::schema_error(format!(
-                    "attribute '{attribute}': value '{key}' has code {raw}, which is not a u32"
-                ))
-            })?;
             // A duplicate key here is a duplicate *code assignment*, which the caller's file
             // decides silently by row order unless it is refused. `check_codes` catches two keys
             // at one code; this catches one key at two.
-            if let Some(previous) = set.codes.insert(key.clone(), code) {
-                return Err(crate::schema::schema_error(format!(
-                    "attribute '{attribute}': the vocabulary at {} lists key '{key}' twice, at \
-                     codes {previous} and {code}. Which one every row carrying '{key}' would \
-                     mean is decided by row order, so it is refused",
+            if set.order.iter().any(|seen| seen == &key) {
+                return Err(crate::config::declaration_error(format!(
+                    "vocabulary '{vocabulary}': the file at {} lists key '{key}' twice. Which \
+                     code every row carrying '{key}' would mean is decided by row order, so it is \
+                     refused",
                     path.display()
                 )));
             }
-            if let Some(values) = &label_values {
-                set.labels.insert(key, values.value(row).to_string());
+            set.order.push(key.clone());
+            if let Some(codes) = &code_values {
+                let raw = codes[row];
+                let code = u32::try_from(raw).map_err(|_| {
+                    crate::config::declaration_error(format!(
+                        "vocabulary '{vocabulary}': value '{key}' has code {raw}, which is not a \
+                         u32"
+                    ))
+                })?;
+                set.codes.insert(key.clone(), code);
+            }
+            if let Some(values) = &title_values {
+                if !values.is_null(row) {
+                    set.titles.insert(key, values.value(row).to_string());
+                }
             }
         }
     }
-    // `reserved` has no file spelling: a tombstone belongs in the reviewed schema artifact rather
-    // than in a regenerable data file, on §3.4's argument that a re-sorted or regenerated
-    // vocabulary file must not be able to change what a stored code means.
+    // `reserved` has no file spelling: a tombstone belongs in the reviewed config rather than in a
+    // regenerable data file, on §3.4's argument that a re-sorted or regenerated vocabulary file
+    // must not be able to change what a stored code means.
     Ok(set)
 }
 
@@ -735,7 +755,7 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
 /// the distinct keys of one Arrow batch, mints any novel ones once each, and only then maps every
 /// row through the now-complete lookup — never once per row, which is both the performance point
 /// and the reason [`BatchColumn::value`] stays a pure positional lookup over already-resolved
-/// data. A row whose category column is null carries [`crate::schema::ABSENT_CODE`], for either
+/// data. A row whose category column is null carries [`crate::config::ABSENT_CODE`], for either
 /// kind.
 ///
 /// `minters` is threaded through rather than owned here so the caller can hand its final state —
@@ -743,7 +763,7 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
 /// writer once the whole scan (there is exactly one, per build) has completed.
 pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
     path: &Path,
-    schema_decl: &crate::schema::Schema,
+    schema_decl: &crate::config::Schema,
     minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
     mut visit: F,
@@ -879,7 +899,7 @@ impl BatchColumn {
     fn decode(
         path: &Path,
         column: &arrow::array::ArrayRef,
-        attribute: &crate::schema::Attribute,
+        attribute: &crate::config::Attribute,
         minters: &mut HashMap<String, VocabularyMinter>,
     ) -> Result<Self> {
         let nulls = column.nulls().cloned();
@@ -892,7 +912,7 @@ impl BatchColumn {
     fn decode_values(
         path: &Path,
         column: &arrow::array::ArrayRef,
-        attribute: &crate::schema::Attribute,
+        attribute: &crate::config::Attribute,
         minters: &mut HashMap<String, VocabularyMinter>,
     ) -> Result<BatchValues> {
         let mismatch = || BuildError::Schema {
@@ -934,11 +954,11 @@ impl BatchColumn {
                         column.data_type()
                     ),
                 })?;
-            return match attribute.vocabulary_kind {
-                Some(crate::schema::VocabularyKind::Discovered) => {
+            return match attribute.value_set {
+                Some(crate::config::ValueSet::Open) => {
                     let minter = minters.get_mut(vocabulary).unwrap_or_else(|| {
                         panic!(
-                            "'{vocabulary}' is discovered, so `Schema::discovered_minters` must \
+                            "'{vocabulary}' is discovered, so `Schema::open_minters` must \
                              have seeded it before this scan began"
                         )
                     });
@@ -1013,8 +1033,8 @@ impl BatchColumn {
     fn value(
         &self,
         row: usize,
-        attribute: &crate::schema::Attribute,
-        schema_decl: &crate::schema::Schema,
+        attribute: &crate::config::Attribute,
+        schema_decl: &crate::config::Schema,
     ) -> Result<ScalarValue> {
         // **Absence, for every family that has no in-band marker.** The two that do are handled in
         // their own arms below and never reach this: a category spends the reserved code 0, and
@@ -1044,7 +1064,7 @@ impl BatchColumn {
             }
             BatchValues::Keys(keys) => {
                 let code = if keys.is_null(row) {
-                    crate::schema::ABSENT_CODE
+                    crate::config::ABSENT_CODE
                 } else {
                     let key = keys.value(row);
                     let vocabulary = attribute
@@ -1054,7 +1074,7 @@ impl BatchColumn {
                     schema_decl.vocabularies[vocabulary]
                         .code_of(key)
                         .ok_or_else(|| {
-                            crate::schema::schema_error(format!(
+                            crate::config::declaration_error(format!(
                                 "attribute '{}': the points file carries value '{key}', which the \
                                  declared vocabulary does not list. Under \
                                  `vocabulary = \"declared\"` there is no auto-mint: a category \
@@ -1129,12 +1149,12 @@ fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
 /// one place every other variant's resolution is a pure index. Collecting first and minting the
 /// distinct set keeps the mutation entirely inside `decode`, before any row is read back.
 ///
-/// An empty key is refused, never minted as [`crate::schema::ABSENT_CODE`] — the same typo trap
+/// An empty key is refused, never minted as [`crate::config::ABSENT_CODE`] — the same typo trap
 /// [`VocabularyMinter::mint`] itself enforces for a declared vocabulary's row-time lookup.
 fn mint_batch(
     keys: &arrow::array::StringArray,
     minter: &mut VocabularyMinter,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
 ) -> Result<Vec<u32>> {
     use std::collections::BTreeSet;
 
@@ -1150,14 +1170,14 @@ fn mint_batch(
     }
     for key in novel {
         minter.mint(key).map_err(|e| {
-            crate::schema::schema_error(format!("attribute '{}': {e}", attribute.name))
+            crate::config::declaration_error(format!("attribute '{}': {e}", attribute.name))
         })?;
     }
 
     Ok((0..keys.len())
         .map(|i| {
             if keys.is_null(i) {
-                crate::schema::ABSENT_CODE
+                crate::config::ABSENT_CODE
             } else {
                 minter
                     .code_of(keys.value(i))
@@ -1213,9 +1233,9 @@ fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
 /// **The refusal is the point.** A `u8` category column whose data carries 300 is a build that
 /// would otherwise write 44 — a different value, in a column whose width cannot be changed
 /// without rewriting the corpus, with nothing downstream able to notice.
-fn narrow(value: i64, min: i64, max: i64, attribute: &crate::schema::Attribute) -> Result<i64> {
+fn narrow(value: i64, min: i64, max: i64, attribute: &crate::config::Attribute) -> Result<i64> {
     if value < min || value > max {
-        return Err(crate::schema::schema_error(format!(
+        return Err(crate::config::declaration_error(format!(
             "attribute '{}': the points file carries {value}, which does not fit its declared \
              '{}' ({min}..={max}). Refused rather than truncated — the width is baked into every \
              row and the remedy is a rebuild at a wider declaration (per-point-attributes §3.6)",

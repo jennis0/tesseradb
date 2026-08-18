@@ -25,7 +25,7 @@ use parquet::arrow::ArrowWriter;
 
 use common::*;
 use croaring::Bitmap;
-use tessera_build::schema::Schema;
+use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{
     candidate, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand, Scalar,
@@ -56,33 +56,41 @@ const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// vocabulary binds, that no posting holds, and that no principal may be offered until something
 /// carries it.
 const SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "department"
-type       = "category"
 width      = "u8"
-render     = true
-index      = true
-vocabulary = "declared"
-listing    = "per_viewer"
-  [attribute.values]
+value_set  = "closed"
+visibility = "derived"
+  [vocabulary.values]
   eng = 1
   sales = 2
   legal = 3
   ops = 4
 
-[[attribute]]
+[[vocabulary]]
 name       = "archive"
-type       = "category"
 width      = "u8"
-render     = true
-index      = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   xx = 11
   yy = 22
   zz = 33
   ww = 44
+
+[[attribute]]
+name       = "department"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "department"
+
+[[attribute]]
+name       = "archive"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "archive"
 
 [[attribute]]
 name     = "title"
@@ -261,7 +269,7 @@ fn fixture() -> Fixture {
 
     let schema_path = dir.path().join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = Schema::parse(&schema_path, &HashMap::new()).unwrap();
+    let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
 
     build(&BuildArgs {
         points: points.clone(),
@@ -274,7 +282,7 @@ fn fixture() -> Fixture {
         identity_key_hex: "000102030405060708090a0b0c0d0e0f".to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

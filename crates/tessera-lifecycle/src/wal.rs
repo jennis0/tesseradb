@@ -302,7 +302,13 @@ pub enum WalRecord {
     /// decide whether it is reachable and what may be served from it, so a registration that
     /// recorded only the name would come back from replay reachable by everyone.
     LayerCreate {
-        declaration: LayerDeclaration,
+        /// **Boxed, and the box is not tidiness.** A declaration carries two access labels, a
+        /// member default, a views list, a computed list and a level list, which makes it several
+        /// times the size of every other record's payload — and a `WalRecord` is sized by its
+        /// largest variant, so an unboxed one would widen every `IngestBatch` row buffer in the
+        /// commit window. Postcard is transparent through the box, so the record's bytes are
+        /// unchanged.
+        declaration: Box<LayerDeclaration>,
         /// The layer's own entity, so layer suppression rides `/control/changes` and the deny lane
         /// unchanged rather than needing a second mechanism.
         layer_entity: EntityId,
@@ -1721,34 +1727,29 @@ mod tests {
         // criterion and the own-terms flag are what decide who may see it and what may be served.
         use tessera_types::layer::{
             ContentDeclaration, EntityRun, ExistenceCriterion, Hierarchy, HierarchyKind,
-            LayerAccess, LevelDeclaration, MembershipSource, SuppliedContent,
+            LevelDeclaration, MembershipSource, SuppliedContent,
         };
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal");
 
         let create = WalRecord::LayerCreate {
-            declaration: LayerDeclaration {
+            declaration: Box::new(LayerDeclaration {
                 name: "boundaries/uk-2026".into(),
                 title: "UK administrative boundaries".into(),
                 views: vec!["geographic".into()],
                 membership: MembershipSource::Spatial,
-                access: LayerAccess {
-                    label: Some("public".into()),
-                    artifacts_carry_own: true,
-                },
-                visible_when: Some(ExistenceCriterion::MinVisible(25)),
+                visibility: Some("public".into()),
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::carried("visibility"),
+                require_member_visibility: Some(ExistenceCriterion::Count(25)),
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Stacked,
                     prune_children: true,
                 },
                 content: ContentDeclaration {
-                    derived: vec!["centroid".into()],
-                    supplied: vec![SuppliedContent {
-                        kind: "polygon".into(),
-                        corpus_derived: false,
-                    }],
-                    on_member_deletion: Default::default(),
+                    computed: vec!["centroid".into()],
+                    supplied: vec![SuppliedContent { name: "polygon".into(), ty: "polygon".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited }],
+                    withdraw_on_member_deletion: true,
                 },
                 depends_on: vec!["clusters/hdbscan-2026-08".into()],
                 levels: vec![
@@ -1763,7 +1764,7 @@ mod tests {
                         zoom: None,
                     },
                 ],
-            },
+            }),
             layer_entity: EntityId::new(4_294_901_759),
             runs: vec![
                 ReservedRuns::from_runs(vec![EntityRun {

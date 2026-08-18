@@ -37,7 +37,7 @@
 use croaring::Bitmap;
 use tessera_spatial::morton::unsplit32;
 use tessera_store::read::SegmentData;
-pub use tessera_types::layer::DerivedProperty;
+pub use tessera_types::layer::ComputedProperty;
 use tessera_types::MortonCode;
 
 /// What a viewer is told about an artifact's shape, beside its masked count.
@@ -112,7 +112,7 @@ impl<'a> RowLocator<'a> {
 /// the layer's parsed vocabulary; an empty one costs one branch and no position read, which is what
 /// keeps a count-only layer at count-only cost.
 pub fn compute(
-    declared: &[DerivedProperty],
+    declared: &[ComputedProperty],
     visible: &Bitmap,
     locator: &RowLocator<'_>,
 ) -> DerivedContent {
@@ -135,7 +135,7 @@ pub fn compute(
 
     for property in declared {
         match property {
-            DerivedProperty::Centroid => {
+            ComputedProperty::Centroid => {
                 // Summed as `f64` rather than `u64`: the grid is 2^32 wide, so a membership past
                 // ~2^32 members would overflow a `u64` sum, and the mean is fractional in any case.
                 let (mut sx, mut sy) = (0.0f64, 0.0f64);
@@ -146,7 +146,7 @@ pub fn compute(
                 let n = positions.len() as f64;
                 out.centroid = Some([sx / n, sy / n]);
             }
-            DerivedProperty::Box => {
+            ComputedProperty::Box => {
                 let mut b = [u32::MAX, u32::MAX, 0u32, 0u32];
                 for p in &positions {
                     b[0] = b[0].min(p[0]);
@@ -156,7 +156,7 @@ pub fn compute(
                 }
                 out.bbox = Some(b);
             }
-            DerivedProperty::Hull => out.hull = Some(convex_hull(&positions)),
+            ComputedProperty::Hull => out.hull = Some(convex_hull(&positions)),
         }
     }
     out

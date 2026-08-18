@@ -12,7 +12,7 @@ use common::*;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::{EntityId, TesseraId};
@@ -27,19 +27,17 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: criterion,
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -160,7 +158,7 @@ fn a_cluster_below_its_criterion_is_absent_for_one_principal_and_served_to_anoth
     let expected_narrow = visible_to_subset(sources.clone());
     // A bar the broad principal clears and the narrow one does not, chosen from the independently
     // computed intersection rather than from anything the engine said.
-    let criterion = ExistenceCriterion::MinVisible(expected_narrow + 1);
+    let criterion = ExistenceCriterion::Count(expected_narrow + 1);
     engine
         .register_layer(declaration("clusters/a", Some(criterion)))
         .unwrap();
@@ -271,7 +269,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     engine
         .register_layer(declaration(
             "clusters/a",
-            Some(ExistenceCriterion::MinVisible(expected_narrow + 1)),
+            Some(ExistenceCriterion::Count(expected_narrow + 1)),
         ))
         .unwrap();
     engine
@@ -476,7 +474,7 @@ fn a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay() {
     engine
         .register_layer(declaration(
             "clusters/compact",
-            Some(ExistenceCriterion::MinVisible(expected_narrow + 1)),
+            Some(ExistenceCriterion::Count(expected_narrow + 1)),
         ))
         .unwrap();
     engine

@@ -5,21 +5,29 @@
 //! section that carries it across a build, and the gate-filtered `/v1/meta` view all read this one
 //! type, so a field cannot mean one thing on disk and another on the wire.
 //!
-//! ## Two declarations decide whether a disclosure control runs at all
+//! ## Two axes, and only two
 //!
-//! [`LayerAccess::artifacts_carry_own`] and [`SuppliedContent::corpus_derived`] are the two fields
-//! the leak register watches (C27, C28). Both are **explicit and required**: neither has a default
-//! to fall through, because the failure in each case is silent. A corpus-derived clustering
-//! declared as carrying its own terms serves the existence and count of every cluster down to one
-//! member; corpus-derived content declared corpus-independent is served with no containment test at
-//! all, which is the disclosure the containment rule exists to prevent.
+//! Every question about who may see a layer or an artifact in it answers one of two
+//! ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)):
+//! [`LayerDeclaration::visibility`] asks which access label the viewer must hold, and
+//! [`LayerDeclaration::require_member_visibility`] asks how much of the object's own membership the
+//! viewer must already see. The second **requires** members to be visible and never *sets* their
+//! visibility — a container grants its members nothing, and the reverse reading inverts the
+//! direction the system exists to protect.
 //!
-//! **The absence of a rule is itself a declaration.** [`LayerDeclaration::visible_when`] being
-//! `None` says *this layer needs no existence criterion* — a claim a reviewer can check — rather
-//! than *nobody filled this in*. That is why it has no default and why a criterion is never
-//! inherited from a deployment-wide setting: a control that can be arrived at by accident from an
-//! unrelated choice is the shape that shipped a fail-open once already, in the three gate modes
-//! this replaced (decision 0079).
+//! [`ArtifactVisibility::field`] and [`SuppliedContent::require_member_visibility`] are the two the
+//! leak register watches (C27, C28). Both are **explicit and required**: neither has a default to
+//! fall through, because the failure in each case is silent. A corpus-derived clustering declared as
+//! carrying its own labels serves the existence and count of every cluster down to one member;
+//! corpus-derived content declared corpus-independent is served with no containment test at all,
+//! which is the disclosure the containment rule exists to prevent.
+//!
+//! **The absence of a rule is itself a declaration.** [`LayerDeclaration::require_member_visibility`]
+//! being `None` — the word `none` in the config — says *this layer needs no membership requirement*,
+//! a claim a reviewer can check, rather than *nobody filled this in*. That is why it has no default
+//! and why a criterion is never inherited from a deployment-wide setting: a control that can be
+//! arrived at by accident from an unrelated choice is the shape that shipped a fail-open once
+//! already, in the three gate modes this replaced (decision 0079).
 //!
 //! ## No `skip_serializing_if` on anything here, ever
 //!
@@ -62,45 +70,92 @@ pub enum MembershipSource {
     Attribute,
 }
 
-/// Whether an artifact's existence is gated on its own access label or on the visibility of its
-/// members. **The register watches this field** (C27).
+/// Where each artifact's own access label is, and what one carrying none gets.
+/// **The register watches this** (C27).
+///
+/// **The presence of [`ArtifactVisibility::field`] is the declaration that artifacts carry their
+/// own labels** — what the retired `artifacts_carry_own` said, spelled as the thing that makes it
+/// true rather than as a second flag beside it (decision 0088). A layer that names no field has
+/// artifacts whose existence is derived from their members' visibility, which is the
+/// membership-derivation rule points already obey.
+///
+/// **No default on either half.** Mis-declared as carrying its own labels, a corpus-derived layer
+/// serves the existence of every artifact to every principal who reaches it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LayerAccess {
-    /// The gate on the layer itself — whether a viewer may know this layer exists at all,
-    /// independent of any member. `None` is reachable by every principal.
+#[serde(deny_unknown_fields)]
+pub struct ArtifactVisibility {
+    /// The field each artifact's own access label is read from. `None` — no field, so no artifact
+    /// carries a label of its own.
     ///
-    /// Reachability is resolved once per session and keyed on the layer version, with a live
-    /// suppression check on the layer's own entity ahead of the cached resolution. A gate-failed
-    /// name and a never-registered name are indistinguishable in outcome **and in work**.
-    pub label: Option<String>,
-    /// `true` — each artifact carries its own access label, and that label gates it. A boundary
-    /// exists whether or not this viewer can see a document inside it.
-    ///
-    /// `false` — an artifact's existence is derived from its members' visibility, which is the
-    /// membership-derivation rule points already obey.
-    ///
-    /// **No default.** Mis-declared `true` on a corpus-derived layer, this serves the existence of
-    /// every artifact to every principal who reaches the layer.
-    pub artifacts_carry_own: bool,
+    /// ⊘ **Acquisition, and nothing reads it yet**: the build has no artifact-label column and the
+    /// control plane takes no label per artifact, so today only its *presence* is consulted
+    /// ([`ArtifactVisibility::carry_own`]). Naming a field therefore declares the shape without yet
+    /// filling it — which is fail-closed, an artifact with no label being withheld.
+    pub field: Option<String>,
+    /// What an artifact carrying no label of its own gets.
+    pub default: MemberDefault,
+}
+
+/// What a member carrying no label of its own gets — the fallback half of an
+/// [`ArtifactVisibility`] or of a view's point visibility.
+///
+/// **Filling never overrides**: a member carrying its own label keeps exactly that, and this lands
+/// only where the field is null or empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberDefault {
+    /// The container's own gate is the whole of it. Legal for artifacts and **not** for points: a
+    /// point carrying no terms is in no posting list and so in no principal's mask, and a gate
+    /// narrows rather than widens.
+    Inherited,
+    /// An access label, `public` included — `public` is a label rather than a reserved absence
+    /// (`per-point-attributes.md` §3.8).
+    Label(String),
+}
+
+impl ArtifactVisibility {
+    /// Whether artifacts on this layer carry access labels of their own — the field's presence,
+    /// which is the whole of what C27 watches.
+    pub fn carry_own(&self) -> bool {
+        self.field.is_some()
+    }
+
+    /// Artifacts carry no labels; the layer's own gate is the whole of it.
+    pub fn inherited() -> Self {
+        ArtifactVisibility {
+            field: None,
+            default: MemberDefault::Inherited,
+        }
+    }
+
+    /// Artifacts carry their own labels in `field`, and one carrying none inherits the layer's
+    /// gate.
+    pub fn carried(field: impl Into<String>) -> Self {
+        ArtifactVisibility {
+            field: Some(field.into()),
+            default: MemberDefault::Inherited,
+        }
+    }
 }
 
 /// The masked count an artifact must clear to be **served at all**.
 ///
 /// It never modifies a number: the count beside a served artifact is the masked count, unmodified.
 /// What it decides is whether the artifact exists for this viewer (decision 0075), and it is
-/// independent of [`LayerAccess::artifacts_carry_own`] — a layer may declare both, either or
-/// neither.
+/// independent of [`ArtifactVisibility`] — a layer may declare both, either or neither.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExistenceCriterion {
-    /// Serve iff the masked count is at least this many visible members.
+    /// Serve iff the masked count is at least this many visible members. The config spells it
+    /// `require_member_visibility = { count = n }`, and `"any"` is this at `n = 1`.
     ///
     /// **The form under which rollup is guaranteed.** A child's members are a subset of its
     /// parent's, so its masked count is never larger: a child that fails while its parent passes
     /// leaves the parent served, and nobody is left with a blank region.
-    MinVisible(u64),
+    Count(u64),
     /// Serve iff the masked count is at least this fraction of the artifact's **declared**
-    /// membership size. `0.0 < p <= 1.0`.
+    /// membership size. `0.0 < p <= 1.0`. The config spells it
+    /// `require_member_visibility = { fraction = p }`, and `"all"` is this at `p = 1.0`.
     ///
     /// **The form that scales** — a fixed bar of fifty protects a cluster of a hundred and does
     /// nothing for a cluster of ten thousand — and the form that ⊘ **breaks rollup**: a ratio does
@@ -111,7 +166,7 @@ pub enum ExistenceCriterion {
     /// ⊘ **It has no denominator for predicate membership** and is refused on such a layer until
     /// the owner rules: *"the points inside this shape"* declares no member set, and its size
     /// changes at every write.
-    MinFraction(f64),
+    Fraction(f64),
 }
 
 /// Where a layer's lineage lives.
@@ -169,43 +224,43 @@ pub struct Hierarchy {
     pub prune_children: bool,
 }
 
-/// What happens to an artifact's supplied content when one of the members it was generated from is
-/// deleted. Only **corpus-derived** supplied content is at stake; derived content is recomputed and
-/// corpus-independent content asserts nothing about the corpus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OnMemberDeletion {
-    /// **The default, and the safe one.** Containment is all-or-nothing, so a generating set that
-    /// loses a member fails for every principal for ever; the content and the set are dropped
-    /// together at the fold, and the caller regenerates. Where the exact membership *is* the object
-    /// — a curated set, a case file — this is the correct declaration.
-    #[default]
-    WithdrawContent,
-    /// The fold removes the deleted member from the generating set and the content goes on serving.
-    /// A caller's declaration, never a service behaviour (C7): a principal satisfying the survivors
-    /// may read content generated from the deleted item, which is a channel the caller chose for an
-    /// object whose membership is statistical.
-    ShrinkGeneratingSet,
-}
-
 /// One kind of content a caller supplies on this layer's artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuppliedContent {
-    /// What it is — `label_text`, `polygon`, `name`, `circle`. Published in `/v1/meta` so a client
-    /// knows what to draw; publishing the *kinds* is safe because an artifact failing containment is
+    /// Distinguishes two contents of one type on one layer — a curated boundary and a statistical
+    /// label may both be `polygon`.
+    pub name: String,
+    /// What it is — `text`, `polygon`, `extent`, `point`. Published in `/v1/meta` so a client knows
+    /// what to draw; publishing the *types* is safe because an artifact failing containment is
     /// absent whole, so no served artifact ever lacks a content its layer declares.
-    pub kind: String,
-    /// Whether this content was computed from corpus items. **The register watches this field**
-    /// (C28), and it has no default.
-    ///
-    /// `true` — the content asserts something about documents, so it is served only to a viewer who
-    /// can see everything it was generated from. Such content **must** arrive with a generating set;
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// How much of the generating set a viewer must already see. **The register watches this
+    /// field** (C28), and it has no default.
+    pub require_member_visibility: SuppliedRequirement,
+}
+
+/// The membership requirement one supplied content carries — the second axis, at the only two
+/// settings supplied content admits (`configuration.md` §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppliedRequirement {
+    /// The content asserts something about documents, so it is served only to a viewer who can see
+    /// **everything** it was generated from. Such content **must** arrive with a generating set;
     /// one that does not is refused.
-    ///
-    /// `false` — the content is true whether or not a single document exists, so containment is
-    /// vacuous and it serves unconditionally. Such content must **not** declare a generating set: a
-    /// set that is never tested is a claim the service would carry without meaning.
-    pub corpus_derived: bool,
+    All,
+    /// The content is true whether or not a single document exists, so containment is vacuous and
+    /// it serves on the container's own gate alone. Such content must **not** declare a generating
+    /// set: a set that is never tested is a claim the service would carry without meaning (C28).
+    Inherited,
+}
+
+impl SuppliedRequirement {
+    /// Whether this content was generated from corpus items, and so must clear containment.
+    pub fn is_corpus_derived(self) -> bool {
+        matches!(self, SuppliedRequirement::All)
+    }
 }
 
 /// One member of the closed vocabulary of properties the engine recomputes per viewer.
@@ -224,7 +279,7 @@ pub struct SuppliedContent {
 /// served without it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DerivedProperty {
+pub enum ComputedProperty {
     /// The mean position of the visible members.
     Centroid,
     /// The axis-aligned bounds of the visible members.
@@ -233,21 +288,21 @@ pub enum DerivedProperty {
     Hull,
 }
 
-impl DerivedProperty {
+impl ComputedProperty {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
-            "centroid" => Some(DerivedProperty::Centroid),
-            "box" => Some(DerivedProperty::Box),
-            "hull" => Some(DerivedProperty::Hull),
+            "centroid" => Some(ComputedProperty::Centroid),
+            "box" => Some(ComputedProperty::Box),
+            "hull" => Some(ComputedProperty::Hull),
             _ => None,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            DerivedProperty::Centroid => "centroid",
-            DerivedProperty::Box => "box",
-            DerivedProperty::Hull => "hull",
+            ComputedProperty::Centroid => "centroid",
+            ComputedProperty::Box => "box",
+            ComputedProperty::Hull => "hull",
         }
     }
 
@@ -256,17 +311,48 @@ impl DerivedProperty {
 }
 
 /// What a layer's artifacts carry.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentDeclaration {
     /// Properties recomputed per viewer from `membership ∩ M_auth` and nothing else — `centroid`,
-    /// `hull`, `box`, `extractive_terms`. Contained by construction, so they need no gate and pass
-    /// containment automatically. The masked count is intrinsic and is never declared here.
+    /// `hull`, `box`, `extractive_terms`. Contained by construction, so they take no visibility
+    /// declaration and pass containment automatically. The masked count is intrinsic and is never
+    /// declared here.
     #[serde(default)]
-    pub derived: Vec<String>,
+    pub computed: Vec<String>,
     #[serde(default)]
     pub supplied: Vec<SuppliedContent>,
-    #[serde(default)]
-    pub on_member_deletion: OnMemberDeletion,
+    /// Drop supplied content when one of its generating set is deleted, rather than shrinking the
+    /// set. **Defaulted `true`**, and that is the one direction a disclosure control may default
+    /// in: the widening half is the one that must be typed (C7).
+    ///
+    /// `true` — the content and its generating set are dropped together at the fold and the caller
+    /// regenerates. Right where the exact membership *is* the object: a curated set, a case file.
+    /// Containment being all-or-nothing, a set that loses a member would otherwise fail for every
+    /// principal for ever.
+    ///
+    /// `false` — the fold removes the deleted member and the content goes on serving. Right where
+    /// the membership is statistical, and it means a principal satisfying the survivors may read
+    /// content generated from the deleted item.
+    #[serde(default = "yes")]
+    pub withdraw_on_member_deletion: bool,
+}
+
+/// [`ContentDeclaration::withdraw_on_member_deletion`]'s default, which is **not** `bool::default`.
+/// Deriving `Default` on the struct would give it `false` — the widening half — so the derive is
+/// replaced by the impl below rather than left to be silently wrong.
+fn yes() -> bool {
+    true
+}
+
+impl Default for ContentDeclaration {
+    fn default() -> Self {
+        ContentDeclaration {
+            computed: Vec::new(),
+            supplied: Vec::new(),
+            withdraw_on_member_deletion: true,
+        }
+    }
 }
 
 /// One declared resolution. Present only on layers whose resolutions are semantic and balanced —
@@ -295,12 +381,30 @@ pub struct LayerDeclaration {
     /// Which views this layer appears in.
     pub views: Vec<String>,
     pub membership: MembershipSource,
-    pub access: LayerAccess,
+    /// The access label a viewer must hold to know this layer exists at all, independent of any
+    /// member. `None` is the config's `visibility = "public"` — reachable by every principal.
+    ///
+    /// Reachability is resolved once per session and keyed on the layer version, with a live
+    /// suppression check on the layer's own entity ahead of the cached resolution. A gate-failed
+    /// name and a never-registered name are indistinguishable in outcome **and in work**.
+    ///
+    /// ⊘ `public` is spelled as an absence here and is specified as a **term**, reserved at `0` and
+    /// satisfied inside the trust boundary (decision 0088). Until the dictionary carries it, the
+    /// absence is what makes the layer reachable — same outcome, and nothing evaluates a term for
+    /// it yet.
+    pub visibility: Option<String>,
+    pub artifact_visibility: ArtifactVisibility,
+    /// How much of an artifact's own membership a viewer must already see for it to exist for them.
     /// `None` declares *no such rule*, which is a statement rather than an omission.
-    pub visible_when: Option<ExistenceCriterion>,
+    pub require_member_visibility: Option<ExistenceCriterion>,
     pub hierarchy: Hierarchy,
     #[serde(default)]
     pub content: ContentDeclaration,
+    // ⊘ **`withdraw_on_member_deletion` on the *layer* is not a field here**, and its absence is
+    // the point (`annotation-write-cycle.md` §6.1, decision 0013). It would drop the whole
+    // artifact when one member is deleted, and the fold has no such path — so the declaration
+    // surface refuses `true` at parse rather than carrying a field the fold would silently ignore.
+    // The **content**-level key of the same name is real and lives on `ContentDeclaration`.
     /// The layers this one's edges point into. A layer named here needs stable keys, because an
     /// edge names its target and at publish time the caller has no `tessera_id` for it.
     #[serde(default)]
@@ -476,16 +580,16 @@ pub enum DeclarationError {
     ProportionalOnPredicate,
     /// A layer naming itself in `depends_on`.
     SelfDependency,
-    /// The same view, level title or supplied-content kind declared twice.
+    /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
-    /// A derived property outside [`DerivedProperty::VOCABULARY`].
+    /// A computed property outside [`ComputedProperty::VOCABULARY`].
     ///
     /// **Refused rather than ignored**, and that is a fail-closed choice rather than tidiness: a
     /// served artifact missing content its layer declared is indistinguishable, to a client, from
     /// one whose content was withheld — and nothing is ever withheld from a served artifact
     /// (decision 0076). Accepting an unknown name would put the client in the position of guessing
     /// which of the two it was looking at.
-    UnknownDerived(String),
+    UnknownComputed(String),
 }
 
 impl std::fmt::Display for DeclarationError {
@@ -512,24 +616,25 @@ impl std::fmt::Display for DeclarationError {
                  entity minus the level's base, so a gap reserves a run nothing addresses"
             ),
             DeclarationError::FractionOutOfRange(p) => {
-                write!(f, "min_fraction must be in (0, 1]; got {p}")
+                write!(f, "require_member_visibility fraction must be in (0, 1]; got {p}")
             }
             DeclarationError::ProportionalOnPredicate => write!(
                 f,
                 "a proportional criterion needs a declared membership size to divide by, and \
-                 predicate membership declares none; use min_visible or no criterion"
+                 predicate membership declares none; use `require_member_visibility = {{ count = n }}` \
+                 or `\"none\"`"
             ),
             DeclarationError::SelfDependency => {
                 write!(f, "a layer may not name itself in depends_on")
             }
             DeclarationError::Duplicate(what) => write!(f, "declared twice: {what}"),
-            DeclarationError::UnknownDerived(name) => write!(
+            DeclarationError::UnknownComputed(name) => write!(
                 f,
-                "'{name}' is not a derived property this service computes; the vocabulary is {} — \
+                "'{name}' is not a computed property this service computes; the vocabulary is {} — \
                  a name outside it is refused rather than ignored, because an artifact served \
                  without content its layer declared cannot be told apart from one whose content \
                  was withheld",
-                DerivedProperty::VOCABULARY.join(", ")
+                ComputedProperty::VOCABULARY.join(", ")
             ),
         }
     }
@@ -580,7 +685,7 @@ impl LayerDeclaration {
             return Err(DeclarationError::LevelsNotDense);
         }
 
-        if let Some(ExistenceCriterion::MinFraction(p)) = self.visible_when {
+        if let Some(ExistenceCriterion::Fraction(p)) = self.require_member_visibility {
             if !(p > 0.0 && p <= 1.0) {
                 return Err(DeclarationError::FractionOutOfRange(p));
             }
@@ -598,24 +703,24 @@ impl LayerDeclaration {
                 return Err(DeclarationError::Duplicate(format!("view {view}")));
             }
         }
-        let mut derived: BTreeSet<&str> = BTreeSet::new();
-        for name in &self.content.derived {
-            if DerivedProperty::parse(name).is_none() {
-                return Err(DeclarationError::UnknownDerived(name.clone()));
+        let mut computed: BTreeSet<&str> = BTreeSet::new();
+        for name in &self.content.computed {
+            if ComputedProperty::parse(name).is_none() {
+                return Err(DeclarationError::UnknownComputed(name.clone()));
             }
-            if !derived.insert(name.as_str()) {
+            if !computed.insert(name.as_str()) {
                 return Err(DeclarationError::Duplicate(format!(
-                    "derived property {name}"
+                    "computed property {name}"
                 )));
             }
         }
 
-        let mut kinds: BTreeSet<&str> = BTreeSet::new();
+        let mut names: BTreeSet<&str> = BTreeSet::new();
         for supplied in &self.content.supplied {
-            if !kinds.insert(supplied.kind.as_str()) {
+            if !names.insert(supplied.name.as_str()) {
                 return Err(DeclarationError::Duplicate(format!(
-                    "supplied content kind {}",
-                    supplied.kind
+                    "supplied content {}",
+                    supplied.name
                 )));
             }
         }
@@ -640,11 +745,9 @@ mod tests {
             title: "X".into(),
             views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
-            access: LayerAccess {
-                label: None,
-                artifacts_carry_own: false,
-            },
-            visible_when: None,
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::inherited(),
+            require_member_visibility: None,
             hierarchy: Hierarchy {
                 kind,
                 prune_children: false,
@@ -685,7 +788,7 @@ mod tests {
         // caller to throw one of them away.
         let mut d = decl(HierarchyKind::Stacked, vec![0, 1, 2]);
         d.membership = MembershipSource::Spatial;
-        d.access.artifacts_carry_own = true;
+        d.artifact_visibility = ArtifactVisibility::carried("visibility");
         assert!(d.validate().is_ok());
     }
 
@@ -712,42 +815,64 @@ mod tests {
         for source in [MembershipSource::Spatial, MembershipSource::Attribute] {
             let mut d = decl(HierarchyKind::Flat, vec![]);
             d.membership = source;
-            d.visible_when = Some(ExistenceCriterion::MinFraction(0.1));
+            d.require_member_visibility = Some(ExistenceCriterion::Fraction(0.1));
             assert_eq!(d.validate(), Err(DeclarationError::ProportionalOnPredicate));
 
             // The absolute form is fine on the same layer — the refusal is about the denominator,
             // not about predicates having no criterion.
-            d.visible_when = Some(ExistenceCriterion::MinVisible(50));
+            d.require_member_visibility = Some(ExistenceCriterion::Count(50));
             assert!(d.validate().is_ok());
         }
 
         let mut d = decl(HierarchyKind::Flat, vec![]);
-        d.visible_when = Some(ExistenceCriterion::MinFraction(1.5));
+        d.require_member_visibility = Some(ExistenceCriterion::Fraction(1.5));
         assert_eq!(d.validate(), Err(DeclarationError::FractionOutOfRange(1.5)));
-        d.visible_when = Some(ExistenceCriterion::MinFraction(0.0));
+        d.require_member_visibility = Some(ExistenceCriterion::Fraction(0.0));
         assert_eq!(d.validate(), Err(DeclarationError::FractionOutOfRange(0.0)));
-        d.visible_when = Some(ExistenceCriterion::MinFraction(1.0));
+        d.require_member_visibility = Some(ExistenceCriterion::Fraction(1.0));
         assert!(d.validate().is_ok());
     }
 
     #[test]
     fn the_two_register_watched_fields_have_no_default() {
-        // C27 and C28: `artifacts_carry_own` and `corpus_derived` decide whether a disclosure
-        // control runs at all, so a declaration omitting either must fail to parse rather than
-        // acquire a value nobody wrote. `deny_unknown_fields` plus the absence of `#[serde(default)]`
-        // is what enforces it, and this test is what stops someone adding a default later.
-        let missing_flag = serde_json::json!({
+        // C27 and C28: the artifact-label declaration and supplied content's membership
+        // requirement decide whether a disclosure control runs at all, so a declaration omitting
+        // either must fail to parse rather than acquire a value nobody wrote. `deny_unknown_fields`
+        // plus the absence of `#[serde(default)]` is what enforces it, and this test is what stops
+        // someone adding a default later.
+        let complete = serde_json::json!({
             "name": "l", "title": "L", "views": [], "membership": "enumerated",
-            "access": {},
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
             "hierarchy": { "kind": "flat" }
         });
-        assert!(serde_json::from_value::<LayerDeclaration>(missing_flag).is_err());
+        assert!(serde_json::from_value::<LayerDeclaration>(complete).is_ok());
+
+        let missing_artifact_visibility = serde_json::json!({
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat" }
+        });
+        assert!(serde_json::from_value::<LayerDeclaration>(missing_artifact_visibility).is_err());
+
+        let missing_member_default = serde_json::json!({
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat" }
+        });
+        assert!(serde_json::from_value::<LayerDeclaration>(missing_member_default).is_err());
 
         let missing_provenance = serde_json::json!({
             "name": "l", "title": "L", "views": [], "membership": "enumerated",
-            "access": { "artifacts_carry_own": false },
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
             "hierarchy": { "kind": "flat" },
-            "content": { "supplied": [{ "kind": "label_text" }] }
+            "content": { "supplied": [{ "name": "topic", "type": "text" }] }
         });
         assert!(serde_json::from_value::<LayerDeclaration>(missing_provenance).is_err());
     }
@@ -807,8 +932,8 @@ mod tests {
         // matters — a *positional* encoding, where absence cannot be signalled — using serde's own
         // tuple form via `serde_json` on a sequence.
         let mut d = decl(HierarchyKind::Flat, vec![]);
-        d.access.label = None;
-        d.visible_when = None;
+        d.visibility = None;
+        d.require_member_visibility = None;
         d.levels = vec![LevelDeclaration {
             level: 0,
             title: "only".into(),
@@ -820,11 +945,15 @@ mod tests {
         let object = json.as_object().expect("a struct serialises as an object");
         // Every `Option` in the whole shape, at each nesting level it appears.
         assert!(
-            object.contains_key("visible_when"),
-            "visible_when was omitted — a positional encoding cannot express that, so every field \
-             after it would decode from the wrong bytes"
+            object.contains_key("require_member_visibility"),
+            "require_member_visibility was omitted — a positional encoding cannot express that, so \
+             every field after it would decode from the wrong bytes"
         );
-        assert!(object["access"].as_object().unwrap().contains_key("label"));
+        assert!(object.contains_key("visibility"));
+        assert!(object["artifact_visibility"]
+            .as_object()
+            .unwrap()
+            .contains_key("field"));
         assert!(object["levels"][0]
             .as_object()
             .unwrap()

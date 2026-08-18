@@ -107,10 +107,10 @@ SEED = 20260731
 
 POINTS_NAME = "catalogue-points.parquet"
 PAIRS_NAME = "catalogue-pairs.parquet"
-SCHEMA_NAME = "catalogue-schema.toml"
+SCHEMA_NAME = "catalogue-config.toml"
 
 # The declaration that makes `fx_key` a served column (per-point-attributes §4.2). Written beside
-# the points parquet on the build path and bound with `--schema`.
+# the points parquet on the build path and bound with `--config`.
 #
 # **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
 # presentation, and declaring a category would need a value set enumerating every item — the
@@ -177,6 +177,40 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # block target (an oversized block of its own — records §3's "target, not a cap"), and entities
 # absent from both (absent from has-row entirely).
 SCHEMA_TOML = """\
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "closed"
+visibility = "derived"
+  [vocabulary.values]
+  alpha  = 1
+  beta   = 2
+  gamma  = 3
+  omega  = 4
+  solo   = 5
+  hollow = 6
+
+[[vocabulary]]
+name       = "archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  red   = 11
+  green = 22
+  blue  = 33
+  void  = 44
+
+[[vocabulary]]
+name       = "shelf"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  north = 51
+  south = 52
+  east  = 53
+
 [[attribute]]
 name     = "fx_key"
 type     = "u64"
@@ -185,30 +219,14 @@ render   = true
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u8"
 index      = true
-vocabulary = "declared"
-listing    = "per_viewer"
-  [attribute.values]
-  alpha  = 1
-  beta   = 2
-  gamma  = 3
-  omega  = 4
-  solo   = 5
-  hollow = 6
+vocabulary = "department"
 
 [[attribute]]
 name       = "archive"
 type       = "category"
-width      = "u8"
 index      = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  red   = 11
-  green = 22
-  blue  = 33
-  void  = 44
+vocabulary = "archive"
 
 [[attribute]]
 name     = "title"
@@ -218,14 +236,8 @@ index    = true
 [[attribute]]
 name       = "shelf"
 type       = "category"
-width      = "u8"
 render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  north = 51
-  south = 52
-  east  = 53
+vocabulary = "shelf"
 
 [[attribute]]
 name     = "submitter"
@@ -1082,7 +1094,7 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
         str(work_dir / POINTS_NAME),
         "--pairs",
         str(work_dir / PAIRS_NAME),
-        "--schema",
+        "--config",
         str(work_dir / SCHEMA_NAME),
         "--extent",
         EXTENT_ARG,

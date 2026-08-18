@@ -709,7 +709,7 @@ fn main() {
         "secondary_category".to_string(),
         a.data.join("secondary_category.parquet"),
     );
-    let schema = tessera_build::schema::Schema::parse(&a.data.join("schema.toml"), &values)
+    let schema = tessera_build::config::Schema::parse(&a.data.join("schema.toml"), &values)
         .expect("the schema parses");
 
     log("building");

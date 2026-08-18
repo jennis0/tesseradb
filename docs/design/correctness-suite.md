@@ -881,7 +881,7 @@ edge a well-meaning refactor adds.
 ## 14. Build order, and what blocks what
 
 **The prerequisite this document was written around has already landed.** `tessera build` gained
-`--schema` on 2026-08-07, the catalogue fixture declares `fx_key`, and the points batch serves it —
+a declaration surface on 2026-08-07, the catalogue fixture declares `fx_key`, and the points batch serves it —
 the strict xfail that pinned it was removed the same day, which is exactly what a strict marker is
 for. So the join from a served row back to its item **exists today**, and total verification is not
 blocked on anything. `conformance.md` §2 and §4.6 still describe it as planted-but-unserved; that is
@@ -1109,7 +1109,7 @@ them would have stopped a builder outright.
   two routes and **rules neither** — it is an owner decision, and build-order row 8 is marked as the
   one row that cannot start on a reading of this document.
 - **The prerequisite this document was built around had already landed**, a week before it was
-  written: `tessera build --schema` exists, the fixtures declare `fx_key`, the points batch serves
+  written: `tessera build --config` exists, the fixtures declare `fx_key`, the points batch serves
   it, and the strict xfail was removed on 2026-08-07 — behaving exactly as a strict marker should.
   Total verification is unblocked now, the planted column *is* `fx_key` rather than a second name
   for it, and `conformance.md` is stale about this as it was about the fold.

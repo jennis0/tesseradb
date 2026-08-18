@@ -37,7 +37,7 @@ use parquet::arrow::ArrowWriter;
 
 use common::*;
 use tessera_authz::{PostingRef, PostingsReader};
-use tessera_build::schema::Schema;
+use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::wal::ChangeOp;
@@ -78,18 +78,22 @@ const IDSET: u32 = 1;
 /// - `note` has neither key set and no vocabulary, so its only home is the record blob (records
 ///   §3).
 const SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-index      = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "band"
 
 [[attribute]]
 name   = "score"
@@ -105,12 +109,14 @@ index = true
 # Blob-resident: a type with neither placement key, so its only home is the record blob. The
 # type is `keyword` because `utf8` is retired as a declarable one — placement is orthogonal to
 # type, and a blob row stores the value's bytes whatever family declared it.
+
 [[attribute]]
 name = "note"
 type = "keyword"
 
 # The only family with **two** homes at once: its prose is a blob row and its words are a token
 # dictionary plus postings over it. Both have to be reached, and by different passes.
+
 [[attribute]]
 name     = "prose"
 type     = "text"
@@ -247,7 +253,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: IDSET,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -255,7 +261,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
+        schema: Config::parse(&schema_path, &std::collections::HashMap::new()).map(|c| c.schema)
             .expect("the every-home fixture schema parses"),
     };
     build(&args).expect("a build carrying all three homes succeeds");

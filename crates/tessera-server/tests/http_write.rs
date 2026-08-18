@@ -4408,7 +4408,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: FIXTURE_IDSET,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -4416,7 +4416,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: tessera_build::schema::Schema::parse(&schema_path, &Default::default()).unwrap(),
+        schema: tessera_build::config::Config::parse(&schema_path, &Default::default()).unwrap().schema,
     };
     build(&args).expect("the scalar-tail fixture build should succeed");
 }

@@ -3141,12 +3141,12 @@ impl Engine {
         // The same computation the viewport does, from the same composed mask — one route's
         // geometry differing from the other's would be two transcriptions of one rule, which is
         // exactly what the shared predicate above exists to prevent.
-        let declared_derived: Vec<crate::derived::DerivedProperty> = layer
+        let declared_derived: Vec<crate::derived::ComputedProperty> = layer
             .declaration
             .content
-            .derived
+            .computed
             .iter()
-            .filter_map(|name| crate::derived::DerivedProperty::parse(name))
+            .filter_map(|name| crate::derived::ComputedProperty::parse(name))
             .collect();
         let derived = if declared_derived.is_empty() {
             crate::derived::DerivedContent::default()
@@ -3387,12 +3387,12 @@ impl Engine {
             // Parsed once per layer. A name outside the vocabulary cannot reach here — the
             // declaration was refused at registration — so an unparseable one is dropped rather
             // than erroring the whole response.
-            let declared_derived: Vec<crate::derived::DerivedProperty> = layer
+            let declared_derived: Vec<crate::derived::ComputedProperty> = layer
                 .declaration
                 .content
-                .derived
+                .computed
                 .iter()
-                .filter_map(|name| crate::derived::DerivedProperty::parse(name))
+                .filter_map(|name| crate::derived::ComputedProperty::parse(name))
                 .collect();
 
             for (level, runs) in layer.runs.iter().enumerate() {

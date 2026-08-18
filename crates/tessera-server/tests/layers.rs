@@ -46,7 +46,7 @@ async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Val
     body["layers"].as_array().cloned().unwrap_or_default()
 }
 
-/// The minimum a declaration needs. `artifacts_carry_own` has no default, deliberately, so it is
+/// The minimum a declaration needs. `artifact_visibility` has no default, deliberately, so it is
 /// spelled out at every call — that field decides whether an artifact's existence derives from its
 /// members' visibility or from its own label, and a default would let a corpus-derived layer
 /// acquire the wrong one silently.
@@ -56,10 +56,11 @@ fn declaration(name: &str, gate: Option<&str>) -> serde_json::Value {
         "title": format!("{name} (title)"),
         "views": ["s0"],
         "membership": "enumerated",
-        "access": { "label": gate, "artifacts_carry_own": false },
-        "visible_when": { "min_visible": 50 },
+        "visibility": gate,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": { "count": 50 },
         "hierarchy": { "kind": "nested", "prune_children": true },
-        "content": { "derived": ["centroid", "hull"], "supplied": [], "on_member_deletion": "withdraw_content" },
+        "content": { "computed": ["centroid", "hull"], "supplied": [], "withdraw_on_member_deletion": true },
         "depends_on": [],
         "levels": []
     })
@@ -134,7 +135,7 @@ async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     assert_eq!(layer["title"], "clusters/a (title)");
     assert_eq!(layer["hierarchy"]["kind"], "nested");
     assert_eq!(layer["hierarchy"]["prune_children"], true);
-    assert_eq!(layer["derived_content"], json!(["centroid", "hull"]));
+    assert_eq!(layer["computed_content"], json!(["centroid", "hull"]));
     // A nested layer declares no levels: its lineage is its edges, and a level number would say
     // nothing about position in it.
     assert_eq!(layer["levels"], json!([]));
@@ -154,7 +155,7 @@ async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     // a term name on this document is what would make the unreachable case distinguishable from the
     // nonexistent one.
     assert!(
-        !object.contains_key("access") && !object.contains_key("gate"),
+        !object.contains_key("visibility") && !object.contains_key("gate"),
         "the gate label must not reach the wire: {layer}"
     );
 }
@@ -358,7 +359,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
 
     let mut spatial = declaration("regions/uk", None);
     spatial["membership"] = json!("spatial");
-    spatial["visible_when"] = json!({ "min_visible": 25 });
+    spatial["require_member_visibility"] = json!({ "count": 25 });
     assert_eq!(register(&server, spatial).await.0, 201);
 
     let (status, body) = publish(
@@ -419,7 +420,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let mut d = declaration("clusters/a", None);
-    d["visible_when"] = serde_json::Value::Null;
+    d["require_member_visibility"] = serde_json::Value::Null;
     assert_eq!(register(&server, d).await.0, 201);
 
     // 300 documents; the fixture gives term 1 to every third source id.
@@ -469,7 +470,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
     assert!(viewport_artifacts(&server, &["0"], json!({})).await.is_none());
 
     let mut d = declaration("clusters/a", None);
-    d["visible_when"] = serde_json::Value::Null;
+    d["require_member_visibility"] = serde_json::Value::Null;
     register(&server, d).await;
     publish(
         &server,
@@ -502,7 +503,7 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let mut d = declaration("clusters/a", None);
-    d["visible_when"] = serde_json::Value::Null;
+    d["require_member_visibility"] = serde_json::Value::Null;
     register(&server, d).await;
     publish(
         &server,
@@ -560,7 +561,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     // term rule rather than from anything the server said.
     let expected_narrow = (0..300u64).filter(|s| terms_of(*s).contains(&1)).count() as u64;
     let mut d = declaration("clusters/a", None);
-    d["visible_when"] = json!({ "min_visible": expected_narrow + 1 });
+    d["require_member_visibility"] = json!({ "count": expected_narrow + 1 });
     assert_eq!(register(&server, d).await.0, 201);
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, _) = publish(
@@ -649,7 +650,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let mut d = declaration("clusters/a", None);
-    d["visible_when"] = serde_json::Value::Null;
+    d["require_member_visibility"] = serde_json::Value::Null;
     assert_eq!(register(&server, d).await.0, 201);
 
     let members: Vec<String> = (0..300u64).map(member).collect();

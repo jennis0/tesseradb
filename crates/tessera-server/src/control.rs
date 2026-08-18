@@ -2013,7 +2013,7 @@ async fn publish_artifacts(
             }
         })
         .collect();
-    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.stable_key.clone()).collect();
+    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
 
     // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
     // and delaying one under ingest load is backpressure working.

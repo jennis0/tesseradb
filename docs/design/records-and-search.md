@@ -121,7 +121,8 @@ type   = "keyword"          # number widths | timestamp_us | category | keyword 
 index  = true               # build the family's search structure; default false
 render = false              # draws on the map; default false
 multi  = false              # more than one value per item; default false
-# category-only, unchanged: width, vocabulary, listing, values / values_key / values_of
+# category-only: `vocabulary`, naming a [[vocabulary]] block that carries the width, the
+# value set and the visibility (configuration.md §1)
 ```
 
 **`index` is the word deliberately borrowed.** It is what Elasticsearch, OpenSearch, SQLite FTS and

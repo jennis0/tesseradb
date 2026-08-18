@@ -80,7 +80,7 @@ fn ensure_bundle() -> PathBuf {
             identity_key_hex: TEST_KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
-            layers: None,
+            layers: Vec::new(),
             artifacts: None,
             artifact_members: None,
             mint_external_ids: true,

@@ -40,39 +40,33 @@ enum Command {
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
-        /// `schema.toml`: the per-item columns to carry alongside the point
-        /// (per-point-attributes §4.2, records §2). Each declares what it *is* and the placement
-        /// follows; `render = true` puts it in `columns.arrow`. Omit for a bundle with no
-        /// per-item columns, which is what every build wrote before this flag existed.
+        /// The configuration file: one TOML document declaring the corpus, its views, its
+        /// vocabularies, its attributes and its layers (configuration.md §1). Omit for a bundle
+        /// with no per-item columns and no layers, which is what every build wrote before this
+        /// flag existed.
         ///
-        /// **A build input, never server configuration** (§4.1). It compiles into MANIFEST.json
-        /// and the server reads the compiled form, so a server cannot be restarted against a
-        /// bundle whose columns disagree with a schema it holds.
+        /// **A build input, never server configuration** (configuration.md §3). It compiles into
+        /// MANIFEST.json and the server reads the compiled form, so a server cannot be restarted
+        /// against a bundle whose columns disagree with a schema it holds. It replaces `--schema`
+        /// and `--layers`, which were two documents describing one corpus.
         #[arg(long, value_name = "PATH")]
-        schema: Option<PathBuf>,
-        /// Bind a schema's `values_key` to a vocabulary file: `--values KEY=PATH`, repeatable.
-        /// The schema names a logical key and the command line binds it to a path, as
-        /// `--id-key-file` already does — so no environment-specific path appears in the schema.
-        #[arg(long, value_name = "KEY=PATH", value_parser = parse_values_binding)]
+        config: Option<PathBuf>,
+        /// Bind a closed vocabulary's values to a Parquet file, by the vocabulary's **name**:
+        /// `--values NAME=PATH`, repeatable. The config names a vocabulary and the command line
+        /// binds it to a path, as `--id-key-file` already does — so no environment-specific path
+        /// appears in the config.
+        #[arg(long, value_name = "NAME=PATH", value_parser = parse_values_binding)]
         values: Vec<(String, PathBuf)>,
-        /// `layers.toml`: annotation layers to register into this bundle, in registration order —
-        /// a layer must follow every layer it names in `depends_on`.
-        ///
-        /// **A build input on `--schema`'s terms**, not server configuration: it compiles into
-        /// MANIFEST.json, and a served bundle comes up with its layers already there. The
-        /// declarations are validated and their ids allocated by the same registry and allocator
-        /// `PUT /control/layers` uses, so both routes refuse the same declarations.
-        #[arg(long, value_name = "PATH")]
-        layers: Option<PathBuf>,
-        /// Parquet of one row per `(artifact, variation)`: `layer`, `stable_key`, and optionally
+        /// Parquet of one row per `(artifact, variation)`: `layer`, `key`, and optionally
         /// `level`, `variation`, `values` (a list of the layer's declared content kinds, in
-        /// declared order) and `attached_layer`/`attached_level`/`attached_key`. Needs `--layers`.
+        /// declared order) and `attached_layer`/`attached_level`/`attached_key`. Needs a config
+        /// declaring the layers it names.
         #[arg(long, value_name = "PATH")]
         artifacts: Option<PathBuf>,
-        /// Parquet of one row per `(artifact, member)`: `layer`, `stable_key`, `member` — a
-        /// **source** entity id, as the pairs file uses — and optionally `level` and `variation`,
-        /// where a null variation is the artifact's membership and `k` is variation *k*'s
-        /// generating set. Needs `--layers`.
+        /// Parquet of one row per `(artifact, member)`: `layer`, `key`, `member` — a **source**
+        /// entity id, as the pairs file uses — and optionally `level` and `variation`, where a
+        /// null variation is the artifact's membership and `k` is variation *k*'s generating set.
+        /// Needs a config declaring the layers it names.
         ///
         /// **Publishing at volume is a build job** for the same reason attaching a view is: the
         /// control plane's route is one fsync per batch with the log pinned until a manifest
@@ -629,13 +623,13 @@ fn resolve_identity(
 fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
     let (key, path) = raw.split_once('=').ok_or_else(|| {
         format!(
-            "--values expects KEY=PATH, got '{raw}' (no '=' — the key is the schema's \
-                 `values_key`, the path is the vocabulary file)"
+            "--values expects NAME=PATH, got '{raw}' (no '=' — the name is the \
+                 `[[vocabulary]]` block's, the path is the vocabulary file)"
         )
     })?;
     if key.is_empty() || path.is_empty() {
         return Err(format!(
-            "--values '{raw}': both the key and the path must be non-empty"
+            "--values '{raw}': both the name and the path must be non-empty"
         ));
     }
     Ok((key.to_string(), PathBuf::from(path)))
@@ -661,7 +655,7 @@ fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// they can see** — §3.3's membership-derived visibility, which is a property of the read path,
 /// not of how an author numbered their codes. A cardinality warning here would be mechanism that
 /// looks like access control and is not.
-fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) {
+fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) {
     let columns = schema.attributes.len();
     match schema.row_bits() {
         Some(per_row_bits) => {
@@ -882,9 +876,8 @@ fn main() -> ExitCode {
             extent,
             view_id,
             limit,
-            schema,
+            config,
             values,
-            layers,
             artifacts,
             artifact_members,
             mint_external_ids,
@@ -925,16 +918,16 @@ fn main() -> ExitCode {
                 );
             }
 
-            // Parsed and refused before any work, for the identity key's reason: a schema refusal
-            // is an operator's typo in a declaration, and discovering it after a multi-minute
-            // build has written a bundle prefix costs the whole build. Every rule in
-            // `tessera_build::schema` fires here, against no data at all.
-            let schema = match &schema {
+            // Parsed and refused before any work, for the identity key's reason: a declaration
+            // refusal is an operator's typo, and discovering it after a multi-minute build has
+            // written a bundle prefix costs the whole build. Every rule in
+            // `tessera_build::config` fires here, against no data at all.
+            let config = match &config {
                 Some(path) => {
                     let bindings: std::collections::HashMap<String, PathBuf> =
                         values.into_iter().collect();
-                    match tessera_build::schema::Schema::parse(path, &bindings) {
-                        Ok(schema) => schema,
+                    match tessera_build::config::Config::parse(path, &bindings) {
+                        Ok(config) => config,
                         Err(e) => {
                             eprintln!("build refused: {e}");
                             return ExitCode::FAILURE;
@@ -943,14 +936,15 @@ fn main() -> ExitCode {
                 }
                 None if !values.is_empty() => {
                     eprintln!(
-                        "build refused: --values was given without --schema. A binding names a \
-                         `values_key` that only a schema can declare, so there is nothing for it \
-                         to bind to"
+                        "build refused: --values was given without --config. A binding names a \
+                         `[[vocabulary]]` block that only a config can declare, so there is \
+                         nothing for it to bind to"
                     );
                     return ExitCode::FAILURE;
                 }
-                None => tessera_build::schema::Schema::default(),
+                None => tessera_build::config::Config::default(),
             };
+            let schema = config.schema;
             // §2.3: the cost is reported, never hidden — a hot column is baked into every row and
             // is unalterable without rewriting the corpus, so the operator sees the per-row and
             // total figures at the moment they can still change the declaration. Reported and
@@ -1018,7 +1012,7 @@ fn main() -> ExitCode {
                 memory_budget,
                 band_rows: None,
                 schema,
-                layers,
+                layers: config.layers,
                 artifacts,
                 artifact_members,
             };

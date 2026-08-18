@@ -14,7 +14,7 @@ use common::*;
 use tessera_engine::Engine;
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::EntityId;
@@ -25,19 +25,17 @@ fn declaration(name: &str) -> LayerDeclaration {
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: Some(ExistenceCriterion::MinVisible(2)),
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: Some(ExistenceCriterion::Count(2)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

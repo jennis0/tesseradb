@@ -17,7 +17,7 @@ use common::*;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::EntityId;
@@ -50,19 +50,17 @@ fn declaration(
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: criterion,
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
             prune_children,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -206,7 +204,7 @@ fn under_a_proportional_criterion_a_passing_child_sits_beneath_a_failing_parent(
     engine
         .register_layer(treed(
             "clusters/tree",
-            Some(ExistenceCriterion::MinFraction(bar)),
+            Some(ExistenceCriterion::Fraction(bar)),
         ))
         .unwrap();
     engine
@@ -227,7 +225,7 @@ fn under_a_proportional_criterion_a_passing_child_sits_beneath_a_failing_parent(
     engine
         .register_layer(treed(
             "clusters/alone",
-            Some(ExistenceCriterion::MinFraction(bar)),
+            Some(ExistenceCriterion::Fraction(bar)),
         ))
         .unwrap();
     engine
@@ -801,7 +799,7 @@ fn a_withheld_parent_is_named_no_differently_from_a_root() {
     let bar = (visible / parent_sources.len() as f64 + 1.0) / 2.0;
 
     let mut declaration = tiered("admin/boundaries", 2);
-    declaration.visible_when = Some(ExistenceCriterion::MinFraction(bar));
+    declaration.require_member_visibility = Some(ExistenceCriterion::Fraction(bar));
     engine.register_layer(declaration).unwrap();
     engine
         .publish_artifacts(

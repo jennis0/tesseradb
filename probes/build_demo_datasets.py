@@ -163,27 +163,36 @@ SCHEMA_HEAD = '''# The demo bundle's declaration — {scale}, {rows:,} items. Ge
 # derived postings so the same predicate is answered in entity space rather than by scanning the
 # request's rows. Declaring both is what lets decision 0068 route on cost.
 
+# `visibility = "public"`: arXiv's archive names are published taxonomy, so their existence
+# discloses nothing about this corpus's contents. It is safe here because the set is `closed` —
+# authored rather than inferred from whatever the corpus happens to hold.
+[[vocabulary]]
+name       = "archive"
+title      = "Archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+
+[[vocabulary]]
+name       = "primary_category"
+title      = "Primary category"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+
 [[attribute]]
 name       = "archive"
 type       = "category"
-width      = "u8"
 render     = true
 index      = true
-vocabulary = "declared"
-values_key = "archive"
-# `public`: arXiv's archive names are published taxonomy, so their existence discloses nothing
-# about this corpus's contents. `public` additionally requires `declared` (§3.8), which it is.
-listing    = "public"
+vocabulary = "archive"
 
 [[attribute]]
 name       = "primary_category"
 type       = "category"
-width      = "u16"
 render     = true
 index      = true
-vocabulary = "declared"
-values_key = "primary_category"
-listing    = "public"
+vocabulary = "primary_category"
 
 # `timestamp_us` rather than `i64`: the unit is then a fact the client reads off `/v1/meta` instead
 # of a convention it has to be told, which is what lets the viewer show a date picker and a date
@@ -286,7 +295,7 @@ def write_points(scale: str, total: int) -> None:
     assert kept == total, f"{scale}: expected {total:,} rows below the limit, found {kept:,}"
     log(f"{scale}: wrote {kept:,} rows, {out.stat().st_size / 1e9:.2f} GB")
 
-    (OUT / f"schema-{scale}.toml").write_text(
+    (OUT / f"config-{scale}.toml").write_text(
         SCHEMA_HEAD.format(scale=scale, rows=total)
         + (SCHEMA_TITLE if with_title else "")
         + (SCHEMA_ABSTRACT if with_abstract else "")

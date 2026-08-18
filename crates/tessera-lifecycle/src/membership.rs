@@ -30,25 +30,24 @@
 use std::collections::BTreeMap;
 
 use croaring::{Bitmap, Portable};
-use tessera_types::layer::OnMemberDeletion;
 use tessera_types::EntityId;
 
-/// Execute a layer's `on_member_deletion` declaration against one record, for the members this fold
-/// retired (`annotation-write-cycle.md` §3.2).
+/// Execute a layer's `withdraw_on_member_deletion` declaration against one record, for the members
+/// this fold retired (`annotation-write-cycle.md` §3.2).
 ///
 /// **An artifact left with no variations is not an artifact with no content** — it is one the
 /// serving path withholds, because its layer declares supplied content and it has none to serve.
 /// That is [decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)
 /// reached from the write side: the alternative is serving the identity and the count with the
 /// description missing, which is the in-between state the decision forbids.
-fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, policy: OnMemberDeletion) {
-    match policy {
-        OnMemberDeletion::WithdrawContent => {
+fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw: bool) {
+    match withdraw {
+        true => {
             record
                 .variations
                 .retain(|variation| variation.generated_from.and_cardinality(retired) == 0);
         }
-        OnMemberDeletion::ShrinkGeneratingSet => {
+        false => {
             for variation in &mut record.variations {
                 variation.generated_from.andnot_inplace(retired);
             }
@@ -70,7 +69,10 @@ pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 /// blinded identifier reaches durable state, where a key rotation would silently redirect it (I10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingArtifact {
-    pub stable_key: Option<String>,
+    /// The caller's own name for this artifact. **Effectively mandatory for a layer another
+    /// layer's edges point into**: an edge names its target, and at publish time the caller holds
+    /// no `tessera_id` for it.
+    pub key: Option<String>,
     pub members: Bitmap,
     /// The artifact's supplied content, as **ranked variations** — most specific first. Empty on a
     /// layer that declares no supplied content, which is every layer Stage 2 could publish.
@@ -86,10 +88,15 @@ pub struct IncomingArtifact {
     /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
     /// address for the target beyond the key they published it under.
     pub attached_to: Option<IncomingAttachment>,
-    /// The parent artifact in a hierarchical layer, named by stable key (stage 5).
+    /// The parent artifact in a hierarchical layer, named by the parent's own key.
+    ///
+    /// **The lineage is declared upward only, and the downward list is deliberately absent.** A
+    /// `children_keys` beside this was read, validated for cross-row agreement, and never walked:
+    /// every consumer — containment, coverage, cycle detection, the cut — derives children by
+    /// inverting the parent edges, because that is the direction an artifact can state without
+    /// knowing what will later point at it. Two spellings of one edge is one more place for them
+    /// to disagree.
     pub parent_key: Option<String>,
-    /// The child artifacts in a hierarchical layer, named by stable keys (stage 5).
-    pub children_keys: Vec<String>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -141,7 +148,7 @@ impl IncomingArtifact {
     /// `check-layers.sh` holds, and one worth holding: the request plane should be able to name a
     /// membership without being able to do arithmetic on one.
     pub fn from_entities(
-        stable_key: Option<String>,
+        key: Option<String>,
         members: impl IntoIterator<Item = EntityId>,
     ) -> Self {
         let mut bitmap = Bitmap::new();
@@ -150,34 +157,33 @@ impl IncomingArtifact {
             bitmap.add(entity.raw() as u32);
         }
         IncomingArtifact {
-            stable_key,
+            key,
             members: bitmap,
             variations: Vec::new(),
             attached_to: None,
             parent_key: None,
-            children_keys: Vec::new(),
         }
     }
 
     /// The same, attached to another layer's artifact — the shape a label layer publishes.
     pub fn attached(
-        stable_key: Option<String>,
+        key: Option<String>,
         members: impl IntoIterator<Item = EntityId>,
         variations: Vec<IncomingVariation>,
         attached_to: IncomingAttachment,
     ) -> Self {
-        let mut artifact = IncomingArtifact::with_content(stable_key, members, variations);
+        let mut artifact = IncomingArtifact::with_content(key, members, variations);
         artifact.attached_to = Some(attached_to);
         artifact
     }
 
     /// The same, carrying supplied content.
     pub fn with_content(
-        stable_key: Option<String>,
+        key: Option<String>,
         members: impl IntoIterator<Item = EntityId>,
         variations: Vec<IncomingVariation>,
     ) -> Self {
-        let mut artifact = IncomingArtifact::from_entities(stable_key, members);
+        let mut artifact = IncomingArtifact::from_entities(key, members);
         artifact.variations = variations;
         artifact
     }
@@ -678,7 +684,7 @@ impl ArtifactStore {
     pub fn repack_all(
         &self,
         retired: &Bitmap,
-        policy: &dyn Fn(&str) -> OnMemberDeletion,
+        policy: &dyn Fn(&str) -> bool,
     ) -> Vec<PendingExtent> {
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -729,7 +735,7 @@ impl ArtifactStore {
     /// **A retired artifact's slot becomes a hole rather than disappearing**, and its stable key
     /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
     /// republication onto the identity of the artifact this fold just removed.
-    pub fn retire(&mut self, retired: &Bitmap, policy: &dyn Fn(&str) -> OnMemberDeletion) {
+    pub fn retire(&mut self, retired: &Bitmap, policy: &dyn Fn(&str) -> bool) {
         if retired.is_empty() {
             return;
         }

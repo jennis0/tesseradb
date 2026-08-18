@@ -17,7 +17,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::{Attribute, Schema};
+use tessera_build::config::{Attribute, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{Access, RecordBlob, RecordValue, SortedDict};
 use tessera_spatial::tiler::ScalarType;
@@ -94,10 +94,11 @@ fn text_schema(index: bool) -> Schema {
     Schema {
         attributes: vec![Attribute {
             name: "abstract".to_string(),
+            title: None,
             ty: ScalarType::Text,
             analyser: Some("unicode/icu4x-2.2/p1".to_string()),
             vocabulary: None,
-            vocabulary_kind: None,
+            value_set: None,
             index,
             render: false,
         }],
@@ -128,7 +129,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

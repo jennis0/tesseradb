@@ -23,7 +23,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{AcceptError, Engine, EngineConfig};
 use tessera_lifecycle::command::UnallocatedRow;
@@ -33,13 +33,17 @@ use tessera_types::EntityId;
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u16"
 render     = true
-vocabulary = "discovered"
-listing    = "per_viewer"
+vocabulary = "department"
 "#;
 
 /// A `u8` discovered `department` vocabulary with 250 of its 255 usable codes retired at build,
@@ -50,16 +54,18 @@ fn discovered_sparse_schema_toml() -> String {
     let retired: Vec<String> = (1..=250u32).map(|c| c.to_string()).collect();
     format!(
         r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "open"
+visibility = "derived"
+reserved   = [{}]
+
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u8"
 render     = true
-vocabulary = "discovered"
-listing    = "per_viewer"
-
-[attribute.values]
-reserved = [{}]
+vocabulary = "department"
 "#,
         retired.join(", ")
     )
@@ -68,23 +74,27 @@ reserved = [{}]
 /// A **declared** `band` vocabulary — the closed-vocabulary sibling, for the case that pins the
 /// executor's mint loop leaves an already-coded column untouched.
 const DECLARED_BAND: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+vocabulary = "band"
 "#;
 
 fn parse_schema(tmp: &Path, text: &str) -> Schema {
-    let path = tmp.join("schema.toml");
+    let path = tmp.join("config.toml");
     std::fs::write(&path, text).unwrap();
-    Schema::parse(&path, &std::collections::HashMap::new()).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
 }
 
 /// `points.parquet` with `entity_id`, `x`, `y`, and a `category` utf8 column always null — every
@@ -127,7 +137,7 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,

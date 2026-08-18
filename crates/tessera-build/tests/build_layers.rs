@@ -80,6 +80,14 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
+/// The coordinate system every fixture layer here is drawn on. Held apart from the layer blocks
+/// so a test can reorder or rewrite those without disturbing the view they all name.
+const VIEW_TOML: &str = r#"
+[[view]]
+name             = "s0"
+point_visibility = { default = "public" }
+"#;
+
 /// A clustering, and a label layer attached into it — the shape the whole feature exists for.
 const LAYERS_TOML: &str = r#"
 [[layer]]
@@ -87,26 +95,27 @@ name = "clusters/a"
 title = "clusters"
 views = ["s0"]
 membership = "enumerated"
-gate = "0"
-artifacts_carry_own = false
-visible_when = { min_visible = 2 }
+visibility = "0"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 2 }
 hierarchy = { kind = "flat", prune_children = false }
-content = { derived = ["centroid"] }
+content = { computed = ["centroid"] }
 
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
 membership = "enumerated"
-ungated = true
-artifacts_carry_own = false
-visible_when = "none"
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = "none"
 hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
 [[layer.content.supplied]]
-kind = "label_text"
-corpus_derived = true
+name = "topic"
+type = "text"
+require_member_visibility = "all"
 "#;
 
 /// One row per `(artifact, variation)`: two clusters with no content, and one label carrying two
@@ -120,7 +129,7 @@ fn write_artifacts(path: &Path) {
 fn write_artifacts_named(path: &Path, labels: &str) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("variation", DataType::UInt32, true),
         Field::new(
             "values",
@@ -130,11 +139,6 @@ fn write_artifacts_named(path: &Path, labels: &str) {
         Field::new("attached_layer", DataType::Utf8, true),
         Field::new("attached_key", DataType::Utf8, true),
         Field::new("parent_key", DataType::Utf8, true),
-        Field::new(
-            "children_keys",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ),
     ]));
     let layers = StringArray::from(vec!["clusters/a", "clusters/a", labels, labels]);
     let keys = StringArray::from(vec!["c-0000", "c-0001", "l-0000", "l-0000"]);
@@ -149,11 +153,6 @@ fn write_artifacts_named(path: &Path, labels: &str) {
     let attached_layer = StringArray::from(vec![None, None, Some("clusters/a"), Some("clusters/a")]);
     let attached_key = StringArray::from(vec![None, None, Some("c-0000"), Some("c-0000")]);
     let parent_key: StringArray = vec![None::<&str>, None, None, None].into();
-    let mut children_keys = ListBuilder::new(StringBuilder::new());
-    children_keys.append(false);
-    children_keys.append(false);
-    children_keys.append(false);
-    children_keys.append(false);
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -165,7 +164,6 @@ fn write_artifacts_named(path: &Path, labels: &str) {
             Arc::new(attached_layer),
             Arc::new(attached_key),
             Arc::new(parent_key),
-            Arc::new(children_keys.finish()),
         ],
     )
     .unwrap();
@@ -187,7 +185,7 @@ fn write_members_named(path: &Path, labels: &str) {
 fn write_members_of(path: &Path, members_of_first_cluster: &[u64], labels: &str) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("variation", DataType::UInt32, true),
         Field::new("member", DataType::UInt64, false),
     ]));
@@ -233,7 +231,7 @@ struct Inputs {
     _tmp: tempfile::TempDir,
     points: PathBuf,
     pairs: PathBuf,
-    layers: PathBuf,
+    config: PathBuf,
     artifacts: PathBuf,
     members: PathBuf,
     dir: PathBuf,
@@ -244,19 +242,19 @@ fn inputs() -> Inputs {
     let dir = tmp.path().to_path_buf();
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
-    let layers = dir.join("layers.toml");
+    let config = dir.join("config.toml");
     let artifacts = dir.join("artifacts.parquet");
     let members = dir.join("members.parquet");
     write_points(&points);
     write_pairs(&pairs);
-    std::fs::write(&layers, LAYERS_TOML).unwrap();
+    std::fs::write(&config, format!("{VIEW_TOML}{LAYERS_TOML}")).unwrap();
     write_artifacts(&artifacts);
     write_members(&members, &(0..30).collect::<Vec<u64>>());
     Inputs {
         _tmp: tmp,
         points,
         pairs,
-        layers,
+        config,
         artifacts,
         members,
         dir,
@@ -275,7 +273,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: Some(inputs.layers.clone()),
+        layers: Vec::new(),
         artifacts: Some(inputs.artifacts.clone()),
         artifact_members: Some(inputs.members.clone()),
         mint_external_ids: false,
@@ -285,6 +283,16 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         band_rows: None,
         schema: Default::default(),
     }
+}
+
+/// Parse the fixture config and run the build over it — the two halves the CLI does in order, so a
+/// declaration refusal and a build refusal reach a test as the same `Result`.
+fn run(inputs: &Inputs, out: &Path) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
+    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default())?;
+    let mut args = args(inputs, out);
+    args.layers = config.layers;
+    args.schema = config.schema;
+    build(&args)
 }
 
 fn manifest_of(root: &Path) -> tessera_store::manifest::SegmentsManifest {
@@ -306,7 +314,7 @@ fn manifest_of(root: &Path) -> tessera_store::manifest::SegmentsManifest {
 fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     let inputs = inputs();
     let out = inputs.dir.join("bundle");
-    build(&args(&inputs, &out)).expect("a build with layers succeeds");
+    run(&inputs, &out).expect("a build with layers succeeds");
     let manifest = manifest_of(&out);
 
     let names: Vec<&str> = manifest
@@ -353,8 +361,13 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     let inputs = inputs();
     let streamed = inputs.dir.join("streamed");
     let linear = inputs.dir.join("linear");
-    build(&args(&inputs, &streamed)).unwrap();
-    build_in_memory(&args(&inputs, &linear)).unwrap();
+    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default())
+        .expect("the fixture config parses");
+    let mut linear_args = args(&inputs, &linear);
+    linear_args.layers = config.layers;
+    linear_args.schema = config.schema;
+    run(&inputs, &streamed).unwrap();
+    build_in_memory(&linear_args).unwrap();
 
     let a = manifest_of(&streamed);
     let b = manifest_of(&linear);
@@ -391,7 +404,7 @@ fn a_member_naming_nothing_this_build_assigned_refuses_it() {
     let inputs = inputs();
     write_members(&inputs.members, &[0, 1, N_ITEMS + 500]);
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("an unknown member is a refusal");
+    let err = run(&inputs, &out).expect_err("an unknown member is a refusal");
     let message = format!("{err}");
     assert!(message.contains(&format!("{}", N_ITEMS + 500)), "{message}");
     assert!(message.contains("refused"), "{message}");
@@ -409,9 +422,9 @@ fn the_registrys_refusals_are_the_builds_refusals() {
         .collect();
     blocks.reverse();
     let reversed = blocks.join("\n");
-    std::fs::write(&inputs.layers, reversed).unwrap();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{reversed}")).unwrap();
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("a dependency must exist before its dependent");
+    let err = run(&inputs, &out).expect_err("a dependency must exist before its dependent");
     assert!(format!("{err}").contains("depends_on"), "{err}");
 }
 
@@ -424,7 +437,7 @@ fn a_member_row_naming_an_undeclared_artifact_is_refused() {
     // Every member of `c-0000` except one, whose key is mistyped.
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("member", DataType::UInt64, false),
     ]));
     let batch = RecordBatch::try_new(
@@ -441,7 +454,7 @@ fn a_member_row_naming_an_undeclared_artifact_is_refused() {
     w.close().unwrap();
 
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("an undeclared key is a refusal");
+    let err = run(&inputs, &out).expect_err("an undeclared key is a refusal");
     assert!(format!("{err}").contains("c-OOO0"), "{err}");
 }
 
@@ -453,7 +466,7 @@ fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
     let inputs = inputs();
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("member", DataType::UInt64, true),
     ]));
     let batch = RecordBatch::try_new(
@@ -470,7 +483,7 @@ fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
     w.close().unwrap();
 
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("a null member is a refusal");
+    let err = run(&inputs, &out).expect_err("a null member is a refusal");
     assert!(format!("{err}").contains("null member"), "{err}");
 }
 
@@ -483,12 +496,12 @@ fn a_label_layer_sorting_before_its_target_still_publishes() {
     // `annotations/…` sorts before `clusters/…`, which is the case an alphabetical publication
     // order would refuse with "holds no such artifact" for a target that is plainly there.
     let renamed = |text: &str| text.replace("topics/x", "annotations/topics");
-    std::fs::write(&inputs.layers, renamed(LAYERS_TOML)).unwrap();
+    std::fs::write(&inputs.config, renamed(&format!("{VIEW_TOML}{LAYERS_TOML}"))).unwrap();
     write_artifacts_named(&inputs.artifacts, "annotations/topics");
     write_members_named(&inputs.members, "annotations/topics");
 
     let out = inputs.dir.join("bundle");
-    build(&args(&inputs, &out)).expect("declaration order is what decides, not the layer's name");
+    run(&inputs, &out).expect("declaration order is what decides, not the layer's name");
     let manifest = manifest_of(&out);
     assert!(manifest
         .membership_extents
@@ -505,15 +518,18 @@ fn a_layer_omitting_its_existence_criterion_is_refused() {
     let inputs = inputs();
     let mut without = String::new();
     for line in LAYERS_TOML.lines() {
-        if !line.starts_with("visible_when") {
+        if !line.starts_with("require_member_visibility") {
             without.push_str(line);
             without.push('\n');
         }
     }
-    std::fs::write(&inputs.layers, without).unwrap();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{without}")).unwrap();
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("an absent criterion is a refusal");
-    assert!(format!("{err}").contains("visible_when"), "{err}");
+    let err = run(&inputs, &out).expect_err("an absent criterion is a refusal");
+    assert!(
+        format!("{err}").contains("require_member_visibility"),
+        "{err}"
+    );
 }
 
 /// A layer in a view this build does not write would be registered, reachable and empty — which
@@ -522,12 +538,15 @@ fn a_layer_omitting_its_existence_criterion_is_refused() {
 fn a_layer_naming_a_view_this_build_does_not_write_is_refused() {
     let inputs = inputs();
     std::fs::write(
-        &inputs.layers,
-        LAYERS_TOML.replace(r#"views = ["s0"]"#, r#"views = ["s7"]"#),
+        &inputs.config,
+        format!(
+            "{VIEW_TOML}{}",
+            LAYERS_TOML.replace(r#"views = ["s0"]"#, r#"views = ["s7"]"#)
+        ),
     )
     .unwrap();
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("a view that does not exist is a refusal");
+    let err = run(&inputs, &out).expect_err("a view that does not exist is a refusal");
     assert!(format!("{err}").contains("s7"), "{err}");
 }
 
@@ -537,10 +556,9 @@ fn a_layer_naming_a_view_this_build_does_not_write_is_refused() {
 fn artifacts_without_a_layer_file_are_refused() {
     let inputs = inputs();
     let out = inputs.dir.join("bundle");
-    let mut args = args(&inputs, &out);
-    args.layers = None;
+    let args = args(&inputs, &out);
     let err = build(&args).expect_err("artifacts need layers");
-    assert!(format!("{err}").contains("--layers"), "{err}");
+    assert!(format!("{err}").contains("no `[[layer]]` block"), "{err}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -556,18 +574,17 @@ name = "clusters/tree"
 title = "a hierarchy"
 views = ["s0"]
 membership = "enumerated"
-gate = "0"
-artifacts_carry_own = false
-visible_when = { min_visible = 2 }
+visibility = "0"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 2 }
 hierarchy = { kind = "nested", prune_children = false }
-content = { derived = ["centroid"] }
+content = { computed = ["centroid"] }
 "#;
 
 /// A three-node tree: one root and two children, written with `parent_key` on each child.
 ///
-/// `children_keys` is left null throughout. The parent direction is the source of truth and the
-/// child direction is derived from it — a fixture that wrote both would be testing whether two
-/// hand-written columns agree, which is not a property of the system.
+/// The parent direction is the only one written, and the only one there is: the child direction is
+/// derived by inverting these edges, so there is no second column for it to disagree with.
 fn write_treed_artifacts(path: &Path, child_parent: &[(&str, Option<&str>)]) {
     write_edged_artifacts(path, "clusters/tree", &child_parent
         .iter()
@@ -580,7 +597,7 @@ fn write_edged_artifacts(path: &Path, layer: &str, rows: &[(u32, &str, Option<&s
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("level", DataType::UInt32, true),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("parent_key", DataType::Utf8, true),
     ]));
     let layers = StringArray::from(vec![layer; rows.len()]);
@@ -607,7 +624,7 @@ fn write_edged_artifacts(path: &Path, layer: &str, rows: &[(u32, &str, Option<&s
 fn write_treed_artifacts_unused(path: &Path, child_parent: &[(&str, Option<&str>)]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("parent_key", DataType::Utf8, true),
     ]));
     let layers = StringArray::from(vec!["clusters/tree"; child_parent.len()]);
@@ -632,7 +649,7 @@ fn write_treed_artifacts_unused(path: &Path, child_parent: &[(&str, Option<&str>
 fn write_treed_members(path: &Path, membership: &[(&str, Vec<u64>)]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("member", DataType::UInt64, false),
     ]));
     let mut layers = Vec::new();
@@ -665,11 +682,11 @@ fn treed_build(
     membership: &[(&str, Vec<u64>)],
 ) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
-    std::fs::write(&inputs.layers, TREED_LAYERS_TOML).unwrap();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{TREED_LAYERS_TOML}")).unwrap();
     write_treed_artifacts(&inputs.artifacts, child_parent);
     write_treed_members(&inputs.members, membership);
     let out = inputs.dir.join("bundle");
-    let result = build(&args(&inputs, &out)).map(|_| ());
+    let result = run(&inputs, &out).map(|_| ());
     (result, out, inputs._tmp)
 }
 
@@ -818,11 +835,11 @@ name = "admin/boundaries"
 title = "administrative boundaries"
 views = ["s0"]
 membership = "enumerated"
-gate = "0"
-artifacts_carry_own = false
-visible_when = { min_visible = 1 }
+visibility = "0"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 1 }
 hierarchy = { kind = "tiered", prune_children = false }
-content = { derived = ["centroid"] }
+content = { computed = ["centroid"] }
 
 [[layer.levels]]
 level = 0
@@ -842,11 +859,11 @@ fn tiered_build(
     membership: &[(u32, &str, Vec<u64>)],
 ) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
-    std::fs::write(&inputs.layers, TIERED_LAYERS_TOML).unwrap();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{TIERED_LAYERS_TOML}")).unwrap();
     write_edged_artifacts(&inputs.artifacts, "admin/boundaries", rows);
     write_levelled_members(&inputs.members, "admin/boundaries", membership);
     let out = inputs.dir.join("bundle");
-    let result = build(&args(&inputs, &out)).map(|_| ());
+    let result = run(&inputs, &out).map(|_| ());
     (result, out, inputs._tmp)
 }
 
@@ -854,7 +871,7 @@ fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Ve
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
         Field::new("level", DataType::UInt32, true),
-        Field::new("stable_key", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
         Field::new("member", DataType::UInt64, false),
     ]));
     let (mut layers, mut levels, mut keys, mut member) = (vec![], vec![], vec![], vec![]);
@@ -939,8 +956,11 @@ fn a_tiered_edge_within_one_level_is_refused() {
 fn edges_on_a_layer_declaring_no_lineage_are_refused() {
     let inputs = inputs();
     std::fs::write(
-        &inputs.layers,
-        TIERED_LAYERS_TOML.replace(r#"kind = "tiered""#, r#"kind = "stacked""#),
+        &inputs.config,
+        format!(
+            "{VIEW_TOML}{}",
+            TIERED_LAYERS_TOML.replace(r#"kind = "tiered""#, r#"kind = "stacked""#)
+        ),
     )
     .unwrap();
     write_edged_artifacts(
@@ -954,6 +974,6 @@ fn edges_on_a_layer_declaring_no_lineage_are_refused() {
         &[(0, "country", (0..20).collect()), (1, "state-a", (0..10).collect())],
     );
     let out = inputs.dir.join("bundle");
-    let err = build(&args(&inputs, &out)).expect_err("a stacked layer has no lineage");
+    let err = run(&inputs, &out).expect_err("a stacked layer has no lineage");
     assert!(format!("{err}").contains("no lineage"), "{err}");
 }

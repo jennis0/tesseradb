@@ -325,7 +325,7 @@ impl LayerRegistry {
         let layer_entity = self.take_layer_entity(alloc)?;
 
         Ok(WalRecord::LayerCreate {
-            declaration,
+            declaration: Box::new(declaration),
             layer_entity,
             runs,
         })
@@ -382,7 +382,7 @@ impl LayerRegistry {
         // and leave the index pointing at whichever landed last.
         let mut within_batch = BTreeSet::new();
         for artifact in incoming {
-            let Some(key) = &artifact.stable_key else {
+            let Some(key) = &artifact.key else {
                 continue;
             };
             if store.ordinal_of_key(layer_name, level, key).is_some() || !within_batch.insert(key) {
@@ -399,7 +399,9 @@ impl LayerRegistry {
         // declared kind, must never carry an undeclared one, and must never carry a generating set
         // nothing will test.
         let declared = &layer.declaration.content.supplied;
-        let corpus_derived = declared.iter().any(|s| s.corpus_derived);
+        let corpus_derived = declared
+            .iter()
+            .any(|s| s.require_member_visibility.is_corpus_derived());
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
                 Err(RegistryError::Content {
@@ -523,7 +525,7 @@ impl LayerRegistry {
         let batch_ordinal = |key: &str| {
             incoming
                 .iter()
-                .position(|a| a.stable_key.as_deref() == Some(key))
+                .position(|a| a.key.as_deref() == Some(key))
                 .map(|i| first_ordinal as u32 + i as u32)
         };
         let parents: Vec<Option<crate::wal::ParentRef>> = incoming
@@ -548,7 +550,7 @@ impl LayerRegistry {
                 // levels — an arXiv archive with no subclass is `hep-ph` at both, and the level-1
                 // artifact's parent is the level-0 one of the same name. Refusing that would force
                 // a caller to rename half their taxonomy to satisfy a check meant for a tree.
-                if !cross_level && artifact.stable_key.as_deref() == Some(key) {
+                if !cross_level && artifact.key.as_deref() == Some(key) {
                     return Err(missing());
                 }
 
@@ -618,7 +620,7 @@ impl LayerRegistry {
                 PublishedArtifact {
                     ordinal: ordinal as u32,
                     entity: EntityId::new(entity),
-                    stable_key: artifact.stable_key.clone(),
+                    stable_key: artifact.key.clone(),
                     members: serialise_members(&artifact.members),
                     variations: artifact
                         .variations
@@ -706,7 +708,7 @@ impl LayerRegistry {
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
-                        declaration: declaration.clone(),
+                        declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
                         version: self.version + 1,
@@ -765,7 +767,7 @@ impl LayerRegistry {
         let names = self
             .layers
             .iter()
-            .filter(|(_, layer)| match &layer.declaration.access.label {
+            .filter(|(_, layer)| match &layer.declaration.visibility {
                 None => true,
                 Some(label) => resolve_label(label).is_some_and(&is_satisfied),
             })
@@ -843,7 +845,7 @@ impl LayerRegistry {
 mod tests {
     use super::*;
     use tessera_types::layer::{
-        ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, MembershipSource, RESERVED_BLOCK,
+        ExistenceCriterion, Hierarchy, HierarchyKind, MembershipSource, RESERVED_BLOCK,
     };
 
     fn declaration(name: &str) -> LayerDeclaration {
@@ -852,11 +854,9 @@ mod tests {
             title: name.into(),
             views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
-            access: LayerAccess {
-                label: None,
-                artifacts_carry_own: false,
-            },
-            visible_when: Some(ExistenceCriterion::MinVisible(50)),
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: Some(ExistenceCriterion::Count(50)),
             hierarchy: Hierarchy {
                 kind: HierarchyKind::Flat,
                 prune_children: false,
@@ -869,7 +869,7 @@ mod tests {
 
     fn gated(name: &str, label: &str) -> LayerDeclaration {
         let mut d = declaration(name);
-        d.access.label = Some(label.into());
+        d.visibility = Some(label.into());
         d
     }
 
@@ -1076,12 +1076,11 @@ mod tests {
 
     fn incoming(key: &str, members: &[u32]) -> IncomingArtifact {
         IncomingArtifact {
-            stable_key: Some(key.into()),
+            key: Some(key.into()),
             members: croaring::Bitmap::of(members),
             variations: Vec::new(),
             attached_to: None,
             parent_key: None,
-            children_keys: Vec::new(),
         }
     }
 
@@ -1340,7 +1339,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         let mut spatial = declaration("regions/uk");
         spatial.membership = MembershipSource::Spatial;
-        spatial.visible_when = Some(ExistenceCriterion::MinVisible(25));
+        spatial.require_member_visibility = Some(ExistenceCriterion::Count(25));
         register(&mut reg, &mut alloc, spatial).unwrap();
 
         assert_eq!(

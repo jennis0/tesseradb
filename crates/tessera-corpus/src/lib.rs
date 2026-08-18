@@ -131,7 +131,7 @@ const SALT_BLURB: u64 = salt(b"blurb   ");
 /// defined for **every** `e`, which is what lets [`Corpus::ingest_batch`] extend the corpus past
 /// the built prefix with items drawn from the same functions.
 ///
-/// The declared columns are fixed — [`Corpus::schema_toml`] is a constant, not a parameter. A
+/// The declared columns are fixed — [`Corpus::config_toml`] is a constant, not a parameter. A
 /// configurable schema would make "the corpus" a family of corpora and put the fixture under
 /// configuration; one statement of the five families (number, datetime, category, keyword, text)
 /// is the whole point of a generator the suite can trust (spec §8, §12.1).
@@ -170,7 +170,7 @@ pub struct Item {
     pub blurb: Option<String>,
 }
 
-/// The category's value keys, in code order (`schema_toml` pins key *i* to code *i + 1*; code 0
+/// The category's value keys, in code order (`config_toml` pins key *i* to code *i + 1*; code 0
 /// is the reserved *absent* sentinel).
 pub const BAY_VALUES: [&str; 7] = ["amber", "basalt", "cedar", "dune", "ember", "flint", "gale"];
 

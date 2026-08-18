@@ -5,7 +5,7 @@
 three booleans** — `render`, `index`, `multi`, each defaulting false —
 [`records-and-search.md`](records-and-search.md) §2–§3 being the design that owns the declaration
 and the three homes; this document owns the category, its vocabulary and its disclosure controls.
-`render` and `index` are **built**: a `schema.toml` compiles into the manifest, both build
+`render` and `index` are **built**: the build config compiles into the manifest, both build
 implementations emit the columns, flush, merge and the fold carry them, and `/v1/categories` serves
 the values a code stands for (contracts r25). `visibility = "derived"` on a vocabulary (retired spelling `listing = "per_viewer"`) is
 **filtered** by §3.3's
@@ -42,7 +42,8 @@ space for filtering and vocabulary visibility, and a vocabulary table carrying p
 are **scattered, not dense** (§3.4), so a visible code is not a lower bound on how many values a
 principal cannot see.
 
-> **The declaration surface is built.** A `schema.toml` declares columns, the build compiles them
+> **The declaration surface is built.** One config declares columns and the vocabularies they
+> draw on ([`configuration.md`](configuration.md)), the build compiles them
 > into `MANIFEST.declared_scalars` — each carrying its `render` and `index` flags — and a
 > `vocabularies` table, and emits the tail; flush, merge and the compaction fold carry it, each
 > taking its writer schema from the manifest rather than from the segment it rewrites. Declared

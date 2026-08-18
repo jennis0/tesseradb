@@ -168,7 +168,7 @@ async fn meta(
         // hot path ships the code and nothing else.
         //
         // **The name is the column's identifier**, here and in `/v1/categories/{column}`. It is
-        // unique bundle-wide (`tessera_build::schema` refuses a duplicate) and restricted to a
+        // unique bundle-wide (`tessera_build::config` refuses a duplicate) and restricted to a
         // path-safe character set for that reason, so no second identifier is minted for it.
         //
         // **Values are not here.** A large vocabulary is megabytes against a measured 79 KB
@@ -338,9 +338,13 @@ async fn meta(
                     "title": l.title,
                     "zoom": l.zoom.map(|(lo, hi)| serde_json::json!([lo, hi])),
                 })).collect::<Vec<_>>(),
-                "derived_content": d.content.derived,
+                "computed_content": d.content.computed,
+                // The **types**, as before: a client draws from them, and publishing them is safe
+                // because an artifact failing containment is absent whole. ⊘ Each entry's `name`
+                // — which distinguishes two contents of one type on one layer — is declared and
+                // not yet published; the wire shape is contracts', not this stage's, to widen.
                 "supplied_content": d.content.supplied.iter()
-                    .map(|s| s.kind.clone()).collect::<Vec<_>>(),
+                    .map(|s| s.ty.clone()).collect::<Vec<_>>(),
                 "depends_on": d.depends_on,
                 // The version a client echoes to notice a gate edit, in the same shape as every
                 // other version coordinate it holds.

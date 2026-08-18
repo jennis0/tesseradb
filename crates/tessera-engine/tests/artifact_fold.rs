@@ -21,7 +21,7 @@ use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::membership::IncomingVariation;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration, MembershipSource,
+    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
 use tessera_types::EntityId;
 
@@ -33,22 +33,20 @@ fn declaration(name: &str) -> LayerDeclaration {
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         // **No criterion**, deliberately: these cases are about what the membership *is* after a
         // fold, and a criterion would turn a wrong count into an absence, which is a weaker
         // assertion than a wrong number.
-        visible_when: None,
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -492,13 +490,10 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
 // ---- the layer's declaration, executed at the fold ----------------------------------------------
 
 /// A layer carrying corpus-derived content under the given deletion declaration.
-fn content_layer(on_deletion: tessera_types::layer::OnMemberDeletion) -> LayerDeclaration {
+fn content_layer(on_deletion: bool) -> LayerDeclaration {
     let mut d = declaration("clusters/a");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
-        kind: "label_text".into(),
-        corpus_derived: true,
-    }];
-    d.content.on_member_deletion = on_deletion;
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }];
+    d.content.withdraw_on_member_deletion = on_deletion;
     d
 }
 
@@ -535,7 +530,7 @@ fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
         let engine = fx.open();
         engine
             .register_layer(content_layer(
-                tessera_types::layer::OnMemberDeletion::WithdrawContent,
+                true,
             ))
             .unwrap();
         publish_described(&fx, &engine);
@@ -575,7 +570,7 @@ fn a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again() 
     let engine = fx.open();
     engine
         .register_layer(content_layer(
-            tessera_types::layer::OnMemberDeletion::ShrinkGeneratingSet,
+            false,
         ))
         .unwrap();
     publish_described(&fx, &engine);
@@ -662,7 +657,7 @@ fn publication_refuses_a_generating_set_naming_a_deleted_document() {
     let engine = fx.open();
     engine
         .register_layer(content_layer(
-            tessera_types::layer::OnMemberDeletion::WithdrawContent,
+            true,
         ))
         .unwrap();
     engine
@@ -709,10 +704,7 @@ fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them()
     let fx = fixture();
     let engine = fx.open();
     let mut layer = declaration("clusters/a");
-    layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
-        kind: "label_text".into(),
-        corpus_derived: true,
-    }];
+    layer.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }];
     engine.register_layer(layer).unwrap();
     engine
         .publish_artifacts(
@@ -858,10 +850,7 @@ fn a_fold_whose_report_cannot_be_written_is_discarded_and_retires_nothing() {
 /// withholding below comes from the arm under test rather than from an access label.
 fn labels_over(target: &str) -> LayerDeclaration {
     let mut d = declaration("topics/x");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
-        kind: "label_text".into(),
-        corpus_derived: false,
-    }];
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited }];
     d.depends_on = vec![target.into()];
     d
 }
@@ -1091,10 +1080,7 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     {
         let engine = fx.open();
         let mut layer = declaration("topics/a");
-        layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
-            kind: "label_text".into(),
-            corpus_derived: true,
-        }];
+        layer.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }];
         engine.register_layer(layer).unwrap();
         engine
             .publish_artifacts(

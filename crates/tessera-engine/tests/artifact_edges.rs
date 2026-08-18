@@ -16,7 +16,7 @@ use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingVariation};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration, MembershipSource,
+    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent,
 };
 use tessera_types::{EntityId, TesseraId};
@@ -32,11 +32,9 @@ fn clusters(gate: Option<&str>) -> LayerDeclaration {
         title: "clusters".into(),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: gate.map(str::to_string),
-            artifacts_carry_own: false,
-        },
-        visible_when: None,
+        visibility: gate.map(str::to_string),
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
@@ -57,22 +55,17 @@ fn labels() -> LayerDeclaration {
         title: "topics".into(),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: None,
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: Vec::new(),
-            supplied: vec![SuppliedContent {
-                kind: "label_text".into(),
-                corpus_derived: true,
-            }],
-            on_member_deletion: Default::default(),
+            computed: Vec::new(),
+            supplied: vec![SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }],
+            withdraw_on_member_deletion: true,
         },
         depends_on: vec![CLUSTERS.into()],
         levels: Vec::new(),

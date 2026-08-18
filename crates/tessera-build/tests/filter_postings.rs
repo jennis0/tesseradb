@@ -16,7 +16,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{ColumnPostings, ValueColumn};
 use tessera_spatial::Bounds;
@@ -165,7 +165,7 @@ fn parse_schema(text: &str) -> Schema {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, text).unwrap();
-    Schema::parse(&path, &HashMap::new()).expect("schema parses")
+    Config::parse(&path, &HashMap::new()).expect("schema parses").schema
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
@@ -180,7 +180,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
@@ -270,38 +270,50 @@ fn postings_path(out: &Path, column: &str) -> PathBuf {
 }
 
 const FILTER_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
 index = true
-vocabulary = "discovered"
-listing = "per_viewer"
+vocabulary = "department"
 "#;
 
 const RENDER_ONLY_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "per_viewer"
+vocabulary = "department"
 "#;
 
 const PUBLIC_RENDER_ONLY_SCHEMA: &str = r#"
-[[attribute]]
-name = "department"
-type = "category"
-width = "u16"
-render = true
-vocabulary = "declared"
-listing = "public"
-  [attribute.values]
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   alpha = 11
   beta = 22
   gamma = 33
+
+[[attribute]]
+name = "department"
+type = "category"
+render = true
+vocabulary = "department"
 "#;
 
 fn build_with(schema_text: &str) -> tempfile::TempDir {
@@ -504,13 +516,17 @@ fn a_universal_column_writes_no_presence_bitmap() {
 }
 
 const STRING_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "public"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "public"
+vocabulary = "department"
 
 [[attribute]]
 name = "title"
@@ -561,13 +577,17 @@ fn a_string_filter_column_emits_its_pair_and_no_postings() {
 /// build stage lands, the declaration is the column's only artefact, so the assertion is that
 /// the build accepts it, compiles it, and materialises nothing under `attrs/` for it.
 const BLOB_RESIDENT_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "public"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "public"
+vocabulary = "department"
 
 [[attribute]]
 name = "title"

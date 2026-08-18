@@ -2,9 +2,9 @@
 //!
 //! A layer registered on the control plane and a layer written by a build are the same object:
 //! both end as a `RegisteredLayer` in `SEGMENTS-<n>.json`, and the engine seeds its registry from
-//! that section before it replays a single WAL record. What this module adds is the route — a
-//! declaration file and two Parquet files the build reads, so a bundle comes up with its layers
-//! already there.
+//! that section before it replays a single WAL record. What this module adds is the route — the
+//! config's `[[layer]]` blocks and two Parquet files the build reads, so a bundle comes up with
+//! its layers already there.
 //!
 //! **Why the build plane exists for this at all.** A 10⁷-artifact level is a build job for the same
 //! reason `--attach-view` is: volume that must not ride the trickle path, where every batch is an
@@ -39,9 +39,15 @@
 //!
 //! Ordinals are identity (an artifact's entity is `run.start + ordinal`), so their assignment may
 //! not depend on the order rows happen to sit in a Parquet file. Artifacts are therefore published
-//! in `(layer, level, stable_key)` order, and a stable key is **required** for a build-published
-//! artifact — the caller's own name for it is the only address that survives a rebuild, and it is
-//! what an edge into the layer names.
+//! in `(layer, level, key)` order, and a key is **required** for a build-published artifact — the
+//! caller's own name for it is the only address that survives a rebuild, and it is what an edge
+//! into the layer names.
+//!
+//! ## The declarations are not read here
+//!
+//! [`crate::config`] parses them, out of the one document that also carries the attributes, the
+//! vocabularies and the views. What is left in this module is the *data* path: two Parquet files,
+//! the publication order, and the hierarchy checks that need every artifact in hand.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -62,132 +68,6 @@ use tessera_types::EntityId;
 
 use crate::error::{BuildError, Result};
 
-/// The `--layers` file: a list of declarations, in registration order.
-///
-/// Registration order is the caller's and is not sorted: a layer must be registered after every
-/// layer it declares in `depends_on`, which is the ordering constraint an edge's target-before-edge
-/// rule imposes one level up (`annotation-representation.md` §5.0.4).
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LayersFile {
-    #[serde(default)]
-    layer: Vec<LayerEntry>,
-}
-
-/// One layer as the file writes it, which is not quite the wire's declaration.
-///
-/// **Two differences, and both are about the gate.** TOML has no null, so a layer that is reachable
-/// by everyone cannot be written as `label = null`; and the gate is exactly the field that must not
-/// acquire a default, since the defaultable value — *no gate* — is the widest one there is (§4.3:
-/// performance knobs default, disclosure controls do not). So the file states it either way round
-/// and **states it explicitly**: `gate = "<term descriptor>"`, or `ungated = true`. Neither, or
-/// both, is a refusal naming the choice rather than a bundle whose layer is public because a line
-/// was mistyped.
-///
-/// Everything else is the declaration's own type, so a field's meaning here is the field's meaning
-/// there: `artifacts_carry_own` and each supplied kind's `corpus_derived` keep having no default,
-/// which is what the register watches them for (C27, C28).
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LayerEntry {
-    name: String,
-    title: String,
-    views: Vec<String>,
-    membership: tessera_types::layer::MembershipSource,
-    /// The access label a viewer must satisfy to know this layer exists at all.
-    #[serde(default)]
-    gate: Option<String>,
-    /// Reachable by every principal — the explicit form of *no gate*.
-    #[serde(default)]
-    ungated: bool,
-    /// Whether each artifact carries its own access label. **No default** (C27).
-    artifacts_carry_own: bool,
-    /// The masked count an artifact must clear to be served at all — `{ min_visible = 1000 }`,
-    /// `{ min_fraction = 0.1 }`, or the word `"none"`.
-    ///
-    /// **Required, for the gate's reason**: the value an absent line would supply is *no
-    /// criterion*, which serves the existence and count of every artifact down to a single member
-    /// — the outcome decision 0079 exists to keep one schema word from producing. The control
-    /// plane's JSON demands the field too, and can write `null`; TOML cannot, so the word stands
-    /// in for it.
-    visible_when: CriterionEntry,
-    #[serde(default)]
-    hierarchy: Option<tessera_types::layer::Hierarchy>,
-    #[serde(default)]
-    content: tessera_types::layer::ContentDeclaration,
-    #[serde(default)]
-    depends_on: Vec<String>,
-    #[serde(default)]
-    levels: Vec<tessera_types::layer::LevelDeclaration>,
-}
-
-/// A declared criterion, or the word that declares none.
-///
-/// Untagged, and the table is tried first: `{ min_visible = … }` is a table and `"none"` is a
-/// string, so no input can satisfy both.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum CriterionEntry {
-    Declared(tessera_types::layer::ExistenceCriterion),
-    None(NoCriterion),
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum NoCriterion {
-    None,
-}
-
-impl From<CriterionEntry> for Option<tessera_types::layer::ExistenceCriterion> {
-    fn from(entry: CriterionEntry) -> Self {
-        match entry {
-            CriterionEntry::Declared(criterion) => Some(criterion),
-            CriterionEntry::None(NoCriterion::None) => None,
-        }
-    }
-}
-
-impl LayerEntry {
-    fn into_declaration(self, path: &Path) -> Result<LayerDeclaration> {
-        let label = match (self.gate, self.ungated) {
-            (Some(label), false) => Some(label),
-            (None, true) => None,
-            (Some(_), true) => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: layer {} declares both a gate and ungated = true",
-                    path.display(),
-                    self.name
-                )))
-            }
-            (None, false) => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: layer {} declares no gate; write the access label as gate = \"...\", or                      ungated = true to say every principal reaches it. There is no default,                      because the default would be the widest one",
-                    path.display(),
-                    self.name
-                )))
-            }
-        };
-        Ok(LayerDeclaration {
-            name: self.name,
-            title: self.title,
-            views: self.views,
-            membership: self.membership,
-            access: tessera_types::layer::LayerAccess {
-                label,
-                artifacts_carry_own: self.artifacts_carry_own,
-            },
-            visible_when: self.visible_when.into(),
-            hierarchy: self.hierarchy.unwrap_or(tessera_types::layer::Hierarchy {
-                kind: tessera_types::layer::HierarchyKind::Flat,
-                prune_children: false,
-            }),
-            content: self.content,
-            depends_on: self.depends_on,
-            levels: self.levels,
-        })
-    }
-}
-
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
 struct PlannedArtifact {
@@ -195,10 +75,8 @@ struct PlannedArtifact {
     /// Indexed by variation, dense — a gap would silently renumber the caller's ranking.
     variations: Vec<PlannedVariation>,
     attached_to: Option<IncomingAttachment>,
-    /// Parent artifact in a hierarchy (stage 5).
+    /// Parent artifact in a hierarchy, named by the parent's own key.
     parent_key: Option<String>,
-    /// Child artifacts in a hierarchy (stage 5).
-    children_keys: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -210,8 +88,8 @@ struct PlannedVariation {
 /// What the build reads: declarations, and the artifacts to publish into them.
 pub struct LayerPlan {
     declarations: Vec<LayerDeclaration>,
-    /// Keyed `(layer, level, stable_key)`, which is also the publication order — see the module
-    /// doc on determinism.
+    /// Keyed `(layer, level, key)`, which is also the publication order — see the module doc on
+    /// determinism.
     artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
 }
 
@@ -294,32 +172,17 @@ impl Default for PublishedLayers {
     }
 }
 
-/// Read the declaration file and, if given, the two artifact files.
+/// Take the config's layer declarations and, if given, read the two artifact files against them.
 ///
-/// The artifact files are refused without a declaration file: an artifact names the layer it
-/// belongs to, and a layer this build does not register is a name the manifest cannot carry.
+/// The artifact files are refused without declarations: an artifact names the layer it belongs to,
+/// and a layer this build does not register is a name the manifest cannot carry.
 pub fn read(
-    layers: &Path,
+    declarations: &[LayerDeclaration],
     artifacts: Option<&Path>,
     members: Option<&Path>,
 ) -> Result<LayerPlan> {
-    let text = std::fs::read_to_string(layers).map_err(|e| BuildError::io(layers, e))?;
-    let file: LayersFile = toml::from_str(&text).map_err(|e| {
-        BuildError::Invalid(format!("{}: {e}", layers.display()))
-    })?;
-    if file.layer.is_empty() {
-        return Err(BuildError::Invalid(format!(
-            "{}: declares no layer; omit --layers rather than passing an empty file, so a \
-             mis-typed path is a refusal instead of a bundle with no layers in it",
-            layers.display()
-        )));
-    }
     let mut plan = LayerPlan {
-        declarations: file
-            .layer
-            .into_iter()
-            .map(|entry| entry.into_declaration(layers))
-            .collect::<Result<Vec<_>>>()?,
+        declarations: declarations.to_vec(),
         artifacts: BTreeMap::new(),
     };
     if let Some(path) = artifacts {
@@ -358,14 +221,13 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
         let batch = batch?;
         let layer = utf8(path, &batch, "layer")?;
         let level = optional_u32(path, &batch, "level")?;
-        let key = utf8(path, &batch, "stable_key")?;
+        let key = utf8(path, &batch, "key")?;
         let variation = optional_u32(path, &batch, "variation")?;
         let values = optional_string_list(path, &batch, "values")?;
         let target_layer = optional_utf8(path, &batch, "attached_layer")?;
         let target_level = optional_u32(path, &batch, "attached_level")?;
         let target_key = optional_utf8(path, &batch, "attached_key")?;
         let parent_key = optional_utf8(path, &batch, "parent_key")?;
-        let children_keys = optional_string_list(path, &batch, "children_keys")?;
 
         for row in 0..batch.num_rows() {
             let address = address(path, layer, &level, key, row)?;
@@ -375,10 +237,10 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
                 target_layer.as_ref().and_then(|c| value_at(c, row)),
                 target_key.as_ref().and_then(|c| value_at(c, row)),
             ) {
-                (Some(layer), Some(stable_key)) => Some(IncomingAttachment {
+                (Some(layer), Some(key)) => Some(IncomingAttachment {
                     layer,
                     level: target_level.as_ref().map_or(0, |c| number_at(c, row)),
-                    stable_key,
+                    stable_key: key,
                 }),
                 (None, None) => None,
                 _ => {
@@ -402,31 +264,20 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
             }
             entry.attached_to = attachment;
 
-            // Hierarchical edges (stage 5): parent and children
+            // **The lineage is read upward only.** A `children_keys` column beside `parent_key`
+            // was read, checked for cross-row agreement and never walked: containment, coverage
+            // and cycle detection all derive children by inverting the parent edges. Two spellings
+            // of one edge is one more place for them to disagree, so the column is gone rather
+            // than carried.
             let parent = parent_key.as_ref().and_then(|c| value_at(c, row));
-            let children = children_keys.as_ref()
-                .map(|c| strings_at(path, c, row, &address.2))
-                .transpose()?
-                .unwrap_or_default();
-
-            if seen.contains(&address) {
-                if entry.parent_key != parent {
-                    return Err(BuildError::Invalid(format!(
-                        "{}: artifact {} does not name the same parent on all of its rows",
-                        path.display(),
-                        address.2
-                    )));
-                }
-                if entry.children_keys != children {
-                    return Err(BuildError::Invalid(format!(
-                        "{}: artifact {} does not name the same children on all of its rows",
-                        path.display(),
-                        address.2
-                    )));
-                }
+            if seen.contains(&address) && entry.parent_key != parent {
+                return Err(BuildError::Invalid(format!(
+                    "{}: artifact {} does not name the same parent on all of its rows",
+                    path.display(),
+                    address.2
+                )));
             }
             entry.parent_key = parent;
-            entry.children_keys = children;
             seen.insert(address.clone());
 
             let Some(index) = variation.as_ref().and_then(|c| value_index(c, row)) else {
@@ -453,7 +304,7 @@ fn read_members(path: &Path, plan: &mut LayerPlan) -> Result<()> {
         let batch = batch?;
         let layer = utf8(path, &batch, "layer")?;
         let level = optional_u32(path, &batch, "level")?;
-        let key = utf8(path, &batch, "stable_key")?;
+        let key = utf8(path, &batch, "key")?;
         let variation = optional_u32(path, &batch, "variation")?;
         let member = u64s(path, &batch, "member")?;
 
@@ -539,7 +390,9 @@ pub fn publish(
         // client, from a layer whose artifacts all failed their existence criterion.
         if let Some(unknown) = declaration.views.iter().find(|s| s.as_str() != view) {
             return Err(BuildError::Invalid(format!(
-                "layer {name} declares view {unknown}, and this build writes view {view}; a                  layer in a view that does not exist is registered, reachable and empty, which no                  client can tell from one whose artifacts were all withheld"
+                "layer {name} declares view {unknown}, and this build writes view {view}. A layer \
+                 in a view this build does not write is registered, reachable and empty, which no \
+                 client can tell from one whose artifacts were all withheld"
             )));
         }
         let record = registry
@@ -881,7 +734,6 @@ fn resolved(
         }
     };
     result.parent_key = artifact.parent_key.clone();
-    result.children_keys = artifact.children_keys.clone();
     Ok(result)
 }
 
@@ -1141,11 +993,11 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
         .collect()
 }
 
-/// One row's `(layer, level, stable_key)`.
+/// One row's `(layer, level, key)`.
 ///
-/// **A stable key is required**, and its absence is a refusal rather than a generated name: an
-/// artifact published without one can be named by no edge and matched by no later build, and the
-/// caller is the only party who knows what it should be called.
+/// **A key is required**, and its absence is a refusal rather than a generated name: an artifact
+/// published without one can be named by no edge and matched by no later build, and the caller is
+/// the only party who knows what it should be called.
 fn address(
     path: &Path,
     layer: &StringArray,
@@ -1155,8 +1007,8 @@ fn address(
 ) -> Result<(String, u32, String)> {
     if layer.is_null(row) || key.is_null(row) {
         return Err(BuildError::Invalid(format!(
-            "{}: row {row} names no layer or no stable_key; a build-published artifact carries \
-             the caller's own name for it, which is what an edge into it names",
+            "{}: row {row} names no layer or no key; a build-published artifact carries the \
+             caller's own name for it, which is what an edge into it names",
             path.display()
         )));
     }

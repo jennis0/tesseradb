@@ -31,7 +31,7 @@ use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration, MembershipSource,
+    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
 use tessera_types::EntityId;
 
@@ -103,23 +103,21 @@ fn declaration(name: &str) -> LayerDeclaration {
         title: format!("{name} (title)"),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
+        visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         // **No criterion on the layer**, so every published artifact is served and the census is a
         // statement about memberships rather than about which artifacts cleared a bar. The
         // generator's own criterion cycle is Stage 5's to exercise, where the tree makes it mean
         // something.
-        visible_when: None,
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

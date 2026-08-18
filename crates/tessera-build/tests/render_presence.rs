@@ -23,7 +23,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::{Attribute, Listing, Schema, Vocabulary, VocabularyKind};
+use tessera_build::config::{Attribute, Listing, Schema, Vocabulary, ValueSet};
 use tessera_build::{build, BuildArgs};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
@@ -109,10 +109,11 @@ fn write_empty_pairs(path: &Path) {
 fn render(name: &str, ty: ScalarType) -> Attribute {
     Attribute {
         name: name.to_string(),
+        title: None,
         ty,
         analyser: None,
         vocabulary: None,
-        vocabulary_kind: None,
+        value_set: None,
         index: false,
         render: true,
     }
@@ -121,10 +122,11 @@ fn render(name: &str, ty: ScalarType) -> Attribute {
 fn schema() -> Schema {
     let archive = Attribute {
         name: "archive".to_string(),
+        title: None,
         ty: ScalarType::U8,
         analyser: None,
         vocabulary: Some("archive".to_string()),
-        vocabulary_kind: Some(VocabularyKind::Declared),
+        value_set: Some(ValueSet::Closed),
         index: false,
         render: true,
     };
@@ -138,13 +140,15 @@ fn schema() -> Schema {
             "archive".to_string(),
             Vocabulary {
                 name: "archive".to_string(),
-                kind: VocabularyKind::Declared,
-                listing: Listing::Public,
+                title: None,
+                value_set: ValueSet::Closed,
+                width: ScalarType::U8,
+                visibility: Listing::Public,
                 codes: ARCHIVE_VALUES
                     .iter()
                     .map(|(k, c)| (k.to_string(), *c))
                     .collect::<BTreeMap<_, _>>(),
-                labels: BTreeMap::new(),
+                titles: BTreeMap::new(),
                 reserved: Vec::new(),
             },
         )]),
@@ -168,7 +172,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
+        layers: Vec::new(),
         artifacts: None,
         artifact_members: None,
         mint_external_ids: true,
