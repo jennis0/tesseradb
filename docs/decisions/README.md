@@ -105,3 +105,4 @@ prevent.
 | [0085](0085-the-existence-criterion-has-no-deployment-wide-form.md) | 2026-08-17 | The existence criterion has no deployment-wide form |
 | [0086](0086-the-attachment-term-does-not-inherit-the-targets-criterion.md) | 2026-08-17 | The attachment term does not inherit the target's criterion |
 | [0087](0087-cross-level-edges-are-information-not-rollup.md) | 2026-08-18 | A layer's edges are all within a level or all between them, and only the within-level ones are roll-up (`nested` against `tiered`) |
+| [0088](0088-visibility-is-two-axes-and-the-membership-test-is-one.md) | 2026-08-18 | Visibility is two axes, and the membership requirement is one of them |

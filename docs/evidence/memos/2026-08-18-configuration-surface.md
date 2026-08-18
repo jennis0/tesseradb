@@ -1,665 +1,636 @@
-# The configuration surface: one file, one vocabulary for visibility, and inputs by grain
+# The configuration surface: two axes, one file, and inputs by grain
 
-**Date:** 2026-08-18 (r3 — reviewed for user experience and for fail-closed properties; owner
-rulings of 2026-08-18 applied; `public` is now a reserved label rather than a config keyword) ·
-**Status:** Proposal — evidence, not normative. It proposes edits
-to [`per-point-attributes.md`](../../design/per-point-attributes.md) §4 and
-[`annotation-write-cycle.md`](../../design/annotation-write-cycle.md) §6.1, which govern; nothing
-here binds until those are revised and the four rulings in §11 are made.
-**Reads with:** [`records-and-search.md`](../../design/records-and-search.md) §2,
-[`annotations.md`](../../design/annotations.md), and the working memo
-[2026-08-15 artifact configurations](2026-08-15-artifact-configurations.md), whose grouped-key
-shape this supersedes.
+**Date:** 2026-08-18 (r4 — rewritten around the two-axis vocabulary settled with the owner on
+2026-08-18, after two reviews of r1) ·
+**Status:** Evidence — the design record, now **bound** by the documents it proposed edits to.
+[`configuration.md`](../../design/configuration.md),
+[`per-point-attributes.md`](../../design/per-point-attributes.md) §3.8 and §3.9, and
+[`annotation-write-cycle.md`](../../design/annotation-write-cycle.md) §6.1 (r5) carry it;
+[decision 0088](../../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) is
+the ruling, superseding 0075's separation of the two membership tests; the register's C27 and C28
+are renamed onto the new keys at architecture r46. Those documents govern where they and this
+differ. The staged plan is
+[`2026-08-18-configuration-surface-plan.md`](2026-08-18-configuration-surface-plan.md).
+**Reads with:** [`annotations.md`](../../design/annotations.md),
+[`records-and-search.md`](../../design/records-and-search.md) §2, and the working memo
+[2026-08-15 artifact configurations](2026-08-15-artifact-configurations.md), which this supersedes.
 
 ## 1. What this is for
 
-A caller builds a bundle by writing two TOML files and up to six Parquet files, and the notebook
-that produces the demo corpus writes nine. The declarations they hold are sound — every refusal in
-per-point-attributes §4.3 earns its place — but the surface around them has accreted three
-separate spellings for *who may know this exists*, four mechanisms for *where a value set comes
-from*, no way to give an attribute or a slice a human-readable name, and one input file per grain
-even where two grains are the same grain.
-
-None of that is a leak and none of it changes what the engine computes. It is a caller-facing
-surface that is harder to write correctly than the rules behind it are, which matters here for one
-specific reason: **every disclosure control in these files is deliberately undefaulted**, so a
-caller must write each one explicitly, and a surface that makes them hard to write is a surface
+A caller builds a bundle by writing two TOML files and up to six Parquet files. The rules behind
+them are sound — every refusal in the old per-point-attributes §4.3 earns its place — but the surface
+around them accreted **three spellings for who may see a thing, four mechanisms for where a value
+set comes from, two unrelated meanings of `derived`, and no way at all to say where several of the
+inputs' fields are**. It is a surface harder to write correctly than the rules it expresses, which
+matters here for one reason: every disclosure control in these files is deliberately undefaulted,
+so a caller writes each one explicitly, and a surface that makes them hard to write is a surface
 that gets them written wrong.
 
-Pre-release, none of this costs compatibility ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)):
-keys are renamed and mechanisms deleted, not aliased.
+None of this changes what the engine computes. Pre-release it costs no compatibility
+([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)): keys
+are renamed and mechanisms deleted, never aliased.
 
-**What the review changed.** Two reviews ran against r1 — one on user experience and onboarding,
-one narrowly on whether the renames preserve every refusal. The user-experience review found that
-the shortest path to a first map is blocked almost entirely by things r1 did not touch (§9), and
-that r1's own `derived` meant two opposite things in two adjacent keys (§4). The fail-closed review
-found three refusals that the vocabulary collapse dropped (§3) and one that the input-shape change
-creates (§8). All are dispositioned here.
+## 2. The whole corpus in one file
 
-## 2. The whole change, in one before and after
-
-Today, to declare a category column drawn from an authored value set and a clustering over it:
+This is the arXiv demo corpus — today two TOML files, six Parquet inputs and a command line
+carrying the rest. It parses; the shapes below were checked against the project's TOML parser.
 
 ```toml
-# schema.toml
-[[attribute]]
-name       = "primary_category"
-type       = "category"
-width      = "u16"
-render     = true
-index      = true
-vocabulary = "declared"
-values_key = "primary_category"       # bound to a file on the command line
-listing    = "public"
+# Entity space: identity and attributes, shared by every view. `entity_id` is the
+# canonical field name, so a source using it declares no field map at all.
+[corpus]
+source = "corpus"                      # entity space: identity and attributes
 
-# layers.toml
-[[layer]]
-name                = "clusters/hdbscan"
-title               = "HDBSCAN clusters"
-slices              = ["s0"]
-membership          = "enumerated"
-ungated             = true
-artifacts_carry_own = false
-visible_when        = { min_fraction = 0.05 }
-hierarchy           = { kind = "nested", prune_children = false }
-```
+[[view]]
+name             = "s0"
+title            = "arXiv, August 2026"
+source           = "geometry"
+fields           = { x = "x", y = "y" }
+point_visibility = { field = "categories", default = "public" }
+# visibility = "ir:analyst"            # ⊘ the view's own gate — specified, not implemented
 
-After — one config file, and the vocabulary is an object rather than a key smuggled through three
-attribute fields:
-
-```toml
-# schema.toml
 [[vocabulary]]
 name       = "primary_category"
 title      = "arXiv category"
-width      = "u16"                    # the code space's width, not the column's (§3)
-value_set  = "closed"                 # or "open": may ingest mint a key nobody declared?
-visibility = "public"                 # or "derived": a viewer sees the values their data carries
-source     = { file = "primary_category" }   # or an inline [vocabulary.values] table
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "primary_category"
+fields     = { title = "label" }
 
 [[attribute]]
-name       = "primary_category"
+name       = "category"
 title      = "Category"
+field      = "primary_category"
 type       = "category"
+vocabulary = "primary_category"
 render     = true
 index      = true
-vocabulary = "primary_category"
+
+[[attribute]]
+name  = "title"
+title = "Title"
+type  = "text"
+index = true
 
 [[layer]]
-name               = "clusters/hdbscan"
-title              = "HDBSCAN clusters"
-slices             = ["s0"]
-membership         = "enumerated"
-visibility         = "public"         # or an access label: visibility = "ir:analyst"
-default_artifact_visibility = "inherited"   # or a label, for artifacts that carry none of their own
-visible_when       = { min_fraction = 0.05 }
-hierarchy          = { kind = "nested", prune_children = false }
+source     = "hdbscan"
+fields     = { members = "members", parent = "parent_id" }
+name       = "clusters/hdbscan"
+title      = "HDBSCAN clusters"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "nested", prune_children = true }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { fraction = 0.05 }
+content                   = { computed = ["centroid", "box"] }   # + on_member_deletion
+
+  [layer.labels]
+  source                    = "hdbscan_topics"
+  fields                    = { contents = "text" }
+  name                      = "topics/hdbscan"
+  title                     = "HDBSCAN topics"
+  type                      = "text"
+  membership                = "enumerated"
+  require_member_visibility = "all"
 ```
+
+A layer small enough to author by hand skips the file entirely, as a vocabulary's values may:
+
+```toml
+[[layer]]
+name      = "regions/curated"
+title     = "Curated regions"
+views     = ["s0"]
+artifacts = [{ key = "eu-west", contents = ["Western Europe"] }]
 ```
+
+```bash
 tessera build --config schema.toml \
-              --points points.parquet \
-              --artifacts artifacts.parquet --artifact-members members.parquet \
-              --values primary_category=primary_category.parquet
+              --file corpus=corpus.parquet   --file geometry=geometry.parquet \
+              --file hdbscan=hdbscan.parquet --file hdbscan_topics=topics.parquet \
+              --file primary_category=primary_category.parquet \
+              --out bundles/notebook --extent auto --mint-id-key
 ```
 
-**Six build inputs become four, plus one vocabulary file per bound vocabulary.** Not three: r1
-claimed members could fold into the artifacts table and that does not hold (§8). The notebook's
-nine files become five, and `values_key`, `values_of`, `ungated`, `gate`, `listing` and
-`artifacts_carry_own` are gone.
+**One flag, because there is now one idiom.** The config names a logical key; the command line
+binds it to a path, so no environment-specific path appears in a file that belongs in git (§4.1).
+`--points`, `--pairs`, `--artifacts`, `--artifact-members` and `--values` all become `--file`, and
+a key bound but not declared — or declared but not bound — is a build failure naming both, the
+rule `values_key` already had.
 
-## 3. Vocabularies are objects, not attribute fields
+Gone: `values_key`, `values_of`, `listing`, `gate`, `ungated`, `artifacts_carry_own`,
+`corpus_derived`, `visible_when`, `stable_key`, `label_text`, and the `[access]` block. Six build
+inputs become four; the notebook's nine files become five.
 
-**The problem is that `values_key` names a vocabulary while `key` names a value inside one.** The
-vocabulary file's columns are `(key, code, label)`, where `key` is `math.GT`; the schema key that
-binds that file is `values_key = "primary_category"`, which is the name of the whole set. Two
-different things, one word, in the same feature.
+## 3. Two axes, and only two
 
-Underneath it there are three mechanisms for one question — *where does this value set come from?*
-— and a fourth key deciding whether the set is closed:
+*(The full surface — six blocks, every key, every enumerated value — is tabulated in
+[`configuration.md`](../../design/configuration.md) §1, which governs.)*
+
+
+Everything about who may see an object answers one of two questions.
+
+| Axis | Key | Answers |
+|---|---|---|
+| label-based | `visibility` | which access label must the viewer hold |
+| membership-based | `require_member_visibility` | how much of this object's membership must the viewer already see |
+
+**The second axis is the one the corpus had no name for**, and its absence is why three unrelated
+keys were doing its work. A cluster served only when half its members are visible, a value visible
+because one point carries it, and a label served only to a viewer holding its whole generating set
+are the *same rule at three settings*:
+
+```toml
+require_member_visibility = "all"                # every member — containment, the label rule
+require_member_visibility = { fraction = 0.5 }   # half of them
+require_member_visibility = { count = 50 }       # fifty of them
+require_member_visibility = "any"                # one is enough — the vocabulary rule
+require_member_visibility = "none"               # no requirement
+```
+
+`visible_when`, `corpus_derived` and a vocabulary's `derived` listing all collapse into it.
+
+**The name says what it does not do.** It requires that members be visible; it never *sets* their
+visibility. That distinction is the whole of the second axis: a container never grants its members
+anything, and reading it the other way round would invert the direction the system is built to
+protect.
+
+**This merges what [decision 0075](../../decisions/0075-the-masked-count-is-an-existence-criterion.md)
+separated, and the owner has ruled the merge** (2026-08-18). What 0075 established is that the
+masked-count test is independent *of the gate* — of `visibility` — and that survives untouched:
+the two axes remain orthogonal, and an artifact must satisfy both. What it also happened to
+separate, the count test from the containment test, was a distinction without a difference: both
+ask how much of the membership the viewer can see, one with a threshold and one with all of it.
+C27 and C28 followed those two fields and now follow one, which makes the register shorter rather
+than weaker — the thing it watches is that the field is stated, and it still has no default.
+
+## 4. Where a key lives, and the `{ field, default }` pattern
+
+Two levels, and the same shape at both:
+
+| container | its own gate | where each member's label comes from |
+|---|---|---|
+| `[[view]]` | `visibility` ⊘ | `point_visibility = { field, default }` |
+| `[[layer]]` | `visibility` | `artifact_visibility = { field, default }` |
+
+**`point_visibility` sits on the view** (owner ruling, 2026-08-18), which is where a caller looks
+for it and where the points source already is. One rule keeps that honest: a point's label is
+**entity-space and shared** — the term index and the mask serve every view (slices §3) — so two
+views may not disagree about a point. With a single view, which is every corpus today, the
+question does not arise. With more than one, **the declarations must agree and disagreement is
+refused**, naming both views. The alternative readings — labels duplicated per view, or a per-view
+mask — are an architectural change rather than a config one, and neither is proposed here.
+
+A container has **one** gate, so it is a bare label. Members have **one each**, so the key says
+where to find them and what a member that carries none gets:
+
+```toml
+point_visibility    = { field = "categories", default = "public" }
+artifact_visibility = { field = "visibility",  default = "inherited" }
+```
+
+**The presence of `field` is the declaration that members carry their own labels**, which is
+exactly what `artifacts_carry_own` announced and what no key said for points at all. `default` is
+what a member with none gets. Omit `default` for points and a point with no label is visible to no
+principal — the narrow direction, so it may be omitted; a *widening* default never may.
+
+**The container's gate conjoins and can only narrow**, at both levels. That is already normative
+for views ([`slices-and-multi-table.md`](../../design/slices-and-multi-table.md) §3: a slice's
+gate is a label, evaluated by the item-visibility predicate verbatim, *conjunctive with item
+labels, never substitutive*). ⊘ **View gating is specified and not implemented** — a bundle has
+one coordinate system reachable by every principal that authorises — so the `[[view]]` block is
+shaped to carry `visibility` and the key waits.
+
+**Filling never overrides.** A point carrying terms of its own keeps exactly those; the default
+lands only where the field is null or empty, and the build reports how many rows it filled.
+Overriding is inadmissible rather than merely unwise: a point's terms are disjunctive, `M_auth`
+being a union of posting lists, so **any label added to a point can only widen it** — a default
+that overrode the field would make every point in a view visible to that label's holders, and
+with `public` would make a corpus world-visible on one config line.
+
+### 4.1 The three words
+
+```toml
+visibility = "public"       # the reserved label every principal holds
+visibility = "ir:analyst"   # any other label
+visibility = "inherited"    # (as a member default) the container's gate is the whole of it
+                            # (on content) served whenever its artifact is
+require_member_visibility = "any" | "all" | { fraction = … } | { count = … } | "none"
+```
+
+**`public` is a label, not a keyword** (owner ruling, 2026-08-18). It is interned at term `0`, that
+id is never minted for anything else, and every resolved principal term set contains it **by
+construction, inside the trust boundary** — not by grant, which would make *public* depend on grant
+hygiene, and not by the plugin, which is caller-supplied code. A corpus whose data already carries
+the descriptor `public` is adopted, not refused. Modelling open-to-all as a real term is an
+ordinary design and Accumulo deployments do it; banning the word to protect a config keyword would
+have been the wrong way round.
+
+**`inherited` means the container is the whole of it.** Not `none`, which reads as *visible to
+nobody* — the dangerous misreading in a visibility key. Not `public`, which would be false whenever
+the container is gated.
+
+**`derived` is retired.** It meant *visible if you can see any member* on a vocabulary and *visible
+only if you can see every member* on content — one word, two quantifiers. Both are now settings of
+`require_member_visibility`, and the ambiguity has nowhere to live.
+
+**Reserved words collide with a caller's label in exactly one slot.** `public` *is* a label.
+`inherited` and the `require_member_visibility` words sit in slots that take no arbitrary label —
+except `inherited` as a member default, where a deployment whose label is literally `inherited` is
+refused at parse with a message naming the rename. Proportionate for a word nobody chooses as an
+access label, and the check the owner declined for `public` precisely because `public` *is* a word
+people choose.
+
+**`inherited` is not a value for `point_visibility.default`.** An artifact carrying no label is
+reachable whenever its layer is, so *no extra requirement* means something. A point carrying no
+terms is in no posting list and so in no principal's mask, and no view gate can add it back, a
+gate narrowing and never widening. A point default is always a label.
+
+## 5. Vocabularies are objects
+
+`values_key` names a vocabulary while `key` names a value inside one — and under it sit four
+mechanisms for one question:
 
 | Today | What it does |
 |---|---|
 | `[attribute.values]` | pin codes inline |
-| `values_key = "k"` + `--values k=<path>` | pin codes from a file, and *name the shared vocabulary* |
+| `values_key` + `--values k=<path>` | pin codes from a file, and name the shared vocabulary |
 | `values_of = "other_attribute"` | share another attribute's keys, codes and properties |
 | `vocabulary = "declared" \| "discovered"` | whether an unknown key at ingest is refused or minted |
 
-A `[[vocabulary]]` block collapses all four. `name` is the identity, so two attributes share a
-vocabulary by naming it and `values_of` has nothing left to do. `source` is where the values come
-from — an inline table or a bound file — so the inline/file distinction stops being a pair of
-mutually exclusive attribute keys with a parse error between them.
+A `[[vocabulary]]` block collapses all four. `name` is the identity, so attributes share by naming
+and `values_of` has nothing to do. `source` is where values come from — an inline table or a bound
+file. `value_set = "closed" | "open"` carries what `declared`/`discovered` carried, in words that
+say what the caller gets; the *key* is `value_set` because `values` is the inline table's own name
+and TOML cannot hold both on one block.
 
-**`value_set = "closed" | "open"`** carries what `declared`/`discovered` carried (owner ruling,
-2026-08-18: the words are widely understood and stay). The *key* is `value_set` rather than
-`values`, because `values` is also the inline table's name and TOML cannot hold both on one block:
-`values = "closed"` and `[vocabulary.values]` in the same `[[vocabulary]]` is a duplicate-key
-error, which would make a closed vocabulary with an inline set unwritable.
+**`width` moves onto the vocabulary**, where it belongs: it is the code space's width, not a
+column's. Sharing is by naming now, so two attributes naming one vocabulary with different widths
+would otherwise be newly expressible, and today's refusal for that (§3.9) would have no site — the
+minter bounds its draw by the first attribute it finds, so the narrower column would silently fail
+to hold codes minted for the wider one.
 
-**`width` moves onto the vocabulary**, where it belongs: it is the width of the code space, not of
-a column. This is not tidying. Sharing is by naming now, so two attributes naming one vocabulary
-with different widths becomes newly expressible, and today's refusal for that case (§3.9 — *"a
-shared vocabulary is one code space; two widths over it is one column unable to hold the other's
-codes"*) would have no site. The minter bounds its draw by the width of the first attribute it
-finds naming the vocabulary, so the narrower column would silently fail to hold codes minted for
-the wider one.
+Four refusals survive verbatim and three are new. Surviving: an unbound source is a build failure
+and **never a fall-through to minting**; a `--vocabulary` binding naming no declared vocabulary is
+an error; code `0` is the *absent* sentinel; a code in both `reserved` and the live set. New:
 
-### 3.1 The refusals, restated against the new shape
+- **An attribute naming a vocabulary no block declares is a config parse error**, refused before a
+  data file is opened, and never an implicitly minted open vocabulary (owner ruling, 2026-08-18).
+  Two blocks of one name likewise. This matters because `vocabulary` changes from holding a keyword
+  to holding a reference — a config still saying `vocabulary = "declared"` becomes a reference to a
+  vocabulary of that name and must fail as one.
+- **`value_set = "closed"` requires a `source`**; `open` does not and starts empty.
+- **Attributes inherit their vocabulary's width**, so disagreement is not expressible.
 
-Four survive verbatim and must be written into §4.3 against the new keys: an unbound file source is
-a build failure and **never a silent fall-through to minting**, which would open a closed
-vocabulary with nobody deciding to; a `--values` binding naming no declared vocabulary is an error,
-or the typo merely relocates; code `0` stays the *absent* sentinel and is refused in any source;
-and a code in both `reserved` and the live set is refused.
+Vocabularies resolve **by name in a second pass**, so block order does not matter; the per-value
+`gate` column stays refused as ⊘ unbuilt. `value_set = "open"` with `visibility = "public"` keeps
+its warning (C11 with no accountable party), not a refusal.
 
-Three are new, each closing a hole the collapse would otherwise open:
+## 6. Everything nameable takes a `title`
 
-- **An attribute naming a vocabulary no `[[vocabulary]]` block declares is a config parse error**
-  — refused when the file is read, before a single data file is opened, and never an implicitly
-  minted open vocabulary (owner ruling, 2026-08-18). Two blocks of one name is likewise a parse
-  error. This matters because `vocabulary` changes meaning: today it holds the words `declared`
-  and `discovered`, and under this proposal it holds a reference, so a config carrying the old
-  word becomes a reference to a vocabulary named `declared` and must fail as one.
-- **`value_set = "closed"` requires a `source`**; `open` does not, and starts empty. Without this
-  the failure moves from the declaration to whichever ingest first carries a key — a much worse
-  message for the same fault.
-- **Attributes sharing a vocabulary inherit its width**, so disagreement is not expressible (above).
+Layers and levels carry one; nothing else does. Attributes have none, so a client shows
+`primary_category`. Slices have `display_name` in the manifest, served on `/v1/meta`, which the
+build hardcodes to the view id with no route to set it. Vocabularies have none. Vocabulary values
+have one spelled `label`, a word meaning *access label* everywhere else here.
 
-`value_set = "open"` with `visibility = "public"` keeps its warning — §3.8's C11-with-no-
-accountable-party — and stays a warning, not a refusal.
+So `title` on `[[attribute]]`, `[[vocabulary]]`, `[[view]]`, each vocabulary value, and the
+existing two. It is presentation metadata on an object whose visibility is already decided, and a
+title discloses nothing a name does not.
 
-Two clarifications the review asked for, neither changing behaviour: vocabularies are **resolved by
-name in a second pass**, so block order in the file does not matter (the file-order constraint
-exists today only because `values_of` pointed at another *attribute*, and nothing can cycle now);
-and the per-value `gate` column in a vocabulary file **stays refused** as ⊘ specified-not-built —
-§2's list of deleted keys is the layer's `gate`, not that one.
+**`--view` selects which declared `[[view]]` a build writes**, and a value naming none is
+refused — otherwise the identifier is spelled twice with nothing reconciling it.
 
-## 4. One vocabulary for visibility
+## 7. Two naming rules, and what they change
 
-Three spellings answer one question today — *may a viewer know this exists?* An attribute says
-`listing = "public" | "per_viewer"`. A layer says `gate = "<label>"` or `ungated = true`, in two
-mutually exclusive keys because TOML has no null. And a layer separately says
-`artifacts_carry_own = true | false`, a clause about artifacts sitting in a block about a layer.
-
-One key, and its value is **an access label** — with one label reserved:
-
-```toml
-visibility = "public"        # the reserved label every principal holds (§4.1)
-visibility = "ir:analyst"    # only a principal satisfying this label
-visibility = "derived"       # vocabularies only: per viewer, from what their data shows them
-```
-
-`public` is the established word for this in Accumulo's visibility model, which is the vocabulary
-this system already borrows from (owner ruling, 2026-08-18).
-
-**`derived` is the only word that is not a label**, and it is legal on a vocabulary alone. A
-vocabulary's value visibility can be computed from its members (§3.3); a layer's existence cannot
-be, so a layer takes a label and nothing else. Any other bare word on a vocabulary is refused
-rather than read as a label, since only layers admit arbitrary ones — without that rule the retired
-`per_viewer`, or a plain typo, would be accepted as a gate nobody satisfies and recorded as a
-control its author believes is set.
-
-**`default_artifact_visibility` is the second, independent axis**, and it stays separate because
-the two compose as a conjunction: an artifact is served when the layer is reachable **and** the
-artifact's own label is satisfied.
-
-```toml
-default_artifact_visibility = "inherited"    # an artifact saying nothing is gated by the layer alone
-default_artifact_visibility = "ir:analyst"   # an artifact saying nothing takes this label besides
-```
-
-**This replaces `artifacts_carry_own` rather than renaming it**, and the flag disappears. Whether a
-given artifact carries a label of its own is a fact about the data, which the data can state; what
-the declaration has to settle is what happens to an artifact that states nothing. So the key holds
-the default, exactly as a slice's `default_point_visibility` does, and an artifact carrying its own
-label always uses it.
-
-It is **required, with no default**, on §4.2's rule: the value an absent line would supply is
-`inherited`, the wider of the two, so the caller writes the word.
-
-**A layer is to an artifact what a slice is to a point**, and the two blocks are deliberately the
-same shape:
-
-| | gate on the container | default for a member that declares nothing |
-|---|---|---|
-| `[[layer]]` | `visibility` | `default_artifact_visibility` |
-| `[[slice]]` | `visibility` ⊘ | `default_point_visibility` |
-
-The container's gate **conjoins** in both cases and can only narrow — that is already normative for
-slices ([`slices-and-multi-table.md`](../../design/slices-and-multi-table.md) §3: a slice's gate is
-a label, evaluated by the item-visibility predicate verbatim, *conjunctive with item labels, never
-substitutive*, the I12 direction). The member-level default **fills** in both cases. Neither level
-does the other's job.
-
-**⊘ A slice gate is specified and not implemented** (slices §3), because a bundle has one
-coordinate system reachable by every principal that authorises at all. The `[[slice]]` block is
-shaped to carry `visibility` when it lands; until then a slice has no gate to conjoin with, and
-§8.1's fill is the whole of what a bulk point label can do.
-
-That is also the correction to an earlier draft of this memo, which called the two levels
-asymmetric on the grounds that a point's terms are a posting union and cannot be conjoined. The
-union is the *member* level, where fill is right for artifacts and points alike; conjunction was
-never the member level's job, and at the container level it applies to both.
-
-Three corrections to r1 here, all from the review and all load-bearing:
-
-- **Not `item_visibility`.** *Item* means point-or-document everywhere else in this system, so that
-  key on a layer block reads as a control over the documents — a different and far more alarming
-  thing than what it does.
-- **Not `derived` for the value.** r1 claimed `derived` meant one thing across both keys. It does
-  not: on a vocabulary it is the *computed* case, where visibility falls out of members' labels
-  with nobody authoring it, and on a layer it would have been the *authored* case. Same word,
-  inverted meaning, in adjacent disclosure controls. A label, or the word `inherited`, says what
-  each one does.
-- **Not `public` for the inherited state.** It does not make artifacts public; it makes them
-  reachable exactly when the layer is, which under a gated layer is not public at all.
-
-### 4.1 `public` is a reserved label, interned at term 0
-
-**`public` is a label like any other, reserved by the system and satisfied by every principal**
-(owner ruling, 2026-08-18). It is interned at term id `0`, that id is never minted for anything
-else, and every resolved principal term set contains it by construction rather than by grant.
-
-This is why there is no keyword-versus-label ambiguity to disambiguate, and both earlier drafts of
-this section were solving a problem that need not exist. r2 refused a corpus term named `public` to
-protect a config word; r3 kept two readings of the word apart with an inline-table escape.
-**There is one meaning, and it is the same everywhere a label can appear.**
-
-- A **point** carrying `public` in its access list is visible to every principal.
-- An **artifact** whose own label is `public` is served to every principal that reaches its layer.
-- A **layer** declaring `visibility = "public"` is reachable by every principal.
-- A **vocabulary** declaring it publishes its value set to every principal.
-
-Four properties this rests on, each of which belongs in the design rather than in the
-implementation that happens to satisfy it:
-
-- **Satisfaction is by construction, not by grant.** The engine adds term `0` to every resolved
-  principal term set, inside the trust boundary — not the plugin, which is caller-supplied code,
-  and not the credential, which would make *public* depend on grant hygiene and fail differently
-  for a principal whose grant was mislaid.
-- **Term `0` is reserved in the dictionary** and never minted for another descriptor. A corpus
-  whose data already carries the descriptor `public` resolves to `0`: it is adopted, not refused.
-- **The descriptor is matched exactly, after trimming.** `Public` is a different label; `public `
-  is the same one, per §8.1's trimming rule.
-- **Reserving it does not weaken a deny.** Suppression and deletion act on entities through the
-  overlay, never through terms, so a suppressed point tagged `public` stays suppressed. The two
-  mechanisms do not meet.
-
-An empty string stays refused rather than read as a label nobody satisfies, since that is what an
-unset template variable renders to.
-
-### 4.2 The no-default rule, and where it is not yet kept
-
-Three keys in this family are required with no parser-level default — a vocabulary's `visibility`,
-a layer's `visibility`, and `default_artifact_visibility` — plus `visible_when`. SA §7's rule
-governs and none of them may become an `Option` with a fallback: the value an absent line would supply is the
-widest one there is.
-
-The proposal makes them *easier to write correctly*: `visibility = "public"` is one word where
-`gate`/`ungated` was a two-key dance whose omission had to be caught by hand. But only one of the
-four currently teaches the caller anything when it is missing. The gate refusal names both
-spellings and the reason; `artifacts_carry_own` and `visible_when` are bare required fields today, so
-omitting either yields raw serde text with no statement of what the values do and no mention of the
-layer. Both should be parsed as optional and hand-validated, on the template the gate refusal
-already sets: *what is missing · the values, spelled out · what each one does · why there is no
-default*.
-
-Two smaller things in that same message: the gate refusal's string literal is wrapped without a
-continuation, so the operator reads twenty-two spaces mid-sentence, twice, and the slice-mismatch
-refusal has the identical bug. They are the most-read messages in the file.
-
-Note what does **not** move: `visible_when` stays its own key. It is a masked-count test, not a
-disclosure control over existence-in-principle, and it is independent of everything else
-([decision 0075](../../decisions/0075-the-masked-count-is-an-existence-criterion.md)).
-
-## 5. Everything nameable takes a `title`
-
-Layers and levels carry `title` and it reaches the client. Nothing else does:
-
-- **Attributes have no title**, so a client's filter UI shows `primary_category`.
-- **Slices have one and it cannot be set.** `MANIFEST.slices[].display_name` exists and is served
-  on `/v1/meta`; the build assigns it the slice id and there is no route to say otherwise.
-- **Vocabularies have no title** — they have only the logical key that binds their file.
-- **Vocabulary values have one, spelled `label`.** That word means *access label* everywhere else
-  in this system. It becomes `title` like every other one.
-
-So: `title` on `[[attribute]]`, `[[vocabulary]]`, each vocabulary value, each declared slice, and
-the existing two. It is presentation metadata on an object whose visibility is already decided —
-per-point-attributes §3.8's rule that properties are not separately gated covers it, and a title
-discloses nothing a name does not.
-
-This needs a `[[slice]]` block, since a slice is named on the command line today and has nowhere
-to carry a title. With both, the rule must be stated: **`--slice` selects which declared
-`[[slice]]` this build writes, and a value naming no declared slice is refused** — otherwise the
-same identifier is spelled in two places with nothing reconciling them.
-
-## 6. Key names, by two rules
-
-The keys are in at least four styles: bare verbs (`render`, `index`), bare adjectives (`multi`,
-`ungated`), preposition fragments (`visible_when`, `depends_on`, `values_of`, `render_in`), and one
-clause about a different subject (`artifacts_carry_own`).
-
-**A key naming a property is a noun; its value carries the choice.** `visibility`, `hierarchy`,
-`vocabulary`, `analyser`, `membership` already are. This is the rule `visibility` applies over
-`ungated`, and it is what removes the clause-shaped key.
-
-**A key that is a boolean is an imperative saying what the build should do.** `render`, `index`,
-`prune_children` already are.
-
-What the two rules change, beyond §3 and §4:
+**A key naming a property is a noun; its value carries the choice.** **A boolean key is an
+imperative saying what the build should do.** `render`, `index` and `prune_children` already are.
 
 | Today | Becomes | Why |
 |---|---|---|
-| `corpus_derived` on supplied content | `visibility` in §4's vocabulary | a disclosure control wearing an adjective |
-| `values` (a vocabulary's value set) | `[vocabulary.values]` only, with `value_set` as the switch | the word also names an artifact's content payload; one meaning each |
-| `stable_key` | `key` | §7 |
-| `children_keys` in the artifacts file | deleted | §8.3 |
+| `content = { derived = [...] }` | `content = { computed = [...] }` | these are properties the engine recomputes per viewer; `derived` had to stop meaning two things |
+| `kind = "label_text"` on supplied content | `name` + `type = "text"` | mirrors `[[attribute]]`; `kind` is a free string the engine never reads, so `label_text` was a tag, not a concept — and a layer carrying both a name and a description is now expressible |
+| `stable_key` | `key` | the caller's own address for an artifact; `stable_` is work the prose should do, and `values_key` no longer competes for the word |
+| `multi` | left alone | ⊘ unbuilt and refused at parse; half-renaming it buys nothing |
 
-`multi` is left alone. r1 proposed renaming it; it is ⊘ unbuilt and refused at parse, and
-half-renaming an unbuilt key buys nothing. `visible_when` and `depends_on` stay — they read as
-fragments, but each is already in the corpus and understood, and renaming them buys nothing.
+Not `id` for the artifact key, which implies the system assigned it and collides with entity ids.
+Not `name`, which suggests something human-facing — a cluster's human name is a **label artifact
+attached to it**, with its own visibility, and that distinction is the point of the label mechanism.
 
-## 7. `stable_key` becomes `key`
+## 8. Inputs by grain, and where their fields are
 
-It is the caller's own address for an artifact: the name that survives a rebuild, the thing an edge
-points at, and the sort key ordinals are assigned in. `stable_` is doing work that the surrounding
-prose should do instead — nothing about a bare `key` suggests it is unstable.
+Two grains — one row per point, one row per artifact — plus the members relation. **Nothing in the
+config currently says where any of their fields are**: `entity_id`, `x`, `y`, `term_id`, `layer`,
+`stable_key` and `member` are hardcoded in the readers, so every corpus renames its columns to suit
+us.
 
-Once `values_key` is gone (§3), `key` is unambiguous, and the artifact columns come out as one
-family: `layer`, `key`, `attached_key`, `parent_key`.
+**`slice` becomes `view`** (owner ruling, 2026-08-18). A slice is a named coordinate system over
+the shared entity space — disjoint time ranges, several embedding spaces, several datasets — and
+*slice* reads as the temporal case that was merely the first instance. This is the one rename in
+this memo that reaches beyond the config: `slices-and-multi-table.md` is a normative document whose
+title, sections and every citation carry the word, as do `SliceDescriptor`, `slice_id`, the
+per-slice layout paths and `--slice`. Pre-release that costs nothing but the edit
+([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)); it
+is simply a larger edit than the rest.
 
-Not `id`, which implies the system assigned it and collides with entity ids and `tessera_id`. Not
-`name`, which suggests something human-facing — a cluster's human name is a **label artifact
-attached to it**, in its own layer with its own visibility, and that distinction is the point of
-the whole label mechanism.
+⚠ **One thing to weigh before it is executed:** *viewer* is load-bearing vocabulary here — the
+principal is a viewer, visibility is resolved per viewer, and `/v1/meta` is a per-viewer document.
+`the view's visibility` and `the viewer's visibility` are different claims one word apart, and the
+corpus makes both constantly. `projection` or `space` carries the same generality without the
+near-collision. Recorded as a concern, not a refusal; the ruling stands unless reversed.
 
-## 8. Inputs by grain
+### 8.0 Every object declares its own source and its own fields
 
-There are two grains here — one row per **point**, one row per **artifact** — and one relation that
-is neither. The current split has four files across them plus one vocabulary file per vocabulary.
+Today `entity_id`, `x`, `y`, `term_id`, `layer`, `stable_key` and `member` are hardcoded in the
+readers, so every corpus renames its columns to suit us. Two earlier drafts answered that badly —
+first with global `[artifacts]` and `[members]` column maps that floated free of the layers they
+described, then with per-layer maps that still let two layers read one file with nothing saying
+which rows were whose. **One file per layer settles it by elimination**: no discriminator column,
+no selector to configure, and no way for a layer to ingest another's rows. It also matches how the
+data is produced — you ran HDBSCAN and you got a file.
 
-**Points already carry their attributes.** The build reads the declared attribute columns off the
-points file, so the flat-table-plus-column-mapping paradigm is implemented; only geometry and
-access terms sit outside it.
-
-**Column names come from the config.** `entity_id`, `x`, `y` and `term_id` are hardcoded in the
-readers, so every corpus must rename its columns to suit us. Under a config that already maps
-columns to attribute slots, mapping these too is the same mechanism:
-
-```toml
-[points]
-entity = "entity_id"
-x      = "x"                          # or: morton = "m", residual = "r"
-y      = "y"
-```
-
-The three accepted geometry shapes (`x`/`y`, `morton` + `residual`, bare `morton`) are unchanged
-and remain mutually exclusive — declaring keys from two of them is refused, and both Morton shapes
-still require the identity extent. The config must show one example of each, because a caller with
-a Morton column cannot otherwise tell whether the `x`/`y` keys must be absent (they must).
-
-### 8.1 The access relation: a column, or a label on the slice
-
-**Two sources. A declaration may name either, or both — where both, the slice label fills
-what the column leaves empty.**
+So every object that has data declares two things, in its own block:
 
 ```toml
-[[slice]]
-name = "s0"
-title = "arXiv, August"
-default_point_visibility = "public"   # points that carry no terms of their own take this label
-# visibility = "ir:analyst"           # ⊘ the slice's own gate — specified, not implemented
-
-[access]
-terms = { column = "categories" }     # list<string>, or a plain string for one term per point
-terms = { file = "pairs" }            # the exploded (entity_id, term_id) form, bound with --pairs
+source = "hdbscan"                                       # a key bound on the command line
+fields = { members = "members", parent = "parent_id" }   # only where the source disagrees
 ```
 
-The **column** is the general case: a `list<string>` where a point carries several terms, or a
-plain `string` where it carries one, minted the way an open vocabulary is minted. Two consequences
-beyond one fewer file: a grant is written in category names instead of integers, and
-`terms.parquet` — which the build never reads, and which exists so a human can translate a grant
-back — is replaced by a real build output (§8.2).
+**`source` is a bare string** because it can only ever be a bound file key — inline data is an
+array or a table on its own key (`artifacts = [...]`, `[vocabulary.values]`), so the two are told
+apart by shape and `{ file = … }` was a wrapper earning nothing. Nesting the column map inside it
+cost a second level of inline table for a rename list, which is the worst thing on the page for the
+least reason.
 
-**`default_point_visibility` on the slice is the bulk form**, for the corpus where every point
-carries the same label. The name states the behaviour: it is what a point takes when it says
-nothing, never what overrides what it said. It is a better answer than the constant column it replaces, on three counts and not
-merely on convenience:
+**They are fields, not columns.** In a Parquet source they are columns; in an inline one they are
+keys of a table, and Arrow's own schema calls them fields either way. Naming the map for one
+storage form would make the config describe Parquet rather than describe the input.
 
-- **It is visible where disclosure decisions are reviewed.** A label in the config appears in a
-  config diff and in the disclosure report (§9); the same label repeated down a data column appears
-  in neither, and no reviewer reads 10⁶ rows to find it.
-- **It costs nothing to store.** At 10⁹ points a constant column is 10⁹ duplicated strings in the
-  producer's memory and on disk, for one fact.
-- **It is the honest shape of the statement.** *Every point in this slice is public* is a property
-  of the slice, and writing it per row makes a corpus-wide decision look like per-row data.
+**The map says *where*, never *whether*.** This is the ambiguity that sank the previous spelling:
+`parent = "parent_id"` was doing double duty, asserting both that a layer's artifacts have parents
+and where they are — so omitting it could mean either *my source uses the default name* or *my
+artifacts have no parents*. The object's own keys are what assert existence — `hierarchy` says whether there are edges and which
+way they run, `membership` says there are members, `type` says there is content — and
+`fields` only ever answers where to find something already declared. Two refusals fall out and
+should be written into §4.3: a field named in the map that the object never declared, and a
+declared field whose default name is absent from the source, each naming both halves.
 
-It takes a list as well as a single label, since a point may carry several terms.
+So `fields` is an **override map**: names default to the canonical ones and the table carries only
+what differs, which is why most objects name a source and stop.
 
-**Where both are declared, the slice label fills and never overrides.** A point whose column value
-is null or empty takes the slice's label; a point carrying terms of its own keeps exactly those.
-The build reports how many points were filled, and declaring both is a warning rather than a
-refusal — the caller is told, and the build proceeds.
+It is a table rather than loose keys because of the rule the rest of this surface keeps — **a data
+reference is keyed `column`/`columns` or wrapped in a table; a bare string is a literal.** Written
+flat, `members = "members"` (a column) would sit beside `membership = "enumerated"` (a value) with
+nothing distinguishing them.
 
-**The rule is *fill*, not *take the config*, because a point's terms are disjunctive.** `M_auth` is
-a union of posting lists (§6.1–§6.3), so a point carrying `math.GT` is visible to every principal
-holding `math.GT`, and **adding a term to a point can only widen it**. A slice label that overrode
-or joined the column would therefore make every point in the slice visible to every holder of that
-label, discarding the corpus's access relation — and with `public` it would make the whole slice
-world-visible on the strength of one config line and a warning nobody is obliged to read. That is
-C-register widening with no accountable party, arriving through a convenience.
+**The identity column is named once**, on `[corpus]`, and a view repeats it only if its own file
+disagrees — identity is entity-space and shared, so declaring it per view would be one fact in two
+places waiting to diverge.
 
-Nor is conjunction the safe fallback it looks like: it is **not expressible** in the current mask
-model at all. AND is reachable only through the access-expressions design
-([`core-access-expressions.md`](../../design/core-access-expressions.md), provisional), and there
-it works by minting a compound term at build time, not by combining sets per request. So the choice
-is genuinely between *fill* and *widen*, and only one of them is admissible.
+**Or the data sits inline**, exactly as a vocabulary's values may. Inline is for what a person
+authors — a dozen curated regions, a handful of boundaries — and it makes a small layer writable
+with no Parquet pipeline. The corpus and views are file-only: a corpus is never something you type.
 
-Filling is also what the bulk case actually wants: a corpus with no per-point terms has an empty
-column everywhere, so every point takes the label and the outcome is identical to declaring no
-column at all. A corpus with a partly-populated column gets the label exactly where it said
-nothing — which is the reading a caller who wrote both would expect, and the only one that cannot
-widen a point they had already restricted.
+**Entity space is its own block, and this is a correction.** An earlier draft hung the attributes
+and the access terms off `[[view]].source`, which contradicted its own next paragraph: entity space
+is the invariant plane and only coordinates are per view. With one view nothing shows; with two,
+`category` would be either duplicated across both points files or undefined as to which the build
+reads. So `[corpus]` owns identity and attributes, `[[view]]` owns coordinates and the access
+field, and the two may name the same physical file when there is one view — their fields are
+disjoint but for the id. The access field is the one entity-space fact declared on a view, by
+ruling, under the agreement rule in §4.
 
-The exploded file stays **as a source, not as a second concept**. That is not compatibility: the
-build *writes* an exploded `pairs.parquet` as an output for the reference oracle, and the probe
-generators at 10⁹ scale produce that shape natively, so the reader exists either way.
+**Membership follows the same rule as `visibility`** — bare where it is a literal, a table where it
+carries a part:
 
-Three rules the fail-closed review requires, all of which must be written into §6.1:
+```toml
+membership = "enumerated"                        # rows or a list in the layer's source
+membership = "spatial"                           # a shape, supplied as content
+membership = { attribute = "primary_category" }  # one artifact per value of that column
+```
 
-- **With no slice label declared, a null value and an empty list both mean no access terms, which
-  means visible to no principal.** Neither means unrestricted. A column introduces null where the
-  pairs file had only absence, and "null is unspecified, so unrestricted" is the plausible
-  misreading and the permissive one. Where a slice label *is* declared, those are the rows it
-  fills, and the count is reported.
-- **Terms are trimmed of surrounding whitespace** (owner ruling, 2026-08-18), matching what the
-  passthrough plugin already does, so `" math.GT"` and `"math.GT"` are one term.
-- **`public` resolves to the reserved term `0`** (§4.1), neither minted nor refused, so a corpus
-  that already models open-to-all as a term keeps writing it and gets the meaning it expects.
+`kind` would be a wrapper around nothing in two cases out of three.
+
+### 8.0.1 Membership by exclusion, an input spelling
+
+A member source may name the entities a membership **excludes** rather than those it includes:
+
+```toml
+fields = { excluding = "not_members" }
+```
+
+**This is a spelling of the input file and nothing more.** The build complements it once against
+the view's entity set and materialises exactly the membership the included form would have
+produced; the segment, the manifest and every read path are byte-identical and never learn which
+way the file was written. So there is no masking arithmetic to specify, no leak-register entry, and
+no question for I2 — the choice has been made and discarded before anything is stored.
+
+**What it buys is the producer's side.** A list column is the natural shape for membership and
+falls over on one case: a condensed tree's root holds every point, so writing it means one cell
+carrying the whole corpus, which the producer must materialise whole and which no reader can
+stream. Written as an exclusion the same root is *empty* — and the clusters deep enough to have
+large exclusion sets are exactly the ones whose member lists are small, so the two spellings cover
+each other and a caller writes whichever side is shorter.
+
+**Not to be confused with a complement taken at request time.** That would be a fourth membership
+source, with the *"never stale"* character `spatial` and `attribute` already have — an artifact
+gaining members whenever a point is ingested, with nobody publishing to it. A coherent thing to
+want and a reasonable feature; it is not this, and building it under this name would change what an
+artifact means while looking like a file-format convenience.
+
+### 8.1 The access relation
+
+A `list<string>` column on the points table, or a plain `string` where a point carries one term,
+minted the way an open vocabulary is minted. A grant is then written in category names rather than
+integers, and `terms.parquet` — which the build never reads, and which exists so a human can
+translate a grant back — is replaced by a real build output (§8.2).
+
+The exploded `(entity_id, term_id)` file stays as a **source**, bound with `--pairs`, not as a
+second concept: the build writes that shape as oracle output regardless and the probe generators
+produce it natively at 10⁹, so the reader exists either way. Declaring both is refused.
+
+Three rules for §6.1:
+
+- **A null value and an empty list both mean no access terms, which means visible to no principal.**
+  Neither means unrestricted — "null is unspecified, so unrestricted" is the plausible misreading
+  and the permissive one. Where a view default is declared, those are the rows it fills.
+- **Terms are trimmed** of surrounding whitespace, matching the passthrough plugin.
+- **`public` resolves to the reserved term `0`** (§4.1), neither minted nor refused.
+
+**The comma stops being a delimiter** (ruled 2026-08-18). The build joins terms with commas only so
+the plugin can re-split them, which was harmless while terms were integers and is not once they are
+caller strings: a category containing a comma would split into two, and the point would become
+visible to holders of *either*. The plugin interface gains an entry point taking a **list**, the
+passthrough implementation of which is the identity, and the delimiter leaves the path rather than
+being defended with a refusal.
 
 ### 8.2 The term dictionary is a build output
 
-Term ids are assigned in first-appearance order, which is canonical today only because the pairs
-reader hands each item its terms already sorted. With caller strings there are no ids yet, so
-first-appearance order becomes the order the caller happened to write their lists in.
+Term ids are assigned in first-appearance order. With caller strings that order is the caller's,
+so the build writes the descriptor→id dictionary as a first-class output, and that file is what a
+grant is written from and what a rebuild replays. Term `0` is `public` in every one.
 
-**The owner has ruled this acceptable, on the condition that the term list is maintained.** So the
-build writes the descriptor→id dictionary as a first-class output beside the bundle, and that file
-— not a notebook byproduct — is what a grant is written from and what a rebuild replays. Term `0`
-is `public` in every such dictionary (§4.1).
+A sort was proposed and **withdrawn** (owner ruling, 2026-08-18): it makes the dictionary a
+function of content only for a one-shot build, since across writes a descriptor first seen later
+takes a later id however each row was ordered. Assignment is a function of history, and the carried
+dictionary is the mechanism — which ingest needs regardless.
 
-r2 proposed additionally sorting each row's list, to make the dictionary a function of content
-rather than of layout. **That is withdrawn** (owner ruling, 2026-08-18): it holds only for a
-one-shot build. Once terms arrive across writes, a descriptor first seen in a later batch takes a
-later id however each row was ordered — assignment is a function of history, not of any one file —
-so the sort would buy determinism in the mode where it matters least, at the cost of a rule that is
-true in one mode and false in the other. The carried dictionary is the mechanism, and ingest needs
-it regardless.
+The consequence to state rather than discover: term ids feed the signature sort key, the signature
+order assigns entity ids, entity ids are permanent (I9) and `tessera_id` derives from them. So
+`--carry-id-key-from` must carry the dictionary alongside the key; remembering one and forgetting
+the other silently renumbers the corpus. Deduplication is required either way — a duplicate
+inflates the item's count against `max_terms_per_item`, whose over-bound counter is documented as
+correct *because* the reader dedups.
 
-The consequence to state plainly rather than discover: term ids feed the signature sort key, the
-signature order assigns entity ids, and entity ids are permanent (I9) with `tessera_id` derived
-from them. So a rebuild preserving identity replays the recorded dictionary exactly as it already
-replays the recorded batch size and identity key — and `--carry-id-key-from` should carry the
-dictionary with them, since a caller who remembers one and forgets the other gets a silently
-renumbered corpus.
+### 8.3 The two grains, and what their columns are called
 
-Deduplication is required either way: a duplicate term inflates the item's descriptor count against
-`max_terms_per_item`, whose over-bound counter is documented as correct *because* the pairs reader
-dedups.
+**An artifact source is one row per artifact; a member source is one row per `(artifact, entity)`.**
+Only the second is long, and the asymmetry rests on cardinality rather than on taste.
 
-### 8.3 Members keep their own file
+**The artifact source is one row each.** It was one row per `(artifact, variation)`,
+which meant `key`, `parent` and `attached` were repeated on every variation row so that a single
+column, the content, could differ. The build then has to *check that the copies agree* and refuse
+when they do not — a refusal that exists only because of the duplication that caused it. So the
+content becomes a **list column, ordered best first**:
 
-r1 proposed folding members into the artifacts table as a list column. **That does not hold**, on
-two counts the review made concrete. The grain is wrong: membership is per artifact, a generating
-set is per variation, and the two are distinguished today by a null variation — on one
-`(artifact, variation)`-grained table with one member list, either the full membership repeats on
-every variation row or it is meaningful on one row and silently ignored on the others. And the
-scale is wrong: the HDBSCAN root's membership is the whole corpus, so the list column is a single
-cell holding millions of ids, which cannot stream and which a producer must materialise whole. The
-current file streams in batches. The dataframe argument does not favour the collapse either —
-`groupby().agg(list)` and `explode()` are one line each.
+```toml
+contents = "contents"   # ["quantum error correction", "a cluster of papers"]
+```
 
-`children_keys` **is** deleted from the artifacts file. It is read, validated for agreement across
-rows, and copied forward, and nothing ever walks it; the parent edge is the only spelling, which
-is what the notebook's own prose already says. An input column a caller can populate in good faith
-and have silently ignored is the same failure as an ignored `listing`, in different clothes.
+Rank is the position in that list, the duplicated identity columns go, and the agreement refusal
+goes with them. This is safe precisely where §8.4's is not: a fallback chain is two or three
+entries, not millions.
 
-### 8.4 The delimiter, and the better fix
+**Two names change with it.** `variation` becomes **`rank`** wherever it survives — in the member
+source, where a generating set is per rank. It is a fallback order: the viewer is served the
+**first content whose sources they can see entirely**, or nothing, and `variation` named the fact
+that the entries differ without saying what orders them, which is the only part a caller must get
+right. And `member` becomes **`entity`**, because the member source is long: the column holds a
+single entity id drawn from `[identity]`'s space, and a column called `member` on a long table
+reads as though it should hold the whole membership — which is the first thing a reader assumes
+and the wrong one.
 
-An item's access label is built by **joining its terms with commas**, and the plugin splits that
-string on commas, trims, and drops empties. Today the terms are integers, so no term can contain
-the delimiter. Move caller strings into that position and a category containing a comma splits into
-two terms — and the item becomes visible to a principal holding *either*, silently wider than the
-corpus states. Trimming does not help with this one; only a refusal or a change of representation
-does.
+A null `rank` on a member row is the artifact's own membership; rank *k* is the generating set of
+`contents[k]`. That is why `require_member_visibility = "all"` on a label means all of *that
+rank's* sources rather than all of the cluster's members.
 
-**The representation is the better target.** The join exists because the build's only input was
-integer ids and the plugin boundary takes an opaque label. A list column already *is* the term
-list, so the build joins strings only to re-split them. Giving the plugin interface an entry point
-that takes a list of terms — the passthrough implementation of which is the identity — removes the
-delimiter from the path entirely, and the refusal becomes unnecessary.
+### 8.4 Members keep their own source
 
-**Ruled 2026-08-18: the plugin interface takes a list.** So the delimiter is gone rather than
-defended, and §8.1's comma refusal goes with it — a category containing a comma is an ordinary
-term. The plugin boundary is unchanged in kind: it still maps caller-supplied bytes to descriptors,
-and passthrough still implements the identity.
+Membership is per artifact; a generating set is per rank; the two are distinguished by a null rank.
+Contents fold into the artifact row (§8.3) because a fallback chain is two or three entries. Members
+do not, and the scale is the whole of the reason: the HDBSCAN root's membership is the whole corpus, so a list column is one cell holding
+millions of ids, which cannot stream and which a producer must materialise whole. `groupby().agg`
+and `explode` are one line each, so the dataframe idiom is indifferent; the memory profile is not.
+
+`children_keys` **is** deleted from the artifacts file: it is read, validated across rows and
+copied forward, and nothing walks it — the parent edge is the only spelling. An input column a
+caller populates in good faith and has silently ignored is an ignored `listing` in other clothes.
+
+### 8.5 Labels are declarable where they are used
+
+A label is a first-class artifact by design — its own visibility, its own suppression, because a
+synthesis can be more sensitive than its sources. The *config* made a caller hand-assemble that: a
+second layer, its own views, `depends_on`, a hierarchy, a criterion to switch off and a content
+sub-block. `[layer.labels]` expands to exactly that layer, and the caller declares only what is
+theirs to decide.
+
+**What the sugar supplies:** `views`, a flat hierarchy, the `depends_on` edge back to the parent,
+and the content wrapper. **What it must never supply:** the gate, the membership requirement, or
+the existence of membership data. `membership` is written out because a label's members are its
+generating set — the documents it was actually generated from, which the producer knows and the
+build cannot derive — and that line is what tells a reader the members file carries label rows.
+
+The label layer's `visibility` defaults to its parent's. That is a default on a disclosure control,
+admissible because it is the *parent's* value rather than the widest one, and it may be overridden
+narrower — a label set more sensitive than the clusters it names is exactly the case the separate
+layer exists for.
 
 ## 9. Getting from a Parquet file to a map
 
-The review's sharpest finding is that r1 rearranged the config without shortening the path to a
-first map, and that the things actually blocking it are elsewhere. Four, in the order a newcomer
-hits them:
+The user-experience review's sharpest finding was that r1 rearranged the config without shortening
+the path to a first map. Four things block it, and only one is a config key.
 
 **The extent silently corrupts geometry, and this repository's own notebook was in the trap.**
-Coordinates are quantised against `--extent` by clamping, so a point outside it lands on the
-boundary and the build reports nothing. `notebooks/arxiv-corpus.ipynb` passed the grid extent
+Coordinates are quantised against `--extent` by clamping, so a point outside lands on the boundary
+and the build reports nothing. `notebooks/arxiv-corpus.ipynb` passed the grid extent
 `0,65536,0,65536` while writing real UMAP coordinates spanning roughly −17…18 and −21…23: every
 negative coordinate collapsed onto an axis and the rest occupied a corner nineteen cells wide out
 of 65,536. The bundle was well-formed and the map was garbage. The notebook is fixed — it computes
-its bounding box, records it in its manifest and passes that — but **the build-side gap is the real
-finding**: nothing reports a point outside the extent. Two changes, and the second matters more
-than the first: **`--extent auto`**, computing the bounding box from the points file and recording
-it in the manifest; and a **build-time report of how many points clamped to an extent edge, printed
-with the data's actual bounds beside the extent given**. Without the second, `auto` only moves the
-trap. (Every other caller of the grid extent is correct — their points files hold Morton codes,
-where it is the required value.)
+its bounding box, records it and passes that — but **the build-side gap is the finding**: nothing
+reports a point outside the extent. Two changes, the second mattering more: **`--extent auto`**,
+computing the box from the points file and recording it; and a **report of how many points clamped
+to an edge, printed with the data's actual bounds beside the extent given**. Without the second,
+`auto` only moves the trap. Every other caller of the grid extent is correct — their points files
+hold Morton codes, where it is the required value.
 
-**`--pairs` is mandatory, so there is no way to build from a bare points file.** A data scientist
-with a dataframe and no permission model has nothing to write, and that is where a first attempt
-stops. This is a disclosure question, so it must not acquire a default — but `default_point_visibility` on
-the slice (§8.1) answers it in one line:
+**A corpus with no permission model** writes `point_visibility = { default = "public" }` and no
+column. Undefaulted, one line, and it states the disclosure rather than acquiring it.
 
-```toml
-[[slice]]
-name = "s0"
-default_point_visibility = "public"
-```
-
-Nothing is defaulted, the caller states the disclosure explicitly in the file where disclosure
-decisions are read, and it carries into the disclosure report below without anyone inspecting the
-data. An earlier draft put the same statement in a constant data column; that works and is strictly
-worse, because a corpus-wide decision then lives where no reviewer looks.
-
-**`--slice` carries no disclosure content and should default** to the single declared slice when
-there is exactly one.
-
-**`tessera check`** — accepted by the owner, 2026-08-18. It parses the config and reads only the
-Parquet *schemas*, reporting: every declared attribute against the column that must carry it
-(present? compatible type?), every vocabulary source bound, every layer's slice declared, every
-member id in range where cheap to tell, and every disclosure decision as a table. It runs in a
-second and it is what goes in CI. Today the only way to discover an unbound vocabulary or a missing
-column is to run a full build.
+**`tessera check`** parses the config and reads only the Parquet *schemas*, reporting every declared
+attribute against the column that must carry it, every vocabulary source bound, every layer's view
+declared, and every disclosure decision as a table. It runs in a second and it is what goes in CI;
+today the only way to find an unbound vocabulary or a missing column is a full build.
 
 **A disclosure report beside the bundle.** The build already writes `reports/containment.json`; it
-should also write `reports/disclosure.json` and print its table — every layer with its `visibility`
-and `default_artifact_visibility`, every vocabulary with its `visibility` and `value_set`, every attribute
-with its placement. It is diffable between builds and it is the artefact a reviewer signs off,
-which is a better answer to *what does this deployment expose* than reading TOML.
+should write `reports/disclosure.json` and print its table — every layer with its `visibility` and
+`require_member_visibility`, every vocabulary with its `visibility` and `value_set`, every
+attribute with its placement, and what `[layer.labels]` expanded to. Diffable between builds, and a
+better answer to *what does this deployment expose* than reading TOML.
 
-One thing already right, and the model the rest should copy: the identity-key refusal names all
-four routes out of the failure it reports.
+**The refusal messages.** Three undefaulted controls fail three different ways today: the gate
+refusal names both spellings and the reason; `artifacts_carry_own` and `visible_when` are bare
+required fields, so omitting either yields raw serde text naming neither the layer nor the choice.
+Both should be optional-and-hand-validated on the gate refusal's template — *what is missing · the
+values, spelled out · what each does · why there is no default*. That refusal's own string literal
+is wrapped without a continuation, so the operator reads twenty-two spaces mid-sentence, twice; the
+view-mismatch refusal has the identical bug.
 
 ## 10. What this does not change
 
-- **No invariant moves.** Every rule about what may be computed, gated or served is untouched;
-  this is the spelling of the declarations, the grain of the inputs, and one deleted mechanism.
-- **The undefaulted disclosure controls stay undefaulted**, and §4.3 keeps every existing refusal:
-  `render` on `keyword`, `index` on a rendered number, code `0`, reserved-and-live collision,
-  shadowed column names, `multi = true` at all (⊘), `render_in` (⊘), and the vocabulary file's
-  per-value `gate` column (⊘).
-- **The compiled form is the contract**, not the config. `MANIFEST.json` gains `title` fields and
-  loses nothing; the server keeps reading only the compiled form, per §4.1.
-- **The control plane is unaffected.** `PUT /control/layers` takes JSON, which has null and needs
-  none of TOML's workarounds; it should adopt the same words so a layer means one thing in both
-  routes, but that is a rename in one struct.
-- **Vocabulary files keep their shape**, minus `label` → `title`.
-- **`deny_unknown_fields` covers the merged config**, as it covers both files today. It is the rule
-  that keeps a mistyped disclosure control from reading as an absent one.
-- **A config declaring no `[[layer]]` is refused when `--artifacts` is given.** Today that refusal
-  rides the absence of the `--layers` flag, which the merge removes; without restating it, a
-  truncated config yields a bundle with no layers and no error, which no client can distinguish
-  from layers whose artifacts were all withheld.
+- **No invariant moves.** This is the spelling of declarations, the grain of inputs, and the merge
+  of two tests that asked one question.
+- **Undefaulted disclosure controls stay undefaulted**, and §4.3 keeps every refusal: `render` on
+  `keyword`, `index` on a rendered number, code `0`, reserved-and-live collision, shadowed column
+  names, `multi` (⊘), `render_in` (⊘), the vocabulary file's `gate` column (⊘).
+- **The compiled form is the contract.** `MANIFEST.json` gains titles and loses nothing; the server
+  reads only the compiled form.
+- **The control plane is unaffected** — JSON has null and needs none of TOML's workarounds — though
+  it should adopt the same words so a layer means one thing in both routes.
+- **`deny_unknown_fields` covers the merged config**, as it covers both files today.
+- **A config declaring no `[[layer]]` is refused when `--artifacts` is given.** That refusal rides
+  the absence of `--layers` today, which the merge removes; without restating it a truncated config
+  yields a bundle with no layers and no error, indistinguishable from layers whose artifacts were
+  all withheld.
 
-## 11. Rulings
+## 11. Settled, and what remains
 
-All settled as of 2026-08-18. Recorded here so the design edits can be made without reopening them.
+Ruled by the owner on 2026-08-18 and recorded so the design edits need not reopen them: the two
+axes and the `require_member_visibility` merge (§3); `public` as a reserved label at term `0`
+(§4.1); `inherited` over `none`; `{ column, default }` at both member levels (§4); `open`/`closed`
+on `value_set`, and an unresolved vocabulary reference as a parse error (§5); the config named on
+the command line, examples using `schema.toml`; trimming, and order-dependent term ids with a
+maintained dictionary and no sort (§8.1–8.2); the plugin entry point taking a list (§8.1);
+`tessera check` (§9).
 
-- **The config file is named on the command line**, as `--schema` and `--layers` are today, so it
-  has no fixed name; the examples here and in the design documents use `schema.toml`. That also
-  disposes of the collision the review raised — `tessera.toml` is the *server* config, and nothing
-  now proposes reusing the name. §4.1's line *"the schema never appears in `tessera.toml`"* still
-  needs rewording so it is not read as forbidding the merge.
-- **The plugin interface gains an entry point taking a list of terms**, so the build stops joining
-  strings with commas only to re-split them, and the delimiter leaves the path entirely (§8.4).
-  The passthrough implementation is the identity. The comma refusal in §8.1 is then unnecessary and
-  is dropped with it.
-- **`open`/`closed` for a vocabulary's value set** (§3), on the key `value_set` — the word `values`
-  being unavailable, since TOML cannot carry it as both a switch and the inline table.
-- **`public` is a reserved label interned at term `0`** (§4.1), meaning the same thing on a point,
-  an artifact, a layer and a vocabulary.
-- **Access terms are trimmed** (§8.1); **term ids stay order-dependent with a maintained
-  dictionary**, and the proposed sort is withdrawn (§8.2).
-- **An unresolved vocabulary reference is a config parse error** (§3.1), refused before any data
-  file is opened.
-- **`default_point_visibility` on a slice** as the bulk access source (§8.1). Declared alongside an
-  access column it **fills** points with no terms of their own and never overrides one that has
-  them, warning with the count rather than refusing. Overriding is inadmissible: a point's terms
-  are disjunctive, so any join widens, and conjunction is not expressible in the current mask
-  model.
-- **`default_artifact_visibility` replaces `artifacts_carry_own`** (§4), on the same shape: the
-  data says whether an artifact carries a label, the declaration says what an artifact that says
-  nothing gets. Required, with `"inherited"` written out where the layer alone gates them. The
-  layer and slice blocks are one shape — a container gate that conjoins, and a member default that
-  fills — with the slice's gate ⊘ until slice gating is built.
-- **`tessera check`** (§9).
+Two things this memo settles by argument rather than by ruling, and either could be reversed
+without disturbing the rest: the label layer's `visibility` defaulting to its parent's (§8.4), and
+`membership` becoming a table so `attribute` membership can name its column (§8).
 
-## 12. Cost
+## 12. Cost and the plan
 
-Two parsers, the input readers' hardcoded column names and a new list-column reader, the CLI's
-`--schema`/`--layers`/`--pairs` flags and the new `check` subcommand, the manifest's title fields,
-the layer declaration struct shared with the control plane, the two wrapped refusal messages, and
-the notebook. Every existing test that writes a `schema.toml` or a `layers.toml` moves with them,
-which is the bulk of the mechanical work.
+The staged plan is
+[`2026-08-18-configuration-surface-plan.md`](2026-08-18-configuration-surface-plan.md).
+
+
+
+Two parsers merging into one, the input readers' hardcoded column names and a new list-column
+reader, the CLI's flags and the new `check` subcommand, the manifest's title fields, the layer
+declaration struct shared with the control plane, the plugin trait's new entry point, the two
+wrapped refusal messages, and the notebook. Every test writing a `schema.toml` or `layers.toml`
+moves with them, which is the bulk of the mechanical work.
 
 Normative edits: per-point-attributes §3.8, §3.9, §4.2, §4.3, §4.4 and Appendix R;
-annotation-write-cycle §6.1 and Appendix R; and whatever in `records-and-search.md` §2 and
-`annotations.md` cites the renamed keys.
+annotation-write-cycle §6.1 and Appendix R; decision 0075 and the C27/C28 entries, for the merge;
+and whatever in `records-and-search.md` §2 and `annotations.md` cites the renamed keys.

@@ -62,6 +62,10 @@ Then, depending on what you are after:
   declared field has exactly one home: the hot column, its family's entity-space structure, or the
   record blob. [`per-point-attributes.md`](per-point-attributes.md) owns the category, its
   vocabulary and its disclosure controls.
+- **How a build is declared.** [`configuration.md`](configuration.md) — one file declaring the
+  corpus, its views, its vocabularies, its attributes and its layers, compiled into the manifest.
+  Its §1 enumerates the whole surface, which is a **closed** set: a key it does not name does not
+  exist. ⊘ Not built — the parsers still read the two-file surface it replaces.
 - **How filtering works.** [`filter-index.md`](filter-index.md) for the attribute artefact the
   operands read, and [`filter-surface.md`](filter-surface.md) for what a query does with it. Both are
   provisional, and **every shipped family is built** end to end — value column and masked scan for

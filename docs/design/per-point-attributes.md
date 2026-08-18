@@ -7,7 +7,8 @@ three booleans** — `render`, `index`, `multi`, each defaulting false —
 and the three homes; this document owns the category, its vocabulary and its disclosure controls.
 `render` and `index` are **built**: a `schema.toml` compiles into the manifest, both build
 implementations emit the columns, flush, merge and the fold carry them, and `/v1/categories` serves
-the values a code stands for (contracts r25). `listing = "per_viewer"` is **filtered** by §3.3's
+the values a code stands for (contracts r25). `visibility = "derived"` on a vocabulary (retired spelling `listing = "per_viewer"`) is
+**filtered** by §3.3's
 predicate, against the column's per-`(column, code)` membership sets unioned with the value-column
 extents a flush writes, so the disclosure control is enforced in both directions. To become
 normative: the §6 amendments folded into `architecture.md` and `contracts.md` — **read §6 as a
@@ -135,8 +136,8 @@ per-attribute table would not:
 - **Report §8.2 filter-surface growth.** Appendix C's exhaustiveness depends on that surface staying
   enumerable, and a config that widens it silently is the one way that property erodes without
   anyone deciding to erode it.
-- **Warn on the combinations that break in practice** — `discovered` + `u8` (§3.6), dense codes
-  under `listing = "per_viewer"` (§3.4), and `render_in` left at its default across
+- **Warn on the combinations that break in practice** — `open` + `u8` (§3.6), dense codes
+  under `visibility = "derived"` (§3.4), and `render_in` left at its default across
   non-overlapping slices (§3.9).
 
 **It reports; it cannot refuse.** Appendix A is a *sizing* table — per-structure figures at 10⁷ and
@@ -255,7 +256,7 @@ cross-slice legends compose.
 **Authoring.** Declared vocabularies pin their codes, following ClickHouse's `Enum8('low'=1,…)` — a
 re-sorted file cannot recolour anything when the mapping is in a reviewed artifact. The system
 scatters when it *mints*; an author writes what they like, and the plan step warns on dense codes
-under `listing = "per_viewer"`. Retired keys move to `reserved` (Protobuf's mechanism and its
+under `visibility = "derived"`. Retired keys move to `reserved` (Protobuf's mechanism and its
 reasoning), so the tombstone is auditable in the schema rather than buried in the manifest — reusing
 a key silently recolours history, on the argument slices §87 makes for slice names.
 
@@ -302,7 +303,7 @@ width*. §8 settles it.
 
 The discriminator is not today's cardinality but whether the domain is **closed by nature**.
 `severity: {low, medium, high, critical}` cannot reach 255; `department` starts at 20 and is 300
-after two reorganisations. So `discovered` + `u8` is the combination that breaks in practice, and
+after two reorganisations. So `open` + `u8` is the combination that breaks in practice, and
 the plan step warns on it by name.
 
 Exhausting the code space is a typed error naming the column and its width — `422` at ingest, a
@@ -346,23 +347,25 @@ both must hear the permanent refusal rather than the temporary one.
 
 Two independent axes:
 
-- **`vocabulary = declared | discovered`** — operational. Does the caller know the value set up
-  front? Governs whether an unknown key at ingest is a `422` or an auto-mint.
-- **`listing = per_viewer | public`** — a disclosure control. Is the *existence* of a value
-  sensitive? Governs whether `/v1/categories` is filtered per principal.
+- **`value_set = closed | open`** — operational. Does the caller know the value set up front?
+  Governs whether an unknown key at ingest is a `422` or an auto-mint.
+- **`visibility = public | derived`** — a disclosure control. Is the *existence* of a value
+  sensitive? Governs whether `/v1/categories` is filtered per principal. `derived` is the setting
+  of §4.2's membership axis that reads *visible if the viewer can see **any** point carrying it*;
+  the retired spelling was `listing = "per_viewer"`.
 
 All four combinations are permitted, and one is **warned about rather than refused** (owner ruling,
-2026-08-07). `listing = "public"` with `vocabulary = "discovered"` publishes value names inferred
+2026-08-07). `visibility = "public"` with `value_set = "open"` publishes value names inferred
 from whatever is in the corpus, which discloses data-derived names on nobody's authority — C11 with
 no accountable party. That is a real hazard and the build says so at parse; it is not a refusal,
 because the operator may have an accountable reason and is the party entitled to decide. `declared`
 means *the value set comes from an authored artifact* — inline in the schema, or a vocabulary file
-bound at build — so a 400-value published vocabulary stays practical. `declared` + `per_viewer` is
+bound at build — so a 400-value published vocabulary stays practical. `closed` + `derived` is
 the combination that matters: a known schema whose value names are themselves sensitive.
 
-**Where a `per_viewer` gate comes from.** Membership-derivation (§3.3) is the gate everywhere: a
-value inherits its members' labels. A **declared** vocabulary may additionally carry an explicit gate
-label per value in its vocabulary file — restricted to declared vocabularies because you cannot
+**Where a `derived` gate comes from.** Membership-derivation (§3.3) is the gate everywhere: a
+value inherits its members' labels. A **closed** vocabulary may additionally carry an explicit gate
+label per value in its vocabulary source — restricted to closed vocabularies because you cannot
 author a gate for a value nobody declared. Two properties of that gate:
 
 - **An explicit label replaces membership-derivation for that value**, rather than conjoining with
@@ -374,14 +377,14 @@ author a gate for a value nobody declared. Two properties of that gate:
   *not* a conservative label join, which yields an empty required set for a disjunctive gate
   (`finance | legal`) and admits every principal.
 
-A gate label requires the file form (§4.3): the inline `values` block pins codes only, and anything
+A gate label requires the source form (§4.5): the inline `values` block pins codes only, and anything
 else about a value is per-value data belonging with the value's other data.
 
 **Properties are not separately gated.** A principal who can see a value gets all of its properties;
 they are presentation metadata on a value whose visibility is already established.
 
 **A filter naming an invisible value contributes an empty operand, never a `422`.** Refusing would
-make the filter surface an existence oracle over exactly the vocabulary `per_viewer` hides — a
+make the filter surface an existence oracle over exactly the vocabulary `derived` hides — a
 caller could enumerate hidden values by observing which keys are refused. This follows contracts
 §3.2's unmatched-token precedent, and makes "no such value" and "a value you cannot see"
 indistinguishable in outcome *and* in work.
@@ -397,7 +400,14 @@ every client fetches once — and values move to a paged, per-principal endpoint
 bulk-lookup form matters more than the pagination: a client knows which codes it drew, so the
 common case resolves a handful of values and never fetches a set at all.
 
-### 3.9 Shared vocabularies, slices, and the absence of a metadata table
+### 3.9 Shared vocabularies, views, and the absence of a metadata table
+
+**A vocabulary is a named object and attributes share one by naming it** (§4.3), which is what
+retires `values_of`. `width` is declared **on the vocabulary**, because a shared vocabulary is one
+code space and the width is that space's, not a column's — so two attributes over one vocabulary
+cannot disagree about it, the disagreement being inexpressible rather than refused. Under the
+retired shape the minter bounded its draw by the first attribute it found, and a narrower column
+would silently fail to hold codes minted for a wider one.
 
 **A vocabulary is a named object and a column references one** (`values_of`). Keys, codes and
 properties are shared — the part humans maintain; postings, membership and therefore visibility stay
@@ -433,155 +443,13 @@ nothing here forecloses it.
 
 ## 4. The configuration surface
 
-### 4.1 A build input, not server config
+**Moved.** The declaration surface — every block, every key, what is required and what is refused —
+is [`configuration.md`](configuration.md), which is normative for it. It began here, as a schema for
+per-point attributes, and outgrew the document: of the six blocks it declares, only `[[attribute]]`
+and `[[vocabulary]]` are this design's subject.
 
-The schema never appears in `tessera.toml`; the server reads the compiled schema from the bundle's
-`MANIFEST.json`. A server reading a schema of its own could be restarted against a bundle whose
-columns disagree, and the mismatch would surface as wrong codes rather than a startup error.
-
-Config compiles to manifest, source to binary. **The capability model does not reach the manifest**,
-which stays flat and per-placement — hot columns, filter operands, categories — because a reader
-should never need to understand intent to know what to load. Corollary: **no environment-specific
-paths in the schema**; file locations are CLI bindings (§4.3).
-
-### 4.2 `schema.toml`
-
-```toml
-[[attribute]]
-name       = "severity"
-type       = "category"
-width      = "u8"
-render     = true
-index      = true                     # legal on a category at any flag combination (§3.7, records §4.2)
-vocabulary = "declared"
-listing    = "public"                 # legal: the value set is authored below
-
-  [attribute.values]                  # codes pinned; dense is fine under `public`
-  low = 1
-  medium = 2
-  high = 3
-  critical = 4
-  reserved = [5]
-
-[[attribute]]
-name       = "department"
-type       = "category"
-width      = "u16"
-render     = true
-index      = true
-vocabulary = "declared"
-values_key = "departments"            # authored, bound at build
-listing    = "per_viewer"
-
-[[attribute]]
-name       = "reviewing_department"
-type       = "category"
-width      = "u16"
-index      = true                     # indexed, never drawn
-vocabulary = "declared"
-values_of  = "department"             # shared keys, codes and properties
-listing    = "per_viewer"             # must match the referent (§3.9)
-
-[[attribute]]
-name       = "ingested_at"
-type       = "timestamp_us"
-index      = true
-
-[[attribute]]
-name       = "notes"
-type       = "keyword"                # neither flag: blob-resident, returned at drill-down alone
-```
-
-```
-tessera build --schema schema.toml \
-              --points data/points.parquet \
-              --values departments=data/departments.parquet
-```
-
-### 4.3 Required, defaulted, refused
-
-SA §7's rule governs: *performance knobs default; disclosure controls do not*.
-
-**Required for every attribute:** `name` and `type`, and nothing else — every placement flag
-defaults `false`, which is the cheapest home, made more expensive only by an explicit word.
-
-**Required for `type = "category"`:** `width` (an unsupported migration — §3.6); `listing` (a
-disclosure control, so absence is a build error exactly as `[disclosure]`'s absence is a startup
-error); `vocabulary` (it decides whether `public` is even legal, and a safe default there is a
-decision nobody made).
-
-**Defaulted:** `render`, `index` and `multi`, each `false`.
-
-**A declaration claiming neither flag is legal.** It is blob-resident (records §3):
-no hot-column slot, no entity-space structure, no operand on `/v1/meta`, and its values in the
-record blob for drill-down to return. The old *"a declaration must name a placement"* refusal is
-deleted rather than reworded — it existed because `inspect` had nowhere to put data, and the blob
-is that place.
-
-**Refused at parse**, each naming what is absent per decision 0013:
-
-- `render` with `multi = true` — decision 0039's fence, checked before the next rule so that a
-  caller who set both hears the permanent refusal;
-- `multi = true` at all (⊘, §3.7, records §5);
-- `index` on a **rendered number or datetime** (⊘ — decision 0064's render half). Store-once serves
-  that filter from the hot column, which stores an absent value as zero, so an item with no value
-  would match every range containing zero. `index` alone filters now, against an entity-space
-  column that carries presence; `render` alone draws now;
-- `render` on `keyword`, the one declarable string family (`utf8` is retired as a declared type —
-  `records-and-search.md` §4.3). The refusal is of the *placement*, not of the type: `index = true`
-  puts the string in entity space and costs the hot column nothing. Its storage form *is*
-  fixed-width — a `u32` ordinal — so "not fixed-width" is not the argument. The argument is that the
-  hot column is served: a rendered keyword would put either the value's bytes in every row, at
-  0.93 GiB per byte per row per 10⁹, or an ordinal that is a position in one layer's dictionary and
-  an index internal that never crosses the trust boundary (**I10**);
-- `render_in` (⊘, §3.9);
-- `record` as a column name — `attrs/record/` is the record blob's namespace, so a column of that
-  name would address the blob's files as its own;
-- a column named for a filter combinator — `all_of`, `any_of`, `none_of` — since a filter
-  expression names columns directly (decision 0062), and a column shadowing a fixed, reserved or
-  already-declared name;
-- `width`, `listing`, `vocabulary` or a value set on a non-category, refused rather than ignored: an
-  ignored `listing` is a disclosure control its author believes is set;
-- more than one of `[attribute.values]`, `values_key`, `values_of`; code `0` in a `values` block,
-  since it is the *absent* sentinel and `low = 0` would make every value-less row a member of `low`;
-  a code appearing in both `reserved` and the live set; and disagreement with a `values_of` referent
-  on `listing`, `vocabulary` or `width`.
-
-`listing = "public"` with `vocabulary = "discovered"` is **warned about, not refused** (§3.8, owner
-ruling 2026-08-07). The retired placement key is refused by the parser's unknown-field rule rather
-than aliased to the booleans that replaced it — decision 0048's shape, and the same rule that keeps
-a mistyped `listing` from reading as an absent one.
-
-### 4.4 Binding vocabulary files
-
-The schema names a logical key and the CLI binds it to a path — this repo's own `--id-key-file`
-pattern. Three rules, all fail-closed:
-
-- `[attribute.values]` and `values_key` are two spellings of one thing, so declaring both is a parse
-  error rather than a precedence question.
-- A declared attribute must have exactly one of them (or a `values_of` reference), and its key must
-  be bound at build. An unbound `values_key` is a build failure naming the attribute and the key —
-  **never a silent fall-through to auto-mint**, which would convert a closed vocabulary to an open
-  one without anyone deciding to.
-- A `--values` binding naming a key no attribute declares is also an error, or the previous rule
-  merely relocates the typo.
-
-The file is `(key, code, …properties, gate?)`. `values_key` is permitted on a discovered vocabulary,
-where it seeds keys and properties rather than closing the set — `vocabulary` is the key that says
-which — and seeded-but-open is still open, so §3.8's rule still forbids `public`.
-
-### 4.5 What is stolen, and from where
-
-| Convention | Source |
-|---|---|
-| Per-field placement booleans, `index` among them by name | Elasticsearch mappings (`index`, `doc_values`, `store`) |
-| *Mappings are immutable; you reindex* | Elasticsearch |
-| Explicit codes in the declaration | ClickHouse `Enum8('low'=1,…)` |
-| `reserved` for retired codes | Protobuf `reserved 3;` |
-| Append-only value addition | Postgres `ALTER TYPE … ADD VALUE` |
-| Logical key bound at invocation | this repo's own `--id-key-file` |
-
----
+What stays here is what a category and its vocabulary *are* — §3 — and in particular §3.8's two
+axes of visibility, which `configuration.md` §3 spells but does not define.
 
 ## 5. Ingest and build
 
@@ -651,7 +519,7 @@ describe**. Nothing here is waiting on someone to type it out.
 | **contracts §2.2** — `declared_scalars` becomes the compiled per-placement attribute record | **Delivered.** Each entry carries `render` and `index`, neither defaulted, and a `vocabularies` table beside them; the two flags are the whole placement, the third home being their joint absence rather than a field (records §3). The blob's own extents are not column-keyed and sit in `record_extents` (contracts §2.3) |
 | **contracts §2.4** — the attribute dictionary namespace and its postings file, and an attribute `dict_extents` counterpart | **Changed, and mostly not needed.** A *category* needs no attribute dictionary: the vocabulary already enumerates every value and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard — an attribute descriptor byte-equal to a satisfied auth descriptor — cannot arise. What §3.3's visibility wants is a postings file keyed by `(column, code)`, sized at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`). A dictionary is for attribute terms that are *not* categories, which nothing declares |
 | **contracts §2.6** — attribute columns and their widths, **per slice** | **Delivered without the per-slice half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-slice declaration would put the column in every slice anyway, silently. Per-slice enumeration belongs with the slices epic, which the roadmap already pairs it with |
-| **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Delivered, less the gate** (contracts r25; the empty-operand rule delivered at r26). The relationship to `/v1/meta` resolves as a **schema/values split**: `/v1/meta` carries the column descriptor and `/v1/categories/{column}` carries the values, in two forms — resolve named codes, or page by value key. That is what answers §3.8's size worry, since the viewer's normal path names the codes it drew and never fetches a set. Visibility is `listing`'s, fail-closed: `public` publishes, `per_viewer` is filtered per principal by §3.3's membership predicate, and a column whose member sets cannot be read is refused rather than served empty. The authored per-value gate (§3.8, C23) is ⊘ unbuilt, so membership-derivation is the only gate a value has. The empty-operand rule belonged to the filter surface and is **delivered** (contracts §3.2 r26, decision 0062): an unknown *value* is an empty operand, where an unknown column — or an operator outside the column's family — is a `422`. The split is which side of the trust boundary the fact sits on |
+| **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Delivered, less the gate** (contracts r25; the empty-operand rule delivered at r26). The relationship to `/v1/meta` resolves as a **schema/values split**: `/v1/meta` carries the column descriptor and `/v1/categories/{column}` carries the values, in two forms — resolve named codes, or page by value key. That is what answers §3.8's size worry, since the viewer's normal path names the codes it drew and never fetches a set. Visibility is the vocabulary's `visibility`, fail-closed: `public` publishes, `derived` is filtered per principal by §3.3's membership predicate, and a column whose member sets cannot be read is refused rather than served empty. The authored per-value gate (§3.8, C23) is ⊘ unbuilt, so membership-derivation is the only gate a value has. The empty-operand rule belonged to the filter surface and is **delivered** (contracts §3.2 r26, decision 0062): an unknown *value* is an empty operand, where an unknown column — or an operator outside the column's family — is a `422`. The split is which side of the trust boundary the fact sits on |
 | **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Delivered for the wire and the rule** (contracts r24, [#82]): a category column carries `utf8` value keys, an unknown key under `vocabulary = "declared"` is a 422 naming column and key, null is *absent* and the empty string is refused. §5 is amended with it, so its first paragraph no longer claims the scalar-tail validation extends to categories unchanged. `/control/categories` is **still owed** and needs no new decision — runtime vocabulary amendment (§5) has no endpoint |
 | **architecture §5.3** — the hot-column list | **Owed**, and unchanged by anything since |
 | **architecture §8.2** — category filter operands | **Owed**, unchanged, and belongs with [#43] rather than here |
@@ -695,6 +563,32 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-18 — the configuration surface is rebuilt on two axes, and enumerated.** §4.0 is new: the
+whole surface in one place, six blocks, every key and every enumerated value. It is worth having
+because the set is **closed** — `deny_unknown_fields` on every block, an enumerated set behind every
+value that is a word rather than a caller's string — and closure is what the leak register rests on,
+the register being exhaustive because the surface is enumerable. A key added without an entry there
+is a disclosure control nobody has reasoned about.
+
+**2026-08-18 — the rebuild itself.** §4 is replaced wholesale and
+§3.8 and §3.9 follow it.
+[Decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) is the
+ruling and
+[`../evidence/memos/2026-08-18-configuration-surface.md`](../evidence/memos/2026-08-18-configuration-surface.md)
+is the design; two reviews of its first draft — user experience and fail-closed properties — are
+what produced most of what changed. **No rule of this design is weakened**: every refusal in the
+old §4.3 survives under the new keys, and three are added where the collapse would otherwise have
+opened a hole (an unresolved vocabulary reference, a closed vocabulary with no source, and widths
+disagreeing across a shared vocabulary — the last now inexpressible rather than refused).
+
+What changed: `listing` and the layer's `gate`/`ungated`/`artifacts_carry_own` become `visibility`
+and a member default; `visible_when` and `corpus_derived` merge into
+`require_member_visibility`; `derived` is retired as a word meaning two quantifiers and returns as
+one setting of that key; `public` becomes a reserved access label at term `0` rather than a config
+keyword; vocabularies become objects, taking `width` with them; every object declares its own
+`source` and an optional `fields` override map, replacing five CLI flags with `--file`; and `slice`
+becomes `view` throughout. ⊘ A view's own gate remains specified and not implemented.
 
 **2026-08-12 — corrected against the built declaration surface.** The placement set this document
 introduced is gone: a field is a `type` and three booleans, `render` and `index` are the two words a

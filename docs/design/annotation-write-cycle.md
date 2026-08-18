@@ -506,26 +506,85 @@ exists for every entity (I10). Contradicts the model's addressing as read; rulin
 
 ### 6.1 The build-plane inputs
 
-Three files, and the split is by grain rather than by kind — one artifact's declaration is a line, a
-10⁷-artifact level's membership is a column.
+**The full configuration surface is enumerated once**, in
+[`configuration.md`](configuration.md) §1 — every block, every key and every
+enumerated value word, including this section's layer keys. It is a closed set, and adding a key
+without an entry there is adding a control nobody has reasoned about.
 
-- **`--layers <toml>`**, a list of declarations in registration order (a layer follows what it
-  `depends_on`). **The two disclosure controls are stated either way round and always explicitly** —
-  `gate = "<descriptor>"` or `ungated = true`, and `visible_when = { min_visible = … }` or
-  `visible_when = "none"` — because TOML has no null and, more to the point, the value a default
-  would supply is in both cases the widest one there is. The control plane's JSON requires both
-  fields for the same reason and can write `null`; the words stand in for it.
-- **`--artifacts <parquet>`**, one row per `(artifact, variation)`: `layer`, `stable_key`, and
-  optionally `level`, `variation`, `values` (the layer's declared content kinds, in declared order)
-  and `attached_layer`/`attached_level`/`attached_key`.
-- **`--artifact-members <parquet>`**, one row per `(artifact, member)`: `layer`, `stable_key`,
-  `member`, and optionally `level` and `variation` — a null variation being the artifact's
-  membership, `k` being variation *k*'s generating set.
+**One config file and one source per object.** `tessera build --config <toml>` declares the corpus,
+its views, its vocabularies, its attributes and its layers together; every object that has data
+names a logical key, and `--file KEY=PATH` binds it. [`configuration.md`](configuration.md) owns the declaration surface; what this section owns is the artifact and member grains and the rules
+peculiar to them.
 
-**Members are source ids**, resolved through the build's own assignment exactly as the pairs file's
-are; an id the build did not assign refuses the build. **Ordinals are assigned in
-`(layer, level, stable_key)` order**, so identity does not depend on how a Parquet file happened to
-be written, and a stable key is required — it is what an edge into the layer names.
+**A layer names its own source, and one file holds one layer.** That is what removes the
+discriminator: there is no `layer` column to select on, no filter to configure, and no way for a
+layer to ingest another's rows.
+
+```toml
+[[layer]]
+source     = "hdbscan"
+fields     = { members = "members", parent = "parent_id" }
+name       = "clusters/hdbscan"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "nested", prune_children = true }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { fraction = 0.05 }
+```
+
+**A layer names one artifact source, and — where its memberships are too large to carry as a list
+field — a second source for members** (`[layer.members]`, `configuration.md` §1). Two grains, and
+the asymmetry is cardinality. An artifact source is **one row per artifact**,
+carrying `contents` as a list ordered best first — the fallback chain, of which the viewer is
+served the first entry whose sources they can see entirely, or nothing. A member source is **one
+row per `(artifact, entity)`**: `key`, `entity`, and an optional `rank`, where a null rank is the
+artifact's own membership and *k* is the generating set of `contents[k]`. Contents fold into the
+artifact row because a fallback chain is two or three entries; members do not, because a condensed
+tree's root holds the whole corpus and one cell carrying it can neither stream nor be materialised
+by a producer.
+
+Collapsing the artifact source to one row each is what retires the agreement refusal the old
+`(artifact, variation)` grain needed: `key`, `parent` and the attachment were repeated on every
+variation row so that a single column could differ, and the build had to check the copies matched.
+`variation` becomes **`rank`** and `member` becomes **`entity`**, a column named `member` on a long
+source reading as though it should hold the whole membership.
+
+**Membership by exclusion is an input spelling.** `fields = { excluding = … }` names the entities a
+membership leaves out; the build complements once against the view's entity set and materialises
+exactly the membership the included form would have produced, so the segment, the manifest and
+every read path are byte-identical and never learn which way the source was written. It exists for
+the producer: a tree's root is empty as an exclusion and the whole corpus as an inclusion, and the
+clusters with large exclusion sets are the ones with short member lists. **Not** a complement taken
+at request time, which would be a fourth membership source with the *"never stale"* character
+`spatial` and `attribute` have — an artifact gaining members with nobody publishing to it.
+
+**A layer may declare that a member deletion withdraws the whole artifact**
+(`configuration.md` §1, `withdraw_on_member_deletion` on `[[layer]]`, default `false`). It is the
+stronger form of the content-level rule this document's §3.1 already carries: where that one drops
+supplied content and keeps the artifact, this drops the artifact at the same fold. It is a caller's
+semantic declaration rather than a disclosure control — an artifact carries no residue of a deleted
+member, its computed properties being recomputed per viewer — so the default is to keep it, and
+`true` is for the artifact whose exact membership *is* the object. Withdrawal is a removal like any
+other: the dangling-dependent rule below governs anything attached to it, refused rather than
+repaired.
+
+**Labels are declarable where they are used.** `[layer.labels]` expands to a layer of its own —
+same views, flat, `depends_on` the parent, the content wrapper — because a label is a first-class
+artifact with its own visibility and its own suppression, a synthesis being able to outrank its
+sources in sensitivity. What the sugar supplies is mechanical; what it never supplies is the gate,
+the membership requirement, or the existence of membership data, all of which are written out. The
+label layer's `visibility` defaults to its parent's — a default on a disclosure control, admissible
+because it is the parent's value rather than the widest one, and overridable narrower.
+
+**Members are source ids**, resolved through the build's own assignment exactly as the access
+relation's are; an id the build did not assign refuses the build. **Ordinals are assigned in
+`(layer, level, key)` order**, so identity does not depend on how a source happened to be written,
+and a key is required — it is what an edge into the layer names.
+
+**Small layers need no data file at all**: `artifacts = [{ key = …, contents = [ … ] }]` inline, for
+what a person authors rather than what a pipeline produces.
 
 The layer entity exists for one reason: an operator discovering a leaking layer needs immediate,
 reversible, fail-closed hiding, and a gate re-evaluated only at authorise cannot give it — a layer
@@ -687,6 +746,18 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r5 — 2026-08-18.** §6.1 is rebuilt on
+[decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)'s two
+axes and the per-object sources that come with them
+([`../evidence/memos/2026-08-18-configuration-surface.md`](../evidence/memos/2026-08-18-configuration-surface.md)).
+No rule of the write cycle moved. What moved is the shape of what a build reads: one config file
+rather than three flags, one source per layer rather than a shared file with a discriminator, an
+artifact source of one row per artifact carrying `contents` as a ranked list — which retires the
+cross-row agreement refusal the `(artifact, variation)` grain needed — and `variation`/`member`
+renamed to `rank`/`entity`. Membership by exclusion is added as an input spelling with the
+request-time reading explicitly excluded. `[layer.labels]` is added as sugar over a layer that is
+still a layer.
 
 **r4 — 2026-08-16.** §6 gains the build plane, which the operations table had allocated to layer
 creation's control verb alone: `tessera build` now takes a declaration file and two artifact files
