@@ -724,3 +724,151 @@ fn an_administrative_edge_within_one_level_is_refused_at_publish() {
         .expect_err("a same-level parent is not an administrative edge");
     assert!(format!("{err}").contains("coarser"), "{err}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The parent identifier on the wire, and the one rule that governs it
+// ---------------------------------------------------------------------------------------------
+
+/// **A client is given the structure of what it was served, and nothing else.**
+///
+/// An administrative layer's whole purpose is this: the client receives countries and states and
+/// can tell which states are in which country, so it can nest what it draws or filter to one
+/// subtree while still drawing the rest of the map.
+#[test]
+fn a_served_artifact_names_its_parent_when_the_parent_is_also_served() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(administrative("admin/boundaries", 2)).unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, 0..300)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![
+                node(&fx, "state-a", Some("country"), 0..100),
+                node(&fx, "state-b", Some("country"), 100..200),
+            ],
+        )
+        .unwrap();
+
+    let served = levelled_artifacts_of(
+        &engine,
+        &full_coverage_credential(),
+        None,
+        "admin/boundaries",
+    );
+    let by_key = |key: &str| {
+        served
+            .iter()
+            .find(|a| a.stable_key.as_deref() == Some(key))
+            .expect("served")
+    };
+    let country = by_key("country");
+    assert_eq!(country.parent_id, None, "a root names no parent");
+    assert_eq!(
+        by_key("state-a").parent_id,
+        Some(country.tessera_id),
+        "a state names the country it is in, by the identifier that country was served under"
+    );
+    assert_eq!(by_key("state-b").parent_id, Some(country.tessera_id));
+}
+
+/// **A parent that exists and was withheld is null, identically to a root.** That is the whole
+/// disclosure rule for the field: naming it would tell this viewer that a coarser artifact exists
+/// which they are not cleared to see, and the register's standing rule is that a withheld artifact
+/// is indistinguishable from one that was never published.
+#[test]
+fn a_withheld_parent_is_named_no_differently_from_a_root() {
+    let fx = fixture();
+    let engine = fx.open();
+    // A bar the country cannot clear for the narrow principal while its state can — the same
+    // proportional gap the layer's own criterion opens, used here to withhold exactly one artifact.
+    let parent_sources: Vec<u64> = (0..300).collect();
+    let child_sources: Vec<u64> = (0..300)
+        .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
+        .take(20)
+        .collect();
+    let visible = parent_sources
+        .iter()
+        .filter(|s| terms_of(**s).contains(&SUBSET_TERM))
+        .count() as f64;
+    let bar = (visible / parent_sources.len() as f64 + 1.0) / 2.0;
+
+    let mut declaration = administrative("admin/boundaries", 2);
+    declaration.visible_when = Some(ExistenceCriterion::MinFraction(bar));
+    engine.register_layer(declaration).unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, parent_sources.iter().copied())],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![node(&fx, "state", Some("country"), child_sources.iter().copied())],
+        )
+        .unwrap();
+
+    let narrow = levelled_artifacts_of(&engine, &subset_credential(), None, "admin/boundaries");
+    assert_eq!(
+        keys(&narrow),
+        vec!["state"],
+        "the country is below the bar for this principal and the state is not"
+    );
+    assert_eq!(
+        narrow[0].parent_id, None,
+        "the state's parent exists and was withheld, so it reads exactly as a root does — the \
+         alternative discloses that a coarser artifact is there"
+    );
+
+    // And the broad principal, who is served both, gets the link.
+    let broad = levelled_artifacts_of(
+        &engine,
+        &full_coverage_credential(),
+        None,
+        "admin/boundaries",
+    );
+    let state = broad
+        .iter()
+        .find(|a| a.stable_key.as_deref() == Some("state"))
+        .expect("served");
+    assert!(
+        state.parent_id.is_some(),
+        "the same edge is named for a principal served both endpoints"
+    );
+}
+
+/// The frontier drops ancestors, so a pruned layer carries no links — correct, and worth pinning:
+/// the field's presence follows the response's own membership rather than the stored lineage.
+#[test]
+fn a_pruned_response_carries_no_parent_links() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(treed("clusters/tree", None)).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                node(&fx, "root", None, 0..300),
+                node(&fx, "leaf", Some("root"), 0..100),
+            ],
+        )
+        .unwrap();
+
+    let served = artifacts_of(&engine, &full_coverage_credential(), None);
+    assert_eq!(keys(&served), vec!["leaf"]);
+    assert_eq!(
+        served[0].parent_id, None,
+        "the root was dropped by the frontier, so there is nothing in this response to name"
+    );
+}

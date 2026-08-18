@@ -290,6 +290,11 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     // declares no supplied content — never that content was withheld, because an artifact whose
     // content this principal may not read does not appear at all.
     const content = t.getChild('content')!;
+    // **Present only where the parent is also in this response.** A null is a root *or* a parent
+    // this principal was not served, and the two are deliberately one value: naming the second
+    // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
+    // here", never as "no parent".
+    const parentId = t.getChild('parent_id');
     for (let i = 0; i < tesseraId.length; i++) {
       const cx = centroidX.get(i);
       const bx = boxMinX.get(i);
@@ -312,7 +317,10 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
             ? null
             : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
         hull,
-        content: Array.from(content.get(i) ?? [], (v) => String(v))
+        content: Array.from(content.get(i) ?? [], (v) => String(v)),
+        // Absent on a server older than the field, which reads the same as a root — the
+        // fail-closed direction, and the only one available without inventing a parent.
+        parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i))
       });
     }
   }

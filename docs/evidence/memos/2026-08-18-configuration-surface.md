@@ -91,7 +91,7 @@ title              = "HDBSCAN clusters"
 slices             = ["s0"]
 membership         = "enumerated"
 visibility         = "public"         # or an access label: visibility = "ir:analyst"
-artifact_visibility = "inherited"     # or "per-artifact": each artifact carries its own label
+default_artifact_visibility = "inherited"   # or a label, for artifacts that carry none of their own
 visible_when       = { min_fraction = 0.05 }
 hierarchy          = { kind = "nested", prune_children = false }
 ```
@@ -198,26 +198,59 @@ rather than read as a label, since only layers admit arbitrary ones — without 
 `per_viewer`, or a plain typo, would be accepted as a gate nobody satisfies and recorded as a
 control its author believes is set.
 
-**`artifact_visibility` is the second, independent axis**, and it must stay separate because the
-two compose as a conjunction: an artifact is served when the layer is reachable **and** the
+**`default_artifact_visibility` is the second, independent axis**, and it stays separate because
+the two compose as a conjunction: an artifact is served when the layer is reachable **and** the
 artifact's own label is satisfied.
 
 ```toml
-artifact_visibility = "inherited"      # today's artifacts_carry_own = false
-artifact_visibility = "per-artifact"   # today's artifacts_carry_own = true
+default_artifact_visibility = "inherited"    # an artifact saying nothing is gated by the layer alone
+default_artifact_visibility = "ir:analyst"   # an artifact saying nothing takes this label besides
 ```
 
-Two corrections to r1 here, both from the review and both load-bearing:
+**This replaces `artifacts_carry_own` rather than renaming it**, and the flag disappears. Whether a
+given artifact carries a label of its own is a fact about the data, which the data can state; what
+the declaration has to settle is what happens to an artifact that states nothing. So the key holds
+the default, exactly as a slice's `default_point_visibility` does, and an artifact carrying its own
+label always uses it.
+
+It is **required, with no default**, on §4.2's rule: the value an absent line would supply is
+`inherited`, the wider of the two, so the caller writes the word.
+
+**A layer is to an artifact what a slice is to a point**, and the two blocks are deliberately the
+same shape:
+
+| | gate on the container | default for a member that declares nothing |
+|---|---|---|
+| `[[layer]]` | `visibility` | `default_artifact_visibility` |
+| `[[slice]]` | `visibility` ⊘ | `default_point_visibility` |
+
+The container's gate **conjoins** in both cases and can only narrow — that is already normative for
+slices ([`slices-and-multi-table.md`](../../design/slices-and-multi-table.md) §3: a slice's gate is
+a label, evaluated by the item-visibility predicate verbatim, *conjunctive with item labels, never
+substitutive*, the I12 direction). The member-level default **fills** in both cases. Neither level
+does the other's job.
+
+**⊘ A slice gate is specified and not implemented** (slices §3), because a bundle has one
+coordinate system reachable by every principal that authorises at all. The `[[slice]]` block is
+shaped to carry `visibility` when it lands; until then a slice has no gate to conjoin with, and
+§8.1's fill is the whole of what a bulk point label can do.
+
+That is also the correction to an earlier draft of this memo, which called the two levels
+asymmetric on the grounds that a point's terms are a posting union and cannot be conjoined. The
+union is the *member* level, where fill is right for artifacts and points alike; conjunction was
+never the member level's job, and at the container level it applies to both.
+
+Three corrections to r1 here, all from the review and all load-bearing:
 
 - **Not `item_visibility`.** *Item* means point-or-document everywhere else in this system, so that
   key on a layer block reads as a control over the documents — a different and far more alarming
   thing than what it does.
-- **Not `derived` for the second value.** r1 claimed `derived` meant one thing across both keys.
-  It does not: on a vocabulary it is the *computed* case, where visibility falls out of members'
-  labels with nobody authoring it, and on a layer it would be the *authored* case, where each
-  artifact carries an explicit label. Same word, inverted meaning, in adjacent disclosure controls.
-  `per-artifact` says what it does.
-- **Not `public` for the off state either.** It does not make artifacts public; it makes them
+- **Not `derived` for the value.** r1 claimed `derived` meant one thing across both keys. It does
+  not: on a vocabulary it is the *computed* case, where visibility falls out of members' labels
+  with nobody authoring it, and on a layer it would have been the *authored* case. Same word,
+  inverted meaning, in adjacent disclosure controls. A label, or the word `inherited`, says what
+  each one does.
+- **Not `public` for the inherited state.** It does not make artifacts public; it makes them
   reachable exactly when the layer is, which under a gated layer is not public at all.
 
 ### 4.1 `public` is a reserved label, interned at term 0
@@ -257,14 +290,14 @@ unset template variable renders to.
 ### 4.2 The no-default rule, and where it is not yet kept
 
 Three keys in this family are required with no parser-level default — a vocabulary's `visibility`,
-a layer's `visibility`, and `artifact_visibility` — plus `visible_when`. SA §7's rule governs and
-none of them may become an `Option` with a fallback: the value an absent line would supply is the
+a layer's `visibility`, and `default_artifact_visibility` — plus `visible_when`. SA §7's rule
+governs and none of them may become an `Option` with a fallback: the value an absent line would supply is the
 widest one there is.
 
 The proposal makes them *easier to write correctly*: `visibility = "public"` is one word where
 `gate`/`ungated` was a two-key dance whose omission had to be caught by hand. But only one of the
 four currently teaches the caller anything when it is missing. The gate refusal names both
-spellings and the reason; `artifacts_carry_own` and `visible_when` are bare required fields, so
+spellings and the reason; `artifacts_carry_own` and `visible_when` are bare required fields today, so
 omitting either yields raw serde text with no statement of what the values do and no mention of the
 layer. Both should be parsed as optional and hand-validated, on the template the gate refusal
 already sets: *what is missing · the values, spelled out · what each one does · why there is no
@@ -364,33 +397,80 @@ and remain mutually exclusive — declaring keys from two of them is refused, an
 still require the identity extent. The config must show one example of each, because a caller with
 a Morton column cannot otherwise tell whether the `x`/`y` keys must be absent (they must).
 
-### 8.1 The access relation as a column
+### 8.1 The access relation: a column, or a label on the slice
 
-A `list<string>` column on the points table, named by the config, minted the way an open vocabulary
-is minted — or a plain `string` column, where each point carries one term, which is the shape a
-corpus with a simple permission model already has (§9).
-
-Two consequences beyond one fewer file: a grant is written in category names instead of
-integers, and `terms.parquet` — which the build never reads, and which exists so a human can
-translate a grant back — is replaced by a real build output (§8.2).
-
-The exploded file stays **as a source, not as a second concept**: one config key, two spellings.
+**Two sources. A declaration may name either, or both — where both, the slice label fills
+what the column leaves empty.**
 
 ```toml
+[[slice]]
+name = "s0"
+title = "arXiv, August"
+default_point_visibility = "public"   # points that carry no terms of their own take this label
+# visibility = "ir:analyst"           # ⊘ the slice's own gate — specified, not implemented
+
 [access]
 terms = { column = "categories" }     # list<string>, or a plain string for one term per point
 terms = { file = "pairs" }            # the exploded (entity_id, term_id) form, bound with --pairs
 ```
 
-That is not compatibility. The build *writes* an exploded `pairs.parquet` as an output for the
-reference oracle, and the probe generators at 10⁹ scale produce that shape natively, so the reader
-exists either way.
+The **column** is the general case: a `list<string>` where a point carries several terms, or a
+plain `string` where it carries one, minted the way an open vocabulary is minted. Two consequences
+beyond one fewer file: a grant is written in category names instead of integers, and
+`terms.parquet` — which the build never reads, and which exists so a human can translate a grant
+back — is replaced by a real build output (§8.2).
+
+**`default_point_visibility` on the slice is the bulk form**, for the corpus where every point
+carries the same label. The name states the behaviour: it is what a point takes when it says
+nothing, never what overrides what it said. It is a better answer than the constant column it replaces, on three counts and not
+merely on convenience:
+
+- **It is visible where disclosure decisions are reviewed.** A label in the config appears in a
+  config diff and in the disclosure report (§9); the same label repeated down a data column appears
+  in neither, and no reviewer reads 10⁶ rows to find it.
+- **It costs nothing to store.** At 10⁹ points a constant column is 10⁹ duplicated strings in the
+  producer's memory and on disk, for one fact.
+- **It is the honest shape of the statement.** *Every point in this slice is public* is a property
+  of the slice, and writing it per row makes a corpus-wide decision look like per-row data.
+
+It takes a list as well as a single label, since a point may carry several terms.
+
+**Where both are declared, the slice label fills and never overrides.** A point whose column value
+is null or empty takes the slice's label; a point carrying terms of its own keeps exactly those.
+The build reports how many points were filled, and declaring both is a warning rather than a
+refusal — the caller is told, and the build proceeds.
+
+**The rule is *fill*, not *take the config*, because a point's terms are disjunctive.** `M_auth` is
+a union of posting lists (§6.1–§6.3), so a point carrying `math.GT` is visible to every principal
+holding `math.GT`, and **adding a term to a point can only widen it**. A slice label that overrode
+or joined the column would therefore make every point in the slice visible to every holder of that
+label, discarding the corpus's access relation — and with `public` it would make the whole slice
+world-visible on the strength of one config line and a warning nobody is obliged to read. That is
+C-register widening with no accountable party, arriving through a convenience.
+
+Nor is conjunction the safe fallback it looks like: it is **not expressible** in the current mask
+model at all. AND is reachable only through the access-expressions design
+([`core-access-expressions.md`](../../design/core-access-expressions.md), provisional), and there
+it works by minting a compound term at build time, not by combining sets per request. So the choice
+is genuinely between *fill* and *widen*, and only one of them is admissible.
+
+Filling is also what the bulk case actually wants: a corpus with no per-point terms has an empty
+column everywhere, so every point takes the label and the outcome is identical to declaring no
+column at all. A corpus with a partly-populated column gets the label exactly where it said
+nothing — which is the reading a caller who wrote both would expect, and the only one that cannot
+widen a point they had already restricted.
+
+The exploded file stays **as a source, not as a second concept**. That is not compatibility: the
+build *writes* an exploded `pairs.parquet` as an output for the reference oracle, and the probe
+generators at 10⁹ scale produce that shape natively, so the reader exists either way.
 
 Three rules the fail-closed review requires, all of which must be written into §6.1:
 
-- **A null value and an empty list both mean no access terms, which means visible to no principal.**
-  Neither means unrestricted. A column introduces null where the pairs file had only absence, and
-  "null is unspecified, so unrestricted" is the plausible misreading and the permissive one.
+- **With no slice label declared, a null value and an empty list both mean no access terms, which
+  means visible to no principal.** Neither means unrestricted. A column introduces null where the
+  pairs file had only absence, and "null is unspecified, so unrestricted" is the plausible
+  misreading and the permissive one. Where a slice label *is* declared, those are the rows it
+  fills, and the count is reported.
 - **Terms are trimmed of surrounding whitespace** (owner ruling, 2026-08-18), matching what the
   passthrough plugin already does, so `" math.GT"` and `"math.GT"` are one term.
 - **`public` resolves to the reserved term `0`** (§4.1), neither minted nor refused, so a corpus
@@ -485,17 +565,19 @@ where it is the required value.)
 
 **`--pairs` is mandatory, so there is no way to build from a bare points file.** A data scientist
 with a dataframe and no permission model has nothing to write, and that is where a first attempt
-stops. This is a disclosure question, so it must not acquire a default — but it does not need a
-config keyword either. **The access column accepts a plain string as well as a list**, so a corpus
-with no permission model writes one line in the language it is already working in:
+stops. This is a disclosure question, so it must not acquire a default — but `default_point_visibility` on
+the slice (§8.1) answers it in one line:
 
-```python
-df["access"] = "public"        # every paper carries the label every principal holds
+```toml
+[[slice]]
+name = "s0"
+default_point_visibility = "public"
 ```
 
-with `[access] terms = { column = "access" }` naming it. Nothing is defaulted, the caller states the
-disclosure explicitly, and the mechanism is the ordinary one — the same reserved label a per-row
-list would carry, with no whole-corpus special case to specify, implement or later explain.
+Nothing is defaulted, the caller states the disclosure explicitly in the file where disclosure
+decisions are read, and it carries into the disclosure report below without anyone inspecting the
+data. An earlier draft put the same statement in a constant data column; that works and is strictly
+worse, because a corpus-wide decision then lives where no reviewer looks.
 
 **`--slice` carries no disclosure content and should default** to the single declared slice when
 there is exactly one.
@@ -509,7 +591,7 @@ column is to run a full build.
 
 **A disclosure report beside the bundle.** The build already writes `reports/containment.json`; it
 should also write `reports/disclosure.json` and print its table — every layer with its `visibility`
-and `artifact_visibility`, every vocabulary with its `visibility` and `value_set`, every attribute
+and `default_artifact_visibility`, every vocabulary with its `visibility` and `value_set`, every attribute
 with its placement. It is diffable between builds and it is the artefact a reviewer signs off,
 which is a better answer to *what does this deployment expose* than reading TOML.
 
@@ -558,6 +640,16 @@ All settled as of 2026-08-18. Recorded here so the design edits can be made with
   dictionary**, and the proposed sort is withdrawn (§8.2).
 - **An unresolved vocabulary reference is a config parse error** (§3.1), refused before any data
   file is opened.
+- **`default_point_visibility` on a slice** as the bulk access source (§8.1). Declared alongside an
+  access column it **fills** points with no terms of their own and never overrides one that has
+  them, warning with the count rather than refusing. Overriding is inadmissible: a point's terms
+  are disjunctive, so any join widens, and conjunction is not expressible in the current mask
+  model.
+- **`default_artifact_visibility` replaces `artifacts_carry_own`** (§4), on the same shape: the
+  data says whether an artifact carries a label, the declaration says what an artifact that says
+  nothing gets. Required, with `"inherited"` written out where the layer alone gates them. The
+  layer and slice blocks are one shape — a container gate that conjoins, and a member default that
+  fills — with the slice's gate ⊘ until slice gating is built.
 - **`tessera check`** (§9).
 
 ## 12. Cost

@@ -670,6 +670,7 @@ impl ViewportSink for WireSink {
                 bbox: a.derived.bbox,
                 hull: a.derived.hull.as_deref(),
                 content: &a.content,
+                parent_id: a.parent_id.map(|id| id.raw()),
             })
             .collect();
         let frame = artifacts_frame(&rows);

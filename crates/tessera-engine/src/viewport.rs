@@ -575,6 +575,13 @@ pub struct ArtifactOut {
     pub derived: crate::derived::DerivedContent,
     /// The publisher's supplied content — one value per kind the layer declares, positionally.
     ///
+    /// This artifact's parent, **and only ever one that is also in this response**.
+    ///
+    /// The structure a client needs to nest what it draws, or to filter to one subtree while still
+    /// drawing the rest of the map. **Null covers two situations on purpose**: a root, and a parent
+    /// that exists but was withheld from this viewer. Distinguishing them would disclose that a
+    /// coarser grouping exists which they are not cleared to see.
+    pub parent_id: Option<TesseraId>,
     /// **This is one variation, entire.** Where an artifact carries several ranked descriptions,
     /// this is the first whose generating set the viewer contains completely; a viewer containing
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
@@ -3163,6 +3170,11 @@ impl Engine {
             }),
             masked_count,
             derived,
+            // **Always null on this route, and not by omission.** A parent is named only where it
+            // is also in the response, and this response is one artifact — so there is nothing for
+            // it to name. Resolving the parent here anyway would hand a caller who holds one
+            // identifier the existence of a coarser artifact they were never served.
+            parent_id: None,
         }))
     }
 
@@ -3347,6 +3359,11 @@ impl Engine {
         );
 
         let mut out = Vec::new();
+        // Where each served artifact ended up, and what each names as its parent — both collected
+        // during the walk and reconciled after it.
+        let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
+            std::collections::BTreeMap::new();
+        let mut parent_of: Vec<Option<(String, u32, u32)>> = Vec::new();
         for name in names {
             let Some(layer) = self.write.registered_layer(&name) else {
                 // Dropped between the resolution and here. Absent is the right answer and the same
@@ -3507,20 +3524,38 @@ impl Engine {
                             .unwrap_or_default();
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     };
+                    let (stable_key, parent) = self.write.with_artifacts(|store| {
+                        match store.get(&name, level, ordinal) {
+                            Some(record) => (record.stable_key.clone(), record.parent),
+                            None => (None, None),
+                        }
+                    });
+                    // Recorded, not resolved: which artifacts this response holds is not known
+                    // until every layer and level has been walked, and a parent may sit in a level
+                    // this loop has not reached.
+                    served_at.insert((name.clone(), level, ordinal), tessera_id);
+                    parent_of.push(parent.map(|p| (name.clone(), p.level, p.ordinal)));
                     out.push(ArtifactOut {
                         content,
                         layer: name.clone(),
                         tessera_id,
-                        stable_key: self.write.with_artifacts(|store| {
-                            store
-                                .get(&name, level, ordinal)
-                                .and_then(|r| r.stable_key.clone())
-                        }),
+                        stable_key,
                         masked_count,
                         derived,
+                        // Filled in below, once the response's own membership is settled.
+                        parent_id: None,
                     });
                 }
             }
+        }
+        // **A parent is named only where it is also in this response**, which is the whole of the
+        // disclosure rule for this field. An artifact whose parent exists but was withheld — below
+        // its own criterion for this viewer, suppressed, or dropped by the frontier — carries a
+        // null here, indistinguishable from a root. Naming it would tell the viewer that a coarser
+        // grouping exists which they are not cleared to see, which is a disclosure the rest of this
+        // pass takes care to avoid making.
+        for (artifact, parent) in out.iter_mut().zip(&parent_of) {
+            artifact.parent_id = parent.as_ref().and_then(|key| served_at.get(key)).copied();
         }
         Ok(out)
     }

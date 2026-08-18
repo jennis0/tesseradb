@@ -323,6 +323,21 @@ export type Artifact = {
    * different text against the same `tesseraId`.
    */
   content: string[];
+  /**
+   * This artifact's parent, **and only ever one that is in the same response**.
+   *
+   * The structure to nest what you draw, or to filter to one subtree while still drawing the rest
+   * of the map — which is what a levelled layer's edges are for, since its resolution comes from
+   * choosing a level rather than from coarsening along them.
+   *
+   * **`null` means "no parent in this response", not "no parent".** It covers a root and a parent
+   * this principal was not served — below its own criterion for them, suppressed, or dropped by
+   * the layer's frontier — and the two are one value deliberately: distinguishing them would
+   * disclose that a coarser artifact exists which they may not see. Build the tree from what you
+   * were given and treat unlinked artifacts as roots of it; do not model a "hidden parent" state,
+   * because there is nothing to fill it from.
+   */
+  parentId: bigint | null;
 };
 
 export type ViewportResult = {
