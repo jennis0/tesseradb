@@ -77,6 +77,14 @@ two, which earlier revisions did not.
 **An edge** relates two artifacts. Parenthood is an edge; a label attaching to a cluster is an
 edge. Edges are declared, never derived: the engine asserts no relation the caller did not state.
 
+**A layer's parent edges are all within one level or all between levels, and which decides what they
+are for** ([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)).
+Within a level they are roll-up — the ladder a request's artifact budget climbs when it cannot draw
+everything. Between levels they are information — what contains what, so a client can nest what it
+draws or filter to one subtree — and a budget is inert, the resolution being the level the client
+asks for. A layer declares which shape it has and may not mix them. An **attachment** is neither: it
+is a visibility term, and an artifact carrying one is withheld when its target is (§2.2).
+
 ### 2.1 Layer against level
 
 **A layer is what shares a gate and a lifecycle. A level is a resolution within one.** The two words
@@ -92,7 +100,7 @@ layers share nothing.
 | identity and name — what a registry lists | its artifact set |
 | the **gate**: whether a viewer may know this analysis exists | its ordinal space and reserved entity run |
 | lifecycle: create, drop, replace, tombstoned name | its representation and membership source |
-| hierarchy kind — nested or stacked | its advisory zoom range |
+| hierarchy kind — flat, nested, stacked or administrative | its advisory zoom range |
 | the **own-terms flag** and **existence criterion** its artifacts use (§5) | its containment-verification result |
 | which slices it appears in | |
 | relations to other layers | |

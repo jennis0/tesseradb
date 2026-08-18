@@ -65,7 +65,7 @@ questions of the form *what do we withhold* are the register's, and this one is 
 
 | Where | What changes |
 |---|---|
-| The model's hierarchy declaration | `kind = "nested"` implies a tree in edges and **no levels**; `kind = "stacked"` implies levels and **no lineage** |
+| The model's hierarchy declaration | `kind = "nested"` implies a tree in edges and **no levels**; `kind = "stacked"` implies levels and **no lineage**. *(The third shape §6.2 describes — levels **and** edges, the administrative case — had no value here until [decision 0087](0087-cross-level-edges-are-information-not-rollup.md) added `kind = "administrative"`. Its edges run between levels and are information rather than roll-up, so nothing in this ruling's separation of tree from levels is disturbed by it.)* |
 | The zoom→level map | does not apply to a treed layer — there are no levels to map, and depth is not a resolution |
 | `annotation-representation.md` §6.2 | *"levels need not align with tree depth"* becomes *"a tree has no levels"* |
 | The artifact address | `(layer, level, ordinal)` is unchanged; a treed layer's level is always 0, and one reserved entity run serves it |

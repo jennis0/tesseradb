@@ -101,3 +101,7 @@ prevent.
 | [0081](0081-a-replacement-mints-identities-an-edit-keeps-them.md) | 2026-08-15 | A replacement mints identities, an edit keeps them, and nothing carries across a replacement |
 | [0082](0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md) | 2026-08-16 | A hierarchy lives in its edges; levels are resolutions, not depths |
 | [0083](0083-the-frontier-is-a-request-time-budget.md) | 2026-08-16 | The frontier is a request-time budget, not a declared depth |
+| [0084](0084-an-undeclared-criterion-declares-no-test.md) | 2026-08-17 | An undeclared criterion declares no test, on every route |
+| [0085](0085-the-existence-criterion-has-no-deployment-wide-form.md) | 2026-08-17 | The existence criterion has no deployment-wide form |
+| [0086](0086-the-attachment-term-does-not-inherit-the-targets-criterion.md) | 2026-08-17 | The attachment term does not inherit the target's criterion |
+| [0087](0087-cross-level-edges-are-information-not-rollup.md) | 2026-08-18 | A layer's edges are all within a level or all between them, and only the within-level ones are roll-up |

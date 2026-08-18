@@ -905,14 +905,34 @@ different one**. `reach` is undefined across levels because there are no edges t
 
 ***Both, and they agree — the administrative case.*** A ward is a ward everywhere on the map, so the
 resolution is semantic and balanced: the layer declares levels *and* carries containment edges, and a
-level number and a tree depth mean the same thing. This is what levels were for, and the only case in
+coarser feature is both an ancestor and a level up. This is what levels were for, and the only case in
 which reading one as the other is safe.
+
+**Its edges run between levels, and they are information rather than roll-up**
+([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)). A layer's edges
+are all within a level or all between them — declared, never inferred, and a layer may not mix them —
+and which shape it has decides what they are *for*. Within a level they are the ladder a cut climbs:
+substituting a parent cluster for its children is an honest coarsening, because a cluster is an
+abstract blob. Between levels they are not, because substituting a state for its counties draws one
+shape across a region whose neighbours are still counties. So the cut never climbs them, **an
+artifact budget is inert** on such a layer exactly as it is on a flat one, and the resolution control
+is the client choosing a level. What the edges deliver instead is structure — which states are in a
+country — carried to the client as a parent identifier on the artifacts frame (contracts §3.2), so it
+can nest what it draws or filter to one subtree while still drawing the wider map.
+
+**An edge need not step to the immediately next level.** A city directly under a country because that
+country has no states is a fact about the data rather than a gap in a ladder; what is refused is an
+edge running *against* the levels, from a finer to a coarser one, which is the guarantee that makes a
+level a scale.
 
 | | A tree | Stacked levels | Administrative |
 |---|---|---|---|
-| The lineage is in | edges | absent — the levels are independent | edges, matching the levels |
+| Declared | `kind = "nested"` | `kind = "stacked"` | `kind = "administrative"` |
+| The lineage is in | edges, **within** a level | absent — the levels are independent | edges, **between** the levels |
 | Levels declared | none; every artifact at level 0 | one per analysis | one per scale |
 | A coarser view is | an ancestor | a different analysis | either, interchangeably |
+| The edges are for | **roll-up** — the cut climbs them | — | **information** — what contains what |
+| `artifact_budget` | trades depth for count | inert | inert |
 | The zoom→level map | does not apply | advisory, the client's choice | its purpose |
 | `reach` | well defined | undefined across levels | well defined |
 
