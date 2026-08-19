@@ -79,7 +79,7 @@ build from a file*, never *required to declare*.
 | `title` | O | human-readable |
 | `width` | R | `u8` \| `u16` \| `u32` — the **code space's** width (`per-point-attributes.md` §3.6, `per-point-attributes.md` §3.9) |
 | `value_set` | R | `closed` \| `open` — is an unknown key at ingest refused, or minted? |
-| `visibility` | R | `public` \| `derived` — no label; only a layer's gate takes one |
+| `visibility` | R | `public` \| `derived` — one axis, two settings; the slot takes no label ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)) |
 | `source` | R for `closed`, unless inline | a path, relative to this document (§3) |
 | `fields` | D | canonical `key`, `code`, `title`; `code` may be absent — see below |
 | `values` | R for `closed`, unless sourced | inline: an array of keys, or a `key = code` table |
@@ -511,7 +511,7 @@ for the two hand-written blocks as well. **A check became a property.**
 | Word | Where | Collides with a label? |
 |---|---|---|
 | `public` | anywhere a label appears | **No** — it *is* a label, reserved at term `0` (`per-point-attributes.md` §3.8) |
-| `derived` | a vocabulary's `visibility` | **No** — that slot takes no label |
+| `derived` | a vocabulary's `visibility` | **No** — that slot takes no label ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)) |
 | `inherited` | a member default, and supplied content | **Yes** — an access label spelled `inherited` is refused at parse |
 
 ## 2. Declaring without building
@@ -1016,6 +1016,20 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — a vocabulary keeps one visibility key, and the contradiction with decision 0088 is
+closed** ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)). 0088 declared
+the word `derived` retired; this document kept it, and the two have read as disagreeing since. The
+design was right. A vocabulary is not merging two axes into one word — it has no label axis at all,
+and `public`/`derived` are *no membership requirement* and *any member*: one axis, two settings.
+0088's objection was the collision with supplied content, which expired when content moved to
+`all`/`inherited`.
+
+The two-key form was written and reverted rather than merely argued about. Splitting the key
+appears to buy label-gating a vocabulary, and does not: a vocabulary hangs off a column, a column
+reaches a principal through six surfaces, and a gate at two of them is fail-open. What landed was
+`visibility` with one legal value and the capability absent — worse than either alternative. The
+decision records the six surfaces so a future attempt starts from a column-level gate.
 
 **2026-08-19 — the frame report also says how much resolution the corpus actually got.** The clamp
 count caught data *outside* the frame and nothing else, so the opposite failure was still silent:
