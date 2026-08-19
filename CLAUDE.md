@@ -71,8 +71,17 @@ broken by a plausible-looking change:
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
 machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Six
-of the thirteen invariants are currently covered as designed; five have no coverage, three of them
-for want of an implementation to test rather than for want of a test.
+of the thirteen invariants are currently covered as designed; five have no coverage, and **only
+one of those five — I6 — is uncovered for want of an implementation to test**. There is no
+wasmtime host, so nothing can be asked of a guest plugin. The rest are a testing gap: the
+annotation machinery I3 and I8 need is built and enforced, and I12's frontier half is built in the
+form that replaced the frontier (every artifact tested on its own — decisions 0080, 0082, 0083).
+I5 and I13b sit between the two, each needing a second partition or a genuinely divergent plugin
+before an oracle could disagree at all.
+
+*We cannot test this* and *we have not tested this* are different claims, and only the first is an
+excuse — a register that records built machinery as absent understates its own gap. Corrected
+2026-08-19; `conformance.md` r13 carries the per-row reasons.
 
 ## Working method
 

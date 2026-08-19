@@ -30,9 +30,14 @@ decisions [0047](../decisions/0047-edit-is-delete-plus-reingest.md),
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`;
 `rep §n` is `annotation-representation.md`; this document's own sections are **spec §n**.
 
-> **⊘ None of this is built.** No artifacts, no layers, no generating sets, no fold artifact pass.
-> Every claim describes a mechanism. Figures are marked *measured*, *modelled* or *assumed* at each
-> site; most of this document's own quantities are assumed, and spec §8 names them.
+> **Most of this is built** *(r10; it was none of it when this document was written)*. Layers,
+> artifacts, generating sets, containment, the dependency edge and the fold's artifact pass all
+> exist and are enforced, through Stage 5 of
+> [`artifact-delivery.md`](../artifact-delivery.md). What is not built is named at its own site:
+> the **edit pass** (deferred to Stage 7), **membership by predicate** (Stage 6), content
+> reclamation, and the notification *feed* — the fold writes its report, and nothing subscribes.
+> Figures are marked *measured*, *modelled* or *assumed* at each site; most of this document's own
+> quantities are still assumed, and spec §8 names them.
 
 ---
 
@@ -772,6 +777,12 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r10 — 2026-08-19. The banner said none of this is built.** A correction, not a design change: no
+claim in the body moves. Through Stage 5 the spine of this document is built — layers, artifacts,
+generating sets, containment, the dependency edge and the fold's artifact pass with its report — so
+a reader who took the banner at its word would have read a built mechanism as a proposal. What is
+genuinely unbuilt is now named rather than covered by a blanket ⊘.
 
 **r9 — 2026-08-19. A deletion cascades where a replacement refuses.** `depends_on` said what an
 edge constrains and nothing about what it means, leaving a label whose cluster is deleted, and a

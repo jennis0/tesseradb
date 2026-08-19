@@ -244,9 +244,12 @@ reconcile as one change and tedious as two.
 > [#41 Serve cluster labels only to viewers who can see what generated them][#41]
 
 Points carry cluster structure and clusters carry labels, both computed from the viewer's own
-visible set. This is where the system stops being a scatterplot. None of it exists — no cluster
-tree, no frontier, no membership structure — which is why I3 and I8 have no tests. [#41] follows
-[#13]: a label attaches to a cluster node.
+visible set. This is where the system stops being a scatterplot. Most of it now exists — memberships,
+masked counts, containment-gated labels and a tree in its edges — so I3 and I8 have no *conformance*
+tests for a different reason than they once did: not that there is nothing to test, but that the suite
+has not been extended to the machinery. There is no frontier, and there is not meant to be: it was
+withdrawn for a per-artifact test with a request-time budget. [#41] follows [#13]: a label attaches to
+a cluster node.
 
 The disclosure question is the whole difficulty in both. A cluster boundary computed over all
 items and then filtered tells a viewer about items they cannot see; a label derived from items a

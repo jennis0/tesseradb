@@ -31,11 +31,14 @@ campaign every sizing figure below comes from). Ordering precedent:
 
 ## Where it stands
 
-A flat clustering is live end to end: layers register, artifacts publish, and a viewer sees each
-cluster with the count its own visible set generates — on the engine, on all three frame decoders,
-and on the map. What does not exist yet is everything above one flat level: no content on an
-artifact, no edges, no levels and no frontier, and no write cycle keeping any of it true across a
-delete.
+A clustering is live end to end, tree and all: layers register, artifacts publish, and a viewer sees
+each cluster with the count its own visible set generates, described by the first content whose
+generating set they contain entire — on the engine, on all three frame decoders, and on the map.
+Edges, levels and the cut are built, the write cycle keeps all of it true across a delete and a
+fold, and one configuration file declares the corpus. **There is no frontier and there is not meant
+to be**: it was withdrawn for a per-artifact test with a request-time budget (decisions 0080, 0083).
+What does not exist yet is membership by predicate, runtime artifacts, and the filter, search and
+scale work — Stages 6 to 8 below.
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
