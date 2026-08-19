@@ -83,6 +83,32 @@ before an oracle could disagree at all.
 excuse — a register that records built machinery as absent understates its own gap. Corrected
 2026-08-19; `conformance.md` r13 carries the per-row reasons.
 
+## What the strictness is for
+
+**This is a secure database, not an assured system.** The fail-closed posture above is real and it
+is narrow. Three questions decide how strict to be, and only the first two earn a refusal.
+
+- **Does it leak?** Anything a principal can observe — masks, gates, membership requirements, a
+  disclosure control accepted and never enforced. Fail closed, no defaults, refuse the
+  unenforceable. This boundary is small and enumerable, which is the point: §4's invariants and
+  Appendix C are its whole extent.
+- **Is it irreversible?** Entity ids are permanent, term ids determine them, a published identity is
+  tombstoned. A rerun does not undo these, so they get the strict treatment though they leak
+  nothing.
+- **Everything else is recoverable and discloses nothing** — frames, joins, coverage, roster shape,
+  config ergonomics, defaults. **Report loudly, let the operator decide, and do not block a build.**
+  The operator is present and the loop is fast: a wrong extent costs a rerun, not a mission.
+
+Refusing outside the first two cases is not the safe option, it is *an* option — one that moves the
+cost onto the caller while looking principled in a way that "this is now harder to use" does not.
+Before adding a refusal outside the disclosure surface, say why it is worth blocking a build; if
+the answer is only *it might be wrong*, make it a warning that prints the numbers, and choose a
+denominator that means something (entities covered, not rows dropped). Prefer **ignore-and-report**
+over **refuse** for joins and inputs.
+
+This is the same rule as *keep emphasis proportionate*, applied to behaviour rather than prose: if
+everything is a refusal, the refusals protecting the invariants stop standing out.
+
 ## Working method
 
 **Rust is the implementation language** — engine, build pipeline and serving alike; one binary.
@@ -144,56 +170,53 @@ of removing it, and backlogs of issues for things that should just have been fix
 
 ## Talking to the owner
 
-**The house style below is for the corpus. A message is not a document, and writing one in the
-other's register is the recurring failure.** `§4.4`, `I2`, `C25`, `decision 0067` and a type name
-are correct in a design document and near-useless in a chat message: they compress for a reader who
-has the corpus loaded, and the owner is not holding it in his head at the moment of reading. A
-message built out of them transmits nothing and has to be asked again.
+Joe knows this system better than you do. When he asks a question he is usually thinking out loud
+and wants a peer to think with, not a verdict with the reasoning arranged behind it. Answer what he
+asked and leave the decision with him. Agreement is a complete reply.
 
-- **Lead with the consequence, not the mechanism.** *"Searches would silently return nothing — no
-  error, just wrong answers"* beats *"the analyser identity is resolved from the manifest"*.
-- **Identifiers go in brackets, or not at all.** Never open a paragraph with one; never make one the
-  subject of a sentence. The owner can ask for the reference.
-- **A concrete example earns its space.** One real string segmented two ways says more than a
-  paragraph about segmentation agreement.
-- **Bold only around plain-language claims.** A bolded line of jargon looks like a summary and
-  carries none — it is the specific shape that has failed here.
-- **Prefer a few short paragraphs to a wall of headed sections**, and offer the depth at the end
-  rather than supplying it unasked.
+Four constructions do not belong in a message. Predecessor models produced none of them across
+1,200 messages in this repository, so these are things to drop, not habits to moderate.
 
-Everything below governs what is written **into the repository** — design documents, module docs,
-decisions, commit messages — where precision, citations and the established vocabulary are exactly
-right.
+- **Commentary on your own messages** — "I was wrong", "what I should have said", "to be precise".
+  If an earlier answer was wrong, just say the right thing now.
+- **Filler that announces importance** — "the real question", "the key thing", "importantly",
+  "worth noting". If a sentence's only job is to say the next one matters, cut it.
+- **Rules invented from a conversation.** A question about a column gets an answer about that
+  column, not a principle that has to be unpicked later.
+- **Uniform urgency.** Save *fail-open*, *silent* and *breaks* for the things that are.
+
+State uncertainty once and plainly — "I don't know whether X", or just ask — rather than hedging
+spread through every paragraph.
+
+Match structure to content: a list when the content is a list, lettered options when a decision is
+needed so he can reply with a letter, plain paragraphs otherwise. Do not impose headed sections on
+prose. Length follows the question — a long answer he can skip through beats a short one that costs
+him three follow-ups.
+
+Identifiers go in brackets or not at all. He is not holding the corpus in his head when he reads.
 
 ## House style
 
-Full guide in [docs/agents/writing.md](docs/agents/writing.md). The rules that matter most:
+This governs what is written **into the repository** — design documents, module docs, decisions,
+commit messages. It does not govern messages, which the section above covers; a summary of it here
+is read every session and ends up in chat, which is why the summary is a pointer.
 
-- **Describe the system, not its construction.** What it is and why — not which revision changed
-  it or which phase built it. That archaeology belongs in `docs/decisions/` and git. A design
-  document that is mostly revision history has stopped being a design document.
-- **Length follows substance.** Cover what the reader needs and stop. No padding, no restated
-  summaries, no section that exists because the template had one. Most design documents here
-  should be shorter than the one you are about to write.
-- **Module docs carry the design argument**, and run long here where that is warranted: an
-  invariant upheld in a way the code does not show, an obvious construction rejected for a
-  non-obvious reason, a measurement driving a shape that otherwise looks arbitrary, or a
-  deliberate duplication a reader would otherwise "fix". Restating the code is never warranted.
-- **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
-  `FIXME` markers here. Open work is an issue.
-- **State negative results.** "F3: NOT confirmed by measurement — do not claim it is" is the form.
-  Distinguish measured from modelled from assumed, every time.
+Read [docs/agents/writing.md](docs/agents/writing.md) before writing corpus prose. Four rules are
+repeated here because they are violated silently rather than visibly:
+
 - **Mark specified-but-unbuilt machinery at the claim**, with what happens instead. Present tense
   about absent machinery reads as an assurance
   ([decision 0013](docs/decisions/0013-mark-specified-vs-implemented.md)).
+- **State negative results.** "F3: NOT confirmed by measurement — do not claim it is" is the form.
+  Distinguish measured from modelled from assumed, every time.
+- **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
+  `FIXME` markers here. Open work is an issue.
 - **Prefer stable citations** — `§4`, `contracts §2.5` — over `file.rs:184`, which drifts.
   `scripts/check-doc-links.py` warns on the ones that have visibly rotted.
-- **State load-bearing assumptions at the site**, and prefer a test to a comment.
-- **Keep emphasis proportionate.** If everything is critical, the reader cannot tell which things
-  are — and a small number here genuinely are.
-- British spelling, and the established security vocabulary — *conservative label join*, *boolean
-  expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC* — over
-  invented terms.
+
+British spelling throughout, and the established security vocabulary — *conservative label join*,
+*boolean expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC* —
+over invented terms.
 
 ## The gate
 
