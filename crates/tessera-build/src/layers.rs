@@ -51,14 +51,13 @@
 //! artifacts and members, the publication order, and the hierarchy checks that need every artifact
 //! in hand.
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, StringArray, UInt16Array,
-    UInt32Array, UInt64Array, UInt8Array,
+    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
+    StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -69,7 +68,7 @@ use tessera_lifecycle::membership::{
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::{LayerDeclaration, ValueSet};
+use tessera_types::layer::{HierarchyKind, LayerDeclaration, ValueSet};
 use tessera_types::EntityId;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
@@ -294,7 +293,7 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
                 &input.name,
                 &members.path,
                 &members.fields,
-                declaration.value_set,
+                declaration,
                 &mut plan,
             )?;
             if rows > 0 {
@@ -508,112 +507,304 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
 /// cluster column as `key` and the id column as `entity`, and the file the build reads its geometry
 /// from is also the file it reads its memberships from.
 ///
+/// **A list key column is one row per `(artifact, entity)` as well** — several of them
+/// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point, and what the
+/// list means is the hierarchy kind the layer already declares: one entry per level for `stacked`
+/// and `tiered`, a lineage for `nested`. The entries name the artifacts the point belongs to,
+/// exactly as a scalar names the one, and `tiered` and `nested` read their **edges** from the
+/// adjacency the list itself carries.
+///
 /// Returns the rows that named no artifact, and the rows read — the numerator and the denominator
 /// the caller prints.
 fn read_members(
     layer: &str,
     path: &Path,
     fields: &Fields,
-    value_set: ValueSet,
+    declaration: &LayerDeclaration,
     plan: &mut LayerPlan,
 ) -> Result<(u64, u64)> {
+    let value_set = declaration.value_set;
     let (mut unclustered, mut read) = (0u64, 0u64);
     // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
     // layer of 10⁷ artifacts pays once rather than per point.
     let mut roster: Option<IntegerRoster> = None;
+    // The edges a list column declared, child address → parent key. **One entry per child, not one
+    // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
+    // and the second statement onward is a comparison rather than an insertion. Applied once the
+    // whole source has been read, so a conflict is found wherever in the file it sits.
+    let mut lineage: BTreeMap<Address, String> = BTreeMap::new();
+    // Reused across rows rather than allocated per point: one slot per position in the row's list,
+    // `None` where the entry named no artifact.
+    let mut entries: Vec<Option<Member>> = Vec::new();
+    let mut said_level_is_ignored = false;
     for batch in batches(path)? {
         let batch = batch?;
-        let key = key_column(path, &batch, fields, "key")?;
+        let key = member_keys(path, &batch, fields, layer, declaration)?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
         let entity = u64s(path, &batch, fields, "entity")?;
         read += batch.num_rows() as u64;
 
+        // **Ignored and said so**, rather than refused or read: the positions in a list are what
+        // carry the levels, so a `level` column beside one is a second answer to a question the
+        // column has already answered. Reading it would place a point at a level its list did not
+        // name; refusing would block a build over an input that discloses nothing and costs a
+        // rerun.
+        if level.is_some() && matches!(key, MemberKeys::Listed(_)) && !said_level_is_ignored {
+            said_level_is_ignored = true;
+            eprintln!(
+                "layer '{layer}': {} carries a `level` column beside a list key column, whose own \
+                 positions are what carry the levels — the column is ignored",
+                path.display()
+            );
+        }
+
         for row in 0..batch.num_rows() {
-            // **The artifacts are the roster, and a key not on them is a refusal** — while the
-            // layer's value set is closed. A mistyped key would otherwise publish a phantom
-            // artifact carrying the members it stole from a real one: an extra cluster nobody
-            // wrote, beside a real cluster whose masked count is quietly short and which may fall
-            // below its own criterion and vanish. Neither has an error anywhere to notice.
-            //
-            // **Open lifts exactly that refusal** (`artifacts-from-points.md` §3): the key creates
-            // an artifact carrying no title, no parent and no contents — the cluster exists because
-            // a point says it does, and the artifacts source, if there is one, is enrichment.
-            let address: Cow<Address> = match key.read_at(row) {
-                KeyRead::Unclustered => {
-                    unclustered += 1;
-                    continue;
-                }
-                KeyRead::Named(name) => {
+            match &key {
+                MemberKeys::Scalar(column) => {
                     let at_level = level.map_or(0, |c| number_at(c, row));
-                    let address = (layer.to_string(), at_level, name.to_string());
-                    if !plan.artifacts.contains_key(&address) {
-                        if value_set == ValueSet::Closed {
-                            return Err(undeclared_key(path, &address));
-                        }
-                        plan.artifacts.insert(address.clone(), PlannedArtifact::default());
+                    let Some(member) = resolve_member(
+                        layer,
+                        at_level,
+                        column.read_at(row),
+                        value_set,
+                        path,
+                        plan,
+                        &mut roster,
+                    )?
+                    else {
+                        unclustered += 1;
+                        continue;
+                    };
+                    let address = member.address(&roster);
+                    // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the
+                    // values buffer whatever the validity bitmap says, and a Parquet writer leaves
+                    // a zero there — so a producer whose join missed a row would publish the
+                    // corpus's lowest-numbered document into the cluster, moving its masked count
+                    // for every viewer who can see that one document.
+                    if entity.is_null(row) {
+                        return Err(null_entity(path, &address.2));
                     }
-                    Cow::Owned(address)
+                    attach_member(
+                        plan,
+                        address,
+                        path,
+                        entity.value(row),
+                        rank.as_ref().and_then(|c| value_index(c, row)),
+                    )?;
                 }
-                KeyRead::Numbered(value) => {
-                    let at_level = level.map_or(0, |c| number_at(c, row));
-                    let roster = roster.get_or_insert_with(|| IntegerRoster::of_layer(layer, plan));
-                    if roster.get(at_level, value).is_none() {
-                        // The one decimal string an integer key ever costs: once per artifact
-                        // minted, never once per point.
-                        let address = (layer.to_string(), at_level, value.to_string());
-                        if value_set == ValueSet::Closed {
-                            return Err(undeclared_key(path, &address));
-                        }
-                        plan.artifacts.insert(address.clone(), PlannedArtifact::default());
-                        roster.insert(at_level, value, address);
+                MemberKeys::Listed(listed) => {
+                    let Some(positions) = listed.entries(path, layer, row)? else {
+                        unclustered += 1;
+                        continue;
+                    };
+                    if entity.is_null(row) {
+                        return Err(null_entity(path, &format!("row {row}")));
                     }
-                    Cow::Borrowed(
-                        roster.get(at_level, value).expect("on the roster, or minted onto it"),
-                    )
+                    let source = entity.value(row);
+                    let rank = rank.as_ref().and_then(|c| value_index(c, row));
+
+                    entries.clear();
+                    for (position, index) in positions.enumerate() {
+                        entries.push(resolve_member(
+                            layer,
+                            listed.meaning.level_of(position),
+                            listed.values.read_at(index),
+                            value_set,
+                            path,
+                            plan,
+                            &mut roster,
+                        )?);
+                    }
+                    // **A row whose every entry is noise is one row in no artifact**, counted
+                    // exactly as a null scalar key is: the denominator the report divides by is
+                    // rows, and a list naming nothing is one of them.
+                    if entries.iter().all(Option::is_none) {
+                        unclustered += 1;
+                        continue;
+                    }
+                    for member in entries.iter().flatten() {
+                        attach_member(plan, member.address(&roster), path, source, rank)?;
+                    }
+                    if listed.meaning.declares_edges() {
+                        record_lineage(&entries, &roster, &mut lineage, path)?;
+                    }
                 }
-            };
-            let entry = plan
-                .artifacts
-                .get_mut(address.as_ref())
-                .expect("resolved against the plan, or minted into it");
-            // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the values
-            // buffer whatever the validity bitmap says, and a Parquet writer leaves a zero
-            // there — so a producer whose join missed a row would publish the corpus's
-            // lowest-numbered document into the cluster, moving its masked count for every
-            // viewer who can see that one document.
-            if entity.is_null(row) {
-                return Err(BuildError::Invalid(format!(
-                    "{}: {} has a null entity; a null is not entity zero, and publishing it as \
-                     one puts a document nobody named into the artifact",
-                    path.display(),
-                    address.2
-                )));
-            }
-            let source = entity.value(row);
-            match rank.as_ref().and_then(|c| value_index(c, row)) {
-                None => match &mut entry.membership {
-                    PlannedMembership::Rows(members) => members.push(source),
-                    // **Two answers to what an artifact's members are.** The config refuses the
-                    // two declarations together; this is the same rule for a caller who bound the
-                    // sources by hand, and it is fail-closed either way — taking one would make a
-                    // masked count, and the criterion that divides by it, depend on which source
-                    // the reader happened to read first.
-                    _ => {
-                        return Err(BuildError::Invalid(format!(
-                            "{}: {} has a membership on its own row and another in this member \
-                             source. They are two shapes of one thing, so which one a masked count \
-                             divides by would be the order the sources were read",
-                            path.display(),
-                            address.2
-                        )))
-                    }
-                },
-                Some(index) => content_at_rank(entry, index).generated_from.push(source),
             }
         }
     }
+    apply_lineage(plan, lineage, path)?;
     Ok((unclustered, read))
+}
+
+/// One member row's key, resolved against the plan — **minting where the value set is open**, and
+/// `None` where the key said the point is in no artifact.
+///
+/// **The artifacts are the roster, and a key not on them is a refusal** — while the layer's value
+/// set is closed. A mistyped key would otherwise publish a phantom artifact carrying the members it
+/// stole from a real one: an extra cluster nobody wrote, beside a real cluster whose masked count is
+/// quietly short and which may fall below its own criterion and vanish. Neither has an error
+/// anywhere to notice.
+///
+/// **Open lifts exactly that refusal** (`artifacts-from-points.md` §3): the key creates an artifact
+/// carrying no title, no parent and no contents — the cluster exists because a point says it does,
+/// and the artifacts source, if there is one, is enrichment. A list column mints from the same call,
+/// so an interior parent no artifact declares is minted on the same rule as a leaf.
+fn resolve_member(
+    layer: &str,
+    level: u32,
+    read: KeyRead<'_>,
+    value_set: ValueSet,
+    path: &Path,
+    plan: &mut LayerPlan,
+    roster: &mut Option<IntegerRoster>,
+) -> Result<Option<Member>> {
+    Ok(match read {
+        KeyRead::Unclustered => None,
+        KeyRead::Named(name) => {
+            let address = (layer.to_string(), level, name.to_string());
+            if !plan.artifacts.contains_key(&address) {
+                if value_set == ValueSet::Closed {
+                    return Err(undeclared_key(path, &address));
+                }
+                plan.artifacts.insert(address.clone(), PlannedArtifact::default());
+            }
+            Some(Member::Named(address))
+        }
+        KeyRead::Numbered(value) => {
+            let roster = roster.get_or_insert_with(|| IntegerRoster::of_layer(layer, plan));
+            match roster.get(level, value) {
+                Some(index) => Some(Member::Interned(index)),
+                None => {
+                    // The one decimal string an integer key ever costs: once per artifact minted,
+                    // never once per point.
+                    let address = (layer.to_string(), level, value.to_string());
+                    if value_set == ValueSet::Closed {
+                        return Err(undeclared_key(path, &address));
+                    }
+                    // **Minted into the plan, never over it.** Absent from the roster is not absent
+                    // from the plan — the roster is built once and indexes only the keys that spell
+                    // an integer exactly — so an insert here would replace an artifact that already
+                    // holds members with an empty one.
+                    plan.artifacts.entry(address.clone()).or_default();
+                    Some(Member::Interned(roster.insert(level, value, address)))
+                }
+            }
+        }
+    })
+}
+
+/// Put one source entity into an artifact — its membership, or the generating set of one rank.
+fn attach_member(
+    plan: &mut LayerPlan,
+    address: &Address,
+    path: &Path,
+    source: u64,
+    rank: Option<u32>,
+) -> Result<()> {
+    let entry = plan
+        .artifacts
+        .get_mut(address)
+        .expect("resolved against the plan, or minted into it");
+    match rank {
+        None => match &mut entry.membership {
+            PlannedMembership::Rows(members) => members.push(source),
+            // **Two answers to what an artifact's members are.** The config refuses the two
+            // declarations together; this is the same rule for a caller who bound the sources by
+            // hand, and it is fail-closed either way — taking one would make a masked count, and
+            // the criterion that divides by it, depend on which source the reader happened to read
+            // first.
+            _ => {
+                return Err(BuildError::Invalid(format!(
+                    "{}: {} has a membership on its own row and another in this member source. \
+                     They are two shapes of one thing, so which one a masked count divides by \
+                     would be the order the sources were read",
+                    path.display(),
+                    address.2
+                )))
+            }
+        },
+        Some(index) => content_at_rank(entry, index).generated_from.push(source),
+    }
+    Ok(())
+}
+
+fn null_entity(path: &Path, what: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: {what} has a null entity; a null is not entity zero, and publishing it as one puts a \
+         document nobody named into the artifact",
+        path.display()
+    ))
+}
+
+/// The edges one row's list declares: entry *k* is the parent of entry *k+1*.
+///
+/// **Adjacent entries only, and both of them present.** An entry naming no artifact is a point that
+/// is noise at that resolution, not a link across it — reading past it would invent an edge from a
+/// level to one two below, which is a containment claim the caller never made and which the next
+/// point, clustered at that resolution, would contradict.
+fn record_lineage(
+    entries: &[Option<Member>],
+    roster: &Option<IntegerRoster>,
+    lineage: &mut BTreeMap<Address, String>,
+    path: &Path,
+) -> Result<()> {
+    for pair in entries.windows(2) {
+        let (Some(parent), Some(child)) = (&pair[0], &pair[1]) else {
+            continue;
+        };
+        let parent = parent.address(roster).2.as_str();
+        let child = child.address(roster);
+        match lineage.get(child) {
+            Some(first) if first != parent => return Err(two_parents(path, child, first, parent)),
+            Some(_) => {}
+            None => {
+                lineage.insert(child.clone(), parent.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hang every child the column named under the parent it named.
+///
+/// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
+/// column are two spellings of one edge, and an artifact holding a different parent in each is the
+/// same conflict as two points disagreeing.
+fn apply_lineage(
+    plan: &mut LayerPlan,
+    lineage: BTreeMap<Address, String>,
+    path: &Path,
+) -> Result<()> {
+    for (child, parent) in lineage {
+        let artifact = plan
+            .artifacts
+            .get_mut(&child)
+            .expect("a child of the lineage was resolved against the plan, or minted into it");
+        match &artifact.parent_key {
+            Some(declared) if *declared != parent => {
+                return Err(two_parents(path, &child, declared, &parent))
+            }
+            _ => artifact.parent_key = Some(parent),
+        }
+    }
+    Ok(())
+}
+
+/// **A child naming two different parents is refused** (`artifacts-from-points.md` §4). The data is
+/// not the tree the layer declared: there is no correct output, and choosing a parent would publish
+/// a hierarchy the caller did not write.
+fn two_parents(path: &Path, child: &Address, first: &str, second: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: {} in level {} of {} is named as a child of both {first} and {second}. A list key \
+         column declares the edges, so two rows naming different parents for one artifact are two \
+         hierarchies — and which of them was published would be the file's row order rather than \
+         anything the caller wrote",
+        path.display(),
+        child.2,
+        child.1,
+        child.0
+    ))
 }
 
 /// The content at `rank`, growing the ranking to reach it.
@@ -1620,7 +1811,16 @@ fn key_column<'a>(
     canonical: &str,
 ) -> Result<KeyColumn<'a>> {
     let name = fields.of(canonical);
-    let array = required(path, batch, fields, canonical)?;
+    scalar_key_column(path, required(path, batch, fields, canonical)?, name, "column")
+}
+
+/// One array read as a key column — the member source's own, or the elements of its list.
+fn scalar_key_column<'a>(
+    path: &Path,
+    array: &'a std::sync::Arc<dyn Array>,
+    name: &str,
+    what: &str,
+) -> Result<KeyColumn<'a>> {
     Ok(match array.data_type() {
         arrow::datatypes::DataType::Utf8 => KeyColumn::Text(typed(path, array, name)?),
         arrow::datatypes::DataType::Int8 => KeyColumn::I8(typed(path, array, name)?),
@@ -1633,7 +1833,7 @@ fn key_column<'a>(
         arrow::datatypes::DataType::UInt64 => KeyColumn::U64(typed(path, array, name)?),
         other => {
             return Err(BuildError::Invalid(format!(
-                "{}: column {name} is {other:?}, and a key is text or an integer — an integer key \
+                "{}: {what} {name} is {other:?}, and a key is text or an integer — an integer key \
                  is read as its decimal spelling, so `3` and \"3\" name one artifact",
                 path.display()
             )))
@@ -1641,32 +1841,255 @@ fn key_column<'a>(
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// A list key column: the artifacts a point belongs to, and the edges between them
+// ---------------------------------------------------------------------------------------------
+
+/// A member source's `key` column: one artifact per row, or a list of them.
+///
+/// **The list's meaning is the hierarchy kind the layer already declares**
+/// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point and nothing in
+/// the list says what its positions mean, so the kind is declared as it always was and only the
+/// edges are read from the data.
+enum MemberKeys<'a> {
+    Scalar(KeyColumn<'a>),
+    Listed(ListedKeys<'a>),
+}
+
+/// A list key column, its elements, and what its positions mean.
+struct ListedKeys<'a> {
+    shape: ListShape<'a>,
+    /// The list's child array, read as a key column: an element is a key on exactly the rule a
+    /// scalar is, integer or text, with the roster converted once rather than per element.
+    values: KeyColumn<'a>,
+    meaning: ListMeaning,
+}
+
+enum ListShape<'a> {
+    /// A `List`: its rows may differ in length, which is what a lineage is.
+    Variable(&'a ListArray),
+    /// A `FixedSizeList`: every row has the arity the type states.
+    Fixed(&'a FixedSizeListArray),
+}
+
+/// What the positions in a list of keys mean.
+#[derive(Clone, Copy)]
+enum ListMeaning {
+    /// `stacked` and `tiered`: entry *k* is the artifact at level *k*, one per declared level.
+    /// `edges` is `tiered`'s containment between consecutive entries; `stacked`'s levels are
+    /// independent analyses and carry none.
+    Levelled { levels: usize, edges: bool },
+    /// `nested`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at level 0** —
+    /// a nested layer's hierarchy is its edges and it declares no levels (decision 0082).
+    Lineage,
+    /// `flat`: a membership each, at level 0, in no order. A flat layer has no positions for a
+    /// list to index, so the entries are a set and nothing is read from their adjacency.
+    Unordered,
+}
+
+impl ListMeaning {
+    fn level_of(&self, position: usize) -> u32 {
+        match self {
+            ListMeaning::Levelled { .. } => position as u32,
+            ListMeaning::Lineage | ListMeaning::Unordered => 0,
+        }
+    }
+
+    fn declares_edges(&self) -> bool {
+        match self {
+            ListMeaning::Levelled { edges, .. } => *edges,
+            ListMeaning::Lineage => true,
+            ListMeaning::Unordered => false,
+        }
+    }
+}
+
+impl ListedKeys<'_> {
+    /// The row's entries, as a range into the element array — `None` where the row named no
+    /// artifact at all.
+    ///
+    /// **A null cell and an empty one are the whole row's `Unclustered`**, which is §2's rule for a
+    /// scalar key applied to a cell that holds no key: a point may be in no artifact at any
+    /// resolution, and a clusterer that emitted nothing for it is the ordinary way of saying so.
+    fn entries(
+        &self,
+        path: &Path,
+        layer: &str,
+        row: usize,
+    ) -> Result<Option<std::ops::Range<usize>>> {
+        let (start, end) = match &self.shape {
+            ListShape::Variable(list) => {
+                if list.is_null(row) {
+                    return Ok(None);
+                }
+                let offsets = list.value_offsets();
+                (offsets[row] as usize, offsets[row + 1] as usize)
+            }
+            ListShape::Fixed(list) => {
+                if list.is_null(row) {
+                    return Ok(None);
+                }
+                let start = list.value_offset(row) as usize;
+                (start, start + list.value_length() as usize)
+            }
+        };
+        if start == end {
+            return Ok(None);
+        }
+        // **The declaration and the data must agree.** A `stacked` or `tiered` layer's list is one
+        // entry per declared level — that is what makes entry *k* mean level *k* — so a row of any
+        // other length is a lineage against a levelled declaration, and guessing which of the two
+        // the caller meant would publish a hierarchy they did not write.
+        if let ListMeaning::Levelled { levels, .. } = self.meaning {
+            if end - start != levels {
+                return Err(BuildError::Invalid(format!(
+                    "{}: row {row} names {} artifacts and layer '{layer}' declares {levels} \
+                     levels. A stacked or tiered layer's key column is one entry per level, \
+                     nullable where the point is in no artifact at that resolution, so a row of \
+                     another length is a variable-length list against a levelled declaration — \
+                     declare `hierarchy.kind = \"nested\"` if the column is a lineage",
+                    path.display(),
+                    end - start,
+                )));
+            }
+        }
+        Ok(Some(start..end))
+    }
+}
+
+/// The member source's key column, at the shapes a layer of this kind may carry.
+fn member_keys<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    layer: &str,
+    declaration: &LayerDeclaration,
+) -> Result<MemberKeys<'a>> {
+    let name = fields.of("key");
+    let array = required(path, batch, fields, "key")?;
+    let fixed = match array.data_type() {
+        arrow::datatypes::DataType::List(_) => None,
+        arrow::datatypes::DataType::FixedSizeList(_, size) => Some(*size as usize),
+        _ => return Ok(MemberKeys::Scalar(key_column(path, batch, fields, "key")?)),
+    };
+    let kind = declaration.hierarchy.kind;
+    let meaning = match kind {
+        // **A flat layer takes a list as plain multi-membership.** A flat layer has no levels
+        // and no lineage, so the positions mean nothing — but the entries still do: the point is
+        // a member of every artifact its list names, which is exactly what the same membership
+        // written as several rows of a member table already means. Refusing the list spelling
+        // would make two spellings of one membership disagree, and overlapping flat groupings —
+        // a document under three topics — are ordinary rather than a mistake.
+        HierarchyKind::Flat => ListMeaning::Unordered,
+        HierarchyKind::Nested => {
+            if let Some(size) = fixed {
+                return Err(BuildError::Invalid(format!(
+                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' is \
+                     declared nested, whose lineage is as deep as each point's own branch — a \
+                     fixed arity is one entry per level, which is the stacked and tiered shape. \
+                     Write the column as a list, or declare the layer tiered and its levels",
+                    path.display()
+                )));
+            }
+            ListMeaning::Lineage
+        }
+        HierarchyKind::Stacked | HierarchyKind::Tiered => {
+            let levels = declaration.levels.len();
+            if let Some(size) = fixed {
+                if size != levels {
+                    return Err(BuildError::Invalid(format!(
+                        "{}: column {name} is a fixed-size list of {size} and layer '{layer}' \
+                         declares {levels} levels. Entry k is the artifact at level k, so the two \
+                         counts are one number written twice",
+                        path.display()
+                    )));
+                }
+            }
+            ListMeaning::Levelled {
+                levels,
+                edges: matches!(kind, HierarchyKind::Tiered),
+            }
+        }
+    };
+    let shape = match array.data_type() {
+        arrow::datatypes::DataType::List(_) => {
+            ListShape::Variable(typed::<ListArray>(path, array, name)?)
+        }
+        _ => ListShape::Fixed(typed::<FixedSizeListArray>(path, array, name)?),
+    };
+    let values = match &shape {
+        ListShape::Variable(list) => list.values(),
+        ListShape::Fixed(list) => list.values(),
+    };
+    Ok(MemberKeys::Listed(ListedKeys {
+        values: scalar_key_column(path, values, name, "the elements of column")?,
+        shape,
+        meaning,
+    }))
+}
+
+/// One member row's key, resolved to the artifact it names.
+///
+/// **An integer key resolves to an index and never to a string.** The roster is converted once per
+/// layer ([`IntegerRoster`]) and a point's key is looked up as the integer it already is, so a
+/// point whose cluster is known formats nothing and allocates nothing — which is the whole reason
+/// the reader takes an integer column at all. A text key allocates its address exactly as it always
+/// has, there being nothing to intern it against.
+enum Member {
+    Interned(usize),
+    Named(Address),
+}
+
+impl Member {
+    fn address<'a>(&'a self, roster: &'a Option<IntegerRoster>) -> &'a Address {
+        match self {
+            Member::Named(address) => address,
+            Member::Interned(index) => roster
+                .as_ref()
+                .expect("an interned member came from the roster it is read against")
+                .address(*index),
+        }
+    }
+}
+
 /// The layer's artifacts, indexed by the integer their keys spell.
 ///
 /// **Built once, before the first member row is read**, which is what keeps the per-point path free
 /// of formatting: a point's integer key is looked up as an integer, and the address it finds is the
-/// one the roster was planned under.
+/// one the roster was planned under. The addresses sit in an arena and are named by index, so a
+/// row's several keys can be held at once without cloning one of them.
 struct IntegerRoster {
-    by_key: BTreeMap<(u32, i128), Address>,
+    by_key: BTreeMap<(u32, i128), usize>,
+    addresses: Vec<Address>,
 }
 
 impl IntegerRoster {
     fn of_layer(layer: &str, plan: &LayerPlan) -> IntegerRoster {
-        let mut by_key = BTreeMap::new();
+        let mut roster = IntegerRoster {
+            by_key: BTreeMap::new(),
+            addresses: Vec::new(),
+        };
         for address in plan.artifacts.keys().filter(|a| a.0 == layer) {
             if let Some(value) = canonical_integer(&address.2) {
-                by_key.insert((address.1, value), address.clone());
+                roster.insert(address.1, value, address.clone());
             }
         }
-        IntegerRoster { by_key }
+        roster
     }
 
-    fn get(&self, level: u32, value: i128) -> Option<&Address> {
-        self.by_key.get(&(level, value))
+    fn get(&self, level: u32, value: i128) -> Option<usize> {
+        self.by_key.get(&(level, value)).copied()
     }
 
-    fn insert(&mut self, level: u32, value: i128, address: Address) {
-        self.by_key.insert((level, value), address);
+    fn insert(&mut self, level: u32, value: i128, address: Address) -> usize {
+        let index = self.addresses.len();
+        self.addresses.push(address);
+        self.by_key.insert((level, value), index);
+        index
+    }
+
+    fn address(&self, index: usize) -> &Address {
+        &self.addresses[index]
     }
 }
 

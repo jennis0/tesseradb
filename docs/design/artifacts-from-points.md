@@ -1,12 +1,12 @@
 # Artifacts declared by the points that belong to them — design
 
 **Date:** 2026-08-19
-**Status:** Draft — owner-ruled in discussion, **§2 and §3 built at build time**. The readers take
-an integer key and skip a noise one, and `value_set` decides whether a member key may create an
-artifact, at a build. ⊘ **§4 (lineage from a list column), §6 (the ingest half of `value_set`) and
-§5's write-path rulings are unbuilt**; a layer declared `open` therefore governs what a *build*
-mints and nothing at ingest, where an unknown key still has no route in. The rulings in §5
-are the owner's; the rest follows from them. Extends
+**Status:** Draft — owner-ruled in discussion, **§2, §3 and §4 built at build time**. The readers
+take an integer key, skip a noise one, and read a list column as the artifacts a point belongs to
+plus the edges between them; `value_set` decides whether a member key may create an artifact, at a
+build. ⊘ **§6 (the ingest half of `value_set`) and §5's write-path rulings are unbuilt**; a layer
+declared `open` therefore governs what a *build* mints and nothing at ingest, where an unknown key
+still has no route in. The rulings in §5 are the owner's; the rest follows from them. Extends
 [`configuration.md`](configuration.md) (normative for the surface) and
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §6.1 (normative for artifact semantics).
 
@@ -86,16 +86,14 @@ an error.
 
 ## 4. A lineage list declares the edges
 
-⊘ **Unbuilt.** A list key column is refused as a type the reader cannot take; the scalar column of
-§2 is what builds today.
-
 Where the column is a list, its shape is checked against the hierarchy kind the layer already
 declares — the kind is declared as it is today, and the edges are read from the data the caller
-supplied:
+supplied. **Every entry names an artifact the point is a member of**, exactly as a scalar key names
+the one; what the kind supplies is what the *positions* mean:
 
 | `hierarchy.kind` | Column | Edges |
 |---|---|---|
-| `flat` | scalar | none |
+| `flat` | scalar, or a list read as plain multi-membership | none |
 | `stacked` | fixed-length list, one entry per level | none — independent analyses |
 | `tiered` | fixed-length list, one entry per level | containment, between consecutive entries |
 | `nested` | variable-length list | the lineage: entry *k* is the parent of entry *k+1* |
@@ -106,7 +104,29 @@ refusal rather than a guess.
 
 **A child naming two different parents is refused.** The map is built during the pass that already
 walks the column, and a conflict means the data is not the tree the layer declared — there is no
-correct output, and choosing a parent would publish a hierarchy the caller did not write.
+correct output, and choosing a parent would publish a hierarchy the caller did not write. A `parent`
+column on an artifact row and a lineage column disagreeing about one artifact is the same conflict
+and refuses with the same words: they are two spellings of one edge.
+
+Three things the table does not settle, decided in the building:
+
+- **A fixed length is the declared level count, however the file spells it.** An Arrow
+  `FixedSizeList` states its arity in its type and is checked once against `[[layer.levels]]`; a
+  plain list states it a row at a time, and a row of another length is the refusal. Reading the type
+  alone would refuse every producer whose Arrow binding writes a plain list, which is most of them —
+  the declaration and the data agree or they do not, and the type is only one of the two places the
+  data can say so.
+- **An entry naming nothing links nothing across itself.** The edge is between *consecutive*
+  entries, and an entry that is null or `-1` is not one — so a point clustered at level 0 and level
+  2 and noise at level 1 declares no edge at all, and an artifact only ever named that way is
+  published as a root. Reading past the gap would state a containment no row makes, which the next
+  point clustered at that resolution would contradict.
+- **A row whose every entry is noise is one row in no artifact**, counted in §2's number rather than
+  a second one: rows are the denominator that separates a noisy clustering from a wrong column.
+
+A `level` column beside a list key column is **ignored, and said so**. The positions are what carry
+the levels, so reading it too would place a point at a level its list did not name; refusing would
+block a build over an input that discloses nothing and costs a rerun.
 
 ## 5. Identity, and what a suppression survives
 
@@ -189,6 +209,29 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-08-19 — r3. §4 is built, and the byte-identical assertion is what says it reads structure
+rather than inventing it.** A `nested` lineage column and the same clustering written out as an
+artifact table with a `parent` column and a member table build the same bundle down to the byte,
+and so do a `tiered` fixed-length column and a member table carrying a `level`. Every entry is a
+membership and the kind supplies the positions' meaning; minting composes with §3, so an interior
+parent that only ever appears inside somebody's lineage is minted like any other key. Three points
+the section did not settle were decided in the building and are now written into it: what counts as
+a fixed length (the declared level count, from the Arrow type where the file gives one and from the
+row otherwise), that a null entry breaks the adjacency rather than being read past, and that a row
+of nothing but noise is one unclustered row. One refusal was added beyond the ones §4 states — a
+lineage column contradicting a `parent` column, which is §4's own conflict arriving by two routes —
+and one thing that could have been a second is a warning instead: a `level` column beside a list is
+ignored and printed, on the rule that only a disclosure or an irreversibility earns a refusal.
+
+**A list under `flat` was briefly refused and is not.** The reasoning was that a flat layer has no
+positions for a list to index, which is true and does not follow: the entries are still
+memberships, and a point in several artifacts of one flat layer is what several rows of a member
+table have always meant. Refusing the list spelling would have made two spellings of one
+membership disagree — the property every other input route here is held to — and would have
+foreclosed overlapping groupings, a document under three topics being ordinary rather than a
+mistake. `a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table` pins it byte for
+byte.
 
 **2026-08-19 — r2. §2 and §3 are built at build time, and §2's first claim was already true.** The
 membership route needed no code: a `[layer.members]` block pointed at the points file, with

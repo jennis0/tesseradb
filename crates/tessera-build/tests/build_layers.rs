@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float64Array, ListBuilder, StringArray, StringBuilder, UInt32Array, UInt64Array,
+    ArrayRef, FixedSizeListArray, Float64Array, Int64Array, ListArray, ListBuilder, StringArray,
+    StringBuilder, UInt32Array, UInt64Array,
 };
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -1734,5 +1736,463 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
     assert_eq!(
         declared.layers[0].declaration.value_set,
         tessera_types::layer::ValueSet::Closed
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A list key column: the lineage the points declare (`artifacts-from-points.md` §4)
+// ---------------------------------------------------------------------------------------------
+
+/// The points, carrying a **list** of cluster ids per point beside the geometry — what a
+/// hierarchical clusterer emits.
+///
+/// `lists[e]` is entity `e`'s list and an entry of `None` is a null one. Written as text or as
+/// `int64`, and as a variable-length list or a fixed-size one, which are the shapes §4's table
+/// distinguishes: the fixed one is a levelled analysis and the variable one a lineage.
+fn write_listed_points(path: &Path, lists: &[Vec<Option<i64>>], as_text: bool, fixed: Option<i32>) {
+    let item = Arc::new(Field::new(
+        "item",
+        if as_text {
+            DataType::Utf8
+        } else {
+            DataType::Int64
+        },
+        true,
+    ));
+    let mut offsets: Vec<i32> = vec![0];
+    let mut entries: Vec<Option<i64>> = Vec::new();
+    for list in lists {
+        entries.extend(list.iter().copied());
+        offsets.push(entries.len() as i32);
+    }
+    let child: ArrayRef = if as_text {
+        Arc::new(StringArray::from(
+            entries
+                .iter()
+                .map(|e| e.map(|e| e.to_string()))
+                .collect::<Vec<_>>(),
+        ))
+    } else {
+        Arc::new(Int64Array::from(entries))
+    };
+    let column: ArrayRef = match fixed {
+        Some(size) => Arc::new(FixedSizeListArray::new(item, size, child, None)),
+        None => Arc::new(ListArray::new(
+            item,
+            OffsetBuffer::new(offsets.into()),
+            child,
+            None,
+        )),
+    };
+    let ids: Vec<u64> = (0..lists.len() as u64).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("lineage", column.data_type().clone(), true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)) as ArrayRef,
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            column,
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// The same layer as `CURATED_LAYER` at another hierarchy kind — the one word §4's table turns on.
+fn layer_of_kind(kind: &str) -> String {
+    CURATED_LAYER.replace(r#"kind = "flat""#, &format!(r#"kind = "{kind}""#))
+}
+
+/// A `[layer.members]` block reading the point table's list column.
+const FROM_LINEAGE: &str = r#"
+  [layer.members]
+  source = "points.parquet"
+  fields = { key = "lineage", entity = "entity_id" }
+"#;
+
+/// The equivalent enumeration: an artifact table carrying the edges, and a member table carrying
+/// one row per `(artifact, entity)`.
+const FROM_TREE_TABLES: &str = r#"source = "tree.parquet"
+  [layer.members]
+  source = "tree_members.parquet"
+"#;
+
+const FROM_LEVELLED_TABLES: &str = r#"source = "admin.parquet"
+  [layer.members]
+  source = "admin_members.parquet"
+"#;
+
+/// Three levels, which is what a fixed-length list of three entries must agree with.
+const THREE_LEVELS: &str = r#"
+[[layer.levels]]
+level = 0
+
+[[layer.levels]]
+level = 1
+
+[[layer.levels]]
+level = 2
+"#;
+
+/// Entity `e`'s lineage: one root, three groups under it, six leaves under those.
+fn lineage_of(entity: u64) -> Vec<Option<i64>> {
+    vec![
+        Some(1),
+        Some(10 + (entity % 3) as i64),
+        Some(100 + (entity % 6) as i64),
+    ]
+}
+
+/// The same clustering written out: every artifact, and the parent it hangs from.
+fn lineage_artifacts() -> Vec<(String, Option<String>)> {
+    let mut rows = vec![("1".to_string(), None)];
+    for group in 0..3u64 {
+        rows.push((format!("{}", 10 + group), Some("1".to_string())));
+    }
+    for leaf in 0..6u64 {
+        rows.push((
+            format!("{}", 100 + leaf),
+            Some(format!("{}", 10 + leaf % 3)),
+        ));
+    }
+    rows
+}
+
+/// The same clustering's memberships: a point belongs to every artifact its lineage names.
+fn lineage_memberships() -> Vec<(String, Vec<u64>)> {
+    let mut rows: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+    for entity in 0..N_ITEMS {
+        for key in lineage_of(entity).into_iter().flatten() {
+            rows.entry(key.to_string()).or_default().push(entity);
+        }
+    }
+    rows.into_iter().collect()
+}
+
+/// **A flat layer takes a list, and it means plain multi-membership.** A document under three
+/// topics is ordinary, and the same membership written as three rows of a member table has always
+/// been legal — so refusing the list spelling would make two spellings of one membership disagree,
+/// which is the property every other input spelling here is held to. No positions are read: a flat
+/// layer has no levels and no lineage, so the entries are a set.
+#[test]
+fn a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table() {
+    // Entity e belongs to every artifact whose id divides into it — overlapping groupings, which
+    // is the case a scalar column cannot express at all.
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
+        .map(|e| {
+            let mut of: Vec<Option<i64>> = (1..4i64).filter(|d| e as i64 % d == 0).collect::<Vec<_>>()
+                .into_iter().map(Some).collect();
+            if of.is_empty() {
+                of.push(None);
+            }
+            of
+        })
+        .collect();
+
+    let from_points = format!("{CURATED_LAYER}value_set = \"open\"\n{FROM_LINEAGE}");
+    let (from_points, _a) = build_spelling(&from_points, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+
+    // The same memberships, one row per (artifact, entity).
+    let mut by_key: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+    for (entity, of) in lists.iter().enumerate() {
+        for key in of.iter().flatten() {
+            by_key.entry(key.to_string()).or_default().push(entity as u64);
+        }
+    }
+    let from_table = format!("{CURATED_LAYER}value_set = \"open\"\n{FROM_TREE_TABLES}");
+    let (from_table, _b) = build_spelling(&from_table, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+        let keys: Vec<(&str, Option<&str>)> = by_key.keys().map(|k| (k.as_str(), None)).collect();
+        write_treed_artifacts(&inputs.at("tree.parquet"), &keys);
+        let membership: Vec<(&str, Vec<u64>)> = by_key
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        write_treed_members(&inputs.at("tree_members.parquet"), &membership);
+    });
+
+    assert_bundles_identical(&from_points, &from_table, "a flat list against a member table");
+}
+
+/// **The headline for §4: a lineage column and an artifact table with a `parent` column build the
+/// same bundle, byte for byte.**
+///
+/// It is the strongest available statement that the reader takes the structure the caller supplied
+/// rather than inventing one: every edge, every membership and every entity assignment comes out
+/// where the enumerated form put them, and the enumerated form is the shape the build has always
+/// read. The keys are integers on one side and their decimal spellings on the other, which is the
+/// ordinary case — a clusterer writes ids and a producer writes names.
+#[test]
+fn a_lineage_column_and_an_edged_artifact_table_build_the_same_bundle() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
+    let from_points = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_kind("nested"));
+    let (from_points, _a) = build_spelling(&from_points, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+
+    let from_tables = format!(
+        "{}value_set = \"open\"\n{FROM_TREE_TABLES}",
+        layer_of_kind("nested")
+    );
+    let (from_tables, _b) = build_spelling(&from_tables, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+        let artifacts = lineage_artifacts();
+        write_treed_artifacts(
+            &inputs.at("tree.parquet"),
+            &artifacts
+                .iter()
+                .map(|(key, parent)| (key.as_str(), parent.as_deref()))
+                .collect::<Vec<_>>(),
+        );
+        write_treed_members(
+            &inputs.at("tree_members.parquet"),
+            &lineage_memberships()
+                .iter()
+                .map(|(key, members)| (key.as_str(), members.clone()))
+                .collect::<Vec<_>>(),
+        );
+    });
+    assert_bundles_identical(
+        &from_points,
+        &from_tables,
+        "a lineage column against an artifact table with parents",
+    );
+}
+
+/// Entity `e`'s levels, coarse → fine: one country, two states, four counties.
+fn levels_of(entity: u64) -> Vec<Option<i64>> {
+    vec![
+        Some(1),
+        Some(10 + (entity % 2) as i64),
+        Some(100 + (entity % 4) as i64),
+    ]
+}
+
+/// **A fixed-length list against `tiered` is the member table with a `level` column.** Entry *k* is
+/// the artifact at level *k*, and the containment edges between consecutive entries are the ones
+/// the enumerated form spells out in a `parent` column.
+#[test]
+fn a_levelled_column_and_a_levelled_member_table_build_the_same_bundle() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(levels_of).collect();
+    let layer = format!(
+        "{}value_set = \"open\"\n{{members}}{THREE_LEVELS}",
+        layer_of_kind("tiered")
+    );
+    let (from_points, _a) = build_spelling(&layer.replace("{members}", FROM_LINEAGE), |inputs| {
+        write_listed_points(&inputs.points, &lists, false, Some(3));
+    });
+
+    let (from_tables, _b) =
+        build_spelling(&layer.replace("{members}", FROM_LEVELLED_TABLES), |inputs| {
+            write_listed_points(&inputs.points, &lists, false, Some(3));
+            write_edged_artifacts(
+                &inputs.at("admin.parquet"),
+                &[
+                    (0, "1", None),
+                    (1, "10", Some("1")),
+                    (1, "11", Some("1")),
+                    (2, "100", Some("10")),
+                    (2, "101", Some("11")),
+                    (2, "102", Some("10")),
+                    (2, "103", Some("11")),
+                ],
+            );
+            let mut membership: Vec<(u32, &str, Vec<u64>)> = vec![(0, "1", (0..N_ITEMS).collect())];
+            for (level, key, modulus, residue) in [
+                (1u32, "10", 2u64, 0u64),
+                (1, "11", 2, 1),
+                (2, "100", 4, 0),
+                (2, "101", 4, 1),
+                (2, "102", 4, 2),
+                (2, "103", 4, 3),
+            ] {
+                membership.push((
+                    level,
+                    key,
+                    (0..N_ITEMS).filter(|e| e % modulus == residue).collect(),
+                ));
+            }
+            write_levelled_members(&inputs.at("admin_members.parquet"), &membership);
+        });
+    assert_bundles_identical(
+        &from_points,
+        &from_tables,
+        "a levelled column against a levelled member table",
+    );
+}
+
+/// **A child naming two different parents is refused, and both are named.** The data is not the
+/// tree the layer declared: there is no correct output, and choosing a parent would publish a
+/// hierarchy nobody wrote.
+#[test]
+fn a_child_named_under_two_parents_is_refused_naming_both() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
+        .map(|e| vec![Some(if e % 2 == 0 { 900 } else { 901 }), Some(950)])
+        .collect();
+    let layer = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_kind("nested"));
+    let message = refuse_spelling(&layer, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+    assert!(message.contains("950"), "{message}");
+    assert!(message.contains("900"), "{message}");
+    assert!(message.contains("901"), "{message}");
+}
+
+/// **A variable-length list against a levelled declaration is refused.** Entry *k* means level *k*
+/// only because there are as many entries as levels; a row of another length is a lineage, and
+/// reading it as one would publish levels the layer did not declare.
+#[test]
+fn a_variable_length_list_against_a_tiered_layer_is_refused() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
+        .map(|e| {
+            let mut list = levels_of(e);
+            // One point's clusterer stopped a level short — the shape the declaration forbids.
+            if e == 7 {
+                list.pop();
+            }
+            list
+        })
+        .collect();
+    let layer = format!(
+        "{}value_set = \"open\"\n{FROM_LINEAGE}{THREE_LEVELS}",
+        layer_of_kind("tiered")
+    );
+    let message = refuse_spelling(&layer, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+    assert!(message.contains("declares 3 levels"), "{message}");
+    assert!(message.contains("nested"), "{message}");
+}
+
+/// **A fixed-length list against `nested` is refused.** A lineage is as deep as the point's own
+/// branch; a fixed arity is one entry per level, which is the other declaration entirely.
+#[test]
+fn a_fixed_length_list_against_a_nested_layer_is_refused() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
+    let layer = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_kind("nested"));
+    let message = refuse_spelling(&layer, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, Some(3));
+    });
+    assert!(message.contains("fixed-size list"), "{message}");
+    assert!(message.contains("nested"), "{message}");
+}
+
+/// **A null entry, and exactly `-1`, place the point at every level it named and at no other.** A
+/// point is noise at a fine resolution and clustered at a coarse one — a quarter of a condensed
+/// tree's points at each split — so the rule §2 states for a scalar key is the rule for an entry.
+///
+/// Asserted against the member table that enumerates exactly those memberships, so "exactly the
+/// levels it named" is compared entity by entity rather than counted. The column is a plain list of
+/// a uniform length, which is the shape a producer writing through Arrow's list builder emits.
+///
+/// **And an entry of noise links nothing across itself.** 400 is named at level 2 by points whose
+/// level-1 entry is noise, so nothing says what contains it and it is published as a root — where
+/// reading past the gap would have hung it under the country, which is a containment claim no row
+/// makes and which the next point clustered at that resolution would contradict.
+#[test]
+fn null_and_noise_entries_place_a_point_at_the_levels_it_named() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
+        .map(|e| {
+            if e >= 240 {
+                // In no artifact at any resolution: a whole row of noise, counted as one row.
+                return vec![Some(-1), Some(-1), None];
+            }
+            if e >= 230 {
+                // Noise at level 1, clustered at level 2.
+                return vec![Some(1), Some(-1), Some(400)];
+            }
+            vec![
+                Some(1),
+                if e % 2 == 0 { Some(20) } else { Some(-1) },
+                if e % 4 == 0 { Some(300) } else { None },
+            ]
+        })
+        .collect();
+    let layer = format!(
+        "{}value_set = \"open\"\n{{members}}{THREE_LEVELS}",
+        layer_of_kind("tiered")
+    );
+    let (from_points, _a, report) =
+        build_spelling_reported(&layer.replace("{members}", FROM_LINEAGE), |inputs| {
+            write_listed_points(&inputs.points, &lists, false, None);
+        });
+    assert_eq!(
+        report.unclustered_member_rows, 10,
+        "a row whose every entry is noise is one row in no artifact"
+    );
+
+    let (from_tables, _b) =
+        build_spelling(&layer.replace("{members}", FROM_LEVELLED_TABLES), |inputs| {
+            write_listed_points(&inputs.points, &lists, false, None);
+            write_edged_artifacts(
+                &inputs.at("admin.parquet"),
+                // 300's parent is 20 and 20's is 1 — the edges the points that named both
+                // declared. 400 has none: every point that named it was noise at level 1.
+                &[
+                    (0, "1", None),
+                    (1, "20", Some("1")),
+                    (2, "300", Some("20")),
+                    (2, "400", None),
+                ],
+            );
+            write_levelled_members(
+                &inputs.at("admin_members.parquet"),
+                &[
+                    (0, "1", (0..240).collect()),
+                    (1, "20", (0..230).filter(|e| e % 2 == 0).collect()),
+                    (2, "300", (0..230).filter(|e| e % 4 == 0).collect()),
+                    (2, "400", (230..240).collect()),
+                ],
+            );
+        });
+    assert_bundles_identical(
+        &from_points,
+        &from_tables,
+        "a column with null and -1 entries against the memberships it names",
+    );
+}
+
+/// **Under `open`, a lineage naming clusters no artifact declares mints all of them — the interior
+/// parents included.** A cluster exists because points say it does, and a parent named only as
+/// somebody's parent is as much a cluster as the leaf that named it.
+#[test]
+fn an_open_layer_mints_the_interior_parents_a_lineage_names() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
+    let layer = format!(
+        "{}value_set = \"open\"\nsource = \"roster.parquet\"\n{FROM_LINEAGE}",
+        layer_of_kind("nested")
+    );
+    let (out, _tmp, _) = build_spelling_reported(&layer, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+        // The table has heard of the root alone. The three groups under it are named by no row of
+        // its own and by no leaf's own key — only as the parent inside a lineage.
+        write_cluster_roster(&inputs.at("roster.parquet"), &[1]);
+    });
+    let manifest = manifest_of(&out);
+    assert_eq!(
+        manifest
+            .membership_extents
+            .iter()
+            .map(|e| e.count)
+            .collect::<Vec<_>>(),
+        vec![10],
+        "one root, three groups and six leaves"
+    );
+    // The groups are internal nodes, which is the assertion that their edges were minted with
+    // them: a parent nothing hangs from is not a split.
+    assert_eq!(containment_report(&out)["splits"]["total"], 4);
+    assert_eq!(
+        containment_report(&out)["violations"].as_array().unwrap().len(),
+        0
     );
 }

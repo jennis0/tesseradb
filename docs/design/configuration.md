@@ -388,6 +388,22 @@ spelling, so `3` and `"3"` name one artifact. A **null** key, and exactly `-1`, 
 in no artifact*: the row is skipped and counted, never refused, noise being a fifth to a quarter of
 the points at each split of a condensed tree. The count is printed and reaches the build report.
 
+**It may also be a *list* of those**, which is what a hierarchical clusterer emits — one row per
+point, naming every artifact the point belongs to. Each entry is a key on the rule above, and what
+the positions mean is the hierarchy kind the layer already declares
+([`artifacts-from-points.md`](artifacts-from-points.md) §4): one entry per declared level under
+`stacked` and `tiered`, whose consecutive entries are `tiered`'s containment edges, and a lineage
+under `nested`, where entry *k* is the parent of entry *k+1* and every artifact sits at level 0. The
+declaration and the data must agree — a variable-length list against `stacked` or `tiered`, or a
+fixed-size one against `nested`, is refused rather than guessed, since choosing one reading would
+publish a hierarchy the caller did not write. **Under `flat` a list is plain multi-membership**: no
+positions are read, and the point is a member of every artifact its list names, which is what the
+same membership written as several member rows has always meant. So is **a child named under
+two different parents**, whether the two come from two rows of the column or from the column and an
+artifact row's `parent`. A null or `-1` entry places the point at no artifact *at that level* and
+links nothing across itself; a row of nothing but those is one unclustered row. A `level` column
+beside a list key is ignored and said so, the positions being what carry the levels.
+
 **The four hierarchy kinds, and which of them carry levels.** The kind is declared and never
 inferred from the edges, and the levels rule follows from it:
 
@@ -1024,6 +1040,13 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — a member key column may be a list, and the hierarchy kind says what its positions
+mean.** No key is added and no block changes: a hierarchical clusterer's one list per point is
+already one row per `(artifact, entity)`, several times over, and `hierarchy.kind` was already the
+declaration of what a layer's lineage is. What the surface gains is a paragraph saying which shapes
+agree with which kind and which disagreement refuses. Full argument in
+[`artifacts-from-points.md`](artifacts-from-points.md) §4.
 
 **2026-08-19 — `value_set` reaches a layer, and a key column may be an integer.** A clusterer emits
 one integer per point and no artifact table, which the surface could not express: membership had to
