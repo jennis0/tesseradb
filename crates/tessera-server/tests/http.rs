@@ -829,33 +829,98 @@ fn engine_config_for_slow_viewport() -> EngineConfig {
     config
 }
 
-/// Poll `/control/status` until `compute.in_flight` reaches `want`, panicking after a generous
-/// bound rather than looping forever. **Deterministic, not a timing bet**: this is the
-/// poll-until-a-real-condition-holds pattern the brief asks for in place of a fixed sleep or a
-/// tuned yield count — it directly observes the gate's own state (derived from the semaphores'
-/// live permit counts, `state::ComputeGate::status`) rather than guessing how long "the slow
-/// request has started" takes on this run's scheduler.
+/// The wall-clock bound every gate poll in this file waits under. Generous on purpose: on a
+/// contended runner a tight bound fires the poller's own panic instead of whichever assertion the
+/// calling test exists to check, which reads to a future maintainer as "the gate never reached
+/// this state" (implicating the mechanism under test) rather than "the runner was slow".
+const GATE_POLL_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Poll `/control/status` until `compute.in_flight` reaches `want`, panicking at
+/// [`GATE_POLL_BOUND`] rather than looping forever. **Deterministic, not a timing bet**: it
+/// directly observes the gate's own state (derived from the semaphores' live permit counts,
+/// `state::ComputeGate::status`) rather than guessing how long "the slow request has started"
+/// takes on this run's scheduler.
+///
+/// **The bound is wall-clock, not an iteration count.** A fixed number of 1ms sleeps is not a
+/// time bound at all: each turn also pays a `/control/status` round trip, so under load the real
+/// bound drifts to several times the stated one and the poller spends that whole time being the
+/// slowest thing in the run.
+///
+/// **A shed is reported as a shed, not as a timeout.** `in_flight` is an instantaneous gauge, so
+/// a request that was refused admission (429) never appears in it and would otherwise spin this
+/// poller to its full bound and then blame the mechanism under test. `shed_total` is monotone and
+/// therefore still visible after the fact: any rise while waiting for a request to *appear* in
+/// flight means it will never appear, and the panic says so immediately. Applies only to
+/// `want > 0` — waiting for the gate to *drain* is indifferent to sheds, and one caller
+/// deliberately sheds a request before waiting for 0.
 async fn poll_until_in_flight(server: &TestServer, want: u64) {
-    // Bound is generous (10s, not the original 2s) precisely so this helper's own panic stays
-    // rare: on a slow or contended runner, a tight bound here fires *this* panic instead of
-    // whichever ratio/timing assertion the calling test actually exists to check, which reads to
-    // a future maintainer as "the gate never reached this state" (implicating the mechanism under
-    // test) rather than "the runner was too slow for the poll bound" (an unrelated, purely
-    // cosmetic failure mode) — both are still test failures either way, just with different, and
-    // differently misleading, messages.
-    for _ in 0..10_000 {
-        let status = control_status(server).await;
-        if status["compute"]["in_flight"].as_u64() == Some(want) {
+    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
+    let shed_at_entry = compute_status(server).await["shed_total"].as_u64().unwrap();
+    loop {
+        let compute = compute_status(server).await;
+        if compute["in_flight"].as_u64() == Some(want) {
             return;
         }
+        if want > 0 {
+            let shed_now = compute["shed_total"].as_u64().unwrap();
+            assert_eq!(
+                shed_now, shed_at_entry,
+                "the request this poll is waiting on was SHED (429), not admitted, so \
+                 compute.in_flight will never reach {want}: the gate's only slot was still held \
+                 when it arrived. Gate state: {compute}"
+            );
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "compute.in_flight did not reach {want} within {GATE_POLL_BOUND:?} -- this is \
+             poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
+             calling test's real assertion; check whether the gate is genuinely stuck before \
+             assuming a regression in the mechanism the calling test targets. Gate state: \
+             {compute}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
-    panic!(
-        "compute.in_flight did not reach {want} within the 10s poll bound -- this is \
-         poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
-         calling test's real assertion; check whether the gate is genuinely stuck before \
-         assuming a regression in the mechanism the calling test targets"
-    );
+}
+
+/// Poll until the gate holds **no slot permit at all** — nothing running compute, nothing queued,
+/// and nothing in its emit phase.
+///
+/// # Why a test ever needs this
+///
+/// `reqwest`'s `send()` resolves when the response *headers* arrive, and `/v1/viewport` flushes
+/// its headers at the first frame — so a client holding a 200 is routinely looking at a request
+/// the server has not finished. Its compute permit is already released, but its outer slot is
+/// held for the whole emit phase (`GatePermits::release_compute`, `state.rs`), and with
+/// `ComputeGate::new(1, 0, _)` there is exactly one slot. A test that sends its next request the
+/// instant the previous one's headers land is therefore racing a still-streaming predecessor for
+/// that slot, and loses it under load: the next request is shed with a 429 that a spawned task's
+/// discarded result hides completely.
+///
+/// Draining the previous response's body first is necessary but **not sufficient** — the server
+/// still has to observe the stream end and drop the permit. This closes the gap by waiting for
+/// the gate itself to say it is empty, which is the condition the caller actually depends on.
+async fn poll_until_gate_idle(server: &TestServer) {
+    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
+    loop {
+        let compute = compute_status(server).await;
+        let held = compute["in_flight"].as_u64().unwrap()
+            + compute["waiting"].as_u64().unwrap()
+            + compute["streaming"].as_u64().unwrap();
+        if held == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the compute gate still held a permit {GATE_POLL_BOUND:?} after the last response \
+             completed -- a permit has leaked past the request that took it. Gate state: \
+             {compute}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+async fn compute_status(server: &TestServer) -> serde_json::Value {
+    control_status(server).await["compute"].clone()
 }
 
 /// With `compute_admission = 1, compute_queue = 0` — the deterministic configuration — a second
@@ -1105,10 +1170,15 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
 
     let slow_resp = slow_task.await.unwrap();
     assert_eq!(slow_resp.status(), 200);
+    slow_resp.bytes().await.unwrap();
 
     // Deterministic wait for the completed request's permits to be returned, then a fresh
-    // request must succeed — a leaked permit would make it shed too.
+    // request must succeed — a leaked permit would make it shed too. Both halves of the release
+    // are waited on: `in_flight` covers the compute permit, which drops at the start of the emit
+    // phase, and `poll_until_gate_idle` covers the outer slot, which is held until the body the
+    // line above has just drained is fully sent.
     poll_until_in_flight(&server, 0).await;
+    poll_until_gate_idle(&server).await;
     let after_completion = control_status(&server).await;
     assert_eq!(after_completion["compute"]["waiting"], 0);
 
@@ -1174,6 +1244,11 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     assert_eq!(baseline_resp.status(), 200);
     let baseline_admission_us: u64 = header_u64(&baseline_resp, "x-tessera-admission-us");
     let baseline_server_us: u64 = header_u64(&baseline_resp, "x-tessera-server-us");
+    // Drain and wait for the slot back before contending for it: this gate has two slots, so a
+    // baseline still in its emit phase leaves only one for the slow request and the queued
+    // request below is shed instead of queued. See `poll_until_gate_idle`.
+    baseline_resp.bytes().await.unwrap();
+    poll_until_gate_idle(&server).await;
 
     // Now hold the gate with a slow request, and send a fast one behind it.
     let viewer_url = server.viewer_url("/v1/viewport");
@@ -1286,6 +1361,13 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 /// future, which is the ONLY signal this transport gives for "the client left" and exactly what
 /// `CancelGuard` (`tessera-server::viewer`) is wired to.
 ///
+/// **Why each request is drained and the gate polled idle between them.** With one slot and no
+/// queue, a request sent while its predecessor is still in its emit phase is shed with a 429 —
+/// and here the shed request is a spawned task whose result is deliberately discarded, so the
+/// shed would be invisible and only surface as the in-flight poll running to its bound and
+/// blaming the cancellation machinery. See `poll_until_gate_idle`; this was a real flake, not a
+/// hypothetical.
+///
 /// **What this test does NOT claim.** Like the engine-level timing test
 /// (`cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes` in
 /// `tessera-engine`'s `tests/viewport.rs`), this does not pin down which of `Engine::viewport`'s
@@ -1328,9 +1410,15 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         .await
         .unwrap();
     assert_eq!(warm.status(), 200);
+    // Drain, then wait for the slot: with one slot and no queue, the baseline below is shed
+    // outright if the warm-up is still in its emit phase. See `poll_until_gate_idle`.
+    warm.bytes().await.unwrap();
+    poll_until_gate_idle(&server).await;
 
     // Baseline: the full, uncancelled slow sweep's own wall-clock time on this run/machine, over
-    // the now-warm session.
+    // the now-warm session. Timed to the **last byte**, not to the headers: `/v1/viewport` flushes
+    // its headers at the first frame, so `send()` alone would time a fraction of the sweep and
+    // the comparison below would be against a figure far smaller than the thing it names.
     let baseline_start = std::time::Instant::now();
     let baseline_resp = server
         .client
@@ -1340,8 +1428,12 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         .send()
         .await
         .unwrap();
-    let baseline_elapsed = baseline_start.elapsed();
     assert_eq!(baseline_resp.status(), 200);
+    baseline_resp.bytes().await.unwrap();
+    let baseline_elapsed = baseline_start.elapsed();
+    // And again before the scenario proper: the slow request below must be *admitted*, and it
+    // cannot be while the baseline still holds the only slot.
+    poll_until_gate_idle(&server).await;
     assert!(
         baseline_elapsed > std::time::Duration::from_millis(50),
         "the uncancelled baseline finished in {baseline_elapsed:?}, too fast to exercise this \
