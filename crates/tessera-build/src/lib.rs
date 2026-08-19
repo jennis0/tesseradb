@@ -1109,7 +1109,7 @@ fn write_manifests(
         // The row-less region's mark, and it must be the manifest's: the WAL carries the same one
         // in its registration records and rotation reclaims those, so a mark that lived only there
         // is lost at the first rotation and the next registration is handed ids a live layer
-        // already holds (decision 0074). `ROWLESS_CEILING` when `--layers` was not given, which is
+        // already holds (decision 0074). `ROWLESS_CEILING` when the declaration carried no layer, which is
         // the untouched region rather than a default standing in for a lost value.
         entity_id_low_water: published_layers.low_water,
         layers: published_layers.layers.clone(),

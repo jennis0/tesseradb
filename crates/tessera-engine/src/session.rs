@@ -944,7 +944,7 @@ impl Engine {
             .map(|partition| partition.manifest.entity_id_high_water)
             .collect();
         // **The row-less mark's homes are the side manifests only**, and `SEGMENTS-0.json` is one
-        // of them — a build given `--layers` spends row-less ids and records the mark there, so
+        // of them — a build whose declaration carries layers spends row-less ids and records the mark there, so
         // this is where a built layer's claim is honoured. `MANIFEST.json` carries no such field at
         // all, and folding the ceiling in as the bundle term is what says "nothing row-less yet"
         // without inventing one.

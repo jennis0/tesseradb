@@ -1,4 +1,4 @@
-//! Build-level tests for `vocabulary = "discovered"` (issue #82's build half).
+//! Build-level tests for `value_set = "open"` (issue #82's build half).
 //!
 //! `schema.rs`'s unit tests cover the parse-time rules (the refusal lifted, the empty-start
 //! case, the relaxed `listing = "public"` combination). These exercise the whole build: minting
@@ -89,7 +89,7 @@ fn write_empty_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// A `values_key` seed file: `key`/`code` columns, no `label` (§4.4).
+/// A vocabulary `source` seed file: `key`/`code` columns, no `title` (§4.4).
 fn write_vocabulary_seed(path: &Path, values: &[(&str, u32)]) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("key", DataType::Utf8, false),
@@ -347,10 +347,10 @@ fn minted_codes_are_not_dense() {
     );
 }
 
-/// §4.4: a `values_key` seed pins its codes verbatim, and the build mints only for the keys the
-/// seed does not carry.
+/// §4.4: a vocabulary's own `source` pins its codes verbatim, and the build mints only for the
+/// keys the seed does not carry.
 #[test]
-fn a_values_key_seed_pins_codes_and_mints_only_the_rest() {
+fn a_vocabulary_source_pins_codes_and_mints_only_the_rest() {
     let temp = tempfile::tempdir().unwrap();
     let points = temp.path().join("points.parquet");
     let pairs = temp.path().join("pairs.parquet");
@@ -393,7 +393,7 @@ vocabulary = "dept_seed"
         .vocabularies
         .iter()
         .find(|v| v.name == "dept_seed")
-        .expect("a values_key-bound vocabulary is named for the key, not the attribute");
+        .expect("a source-bound vocabulary is named for itself, not for the attribute");
     let code_of = |key: &str| vocab.values.iter().find(|v| v.key == key).map(|v| v.code);
     assert_eq!(
         code_of("eng"),

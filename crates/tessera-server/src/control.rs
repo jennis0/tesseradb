@@ -592,7 +592,7 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// **This is what makes a category's value checkable at all.** A code can only be range-checked —
 /// a `u16` column accepted any `u16`, so an unassigned code, a `reserved` code or a typo was stored
 /// with no error anywhere and the row carried a code no key explains. A key can be
-/// membership-checked, and membership is the rule: an unknown key under `vocabulary = "declared"`
+/// membership-checked, and membership is the rule: an unknown key under `value_set = "closed"`
 /// is a 422 naming the column and the key, whole batch without effect (declare-then-use, §5,
 /// views §80).
 ///

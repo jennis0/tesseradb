@@ -937,7 +937,7 @@ fn a_layer_compiles_its_two_axes() {
     assert_eq!(layer.name, "clusters/a");
     // `public` is the absence of a gate today, and a *term* once the dictionary carries one.
     assert_eq!(layer.visibility, None);
-    assert!(!layer.artifact_visibility.carry_own());
+    assert!(!layer.artifact_visibility.carries_own_labels());
     assert_eq!(layer.artifact_visibility.default, MemberDefault::Inherited);
     assert_eq!(
         layer.require_member_visibility,
@@ -1087,7 +1087,7 @@ fn an_access_label_may_not_be_spelled_inherited() {
         "artifact_visibility       = { field = \"visibility\", default = \"ir:analyst\" }",
     );
     let config = parse_str(&text).expect("a member default may be a label");
-    assert!(config.layers[0].artifact_visibility.carry_own());
+    assert!(config.layers[0].artifact_visibility.carries_own_labels());
     assert_eq!(
         config.layers[0].artifact_visibility.default,
         MemberDefault::Label("ir:analyst".into())
@@ -1183,7 +1183,7 @@ fn supplied_content_declares_its_membership_requirement() {
     let content = &config.layers[0].content.supplied[0];
     assert_eq!(content.name, "topic");
     assert_eq!(content.ty, "text");
-    assert!(content.require_member_visibility.is_corpus_derived());
+    assert!(content.require_member_visibility.requires_all_members());
 
     let without =
         "\n[[layer.content.supplied]]\nname = \"topic\"\ntype = \"text\"\n";

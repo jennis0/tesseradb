@@ -1628,7 +1628,7 @@ impl BatchColumn {
                         keys, minter, attribute,
                     )?))
                 }
-                // Declared (or a `values_of` share of one): resolved per row in `value`,
+                // Declared (or a vocabulary shared by naming it): resolved per row in `value`,
                 // unchanged from the declare-then-use rule.
                 _ => Ok(BatchValues::Keys(keys.clone())),
             };

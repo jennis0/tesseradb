@@ -50,13 +50,13 @@ async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Val
 /// spelled out at every call — that field decides whether an artifact's existence derives from its
 /// members' visibility or from its own label, and a default would let a corpus-derived layer
 /// acquire the wrong one silently.
-fn declaration(name: &str, gate: Option<&str>) -> serde_json::Value {
+fn declaration(name: &str, visibility: Option<&str>) -> serde_json::Value {
     json!({
         "name": name,
         "title": format!("{name} (title)"),
         "views": ["s0"],
         "membership": "enumerated",
-        "visibility": gate,
+        "visibility": visibility,
         "artifact_visibility": { "field": null, "default": "inherited" },
         "require_member_visibility": { "count": 50 },
         "hierarchy": { "kind": "nested", "prune_children": true },
@@ -116,7 +116,7 @@ async fn the_meta_layer_list_is_filtered_per_principal() {
     assert_eq!(
         narrow,
         vec!["clusters/open".to_string(), "clusters/restricted".to_string()],
-        "an ungated layer is reachable by every principal — the gate narrows, it never widens, so \
+        "a `public` layer is reachable by every principal — the gate narrows, it never widens, so \
          holding term 1 adds the restricted layer rather than exchanging one for the other"
     );
 }

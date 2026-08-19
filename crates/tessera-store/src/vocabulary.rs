@@ -21,7 +21,7 @@
 //! that carries it, with no error and no digest mismatch. So the set has to be seeded from *every*
 //! home a binding can live in before the first draw: `MANIFEST.vocabularies`, the served
 //! `SEGMENTS-<n>.json`'s `vocabulary_extensions`, replayed [`crate::manifest::VocabularyExtension`]
-//! mints, and a seeded `values_key` file's codes. Missing one is the failure this module is most
+//! mints, and the codes a vocabulary's own `source` file seeds. Missing one is the failure this module is most
 //! exposed to, and it is silent — `a_draw_excludes_codes_from_every_home` is the direct test.
 
 use std::collections::{BTreeMap, BTreeSet};

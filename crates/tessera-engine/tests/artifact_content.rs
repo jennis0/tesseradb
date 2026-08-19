@@ -335,12 +335,12 @@ fn a_layer_declaring_a_property_the_engine_does_not_compute_is_refused() {
 
 // ---- supplied content, and the test that decides who may read it ----------------------------
 
-fn label_layer(name: &str, corpus_derived: bool) -> LayerDeclaration {
+fn label_layer(name: &str, requires_all_members: bool) -> LayerDeclaration {
     let mut d = declaration(name, &[]);
     d.content.supplied = vec![tessera_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
-        require_member_visibility: if corpus_derived {
+        require_member_visibility: if requires_all_members {
             tessera_types::layer::SuppliedRequirement::All
         } else {
             tessera_types::layer::SuppliedRequirement::Inherited

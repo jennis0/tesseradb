@@ -25,14 +25,14 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
 
-/// The cluster layer. `gate` is the access label a viewer must hold to reach it at all.
-fn clusters(gate: Option<&str>) -> LayerDeclaration {
+/// The cluster layer. `visibility` is the access label a viewer must hold to reach it at all.
+fn clusters(visibility: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
         name: CLUSTERS.into(),
         title: Some("clusters".into()),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        visibility: gate.map(str::to_string),
+        visibility: visibility.map(str::to_string),
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
@@ -45,9 +45,9 @@ fn clusters(gate: Option<&str>) -> LayerDeclaration {
     }
 }
 
-/// The label layer: ungated, corpus-derived text, and declaring the cluster layer it edges into.
+/// The label layer: `public`, corpus-derived text, and declaring the cluster layer it edges into.
 ///
-/// **Ungated on purpose.** Every withholding below has to come from the attachment term rather than
+/// **`public` on purpose.** Every withholding below has to come from the attachment term rather than
 /// from the label layer's own gate, or the test would pass with the term deleted.
 fn labels() -> LayerDeclaration {
     LayerDeclaration {
@@ -255,7 +255,7 @@ fn a_viewer_who_cannot_reach_the_cluster_layer_is_served_none_of_its_labels() {
     assert_eq!(label[0].content, vec!["logistics".to_string()]);
     let label_id = label[0].tessera_id;
 
-    // The ungated principal — term 0, which every document carries, so nothing here turns on the
+    // The principal holding `public` — term 0, which every document carries, so nothing here turns on the
     // mask — reaches the label layer and none of its labels.
     let outsider = artifacts_of(&engine, &full_coverage_credential());
     assert!(

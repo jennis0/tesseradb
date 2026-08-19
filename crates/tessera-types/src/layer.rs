@@ -91,7 +91,7 @@ pub struct ArtifactVisibility {
     ///
     /// ⊘ **Acquisition, and nothing reads it yet**: the build has no artifact-label column and the
     /// control plane takes no label per artifact, so today only its *presence* is consulted
-    /// ([`ArtifactVisibility::carry_own`]). Naming a field therefore declares the shape without yet
+    /// ([`ArtifactVisibility::carries_own_labels`]). Naming a field therefore declares the shape without yet
     /// filling it — which is fail-closed, an artifact with no label being withheld.
     pub field: Option<String>,
     /// What an artifact carrying no label of its own gets.
@@ -118,7 +118,7 @@ pub enum MemberDefault {
 impl ArtifactVisibility {
     /// Whether artifacts on this layer carry access labels of their own — the field's presence,
     /// which is the whole of what C27 watches.
-    pub fn carry_own(&self) -> bool {
+    pub fn carries_own_labels(&self) -> bool {
         self.field.is_some()
     }
 
@@ -259,8 +259,9 @@ pub enum SuppliedRequirement {
 }
 
 impl SuppliedRequirement {
-    /// Whether this content was generated from corpus items, and so must clear containment.
-    pub fn is_corpus_derived(self) -> bool {
+    /// Whether this content requires **every** member of its generating set to be visible — the
+    /// `"all"` setting, and the reason such content must arrive with a generating set at all.
+    pub fn requires_all_members(self) -> bool {
         matches!(self, SuppliedRequirement::All)
     }
 }
@@ -578,7 +579,7 @@ pub enum DeclarationError {
     /// Levels that repeat a number or do not start at 0 and run consecutively. Ordinals are
     /// level-local over a contiguous entity run, so a gap would reserve a run nothing addresses.
     LevelsNotDense,
-    /// `min_fraction` outside `(0, 1]`.
+    /// `require_member_visibility = { fraction = p }` with `p` outside `(0, 1]`.
     FractionOutOfRange(f64),
     /// A proportional criterion on a predicate layer. ⊘ Refused until the owner rules on the
     /// denominator: *"the points inside this shape"* declares no member set and its size changes at

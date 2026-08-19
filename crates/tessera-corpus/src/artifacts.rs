@@ -68,8 +68,8 @@ pub const EMPTY_LEVEL: u32 = 1;
 /// One artifact's declared shape — everything about it that is not its membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactShape {
-    /// Whether its layer's `artifacts_carry_own` flag applies to it, and which term it then
-    /// carries. `None` where the artifact is gated on its members' visibility alone.
+    /// Whether its layer's `artifact_visibility` names a field — so artifacts carry their own
+    /// labels — and which term this one then carries. `None` where the artifact is gated on its members' visibility alone.
     pub own_term: Option<u32>,
     /// The existence criterion this artifact is expected to be tested against, as an absolute
     /// count. `None` where its layer declares none.

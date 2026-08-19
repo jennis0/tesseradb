@@ -1,6 +1,6 @@
 # Tessera — Conformance Suite Design
 
-**Status:** Draft r11 — §5's marker refreshed to decision 0071's state of the world: five pause sites, the seam three landed by extending the switchboard as the marker demands, and the gate now "no default-features build", the feature being declarable for the correctness suite's faults build. §5's eight points remain unbuilt. r10 stands otherwise — a correction, not a design change: the compaction fold is **built**, and three of this document's claims that it does not exist are wrong. Scripts 2, 3 and 6 move from "no machinery to test" to **untested machinery**, which is a testing gap where it previously was not one (§0, §2, §5). **No coverage row moves** — §4.6 is untouched, per decision 9. r9 stands otherwise: I12's mask half is covered by the attribute-filter differential in the form filter-surface §9 specifies, its frontier half blocked on the label service with I3; script 5 is unreconstructable and the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
+**Status:** Draft r12 — the I12 row names the **existence criterion** rather than the deleted `min_visible_members` key (Appendix R); r11 stands otherwise — §5's marker refreshed to decision 0071's state of the world: five pause sites, the seam three landed by extending the switchboard as the marker demands, and the gate now "no default-features build", the feature being declarable for the correctness suite's faults build. §5's eight points remain unbuilt. r10 stands otherwise — a correction, not a design change: the compaction fold is **built**, and three of this document's claims that it does not exist are wrong. Scripts 2, 3 and 6 move from "no machinery to test" to **untested machinery**, which is a testing gap where it previously was not one (§0, §2, §5). **No coverage row moves** — §4.6 is untouched, per decision 9. r9 stands otherwise: I12's mask half is covered by the attribute-filter differential in the form filter-surface §9 specifies, its frontier half blocked on the label service with I3; script 5 is unreconstructable and the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
 
 **Owns:** the design of `conformance/` and `reference/` — harness architecture, oracle interfaces, fixtures, the invariant matrix's concrete test forms, the interleaving machinery, and what "pass" means. The implementation plan (§10.1) is blunt that the suite is the deliverable; this document exists so it is designed, not accreted.
 
@@ -155,7 +155,7 @@ This is the coverage claim the suite can actually support. "As designed" means t
 | **I5** the two authorisation functions agree | **not covered** | passthrough plugin only; the differential oracle that would test it does not exist (§4.5) |
 | **I6** authorisation comes only from the token | **not covered — nothing to test** | no plugin host, no sandbox |
 | **I8** generating sets immutable | **not covered — nothing to test** | no generating sets |
-| **I12** filters narrow rendering, never authorisation | **covered — mask half, in the form filter-surface §9 specifies** *(r9; was: not covered — nothing to test)* | the attribute-filter differential: engine against `reference/oracle/filters.py` — a per-entity walk over the fixture's planted values, never the `attrs/` artefact — across the mask catalogue's principals. Per tile `matched ≤ visible` with `visible` unmoved; the filtered served set equals the oracle's brute-force `M_sel` exactly; hidden, hollow and nonexistent values byte-identical in outcome (C11), with a single-member positive control; composition and the empty-combinator identities against brute force; unknown column `422`, unknown value not. The **frontier half** — §4.4's frontier-depth form, `min_visible_members` against `M_auth` — stays blocked on the label service, with I3. Rule S over filter counts (surface §9) is also not yet driven; the test module's doc says why |
+| **I12** filters narrow rendering, never authorisation | **covered — mask half, in the form filter-surface §9 specifies** *(r9; was: not covered — nothing to test)* | the attribute-filter differential: engine against `reference/oracle/filters.py` — a per-entity walk over the fixture's planted values, never the `attrs/` artefact — across the mask catalogue's principals. Per tile `matched ≤ visible` with `visible` unmoved; the filtered served set equals the oracle's brute-force `M_sel` exactly; hidden, hollow and nonexistent values byte-identical in outcome (C11), with a single-member positive control; composition and the empty-combinator identities against brute force; unknown column `422`, unknown value not. The **frontier half** — §4.4's frontier-depth form, the existence criterion against `M_auth` — stays blocked on the label service, with I3. Rule S over filter counts (surface §9) is also not yet driven; the test module's doc says why |
 
 **Six covered as designed, one in substance, one incidental, six not covered — three of those six for want of an implementation rather than for want of a test.** The plan calls the suite the deliverable; this is where it stands.
 
@@ -224,6 +224,12 @@ A differential failure is a defect until proven a fixture bug. The oracle change
 9. **Coverage is reported, not claimed.** §4.6 is the matrix of record, and a row moves only when a test moves with it.
 
 ## Appendix R — Review record
+
+**r12 — 2026-08-19. One word.** §4.6's I12 row named the frontier-depth threshold
+`min_visible_members`, a config key that is deleted; the control it names is the **existence
+criterion**, declared per layer ([decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md),
+`annotations.md` §5). No coverage row moves and no status claim changes.
+
 
 **r11** (2026-08-15) refreshes §5's marker to what exists after decision
 [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md): the fault

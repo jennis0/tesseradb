@@ -3145,9 +3145,9 @@ impl Engine {
             mask: &mask,
             dependency_served: &dependency_served,
         };
-        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
-        // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
-        // fail-closed answer reached by the same call.
+        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
+        // `artifact_visibility` names a field withholds here as it does on the viewport, which is
+        // the same fail-closed answer reached by the same call.
         let crate::artifacts::ArtifactVerdict::Serve {
             masked_count,
             rank,
@@ -3535,11 +3535,11 @@ impl Engine {
                     let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                         continue;
                     };
-                    // ⊘ **No artifact carries its own terms yet**, so a layer declaring
-                    // `artifacts_carry_own` serves nothing here — fail-closed, and visibly so. The
-                    // per-artifact label arrives with content (Stage 3); until then the flag has
-                    // nothing to satisfy, and admitting the artifact instead would make a missing
-                    // declaration a grant to everyone.
+                    // ⊘ **No artifact carries its own terms yet**, so a layer whose
+                    // `artifact_visibility` names a field serves nothing here — fail-closed, and
+                    // visibly so. The per-artifact label arrives with content (Stage 3); until then
+                    // the named field has nothing to satisfy, and admitting the artifact instead
+                    // would make a missing declaration a grant to everyone.
                     let crate::artifacts::ArtifactVerdict::Serve {
                         masked_count,
                         rank,

@@ -846,7 +846,7 @@ fn a_fold_whose_report_cannot_be_written_is_discarded_and_retires_nothing() {
 
 // ---- Rule F's artifact arm ---------------------------------------------------------------------
 
-/// The cluster layer a label hangs from, and the label layer itself. Both ungated, so every
+/// The cluster layer a label hangs from, and the label layer itself. Both `public`, so every
 /// withholding below comes from the arm under test rather than from an access label.
 fn labels_over(target: &str) -> LayerDeclaration {
     let mut d = declaration("topics/x");

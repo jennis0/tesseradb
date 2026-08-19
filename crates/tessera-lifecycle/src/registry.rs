@@ -413,9 +413,9 @@ impl LayerRegistry {
         // declared kind, must never carry an undeclared one, and must never carry a generating set
         // nothing will test.
         let declared = &layer.declaration.content.supplied;
-        let corpus_derived = declared
+        let requires_all_members = declared
             .iter()
-            .any(|s| s.require_member_visibility.is_corpus_derived());
+            .any(|s| s.require_member_visibility.requires_all_members());
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
                 Err(RegistryError::Content {
@@ -449,19 +449,19 @@ impl LayerRegistry {
                         declared.len()
                     ));
                 }
-                if !corpus_derived && !content.generated_from.is_empty() {
+                if !requires_all_members && !content.generated_from.is_empty() {
                     return refuse(format!(
                         "contents[{rank}] declares a generating set, and none of this layer's \
-                         content is corpus-derived; a set that is never tested is a claim the \
-                         service would carry without meaning"
+                         content requires its members visible; a set that is never tested is a \
+                         claim the service would carry without meaning"
                     ));
                 }
-                if corpus_derived && content.generated_from.is_empty() {
+                if requires_all_members && content.generated_from.is_empty() {
                     return refuse(format!(
-                        "contents[{rank}] declares no generating set, and this layer's content is \
-                         corpus-derived; such content is served only to a viewer who can see \
-                         everything it was generated from, and an empty set is satisfied by \
-                         everyone"
+                        "contents[{rank}] declares no generating set, and this layer's content \
+                         requires every member visible; such content is served only to a viewer \
+                         who can see everything it was generated from, and an empty set is \
+                         satisfied by everyone"
                     ));
                 }
             }

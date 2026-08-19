@@ -169,7 +169,7 @@ fn a_passing_child_replaces_its_passing_parent() {
 /// **A hole in the lineage does not stop the child being served**, and the proportional criterion
 /// is what opens one.
 ///
-/// A parent at a small fraction of a large membership fails a `min_fraction` rule while its child
+/// A parent at a small fraction of a large membership fails a `{ fraction = p }` requirement while its child
 /// at a large fraction of a small one passes it — the child a strict subset of the parent
 /// throughout. **A run that does not reproduce this gap has not exercised the proportional form at
 /// all**, which is why the numbers here are chosen against the independently computed intersection

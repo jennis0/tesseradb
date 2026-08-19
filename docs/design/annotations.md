@@ -526,8 +526,8 @@ subset of its parent's, so under an **absolute** criterion its masked count is n
 that fails while its parent passes leaves the parent served, tested on its own. That is rollup,
 falling out of per-artifact testing. ⊘ **A proportional criterion breaks it** — a ratio does not
 shrink downward, so a parent at 5% of 10 000 declared members can fail a 10% rule while its child at
-50% of 200 passes it, with the child a strict subset throughout. A layer declaring `min_fraction`
-must expect gaps in its lineage. No disclosure follows either way, since each artifact passed its own
+50% of 200 passes it, with the child a strict subset throughout. A layer declaring
+`require_member_visibility = { fraction = … }` must expect gaps in its lineage. No disclosure follows either way, since each artifact passed its own
 test; what follows is a rendering consequence the caller chooses.
 
 **What remains is frontier *selection*, which is a display concern.** Where a parent and a child both
@@ -794,7 +794,8 @@ the "count-not-shape" split the retired `derived-artifact-gating.md` had flagged
 ### 8.3 Per-analyst selections — the scattered set, and why a category is not enough
 
 `selections/analyst`: one artifact per set an analyst has assembled by hand. No hierarchy, no
-descent, no supplied geometry, and `derived = [count]` alone.
+descent, no supplied geometry, and no computed content — the masked count, which every artifact
+has, alone.
 
 **A category value cannot carry this**, for three reasons that are each sufficient. It is a name and
 a code with nowhere to record who defined the set, when, or why — and the provenance is most of the
@@ -1016,6 +1017,14 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r6 — 2026-08-19. Two config spellings, corrected.** §6 named the proportional criterion
+`min_fraction` and §8.3 declared computed content as `derived = [count]`; neither parses. The
+criterion is `require_member_visibility = { fraction = … }` and computed content is
+`content = { computed = [...] }`, with the masked count intrinsic and never declared
+([decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md),
+[`configuration.md`](configuration.md) §1). §7's blockquote keeps `min_visible_members`, being a
+quoted review finding from before the rename, and the *withdrawn* section's record. No rule moves.
 
 **r5 — 2026-08-19. Vocabulary only.** What §2.3 called a *variation* is an entry in the artifact's
 ranked **`contents`**, and its position in that list is its **rank** — the names

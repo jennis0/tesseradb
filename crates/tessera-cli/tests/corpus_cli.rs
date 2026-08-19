@@ -166,7 +166,7 @@ fn items_refuses_a_non_decimal_key() {
 }
 
 /// The corpus's declaration parses under the build's own `schema.toml` parser — the loop from
-/// generator to `tessera build --schema` closed with the real consumer, so a drifted spelling in
+/// generator to `tessera build --config` closed with the real consumer, so a drifted spelling in
 /// the generated declaration fails here rather than at the first suite run.
 #[test]
 fn the_corpus_schema_parses_under_the_builds_parser() {

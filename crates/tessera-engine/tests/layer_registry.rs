@@ -16,13 +16,13 @@ use tessera_types::layer::{
     MembershipSource, ROWLESS_CEILING,
 };
 
-fn declaration(name: &str, gate: Option<&str>) -> LayerDeclaration {
+fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        visibility: gate.map(str::to_string),
+        visibility: visibility.map(str::to_string),
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(50)),
         hierarchy: Hierarchy {
@@ -102,7 +102,7 @@ fn a_gate_failed_layer_is_indistinguishable_from_one_that_was_never_registered()
     // "0" is the term the full-coverage credential holds; "1" is the subset credential's.
     engine
         .register_layer(declaration("clusters/open", None))
-        .expect("an ungated layer registers");
+        .expect("a `public` layer registers");
     engine
         .register_layer(declaration("clusters/restricted", Some("1")))
         .expect("a gated layer registers");

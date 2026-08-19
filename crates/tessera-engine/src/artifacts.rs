@@ -460,10 +460,11 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// The one predicate.
     ///
     /// `own_terms` is the artifact's own access label resolved to a term, or `None` if it carries
-    /// none. **A layer that declares `artifacts_carry_own` and an artifact that carries no term is
-    /// withheld**, not admitted: the flag says the artifact's existence is gated on its own label,
-    /// and an artifact with no label has nothing for a viewer to satisfy. Admitting it would make a
-    /// missing declaration a grant to everyone, which is the direction a mistake must never take.
+    /// none. **A layer whose `artifact_visibility` names a field, holding an artifact that carries
+    /// no term, withholds it** rather than admitting it: naming the field says the artifact's
+    /// existence is gated on its own label, and an artifact with no label has nothing for a viewer
+    /// to satisfy. Admitting it would make a missing declaration a grant to everyone, which is the
+    /// direction a mistake must never take.
     pub fn verdict(
         &self,
         artifact_entity: EntityId,
@@ -497,7 +498,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         }
 
         // 4. The artifact's own terms, if its layer says it carries them.
-        if self.declaration.artifact_visibility.carry_own() {
+        if self.declaration.artifact_visibility.carries_own_labels() {
             match own_terms {
                 Some(term) if self.satisfied.contains(&term) => {}
                 _ => return ArtifactVerdict::Absent(Withheld::OwnTerms),
@@ -563,14 +564,14 @@ mod tests {
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, MembershipSource,
     };
 
-    fn declaration(carry_own: bool, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
+    fn declaration(carries_own_labels: bool, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
         LayerDeclaration {
             name: "clusters/a".into(),
             title: Some("A".into()),
             views: vec!["s0".into()],
             membership: MembershipSource::Enumerated,
             visibility: None,
-            artifact_visibility: if carry_own {
+            artifact_visibility: if carries_own_labels {
                 ArtifactVisibility::carried("visibility")
             } else {
                 ArtifactVisibility::inherited()
@@ -777,7 +778,7 @@ mod tests {
     /// A layer declaring that its artifacts carry their own terms, and an artifact carrying none,
     /// is withheld. Admitting it would make a missing declaration a grant to everyone.
     #[test]
-    fn an_artifact_with_no_terms_on_a_carry_own_layer_is_withheld() {
+    fn an_artifact_with_no_terms_on_a_layer_carrying_own_labels_is_withheld() {
         let d = declaration(true, None);
         let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
         fx.satisfied.insert(TermId::new(7));

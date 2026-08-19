@@ -1,7 +1,6 @@
 # Records and search — design
 
-**Date:** 2026-08-14 (r8 — the text family built end to end, and the corpus's status claims
-corrected against it; Appendix R)
+**Date:** 2026-08-19 (r9 — §2's category requirement spelled in the two-axis surface; Appendix R)
 **Status:** **Provisional — nothing remains open; promotion awaits only the §13 amendments pass,
 which is an editing round rather than a decision.** Its **first three epics are built** — §2's
 declaration, §3's record blob through the whole lifecycle, drill-down's assembly from the three
@@ -165,9 +164,11 @@ route. Every fixed-width family is now filterable from the hot column. What 0064
 the wire and the client — the points batch cannot say "absent", so a client draws an absent number
 at zero while the filter treats it as having no value, a narrowing disagreement recorded there.
 
-**Required:** `name`, `type`. Categories additionally require `width`, `listing`, `vocabulary`
-exactly as today — disclosure and migration controls do not default, and they remain meaningful at
-every flag combination because a category's entity-space structures always exist (§4.2). Everything
+**Required:** `name`, `type`. A category additionally requires `vocabulary`, naming the
+`[[vocabulary]]` block that carries the `width`, the `value_set` and the `visibility`
+(`configuration.md` §1) — disclosure and migration controls do not default, and they remain
+meaningful at every flag combination because a category's entity-space structures always exist
+(§4.2). Everything
 else defaults to `false`: the cheapest placement, made more expensive only by an explicit word.
 
 ---
@@ -1260,6 +1261,14 @@ is still owed**; everything below them is made or is waiting on machinery that d
 ---
 
 ## Appendix R — review trail
+
+**2026-08-19 (r9) — §2's category requirement is spelled in the surface that exists.** It read
+"Categories additionally require `width`, `listing`, `vocabulary`", three words of a declaration
+that no longer parses: `width`, `value_set` and `visibility` live on the `[[vocabulary]]` block an
+attribute names, and `listing` is retired in favour of the two visibility axes
+([decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md),
+`configuration.md` §1, §5). Nothing about the family changes; §4.2's `listing` references are the
+manifest's field, which still carries that name, and are left alone.
 
 **2026-08-14 (r8) — the text family is built, and the corpus said otherwise in eight places.** A
 three-lens adversarial review over the implementation found the design's status claims trailing it

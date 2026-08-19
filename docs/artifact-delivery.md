@@ -41,10 +41,11 @@ delete.
 |---|---|---|---|
 | **0** Rulings and promotion | **done** 2026-08-16 — decisions [0074](decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | the three designs are normative and the register carries their rows | [the review](evidence/memos/2026-08-15-artifact-design-review.md), ten rulings, and architecture **r43** — §7.5's descent and §7.7's ladder amended, §8.4's second threshold withdrawn, C1 and C17 annotated, C27 and C28 added. Five ⊘ items stay open **inside** the normative documents, each allocated to the stage that needs it |
 | **1** The spine — allocation and the layer registry | **done** 2026-08-16 (`artifacts/stage-1`) | an empty layer is reachable by gate, suppressible at the ack, droppable for ever, and survives restart | **all five bullets built and gate-green.** The tiebreak in both build paths, verified on the real 2.4M corpus; the two-region allocator with both marks durable; the registry seeded from the manifest and replayed over; `PUT`/`DELETE /control/layers`; `/v1/meta`'s gate-filtered list. Eleven tests, of which the disclosure one is that a gate-failed name and a never-registered one are **one identical set probe** |
-| **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `min_visible` of 1,000 the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
+| **2** One flat level, masked counts | **done** 2026-08-16 (`artifacts/stage-2`) | two principals get different counts for one real cluster, neither equal to its size; below-criterion artifacts are indistinguishable from absent ones | **met on the map.** One 24-cluster k-means over the 2.4M bundle: the same cluster is 4 / 485 / 1,962 / 4,138 / 8,380 members to five principals against 11,008 declared, and under a `require_member_visibility` of `{ count = 1000 }` the same membership serves them 0 / 0 / 8 / 20 / 24 clusters. Engine, server and all three frame decoders; `@tessera/client` and the viewer; one ⊘ open below |
 | **3** Content — derived, supplied, containment | **done** 2026-08-16 (`artifacts/stage-3`) | both principals fail the same real label and both satisfy its per-term variant | derived geometry (`centroid`/`box`/`hull`), the containment test and **the attachment edge** built, published, served and decoded on all three readers, with content crossing the boundary in both directions. **Reviewed 2026-08-16** — one data-loss defect found and fixed (a second publication un-named the first's content extent), three lesser ones with it. **The check is met on the 2.4M corpus** (§3): a principal seeing 7.5% of it is served no label where one seeing 0.6% is served the description, and suppressing a cluster stops its labels on the identifier route. Layers, levels and bulk publication are definable at build time as well as online |
 | **4** The write cycle | **done** 2026-08-17 (`artifacts/stage-4`, merged to `main`) | a deleted source document's label vanishes at the ack and **stays gone** across a fold; the stage battery covers the artifact surface | **met on the 2.4M corpus**, driven over the control and viewer planes of a running server: a label published from three documents goes absent the moment one of them is deleted and is still absent after the fold, and the fold's report named the five *other* published layers the same document degraded. **The fold's artifact pass is measured and built** — a node holding artifacts folds, its memberships are rewritten into the new prefix minus what the fold retired, its content is carried, and the row forms are rebuilt inside the fold ([the probe](../probes/2026-08-16-fold-artifact-pass/README.md); nineteen tests). Two stale-manifest defects found in the doing, both of the class that has bitten twice. `plan_fold` prices the pass at the measured 90 B per container, counted from the resident store. **Rule F's artifact arm** is built with it: a deleted artifact's record leaves its level in the publication that retires its overlay entry, its ordinal held open as a hole, and its labels stay withheld because an attachment must now resolve. **The row form covers base rows**, which deletes the flush-union and merge-rebase arms rather than deferring them, and the **report sweep** discharges the notification obligation before anything retires. The **strict/permissive declaration** executes at the fold, with publish-time validation beside it. The generator has its **artifact arm** — closed form in both directions — and the **census** runs the whole surface against it, before a write, after a deletion, after the fold and after a restart. Open: content reclamation, and the read battery this census should eventually be a row of (⊘ no battery exists) |
 | **5** Trees, levels and the cut | **done** 2026-08-18 (`artifacts/stage-4`) | a passing child sits beneath a failing parent under the proportional criterion and never under the absolute one, and two budgets agree on every artifact both return | **all three checks met, the third on the real condensed tree** ([the probe](../probes/2026-08-18-condensed-tree/README.md)): a principal holding only the term covering a parent's stray members is served that parent alone, masked count exactly the 687 members they can see, none of its children, at every budget — and the build's report named the split in advance. **124 of the tree's 131 splits are non-covering**, so that case is the majority rather than the edge. A hierarchy's edges are inline on the artifact record — the parent direction durable, the child direction built per level at serve time, so no deletion has to keep two copies of one fact agreeing. The cut runs after the verdicts and can only serve fewer: where a parent and a child both pass the child is drawn, and a budget is met by climbing to a **passing** ancestor rather than to a depth — the defect an integration test caught, where a suppressed root blanked its children's regions. The proportional gap is proved rather than assumed: the first version of that test passed vacuously, the parent being covered by the frontier rather than failing its bar. The generator has its **edge arm** and the build a **coverage report**; the cut is measured ([`artifact_cut_cost`](../crates/tessera-bench/src/bin/artifact_cut_cost.rs)) at 0.6 ms per ten thousand visible artifacts. The corpus is re-derivable end to end from [the notebook](../notebooks/README.md). **Levels are closed too:** a layer's edges are now declared to run either within a level or between them and may not mix, the second shape being the missing declaration value `tiered` ([decision 0087](decisions/0087-cross-level-edges-are-information-not-rollup.md)) — and a budget does not climb a between-levels edge, because substituting a state for its counties is not the honest coarsening substituting a parent cluster for its children is. What those edges carry instead is **structure on the wire**: each artifact names its parent where that parent is in the same response (**C29**), and the viewer nests what it lists and lights a subtree when one is opened. The demo corpus publishes all three shapes — flat, nested and tiered — over the same points. ⊘ Per-branch depth stays unspecified |
+| **The configuration surface** | **stages 1–8 done** 2026-08-18/19 (`artifacts/stage-4`) — [decision 0088](decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) | one document declares the corpus and `tessera build` takes no flags; every retired key is refused rather than aliased | **built and gate-green.** Two visibility axes in place of six keys, `public` interned at term `0`, points carrying their own labels, the plugin taking a term list with the manifest hash enforced, one row per artifact with ranked `contents`, `[layer.labels]` expanding to a real layer, `tessera check`, the frame report and `disclosure.json`. ⊘ Stage 9 — the notebook and the corpus's citations — is the remainder |
 | **6** Predicate membership | not started | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
 | **8** Filters, search, scale | not started | an invisible artifact and a nonexistent one cost the same; 10⁹ points with ~10⁷ artifacts serves and folds inside budget | — |
@@ -98,7 +99,7 @@ No code, and it is finished. The adversarial review is run, the ruling pass is m
 | **Review ruling 3** — does a label's existence follow its content? | ✔ **ruled** — [decision 0076](decisions/0076-an-artifact-is-served-whole-or-not-at-all.md) | Stage 3 | wider than asked: **no levels of restriction within one artifact**, beyond ranked contents. C3's question evaporates; the model's degrade-to-derived is deleted |
 | **Review ruling 4** — the artifact **edit** mechanism | **deferred to its own design pass** *(owner, 2026-08-15)* | Stage 7 only | not load-bearing: publishing and republishing artifacts needs no edit route. Two consequences, both stated rather than discovered — the emergency path becomes *suppress, then republish* (slower, not weaker), and runtime selections, whose whole lifecycle is editing, wait for it |
 | Where supplied content **lives** | ✔ **ruled** — [decision 0077](decisions/0077-supplied-content-lives-in-the-record-blob.md) | Stage 3 | the record blob, at the artifact's entity. Its addressing is rank in the blob's **own** has-row bitmap, independent of row space, so an artifact having no row does not bear on it |
-| **Does the attachment term inherit the target's criterion?** | ✔ **ruled 2026-08-17** — [decision 0086](decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md) | Stage 4 | it does not: disposition and layer reachability, not the target's threshold. A label is an artifact with its own declaration, and the surface the extension appeared to close is C1's multi-layer one, already governed by the most permissive declaration. The cost is stated rather than enforced — a label layer over a gated cluster layer should declare a criterion at least as strong as its target's |
+| **Does the attachment term inherit the target's criterion?** | ✔ **reversed 2026-08-19** — [decision 0089](decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md) supersedes [0086](decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md) | Stage 4 | it does, and by the whole target `verdict` rather than by the threshold alone: a dependent is served only where the artifact it depends on is served, and deleted when it is deleted, neither configurable. 0086 had declined exactly this and named the asymmetry it left — a viewer too sparse to be shown a cluster was still shown the label written about it — which is now closed at the price 0086 disputed, one masked count per attached artifact per request. 0086 stands unedited as the record of why the case first went the other way |
 | **Review ruling 5** — how search gates on containment | open | Stage 8 | the term-signature conjunction is the candidate shape; the route stays withdrawn until ruled, which costs nothing before Stage 8 |
 | **A hierarchy lives in its edges; levels are resolutions** | ✔ **ruled** — [decision 0082](decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md) | Stage 5 | a condensed tree is unbalanced, so a level number says nothing about lineage. A treed layer declares **no levels**; levels stay for balanced semantic resolutions and for stacked independent analyses, and the two are independent declarations. Rollup then falls out of per-artifact testing — ⊘ under an **absolute** criterion only, since a ratio does not shrink downward |
 | **The frontier is a request-time budget** | ✔ **ruled** — [decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | Stages 2, 5 | levels had been bounding the response quietly; with the tree in edges a viewport intersects a root and every passing descendant. The cut's depth becomes a request parameter beside the mark budget, met by serving ancestors and never by sampling. **A budget is not a disclosure control** — every artifact it returns passed its own test — which §8.4's maximum depth was, and the two occupy the same place in a request |
@@ -109,7 +110,7 @@ No code, and it is finished. The adversarial review is run, the ruling pass is m
 | The three gate modes | ✔ **ruled** — [decision 0079](decisions/0079-the-gate-is-one-flag-not-three-modes.md) | Stages 1–2 | they were a two-by-two in three names. One flag — does the artifact carry its own terms — beside the independent criterion, which also stops a schema word disabling a disclosure control |
 | The suppression-carry refusal | ✔ **withdrawn** — [decision 0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | — | the premise was wrong: a refresh need not mint identities. An **edit** keeps them and suppressions survive natively; a **replacement** ends them and nothing carries, correctly. A report replaces the refusal; the key is optional again |
 | Membership as a filter (rep §7) | open | Stage 8 | a disclosure question, not a cost one |
-| Appendix C edits | ✔ **done** — architecture r43 | Stages 2–4 | **C1** annotated twice: a criterion bounds a grouping's existence and shape and **never its count**, which §7.1 and §7.3 already serve exactly, so a compact artifact's masked count is recoverable by summing the underlay whatever it declares; and where several layers cover the same points, the most permissive declaration governs what is recoverable about all of them. **C27** — the own-terms flag, C23-shaped. **C28** — the corpus-independence declaration on supplied content, C12-shaped, `High if mis-declared`. **C17** — an artifact identifier probes the same channel and stays inside the same bound. C7's disposition was already written (r42) |
+| Appendix C edits | ✔ **done** — architecture r43 | Stages 2–4 | **C1** annotated twice: a criterion bounds a grouping's existence and shape and **never its count**, which §7.1 and §7.3 already serve exactly, so a compact artifact's masked count is recoverable by summing the underlay whatever it declares; and where several layers cover the same points, the most permissive declaration governs what is recoverable about all of them. **C27** — the artifact's own-label declaration, C23-shaped; it follows `artifact_visibility`'s `field` since the two axes landed (0088, architecture r46). **C28** — the caller's membership requirement on supplied content, C12-shaped, `High if mis-declared`; it follows `require_member_visibility`. **C17** — an artifact identifier probes the same channel and stays inside the same bound. C7's disposition was already written (r42) |
 | `derived-artifact-gating.md` — retired | ✔ **deleted** 2026-08-15 | — | its taxonomy is superseded; what existed nowhere else — the point-scale edge argument, the edge gate's form, the induced-subgraph sampling problem — is carried in the model (§5, §11), and the roadmap names the three successors |
 
 **Two design items are owed and are not rulings.** The entity budget under repeated replacement —
@@ -332,8 +333,8 @@ never the cluster's size.
   The budget is defined here rather than at Stage 5 because it is a wire shape, and adding a
   request field to a shipped frame later is the change this ordering exists to avoid
   ([decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md)).
-- ⊘ **No artifact carries its own terms yet**, so a layer declaring `artifacts_carry_own` serves
-  nothing on either route. Fail-closed and deliberate: the per-artifact label arrives with content
+- ⊘ **No artifact carries its own terms yet**, so a layer whose `artifact_visibility` names a
+  field serves nothing on either route. Fail-closed and deliberate: the per-artifact label arrives with content
   at Stage 3, and admitting an unlabelled artifact would make a missing declaration a grant to
   everyone.
 - ✔ All three frame decoders — Rust, TypeScript, the Python oracle — know the artifacts frame, and
@@ -371,7 +372,7 @@ principals:
 
 No principal's count equals the declared size, because the clustering was published from a
 principal broader than any the viewer offers — the top 16,384 ranked terms. Under
-`visible_when = {min_visible: 1000}` over the *same* membership the five are served 0, 0, 8, 20 and
+`require_member_visibility = { count = 1000 }` over the *same* membership the five are served 0, 0, 8, 20 and
 24 clusters: presence itself moving with the mask, and the response saying nothing about why.
 Reproduced by `clients/ts/viewer/smoke-artifacts.mjs`, which fails if the counts stop moving with
 the principal.
@@ -392,11 +393,11 @@ that declares no criterion — and that is **ruled correct**
 ([decision 0084](decisions/0084-an-undeclared-criterion-declares-no-test.md), owner, 2026-08-16).
 The viewport rule is *any member visible to this principal falls inside the requested tiles*, so a
 cluster this principal can see none of never appears on the map; the identifier route applies the
-existence predicate alone, which an artifact with a zero count passes when `visible_when` is
-`null`. A declaration of *no threshold* is a declaration, and the service adds no floor of its own:
+existence predicate alone, which an artifact with a zero count passes when
+`require_member_visibility` is `"none"`. A declaration of *no threshold* is a declaration, and the service adds no floor of its own:
 one that the schema cannot express, applied on the service's initiative, would be a rule nobody
-wrote and nobody could turn off. `min_visible = 1` expresses the floor exactly, for a deployment
-that wants it. The cost is recorded rather than sheltered — C17's bound moves from *items the
+wrote and nobody could turn off. `require_member_visibility = { count = 1 }` expresses the floor exactly, for a
+deployment that wants it. The cost is recorded rather than sheltered — C17's bound moves from *items the
 principal already sees* to *the layer's gate*, and the decision carries the three properties that
 bound it. No code changed.
 
@@ -680,8 +681,8 @@ members is served that parent alone, masked count exactly the 687 members they c
 children, at every budget — and the build's report named the split in advance
 ([the probe](../probes/2026-08-18-condensed-tree/README.md)). **124 of the tree's 131 splits are
 non-covering**, so that case is the majority rather than the edge. *The criterion's two forms:*
-under `min_visible` a passing child never sits beneath a failing parent, and under `min_fraction`
-one does — proved rather than assumed, the first version of that test having passed vacuously with
+under `require_member_visibility = { count = n }` a passing child never sits beneath a failing
+parent, and under `{ fraction = p }` one does — proved rather than assumed, the first version of that test having passed vacuously with
 the parent covered by the frontier rather than failing its bar. *The budget:* a cut at one depth and
 a cut at a deeper one agree on every artifact both return, and neither reveals an artifact that
 failed its own test.
@@ -694,6 +695,64 @@ k-means flat, HDBSCAN's condensed tree nested, and arXiv's own classification ti
 levels. The last of those is also the **covering** counterpart to the first: every paper's primary
 category sits in exactly one archive, so an archive is exactly the union of its classes, and its
 32 splits lose nothing where HDBSCAN's 124 do.
+
+### The configuration surface — the rework that ran beside Stage 5
+
+**Stages 1–8 done on `artifacts/stage-4`, 2026-08-18/19** (`ead7e90` and `c3a595a`…`180e6b6`),
+against the plan in
+[`evidence/memos/2026-08-18-configuration-surface-plan.md`](evidence/memos/2026-08-18-configuration-surface-plan.md)
+and the design in [`design/configuration.md`](design/configuration.md), ruled by
+[decision 0088](decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md). Stage **9**
+is the tail — the notebook, and the citations across the corpus — and is the only part outstanding.
+
+**A build is now `tessera build` with no flags at all.** One document declares the corpus, its
+views, its vocabularies, its attributes and its layers; `tessera.toml` names it; every `source` is a
+path relative to the declaration and `--file KEY=PATH` overrides one. `--extent`, `--points`,
+`--pairs`, `--values`, `--artifacts`, `--artifact-members`, `--schema`, `--layers`, `schema.toml` as
+a fixed name and `layers.toml` are all gone, and every retired key is **refused** by the
+unknown-field rule rather than aliased (decision 0048): a stale file is told so instead of read
+wrong.
+
+- ✔ **Two axes and only two.** `visibility` asks which access label the viewer must hold;
+  `require_member_visibility` asks how much of the object's own membership they must already see.
+  That retires `listing`, `gate`/`ungated`, `artifacts_carry_own`, `visible_when` and supplied
+  content's `corpus_derived` — three spellings of the first question and three settings of the
+  second. `public` is a reserved access label interned at term `0` and satisfied by every principal
+  **inside the trust boundary**, not by grant and not in the plugin.
+- ✔ **Points carry their own labels**, read from a field of the view's own source — a list, or a
+  plain string — beside the exploded relation, which is unchanged. Filling never overrides, a null
+  and an empty list both mean *no terms and so no principal*, and the linear and streaming builds
+  are proved byte-identical on a fixture whose lexicographic and first-appearance orders disagree.
+- ✔ **The plugin takes a term list.** The build had joined an item's terms with commas for
+  `builtin:passthrough` to split apart, so a term written `ir:analyst,ir:legal` arrived as two
+  grants; `terms_of_labels` is required rather than defaulted, and `Engine::open` now enforces the
+  manifest's `data_plugin_hash` against the serving plugin — a check the corpus had claimed for some
+  time and nothing performed.
+- ✔ **One row per artifact**, from a layer's own `source` or an inline `artifacts` list, never both;
+  `contents` is the ranked list and its index is the **rank**; membership may be spelled by
+  `excluding` for a set that is nearly the whole corpus, complemented once in the build and never at
+  request time. `stable_key` is `key` and the membership row's scalar `member` is `entity`.
+- ✔ **`[layer.labels]` expands to a `[[layer]]` before anything compiles**, so the sugar meets every
+  refusal a hand-written layer meets and the two build a byte-identical bundle. It supplies
+  mechanism and **no disclosure control**: both member requirements and the artifact gate stay the
+  caller's, required and undefaulted. `membership` is a table, so attribute membership names the
+  field that carries it.
+- ✔ **A dependency edge carries deletion and visibility**
+  ([decision 0089](decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)) — recorded
+  at Stage 4 above, taken during this rework, and reversing 0086.
+- ✔ **The build says where the data sits inside the frame**, per view and before any work: the
+  frame, the data's own bounds, how many points land on the frame's edge, and what proportion keep a
+  cell of their own. Past half the points clamped it **refuses**, with no override — a frame that
+  misplaces the majority of a corpus is not that corpus's frame — and a tenth of the corpus sharing
+  cells warns. The threshold's limit is stated rather than overclaimed: at 10⁹ points concentrated
+  in a hundredth of the frame a well-fitted build would warn too.
+- ✔ **`tessera check`** parses the declaration and opens only Parquet footers, never a row, and
+  collects every finding rather than stopping at the first, which is what makes it a CI verb.
+  `--payloads` emits the control-plane bodies, closing the gap where a declare-but-never-build
+  deployment authored every layer twice. **`reports/disclosure.json`** joins `containment.json`:
+  every layer's gate, member requirement, dependencies and content, diffable by construction.
+- ⊘ **Stage 9 outstanding** — the notebook emits one config and one source per layer, and the term
+  dictionary becomes a real build output. The corpus citations are swept.
 
 ### Stage 6 — Predicate membership
 

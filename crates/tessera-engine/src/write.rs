@@ -1531,7 +1531,7 @@ impl LiveState {
     /// Apply the fold's executed deletions to the resident artifact store — the second half of the
     /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired artifacts
     /// leave their levels; retired members leave the memberships that survive; and each layer's
-    /// `on_member_deletion` declaration executes against the generating sets that lost a source.
+    /// `withdraw_on_member_deletion` declaration executes against the generating sets that lost a source.
     fn retire_artifacts(&self, retired: &croaring::Bitmap) {
         let policy = self.deletion_policy();
         lock_recover(&self.artifacts).retire(retired, &policy);
@@ -1919,7 +1919,7 @@ pub(crate) struct ManifestSeed<'a> {
     /// `max(build MANIFEST, side manifests)` — the point region's floor.
     pub high_water: u64,
     /// `min(ceiling, side manifests)` — the row-less region's ceiling. A build carries a term here
-    /// whenever it was given `--layers`: the layers it registered spent row-less ids, and the mark
+    /// whenever its declaration carried layers: the layers it registered spent row-less ids, and the mark
     /// recording that has to survive into what this seeds from, or the first online registration
     /// reissues them.
     pub low_water: u64,

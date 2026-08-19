@@ -7,7 +7,7 @@
 //! narrow — a key is a string per *value*, and inlining it would make it a string per *point*.
 //!
 //! **The unit of address is the column, not the vocabulary.** Two columns may draw from one value
-//! set (§3.9's `values_of`), and they still have distinct member sets: a principal who may see
+//! set (one `[[vocabulary]]` named by both), and they still have distinct member sets: a principal who may see
 //! `finance` under `reviewing_department` may see nothing under `owner_department`. §3.2 makes
 //! that normative, so the gate is applied per column even where the values behind it are shared.
 //!

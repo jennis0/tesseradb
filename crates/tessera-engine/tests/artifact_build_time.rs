@@ -28,7 +28,7 @@ const LABELS: &str = "topics/x";
 /// subset principal sees a third of it — which is what makes the two counts differ.
 const MEMBERS: std::ops::Range<u64> = 0..150;
 
-/// Two layers: an ungated clustering, and labels attached into it carrying corpus-derived text.
+/// Two layers: a `public` clustering, and labels attached into it carrying corpus-derived text.
 const CONFIG_TOML: &str = r#"
 [[view]]
 name             = "s0"
