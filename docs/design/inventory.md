@@ -74,7 +74,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | Document | Status | ⊘ |
 |---|---|---|
 | `annotation-representation.md` | Normative for the annotation representat | 39 |
-| `annotation-write-cycle.md` | Normative for the annotation write cycle | 17 |
+| `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r48 | 35 |
 | `artifacts-from-points.md` | Draft | 3 |

@@ -362,7 +362,7 @@ both takes both columns.
 | A denied point leaves every count, hull, criterion and containment test | **accept** | the ack asserts the disposition is in force (write-path §5.2); any later point serves a hidden item inside an aggregate — fail-open |
 | A **permissive** layer's `G` loses the deleted member, and its content serves again | **the fold** (spec §2.1) | the interim is fail-closed — containment fails for everyone while the member is denied — so the only cost of waiting is availability. Earlier is the deny lane, where finding the affected sets is the inverted lookup §4.5 exists to avoid; the fold already computes the list for §4.2's report |
 | An ingested point enters predicate membership | **its flush** | counts are row-space questions and the point has no row before flush (§11.2); earlier is impossible, later is a gratuitous staleness |
-| An ingested point enters enumerated membership | **never** — a layer refresh (⊘ by replacement today) | I8; the caller declared the set |
+| An ingested point enters enumerated membership | **its flush**, as a predicate membership does — the point joins and the artifact then behaves as though it had been there all along ([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)) | a build reading a member table has always entered points into an enumerated membership, so a build is the same operation at the other entry point. This row read **never** and cited I8; I8 governs a *generating set*, which is a different set, is never grown either way, and was not at stake. ⊘ The growth mechanism is unbuilt: a delta record, one store method, and the packing rule that keeps a grown record reachable after a restart |
 | An artifact's row operator is rebased over the merged span | **the merge that publishes it** | a merge permutes row space inside its span, so a row id there names a different entity afterwards (lifecycle §2.1); an operator holding extent rows is wrong from the publication until it is rebased. Entity space is untouched, so the ground truth needs nothing |
 | Membership row forms reconcile with executed deletes | **the fold** (rep §5.0.3's pass, minus `G`) | the interim is already enforced by the overlay — the fold changes what is *stored*, never what is *served*, so its timing is an efficiency, not a safety property |
 | A deleted `G` member's exclusion becomes structural (postings blanked) | **the fold** | the deny entry enforces it until the flip; Rule F retires the entry in the same publication that blanks the postings — no gap (compaction §4) |
@@ -777,6 +777,25 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+
+**2026-08-20 — the contested membership row is ruled, and the rule is larger than the row**
+([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)). §3.4 said an
+ingested point enters an enumerated membership *never*, citing I8 and *the caller declared the
+set*; `artifacts-from-points.md` §5 said it joins. §3.4 was wrong, and the argument that settles it
+is that a build reading a member table has always entered points into an enumerated membership — so
+the two documents were describing one operation at two entry points and disagreeing about it. I8
+governs a generating set, which is a different set and is never grown either way. The growth
+mechanism is marked ⊘ at the row.
+
+**r11 — 2026-08-20. §3.4's enumerated-membership row is marked contested, and nothing else moves.**
+[`artifacts-from-points.md`](artifacts-from-points.md) §5 rules that a point carrying an artifact's
+key joins that artifact's membership at ingest; this document's timing table rules the same
+consequence **never**, citing I8. Both are normative for artifact semantics. The marker records the
+disagreement where the next reader meets it rather than resolving it — the resolution is a ruling,
+and the stage that ran into it stopped there (§6.1 of that document carries what the attempt
+found). Worth stating plainly because the row's reason does not quite reach its claim: I8 governs a
+**generating set**, and a membership is a different object with a different owner.
 
 **r10 — 2026-08-19. The banner said none of this is built.** A correction, not a design change: no
 claim in the body moves. Through Stage 5 the spine of this document is built — layers, artifacts,

@@ -419,6 +419,12 @@ pub struct LayerDeclaration {
     /// id, and governing both entry points is the point of it. ⊘ The build half is implemented; the
     /// ingest half — minting an artifact for a key a point carries — is specified and unbuilt
     /// (`artifacts-from-points.md` §6), so today an open layer means only that a build mints.
+    ///
+    /// **Blocked rather than outstanding, and the blocker is not minting** (§6.1, investigated
+    /// 2026-08-20): nothing in the write path can add an entity to an artifact that already
+    /// exists, so the closed case has no route in either. `annotation-write-cycle.md` §3.4 also
+    /// rules that consequence *never*, which `artifacts-from-points.md` §5 contradicts — a ruling
+    /// the field cannot settle for itself.
     #[serde(default)]
     pub value_set: ValueSet,
     /// The access label a viewer must hold to know this layer exists at all, independent of any

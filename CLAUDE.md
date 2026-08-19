@@ -133,6 +133,15 @@ guards, the contracts a second reader depends on (the Python oracle, the conform
 the format-stability rules of a *running* process — `seg_id` never reused, dictionary extents
 positional — all stay.
 
+**Build is ingest into an empty database** ([decision 0091](docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+There is no difference in functionality or user experience between the two entry points; what
+differs is cost and acquisition. A feature that works at a build and not at ingest is unfinished
+rather than staged, and a build-only refusal is a bug unless it is about where rows come from. The
+test is the one already in use: two spellings of one input produce a byte-identical bundle. Two
+asymmetries are deliberate and enumerated in the decision — entity ids are assigned in
+signature-sorted order at a build and above the high-water at ingest, and acquisition keys are
+absent from a deployment that never builds.
+
 **Design for audit before performance.** Prefer the construction that is obviously correct; keep
 modules readable in isolation; keep the query surface narrow — the leak register is exhaustive
 *because* the surface is enumerable. New capability enters through the filter contract (§8.2). An
