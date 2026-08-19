@@ -7,8 +7,8 @@ or belongs to any trusted computing base.
 
 | | |
 |---|---|
-| [`arxiv-corpus.ipynb`](arxiv-corpus.ipynb) | the whole corpus, end to end: the arXiv sources, UMAP, two clusterings, arXiv's own taxonomy, TF-IDF labels, and the configuration that reads the lot |
-| [`run-corpus.sh`](run-corpus.sh) | builds a bundle from what the notebook wrote and serves it, then prints two principals to compare |
+| [`arxiv-corpus.ipynb`](arxiv-corpus.ipynb) | the whole corpus, end to end: the arXiv sources, UMAP, two clusterings, arXiv's own taxonomy, TF-IDF labels, and the one declaration that reads the lot |
+| [`run-corpus.sh`](run-corpus.sh) | writes this deployment's `tessera.toml`, runs `tessera build`, serves what it wrote, and prints two principals to compare |
 
 ## The short way
 
@@ -30,8 +30,40 @@ so a narrow viewer's tree comes apart into pieces whose tops are the highest clu
 for. The viewer draws exactly that, and no more: a piece's top is indented flush left, identically
 to a cluster that has no parent at all, and nothing says a coarser one exists above it.
 
+**The labels are the one thing neither of those two is shown.** A topic's text is a synthesis of
+the two hundred titles it was drawn from, and it is declared as one — so it is served only to a
+viewer who can already read every one of them. Eight categories is not enough; a principal holding
+the whole vocabulary sees all sixty-four k-means topics with their text. That is the containment
+test doing its job, not a missing label.
+
 Without `--notebook` it builds from whatever is already in the output directory; `--build-only`
 stops before serving.
+
+## One declaration, and the frame it carries
+
+The notebook writes a single `schema.toml` — the corpus, the view, the vocabularies, the attribute
+columns and the five layers, every `source` a path relative to itself. `run-corpus.sh` writes the
+`tessera.toml` beside it that says where the bundle goes, and the build is then `tessera build`
+with no flags but the identity decision.
+
+**The extent lives in that declaration, as `extent = "auto"`, and this is the failure the whole
+arrangement exists to prevent.** The notebook writes raw UMAP coordinates, spanning about −17…18,
+and the build fits a square box around them. It used to scale them by hand onto a grid a command
+line named, and a frame that does not fit the data does not fail — quantisation clamps, so the
+bundle is well-formed with the geometry wrong. Every build now prints what its frame does:
+
+```
+view 's0': quantising against x [-21.68873016357422, 23.519910736083986], y [-21.566141052246095, 23.64249984741211]
+        the data spans x [-16.606388092041016, 18.43756866455078], y [-21.1229190826416, 23.199277877807617] — 50802 x 64252 of the 65536 x 65536 cells
+        50000 point(s) placed, none on the frame's edge
+view 's0': 50000 point(s) landed in 49945 distinct cell(s) — 99.9% of them have a position of their own
+```
+
+Read the last two lines. Nothing **clamped** onto the frame's edge, so no position is the frame's
+rather than its own; and 99.9% of the points **keep a position of their own**, so papers far apart
+in the embedding are far apart on the map. The old hand-scaled mistake reads instead as `18 x 23 of
+the 65536 x 65536 cells` with zero clamps and a percentage in the low single digits — no error
+anywhere, and a map that is one speck in a corner.
 
 ## Setting up, and running the notebook on its own
 
@@ -87,8 +119,8 @@ with every measurement already taken against the corpus. The recompute path is C
 
 ## Measured
 
-At `SAMPLE=50000` with UMAP reused, on WSL2: **19 seconds** end to end, of which the TF-IDF labels
-are 8 and everything else is under 4. HDBSCAN over the full 2 422 486 papers is 67 seconds, so the
+At `SAMPLE=50000` with UMAP reused, on WSL2: **10 seconds** end to end for the notebook — the
+sample draw is 4 of them, HDBSCAN 1.5, and nothing else reaches a second. HDBSCAN over the full 2 422 486 papers is 67 seconds, so the
 whole-corpus run is tractable as long as UMAP is not recomputed.
 
 ## Why a notebook and not a script

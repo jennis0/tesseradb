@@ -76,14 +76,17 @@ async function visibleFor(terms) {
   });
   if (!r.ok) throw new Error(`viewport ${terms}: ${r.status} ${await r.text()}`);
   const buf = new Uint8Array(Buffer.from(await r.arrayBuffer()));
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  // Named `frame`, not `view`: `view` is this module's view id, read a few lines above and used in
+  // the request body, and a `const view` here shadows it for the whole function body — the request
+  // above then reads an initialiser that has not run yet and every term throws.
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   // `u8 kind, u32 LE length, <payload>` — every frame prefixed, tiles always first (`core/frame.ts`
   // carries the full table). Asserted rather than assumed: reading the length from byte 0 decodes
   // the kind tag as part of it, which yields a plausible-looking offset and an empty table, and an
   // empty table here reads as "this principal sees nothing" rather than as a broken parse.
-  const kind = view.getUint8(0);
+  const kind = frame.getUint8(0);
   if (kind !== 1) throw new Error(`expected a tiles frame first, got kind ${kind}`);
-  const tileLength = view.getUint32(1, true);
+  const tileLength = frame.getUint32(1, true);
   const tiles = tableFromIPC(buf.subarray(5, 5 + tileLength));
   const column = tiles.getChild('visible');
   if (!column) throw new Error('the tiles frame carries no `visible` column');

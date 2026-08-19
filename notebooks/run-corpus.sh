@@ -22,8 +22,8 @@
 #
 # Five layers over the corpus, and the three shapes among them are the point:
 #
-#   clusters/kmeans    flat, min_visible = 50       — the control: every cluster a peer
-#   clusters/hdbscan   nested, min_fraction = 0.05  — the condensed tree, whose children do not
+#   clusters/kmeans    flat, { count = 50 }         — the control: every cluster a peer
+#   clusters/hdbscan   nested, { fraction = 0.05 }  — the condensed tree, whose children do not
 #                                                     exhaust their parents
 #   taxonomy/arxiv     tiered, two levels           — arXiv's own classification, with containment
 #                                                     edges running between the levels
@@ -80,25 +80,71 @@ fi
 [[ -f "$OUT/points.parquet" ]] || {
   echo "no build inputs at $OUT — run with --notebook first, or pass --out" >&2; exit 1; }
 
+# ------------------------------------------------------------------------------- the deployment
+#
+# **One file, read by both verbs.** `tessera build` and `tessera serve` each find it and take
+# nothing else: it says where the bundle goes, where the declaration is, and — for the server —
+# what to listen on. Generated per run rather than committed, which is why its paths are absolute;
+# a `source` inside the declaration is relative to the declaration and stays portable.
+#
+# The credentials are minted here rather than defaulted: `tessera serve` refuses to start without
+# one, and refuses an inline value in the config outright, so there is nowhere for a shared secret
+# to be left behind.
+work="$(mktemp -d)"
+config="$work/tessera.toml"
+export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-$(head -c 24 /dev/urandom | base64)}"
+export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-$(head -c 24 /dev/urandom | base64)}"
+
+mkdir -p "$(dirname "$BUNDLE")"
+bundle_abs="$(cd "$(dirname "$BUNDLE")" && pwd)/$(basename "$BUNDLE")"
+cat > "$config" <<EOF
+[bundle]
+path  = "$bundle_abs"
+cache = "$work/cache"
+wal   = "$work/wal.log"
+
+[build]
+schema = "$OUT/schema.toml"
+
+[plugin]
+module = "builtin:passthrough"
+
+[disclosure]
+token_max_lifetime = 3600
+
+[serve]
+viewer  = "127.0.0.1:$VIEWER_PORT"
+session = "127.0.0.1:$SESSION_PORT"
+control = "127.0.0.1:$CONTROL_PORT"
+max_k = 5000
+session_credential_env = "TESSERA_SESSION_CRED"
+operator_credential_env = "TESSERA_OPERATOR_CRED"
+# Development-only, exactly as run_demo.sh says of its own: the browser bundle talks to the two
+# planes directly, so the dev origin is named here. Nothing to copy into an integration.
+dev_cors_origins = ["http://localhost:$VITE_PORT"]
+EOF
+
 # ------------------------------------------------------------------------------- the build
 [[ $rebuild -eq 1 ]] && rm -rf "$BUNDLE"
 if [[ ! -d "$BUNDLE" ]]; then
   say "building $BUNDLE"
   cargo build --release -p tessera-cli
-  ./target/release/tessera build \
-    --points "$OUT/points.parquet" \
-    --pairs "$OUT/pairs.parquet" \
-    --schema "$OUT/schema.toml" \
-    --layers "$OUT/layers.toml" \
-    --values "archive=$OUT/archive.parquet" \
-    --values "primary_category=$OUT/primary_category.parquet" \
-    --out "$BUNDLE" --view s0 --extent 0,65536,0,65536 --mint-id-key
+
+  # **No flag but the identity decision.** Every source, the frame and the layer set are in the
+  # declaration, so there is no `--extent` here to disagree with the coordinates the notebook
+  # wrote and no source path to bind twice.
+  #
+  # Read the frame report it prints: the data's own bounds beside the frame, how much of the
+  # 65,536² grid the corpus occupies, how many points clamp onto the frame's edge, and what share
+  # of points keep a position of their own. A corpus folded into one corner still builds cleanly,
+  # and this is where you see that it has.
+  ./target/release/tessera build --deployment "$config" --mint-id-key
 
   # **The build's own report on the hierarchy.** Every split that keeps members none of its
   # children hold is named here, which is what makes a cluster appearing without its children a
   # thing you read about rather than a thing you report.
   if [[ -f "$BUNDLE/reports/containment.json" ]]; then
-    python3 - "$BUNDLE/reports/containment.json" <<'PY'
+    python3 - "$BUNDLE/reports/containment.json" <<'CONTAINMENT'
 import json, sys
 r = json.load(open(sys.argv[1]))
 s = r["splits"]
@@ -109,7 +155,7 @@ for row in s["by_stray_members"][:3]:
     if row["stray_members"]:
         print(f"  {row['parent']}: {row['stray_members']:,} of {row['members']:,} "
               f"held by none of its {row['children']} children")
-PY
+CONTAINMENT
   fi
 else
   say "serving the existing $BUNDLE (--rebuild to discard it)"
@@ -118,36 +164,9 @@ fi
 [[ $build_only -eq 1 ]] && { say "built; not serving (--build-only)"; exit 0; }
 
 # ------------------------------------------------------------------------------- the server
-# Minted per run rather than defaulted: `tessera serve` refuses to start without one, and refuses
-# an inline value in the config outright, so there is nowhere for a shared secret to be left behind.
-export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-$(head -c 24 /dev/urandom | base64)}"
-export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-$(head -c 24 /dev/urandom | base64)}"
-
-work="$(mktemp -d)"
-config="$work/serve.toml"
-cat > "$config" <<EOF
-[bundle]
-path = "$BUNDLE"
-cache = "$work/cache"
-wal = "$work/wal.log"
-
-[plugin]
-module = "builtin:passthrough"
-
-[disclosure]
-token_max_lifetime = 3600
-
-[serve]
-viewer = "127.0.0.1:$VIEWER_PORT"
-session = "127.0.0.1:$SESSION_PORT"
-control = "127.0.0.1:$CONTROL_PORT"
-max_k = 5000
-session_credential_env = "TESSERA_SESSION_CRED"
-operator_credential_env = "TESSERA_OPERATOR_CRED"
-# Development-only, exactly as run_demo.sh says of its own: the browser bundle talks to the two
-# planes directly, so the dev origin is named here. Nothing to copy into an integration.
-dev_cors_origins = ["http://localhost:$VITE_PORT"]
-EOF
+#
+# The same `tessera.toml` the build read: a build's output path and a server's bundle path are one
+# value seen from two sides, so a server can never open a bundle some other invocation wrote.
 
 # **Refuse a port someone else holds, rather than talking to whatever is on it.** Without this the
 # readiness poll below is satisfied by a *stale server from an earlier run*: the new one exits on a
@@ -164,7 +183,7 @@ for port in "$VIEWER_PORT" "$SESSION_PORT" "$CONTROL_PORT"; do
 done
 
 say "starting tessera serve on :$VIEWER_PORT"
-./target/release/tessera serve -c "$config" &
+./target/release/tessera serve --deployment "$config" &
 serve_pid=$!
 trap 'kill "$serve_pid" 2>/dev/null || true; rm -rf "$work"' EXIT INT TERM
 
@@ -183,19 +202,45 @@ done
 # clusters* in front of both principals with a different count beside each — which is the thing to
 # see. A category narrow enough to be interesting on its own is also narrow enough to fall under
 # the layer's 5% floor everywhere, and its viewer is served nothing at all.
-read -r broad_list narrow_id narrow_name broad_names <<<"$(python3 - "$OUT" <<'PY'
-import sys, pathlib, collections
+#
+# **The frame comes from the service, not from a constant.** A viewport's bbox is in the corpus's
+# own coordinates, and the view was quantised against the box `extent = "auto"` fitted to them —
+# so the full-extent box is whatever `/v1/meta` publishes and never a number written here.
+# One value per line and read with `mapfile`, rather than a line of words: two of these values are
+# prose and a word-split would silently shift every field after them.
+mapfile -t facts < <(python3 - "$OUT" "$SESSION_PORT" "$VIEWER_PORT" <<'TOPTERMS'
+import base64, collections, json, os, pathlib, sys, urllib.request
 import pyarrow.parquet as pq
-out = pathlib.Path(sys.argv[1])
-terms = pq.read_table(out / "terms.parquet").to_pydict()
-name_of = dict(zip(terms["term_id"], terms["descriptor"]))
-counts = collections.Counter(pq.read_table(out / "pairs.parquet").column("term_id").to_pylist())
+
+out, session_port, viewer_port = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+counts = collections.Counter(
+    t for cats in pq.read_table(out / "points.parquet", columns=["categories"])
+                     .column("categories").to_pylist()
+    for t in (cats or []))
 top = [t for t, _ in counts.most_common(8)]
-print(",".join(f'"{t}"' for t in top),
-      top[0], name_of[top[0]],
-      "+".join(name_of[t] for t in top[:4]) + f"+{len(top) - 4} more")
-PY
-)"
+
+auth = base64.b64encode(json.dumps({"terms": top}).encode()).decode()
+req = urllib.request.Request(
+    f"http://127.0.0.1:{session_port}/session/authorise",
+    data=json.dumps({"auth_data": auth}).encode(),
+    headers={"content-type": "application/json",
+             "authorization": f"Bearer {os.environ['TESSERA_SESSION_CRED']}"})
+token = json.loads(urllib.request.urlopen(req, timeout=60).read())["token"]
+meta = json.loads(urllib.request.urlopen(urllib.request.Request(
+    f"http://127.0.0.1:{viewer_port}/v1/meta",
+    headers={"authorization": f"Bearer {token}"}), timeout=60).read())
+q = meta["quantisation"]
+
+for value in (",".join(f'"{t}"' for t in top),
+              top[0],
+              " + ".join(top[:4]) + f" and {len(top) - 4} more",
+              q["x_min"], q["y_min"], q["x_max"], q["y_max"]):
+    print(value)
+TOPTERMS
+)
+broad_list="${facts[0]}" narrow_name="${facts[1]}" broad_names="${facts[2]}"
+bbox="[${facts[3]},${facts[4]},${facts[5]},${facts[6]}]"
+x_min="${facts[3]}" y_min="${facts[4]}" x_max="${facts[5]}" y_max="${facts[6]}"
 
 cat <<EOF
 
@@ -220,7 +265,7 @@ broad principal's eight, so the two are looking at the same clusters:
 
   NARROW=\$(curl -s -X POST http://127.0.0.1:$SESSION_PORT/session/authorise \\
     -H "authorization: Bearer \$TESSERA_SESSION_CRED" -H 'content-type: application/json' \\
-    -d '{"auth_data":"'\$(printf '{"terms":["$narrow_id"]}' | base64 -w0)'"}' | jq -r .token)
+    -d '{"auth_data":"'\$(printf '{"terms":["$narrow_name"]}' | base64 -w0)'"}' | jq -r .token)
 
   # broad is $broad_names; narrow is $narrow_name alone
 
@@ -228,7 +273,7 @@ Then ask the same question as each, and compare the count beside one cluster:
 
   curl -s -X POST http://127.0.0.1:$VIEWER_PORT/v1/viewport \\
     -H "authorization: Bearer \$BROAD" -H 'content-type: application/json' \\
-    -d '{"view":"s0","zoom":0,"bbox":[0,65536,0,65536],"k":1,
+    -d '{"view":"s0","zoom":0,"bbox":$bbox,"k":1,
          "layers":["clusters/hdbscan"],"artifact_budget":20}' --output -
 
 The response is a streamed frame sequence, not JSON — frame kind 5 carries the artifacts. The
@@ -268,11 +313,12 @@ cd clients/ts
 # with no artifact in the response is not drawn, so it can never put a cluster on screen that the
 # asking principal was not served, and it carries neither membership nor declared size.
 say "placing clusters for the viewer"
-python3 - "$OUT" viewer/public/clusters.json <<'PY'
+python3 - "$OUT" viewer/public/clusters.json "$x_min" "$y_min" "$x_max" "$y_max" <<'PLACE'
 import json, pathlib, sys, collections
 import pyarrow.parquet as pq
 
 out, dest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+x_min, y_min, x_max, y_max = (float(v) for v in sys.argv[3:7])
 points = pq.read_table(out / "points.parquet", columns=["entity_id", "x", "y"]).to_pydict()
 xy = {e: (x, y) for e, x, y in zip(points["entity_id"], points["x"], points["y"])}
 # The centroid of an artifact's **declared** membership, which is the publisher's own knowledge and
@@ -291,37 +337,60 @@ for path in sorted(out.glob("*-members.parquet")):
         a = acc[(layer, key)]
         a[0] += x; a[1] += y; a[2] += 1
 
+# **In cells, because that is what the viewer draws in.** The sidecar's coordinates are grid cells
+# on the 65,536² frame, and the frame is the one the build fitted — read back off `/v1/meta` rather
+# than assumed here, which is the same mistake in miniature that a hand-written extent was.
+CELLS = 65536.0
+sx, sy = CELLS / (x_max - x_min), CELLS / (y_max - y_min)
+
 layers = collections.defaultdict(list)
-for (layer, key), (sx, sy, n) in acc.items():
-    layers[layer].append({"key": key, "x": sx / n, "y": sy / n})
+for (layer, key), (px, py, n) in acc.items():
+    layers[layer].append({"key": key,
+                          "x": (px / n - x_min) * sx,
+                          "y": (py / n - y_min) * sy})
 dest.parent.mkdir(parents=True, exist_ok=True)
 dest.write_text(json.dumps({"layers": layers}))
 print(f"  {sum(len(v) for v in layers.values())} positions across {len(layers)} layers")
-PY
+PLACE
 
 # **Principals are measured against this bundle, never carried between bundles.** A term id names a
 # different set in each dictionary, so a preset list measured elsewhere would mislabel every
 # principal here.
 say "measuring principals"
-term_hi="$(python3 -c "
-import pyarrow.parquet as pq, sys
-print(max(pq.read_table('$OUT/terms.parquet').column('term_id').to_pylist()))")"
-node scripts/measure-principals.mjs   --viewer "http://127.0.0.1:$VIEWER_PORT" --session "http://127.0.0.1:$SESSION_PORT"   --terms "0..$term_hi" --out "$work/presets.json"
+# **A principal is written in the corpus's own vocabulary.** The access terms are arXiv category
+# names, so the candidates are the categories themselves — there is no `term_id` on this path and
+# no sidecar mapping one back, the build's dictionary being the only place ids are decided.
+terms="$(python3 - "$OUT" <<'CANDIDATES'
+import collections, pathlib, sys
+import pyarrow.parquet as pq
+counts = collections.Counter(
+    t for cats in pq.read_table(pathlib.Path(sys.argv[1]) / "points.parquet",
+                                columns=["categories"]).column("categories").to_pylist()
+    for t in (cats or []))
+print(",".join(t for t, _ in counts.most_common(120)))
+CANDIDATES
+)"
+node scripts/measure-principals.mjs \
+  --viewer "http://127.0.0.1:$VIEWER_PORT" --session "http://127.0.0.1:$SESSION_PORT" \
+  --terms "$terms" --out "$work/presets.json"
 
 # **One composed principal, added to the measured list.** The measured presets are single terms,
 # and a single term either sees the whole map (the few broad ones) or no clusters at all — its
 # share of every cluster falls under the layer's floor. The interesting comparison is a *subset*:
 # a viewer holding eight categories against one holding one of the eight sees the same clusters
 # with a different count beside each, which is the thing this corpus exists to show.
-python3 - "$OUT" "$work/presets.json" "$SESSION_PORT" "$VIEWER_PORT" <<'PY'
+python3 - "$OUT" "$work/presets.json" "$SESSION_PORT" "$VIEWER_PORT" "$bbox" <<'COMPOSED'
 import collections, io, json, pathlib, struct, sys, base64, urllib.request, os
 import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
 out, presets = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-session_port, viewer_port = sys.argv[3], sys.argv[4]
-counts = collections.Counter(pq.read_table(out / "pairs.parquet").column("term_id").to_pylist())
-top = [str(t) for t, _ in counts.most_common(8)]
+session_port, viewer_port, bbox = sys.argv[3], sys.argv[4], json.loads(sys.argv[5])
+counts = collections.Counter(
+    t for cats in pq.read_table(out / "points.parquet", columns=["categories"])
+                     .column("categories").to_pylist()
+    for t in (cats or []))
+top = [t for t, _ in counts.most_common(8)]
 
 
 def post(url, body, bearer):
@@ -339,7 +408,7 @@ auth = base64.b64encode(json.dumps({"terms": top}).encode()).decode()
 token = json.loads(post(f"http://127.0.0.1:{session_port}/session/authorise",
                         {"auth_data": auth}, cred))["token"]
 body = post(f"http://127.0.0.1:{viewer_port}/v1/viewport",
-            {"view": "s0", "zoom": 0, "bbox": [0, 65536, 0, 65536], "k": 1}, token)
+            {"view": "s0", "zoom": 0, "bbox": bbox, "k": 1}, token)
 visible, at = 0, 0
 while at < len(body):
     kind = body[at]
@@ -351,11 +420,11 @@ while at < len(body):
         break
 
 chosen = json.loads(presets.read_text())
-chosen.insert(-1, {"label": f"eight categories (superset of term {top[0]})",
+chosen.insert(-1, {"label": f"eight categories (superset of {top[0]})",
                    "terms": top, "visible": visible})
 presets.write_text(json.dumps(chosen, indent=2) + "\n")
 print(f"  added a composed principal over {len(top)} terms, {visible:,} visible")
-PY
+COMPOSED
 
 items="$(python3 -c "
 import pyarrow.parquet as pq

@@ -120,12 +120,12 @@ async function authorise(terms) {
  * than being skipped, because skipping is how a future frame's data goes silently missing.
  */
 function frames(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const out = [];
   let at = 0;
   while (at < buf.byteLength) {
-    const kind = view.getUint8(at);
-    const length = view.getUint32(at + 1, true);
+    const kind = frame.getUint8(at);
+    const length = frame.getUint32(at + 1, true);
     if (kind < 1 || kind > 5) throw new Error(`unknown frame kind ${kind} at byte ${at}`);
     out.push({kind, payload: buf.subarray(at + 5, at + 5 + length)});
     at += 5 + length;

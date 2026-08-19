@@ -61,12 +61,12 @@ async function authorise(terms) {
 }
 
 function frames(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const out = [];
   let at = 0;
   while (at < buf.byteLength) {
-    const kind = view.getUint8(at);
-    const length = view.getUint32(at + 1, true);
+    const kind = frame.getUint8(at);
+    const length = frame.getUint32(at + 1, true);
     out.push({kind, payload: buf.subarray(at + 5, at + 5 + length)});
     at += 5 + length;
   }
