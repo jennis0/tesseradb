@@ -1237,3 +1237,189 @@ fn an_artifact_written_on_two_rows_is_refused() {
     assert!(message.contains("more than one row"), "{message}");
     assert!(message.contains("c-0"), "{message}");
 }
+
+// -------------------------------------------------------------------------------------------
+// `[layer.labels]` — the sugar, and the bundle that proves it is sugar
+// -------------------------------------------------------------------------------------------
+
+/// The clustering, with its labels declared where they are used. The label layer declares no
+/// `visibility`, so it takes the clustering's own gate — which is what the written-out form below
+/// spells out.
+const SUGARED_TOML: &str = r#"
+[[layer]]
+name = "clusters/a"
+title = "clusters"
+views = ["s0"]
+source = "clusters.parquet"
+membership = "enumerated"
+visibility = "0"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 2 }
+hierarchy = { kind = "flat", prune_children = false }
+content = { computed = ["centroid"] }
+
+  [layer.members]
+  source = "clusters_members.parquet"
+
+  [layer.labels]
+  name = "topics/x"
+  title = "topics"
+  source = "topics.parquet"
+  type = "text"
+  membership = "enumerated"
+  require_member_visibility = "none"
+  artifact_visibility = { default = "inherited" }
+
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    [layer.labels.members]
+    source = "topics_members.parquet"
+"#;
+
+/// The same thing, written out: every key the expansion supplies, spelled by hand.
+const WRITTEN_OUT_TOML: &str = r#"
+[[layer]]
+name = "clusters/a"
+title = "clusters"
+views = ["s0"]
+source = "clusters.parquet"
+membership = "enumerated"
+visibility = "0"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 2 }
+hierarchy = { kind = "flat", prune_children = false }
+content = { computed = ["centroid"] }
+
+  [layer.members]
+  source = "clusters_members.parquet"
+
+[[layer]]
+name = "topics/x"
+title = "topics"
+views = ["s0"]
+source = "topics.parquet"
+membership = "enumerated"
+visibility = "0"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = "none"
+hierarchy = { kind = "flat", prune_children = false }
+depends_on = ["clusters/a"]
+
+  [layer.members]
+  source = "topics_members.parquet"
+
+  [[layer.content.supplied]]
+  name = "topics/x"
+  type = "text"
+  require_member_visibility = "all"
+"#;
+
+/// Build `text` as this fixture's declaration, into `out`.
+fn run_config(inputs: &Inputs, text: &str, out: &Path) -> tessera_build::BuildReport {
+    let path = inputs.dir.join(format!(
+        "{}.toml",
+        out.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::write(&path, format!("{VIEW_TOML}{text}")).unwrap();
+    let config = tessera_build::config::Config::parse(&path, &Default::default())
+        .expect("the declaration parses");
+    let mut args = args(inputs, out);
+    args.layers = config.layers;
+    args.layer_inputs = config.layer_sources;
+    args.schema = config.schema;
+    build(&args).expect("the build runs")
+}
+
+/// Every file under `root`, keyed by its `root`-relative slash-separated path.
+fn collect(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// **The definition of sugar, asserted where it counts.** `[layer.labels]` and the second
+/// `[[layer]]` it expands to produce the *same bundle, byte for byte* — so the sugar is a spelling
+/// and never a second kind of layer, and nothing downstream of the parser has a label layer to
+/// treat differently (`annotation-write-cycle.md` §6.1).
+///
+/// `MANIFEST.json` carries a wall-clock `created_at` and `CURRENT` is that manifest's digest, so
+/// those two are compared with the timestamp blanked. Every other file, including every digest the
+/// manifest records, is compared verbatim.
+#[test]
+fn the_label_sugar_and_the_layer_written_out_build_the_same_bundle() {
+    let inputs = inputs();
+    let sugared = inputs.dir.join("sugared");
+    let written = inputs.dir.join("written");
+    run_config(&inputs, SUGARED_TOML, &sugared);
+    run_config(&inputs, WRITTEN_OUT_TOML, &written);
+
+    let a = collect(&sugared);
+    let b = collect(&written);
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "the two bundles do not contain the same files"
+    );
+    assert!(
+        a.len() > 6,
+        "expected a full bundle, found {} files",
+        a.len()
+    );
+    let mut compared = 0;
+    for (name, left) in &a {
+        let right = &b[name];
+        if name == "v00000/MANIFEST.json" {
+            let normalise = |bytes: &[u8]| {
+                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                value["created_at"] = serde_json::Value::Null;
+                value
+            };
+            assert_eq!(
+                normalise(left),
+                normalise(right),
+                "MANIFEST.json differs (ignoring created_at)"
+            );
+            compared += 1;
+            continue;
+        }
+        if name == "CURRENT" {
+            continue; // nothing but the digest of a manifest differing in created_at alone
+        }
+        assert_eq!(left, right, "{name} is not byte-identical");
+        compared += 1;
+    }
+    assert!(compared > 6, "only {compared} files were compared");
+    // And the layer really is in there: a vacuous pass over two bundles with no label layer would
+    // otherwise assert nothing at all.
+    let manifest = manifest_of(&sugared);
+    assert!(
+        manifest
+            .layers
+            .iter()
+            .any(|l| l.declaration.name == "topics/x"),
+        "the sugared bundle carries no label layer: {:?}",
+        manifest
+            .layers
+            .iter()
+            .map(|l| &l.declaration.name)
+            .collect::<Vec<_>>()
+    );
+}

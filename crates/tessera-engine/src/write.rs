@@ -2549,7 +2549,9 @@ impl WritePath {
     ) -> Result<EntityId, AcceptError> {
         let receipt = self
             .handle()?
-            .submit(Command::RegisterLayer { declaration })?;
+            .submit(Command::RegisterLayer {
+                declaration: Box::new(declaration),
+            })?;
         match receipt.outcome {
             Ok(Ack::LayerRegistered { entity }) => Ok(entity),
             Ok(other) => unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}"),
@@ -7611,7 +7613,7 @@ impl Executor {
                 respond,
             }]),
             Command::RegisterLayer { declaration } => self.commit_registry(
-                |registry, alloc| registry.prepare_create(declaration, alloc),
+                |registry, alloc| registry.prepare_create(*declaration, alloc),
                 |record| match record {
                     WalRecord::LayerCreate { layer_entity, .. } => Ack::LayerRegistered {
                         entity: *layer_entity,

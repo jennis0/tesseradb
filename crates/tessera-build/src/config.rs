@@ -282,7 +282,7 @@ struct ExtentTable {
 /// which is why it is one table rather than a flag beside a fallback: the two cannot be declared
 /// apart. It takes no `source`: an artifact's label rides its own row, there being one row per
 /// artifact, where a point's label is one of many terms and needs a relation of its own.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactVisibilityBlock {
     #[serde(default)]
@@ -353,7 +353,7 @@ struct AttributeBlock {
 
 /// `[[layer]]` — one annotation layer. Artifact-side semantics are `annotation-write-cycle.md`
 /// §6.1's; this is the declaration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LayerBlock {
     name: String,
@@ -363,12 +363,10 @@ struct LayerBlock {
     /// membership no single cell should hold.
     #[serde(default)]
     members: Option<MembersBlock>,
-    /// ⊘ Declared so the refusal can *name* what is absent (decision 0013). Without this field the
-    /// block falls to `deny_unknown_fields`, whose "unknown field `labels`" reads as a typo rather
-    /// than as machinery that is specified and not yet built — and a caller who wrote one had every
-    /// reason to expect it to work, `configuration.md` §1 listing it.
+    /// `[layer.labels]` — sugar, expanded to a layer of its own before anything here compiles
+    /// ([`expand_labels`]).
     #[serde(default)]
-    labels: Option<toml::Value>,
+    labels: Option<LabelsBlock>,
     #[serde(default)]
     views: Option<Vec<String>>,
     #[serde(default)]
@@ -380,8 +378,12 @@ struct LayerBlock {
     /// row's own key set is closed by the same `deny_unknown_fields` rule every block is under.
     #[serde(default)]
     artifacts: Option<Vec<InlineArtifact>>,
+    /// `"enumerated"`, `"spatial"` or `{ attribute = "<field>" }`. Held as a `toml::Value`
+    /// because the third spelling is a table naming the field the predicate reads, and a
+    /// hand-written match reports the three shapes as three shapes rather than as *no variant
+    /// matched* ([`compile_membership`]).
     #[serde(default)]
-    membership: Option<String>,
+    membership: Option<toml::Value>,
     #[serde(default)]
     hierarchy: Option<HierarchyBlock>,
     #[serde(default)]
@@ -436,9 +438,74 @@ pub struct InlineArtifact {
     pub attached_key: Option<String>,
 }
 
+/// `[layer.labels]` — a label layer, written where it is used.
+///
+/// **Sugar, and sugar exactly**: it carries no key that is not a `[[layer]]` key, and it expands
+/// to a `[[layer]]` block before anything compiles, so a declaration written this way and the
+/// same one written out as a second layer build a byte-identical bundle
+/// (`annotation-write-cycle.md` §6.1). What the expansion supplies is mechanical — the parent's
+/// views, a flat hierarchy, `depends_on` the parent, and the content wrapper around `type`. What
+/// it never supplies is the gate, the membership requirement or the existence of membership data,
+/// each of which is written out here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LabelsBlock {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    fields: Option<BTreeMap<String, String>>,
+    /// `[layer.labels.members]` — the same block a `[[layer]]` takes, and here for the same
+    /// reason: a label's ranked contents each name the generating set they were drawn from, and a
+    /// `(artifact, rank, entity)` row is the only shape that carries one. Without it the sugar
+    /// could declare content it could never serve.
+    #[serde(default)]
+    members: Option<MembersBlock>,
+    #[serde(rename = "type", default)]
+    ty: Option<String>,
+    /// Written out, never derived: a label's members **are** its generating set, and no build can
+    /// work out from the parent which entities a synthesis was drawn from.
+    #[serde(default)]
+    membership: Option<toml::Value>,
+    /// The **layer** grain: how much of a label's membership a viewer must already see for the
+    /// label itself to appear. The content grain is `[layer.labels.content]`, and the two cannot
+    /// be one key — this one admits `{ fraction = p }` and `{ count = n }`, and the content's
+    /// admits exactly `all` or `inherited`.
+    #[serde(default)]
+    require_member_visibility: Option<toml::Value>,
+    /// `[layer.labels.content]` — the supplied content's own requirement, declared and never
+    /// supplied. Whether a label's text was generated from the documents it names (`all`) or is
+    /// true whether or not any of them exists (`inherited`) is a fact only the caller knows, and
+    /// the expansion fixing it at `all` decided a disclosure control on the caller's behalf.
+    #[serde(default)]
+    content: Option<LabelsContentBlock>,
+    /// Declared, never supplied. It is a disclosure control, so it has no default: the value an
+    /// expansion could pick for a caller who wrote nothing is a value the caller never chose.
+    #[serde(default)]
+    artifact_visibility: Option<ArtifactVisibilityBlock>,
+    /// The one defaulted disclosure control in the surface: absent, this layer takes its parent's
+    /// gate. Admissible only because the value it defaults to is the parent's own and never the
+    /// widest one there is ([`expand_labels`]).
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
+/// `[layer.labels.content]` — the label content's own member requirement. One key, because the
+/// rest of `[layer.content]` has no meaning here: a label layer's content is the label, supplied
+/// by the caller, so there is nothing to compute and the wrapper the expansion writes is the
+/// caller's `type` at the caller's requirement.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LabelsContentBlock {
+    #[serde(default)]
+    require_member_visibility: Option<String>,
+}
+
 /// `[layer.members]` — membership as its own source, instead of a list field on the artifact row.
 /// Declaring both is refused (`configuration.md` §7).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembersBlock {
     #[serde(default)]
@@ -447,7 +514,7 @@ struct MembersBlock {
     fields: Option<BTreeMap<String, String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HierarchyBlock {
     #[serde(default)]
@@ -458,7 +525,7 @@ struct HierarchyBlock {
     prune_children: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LevelBlock {
     #[serde(default)]
@@ -469,7 +536,7 @@ struct LevelBlock {
     zoom: Option<(u32, u32)>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContentBlock {
     #[serde(default)]
@@ -480,7 +547,7 @@ struct ContentBlock {
     withdraw_on_member_deletion: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuppliedBlock {
     name: String,
@@ -1019,7 +1086,8 @@ impl Config {
         let views = compile_views(&file.view, &mut sources)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &mut sources)?;
         let attributes = compile_attributes(&file.attribute, &vocabularies)?;
-        let (layers, layer_sources) = compile_layers(&file.layer, &views, &mut sources)?;
+        let (layers, layer_sources) =
+            compile_layers(&file.layer, &views, &attributes, &mut sources)?;
         sources.every_override_is_claimed()?;
 
         Ok(Config {
@@ -1456,21 +1524,143 @@ fn check_fields(
     })
 }
 
-/// The one sub-block `configuration.md` §1 declares and no stage has built.
+/// Expand every `[layer.labels]` block into a `[[layer]]` block of its own, in place.
 ///
-/// Separate from the acquisition keys because the reason differs: a source names a file, where this
-/// names *machinery* — the label sugar that expands to a second layer. Until it lands, a caller who
-/// wrote one must be told which it is rather than left reading a typo message.
-fn refuse_unbuilt_labels(layer: &str, present: bool) -> Result<()> {
-    if !present {
-        return Ok(());
+/// **The sugar is expanded before anything is compiled**, which is what makes it sugar rather than
+/// a second implementation: the block below is a [`LayerBlock`] like any other by the time
+/// `compile_layers` sees it, so it meets every refusal, every allocator rule and every reader a
+/// hand-written layer meets, and the two spellings produce a byte-identical bundle
+/// (`annotation-write-cycle.md` §6.1). Nothing downstream of here knows a label layer from a layer.
+///
+/// The block's `source`, `fields` and `[layer.labels.members]` are `[[layer]]`'s own, and carry
+/// straight across. Five things are supplied and one is defaulted:
+///
+/// * **the parent's `views`** — a label is drawn where the thing it labels is drawn;
+/// * **`hierarchy = { kind = "flat" }`** — a label layer is one population, its lineage being the
+///   parent's;
+/// * **`depends_on = [parent]`**, which is what admits the `attached_layer` / `attached_key` edge
+///   every label hangs from;
+/// * **the content wrapper** — one `[[layer.content.supplied]]` entry, named for the layer itself
+///   and typed by `type`, at `require_member_visibility = "all"`. Fixed rather than taken from the
+///   block's own key, and fixed at the strict end: a label is generated from its members, so
+///   containment is what its content is served on. A label whose content is true whether or not a
+///   document exists — `"inherited"` (C28) — is written out as a `[[layer]]`;
+/// * **`artifact_visibility = { default = "inherited" }`** — the sugar names no column to carry a
+///   per-artifact label, and with no column the only values expressible are *the layer's gate is
+///   the whole of it* and *one fixed label on every artifact*. A label layer whose artifacts carry
+///   labels of their own is written out as a `[[layer]]`, where the field can be named;
+/// * **`visibility` defaults to the parent's** — the one defaulted disclosure control here.
+///
+/// ## What "narrower, never wider" can actually be checked
+///
+/// The design says the gate is overridable narrower and never wider. **Only one case of that is
+/// computable, and it is the one implemented**: an access label is an opaque interned term, so
+/// given two of them the build has no ordering — whether every principal holding `ir:secret` also
+/// holds `ir:analyst` is a fact about grants, which live outside the bundle entirely. What *is*
+/// decidable is `public`: it is held by every principal by construction
+/// (`per-point-attributes.md` §3.8), so it is the widest label there is, and a label layer
+/// declaring it under a parent that declared anything else is refused.
+///
+/// ⊘ **Two distinct non-`public` labels are admitted and not ordered.** The parent's gate and the
+/// child's are then two independent gates, and a principal holding the child's and not the
+/// parent's reaches the labels without reaching the layer they describe. That is a caller's
+/// declaration rather than a service behaviour — the same declaration the caller would make by
+/// writing two `[[layer]]` blocks, which the surface has always admitted and which this expansion
+/// is defined to be identical to — so the refusal here would be a lint on one spelling of a thing
+/// the other spelling still admits, not a control. Closing it needs an ordering over access
+/// labels, which is a grants question and not a configuration one.
+fn expand_labels(blocks: &[LayerBlock]) -> Result<Vec<LayerBlock>> {
+    let mut expanded: Vec<LayerBlock> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let mut parent = block.clone();
+        let Some(labels) = parent.labels.take() else {
+            expanded.push(parent);
+            continue;
+        };
+        let object = format!("layer '{}' `[layer.labels]`", block.name);
+
+        // **The default is the parent's own value**, read from the parent's own declaration rather
+        // than from anything compiled: a parent that declares no gate is refused on its own
+        // account, and its refusal fires first, the parent being pushed before this block.
+        let visibility = match (&labels.visibility, &parent.visibility) {
+            (Some(declared), Some(parent_gate)) if declared == PUBLIC && parent_gate != PUBLIC => {
+                return Err(declaration_error(format!(
+                    "{object}: `visibility = \"public\"` under a layer gated on \
+                     '{parent_gate}'. A label layer's gate defaults to its parent's and is \
+                     overridable narrower, never wider — and `public` is the widest label there \
+                     is, held by every principal by construction, so this one would serve every \
+                     label of a layer whose own existence is gated. Omit the key to take \
+                     '{parent_gate}', or write the narrower label a viewer must hold"
+                )));
+            }
+            (Some(declared), _) => Some(declared.clone()),
+            (None, parent_gate) => parent_gate.clone(),
+        };
+
+        // **Both of these are declared, never supplied.** A disclosure control has no default,
+        // because the value an expansion could pick for a caller who wrote nothing is the value
+        // the caller never chose — and here the expansion previously picked both, fixing the
+        // content at `all` and the artifact gate at `inherited`. `visibility` remains the single
+        // exception in the surface, and only because the value it takes is the parent's own.
+        let artifact_visibility = labels.artifact_visibility.clone().ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `artifact_visibility` is required — what a label carrying no access                  label of its own is gated on. Write `{{ default = \"inherited\" }}` for labels                  gated with the layer, or name the field carrying each label's own"
+            ))
+        })?;
+        let content_requirement = labels
+            .content
+            .as_ref()
+            .and_then(|c| c.require_member_visibility.clone())
+            .ok_or_else(|| {
+                declaration_error(format!(
+                    "{object}: `[layer.labels.content]` must declare                      `require_member_visibility` — `all` where the label text was generated from                      the documents it names, so a viewer reads a synthesis only of documents it                      can already see, or `inherited` where the text is true whether or not any of                      them exists. Only the caller knows which, and the wider of the two cannot be                      a default"
+                ))
+            })?;
+
+        let ty = labels.ty.clone().ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `type` is required — it is the kind of content each label carries, \
+                 published on `/v1/meta` so a client knows what to draw: text, polygon, extent or \
+                 point"
+            ))
+        })?;
+
+        let child = LayerBlock {
+            name: labels.name.clone(),
+            title: labels.title.clone(),
+            members: labels.members.clone(),
+            labels: None,
+            views: parent.views.clone(),
+            source: labels.source.clone(),
+            fields: labels.fields.clone(),
+            artifacts: None,
+            membership: labels.membership.clone(),
+            hierarchy: Some(HierarchyBlock {
+                kind: Some("flat".to_string()),
+                prune_children: false,
+            }),
+            visibility,
+            artifact_visibility: Some(artifact_visibility),
+            require_member_visibility: labels.require_member_visibility.clone(),
+            withdraw_on_member_deletion: None,
+            depends_on: vec![parent.name.clone()],
+            levels: Vec::new(),
+            content: Some(ContentBlock {
+                computed: Vec::new(),
+                supplied: vec![SuppliedBlock {
+                    name: labels.name.clone(),
+                    ty: Some(ty),
+                    require_member_visibility: Some(content_requirement),
+                }],
+                withdraw_on_member_deletion: None,
+            }),
+        };
+        // **Immediately after its parent**, because a layer is declared after every layer it names
+        // in `depends_on` and the expansion has just named one.
+        expanded.push(parent);
+        expanded.push(child);
     }
-    Err(declaration_error(format!(
-        "layer '{layer}': `[layer.labels]` is specified and not built — the label sugar, expanding \
-         to a layer of its own (`annotation-write-cycle.md` §6.1). Declared in configuration.md §1 \
-         and refused here rather than ignored, because a block that parses and does nothing is a \
-         declaration its author believes is in effect"
-    )))
+    Ok(expanded)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2328,14 +2518,17 @@ fn check_column_name(name: &str) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 
 fn compile_layers(
-    blocks: &[LayerBlock],
+    declared: &[LayerBlock],
     views: &[View],
+    attributes: &[Attribute],
     sources: &mut Sources,
 ) -> Result<(Vec<LayerDeclaration>, Vec<LayerSources>)> {
+    // Sugar first, so nothing below this line knows a label layer from a layer.
+    let blocks = expand_labels(declared)?;
     let mut layers = Vec::with_capacity(blocks.len());
     let mut per_layer = Vec::with_capacity(blocks.len());
     let mut seen: HashSet<&str> = HashSet::new();
-    for block in blocks {
+    for block in &blocks {
         if !seen.insert(block.name.as_str()) {
             return Err(declaration_error(format!(
                 "layer '{}' is declared twice. A layer name is tombstoned on drop and never \
@@ -2343,7 +2536,6 @@ fn compile_layers(
                 block.name
             )));
         }
-        refuse_unbuilt_labels(&block.name, block.labels.is_some())?;
         let object = format!("layer '{}'", block.name);
 
         // **Refused here, before the artifacts file is opened**: a layer appears only in the views
@@ -2377,28 +2569,7 @@ fn compile_layers(
             }
         }
 
-        let membership = match block.membership.as_deref() {
-            Some("enumerated") => MembershipSource::Enumerated,
-            Some("spatial") => MembershipSource::Spatial,
-            Some("attribute") => MembershipSource::Attribute,
-            Some(other) => {
-                return Err(declaration_error(format!(
-                    "layer '{}': `membership = \"{other}\"` is none of \"enumerated\" (a stored \
-                     set per artifact), \"spatial\" (a shape, decomposed at request time) or \
-                     \"attribute\" (a predicate over a value column)",
-                    block.name
-                )));
-            }
-            None => {
-                return Err(declaration_error(format!(
-                    "layer '{}': `membership` is required — it decides what a write invalidates. \
-                     \"enumerated\" is a stored set per artifact, stale between the write and the \
-                     refresh; \"spatial\" is a shape decomposed at request time and never stale; \
-                     \"attribute\" is a predicate over a value column, likewise",
-                    block.name
-                )));
-            }
-        };
+        let membership = compile_membership(block, attributes)?;
 
         let hierarchy = compile_hierarchy(block)?;
         let visibility = match block.visibility.as_deref() {
@@ -2701,6 +2872,100 @@ fn compile_layers(
         layers.push(declaration);
     }
     Ok((layers, per_layer))
+}
+
+/// `membership` — where a layer's artifacts get their members, at its three spellings.
+///
+/// **Two words and a table**, and the table is not decoration: an attribute membership is a
+/// predicate over a value column, and *which* column is part of the declaration. Spelled as a
+/// bare word it would be a membership rule with nothing to evaluate, so the field rides the value
+/// that asserts there is one — the same shape `point_visibility = { field }` takes, and the same
+/// reason.
+fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<MembershipSource> {
+    let spellings = "\n  \
+         membership = \"enumerated\"              # a stored set per artifact\n  \
+         membership = \"spatial\"                 # a shape, decomposed at request time\n  \
+         membership = { attribute = \"severity\" }  # a predicate over that value column";
+    let Some(value) = &block.membership else {
+        return Err(declaration_error(format!(
+            "layer '{}': `membership` is required — it decides what a write invalidates. \
+             \"enumerated\" is a stored set per artifact, stale between the write and the \
+             refresh; \"spatial\" is a shape decomposed at request time and never stale; \
+             `{{ attribute = \"<field>\" }}` is a predicate over the value column it names, \
+             likewise:{spellings}",
+            block.name
+        )));
+    };
+    match value {
+        toml::Value::String(word) => match word.as_str() {
+            "enumerated" => Ok(MembershipSource::Enumerated),
+            "spatial" => Ok(MembershipSource::Spatial),
+            // Named apart from the general refusal because it is the one wrong word a caller has
+            // every reason to write: it *was* the spelling, and it is still the name of the thing.
+            // Telling them the word does not exist would leave them looking for a fourth kind.
+            "attribute" => Err(declaration_error(format!(
+                "layer '{}': `membership = \"attribute\"` names no column. An attribute \
+                 membership is a predicate over one value column, and which column is part of \
+                 the declaration — write `membership = {{ attribute = \"<field>\" }}`:{spellings}",
+                block.name
+            ))),
+            other => Err(declaration_error(format!(
+                "layer '{}': `membership = \"{other}\"` is neither \"enumerated\" (a stored set \
+                 per artifact) nor \"spatial\" (a shape, decomposed at request time):{spellings}",
+                block.name
+            ))),
+        },
+        toml::Value::Table(table) => {
+            let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let ["attribute"] = keys.as_slice() else {
+                return Err(declaration_error(format!(
+                    "layer '{}': `membership` as a table takes exactly `attribute`, and this one \
+                     carries {}:{spellings}",
+                    block.name,
+                    if keys.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        keys.join(", ")
+                    }
+                )));
+            };
+            let field = table["attribute"].as_str().filter(|f| !f.trim().is_empty());
+            let field = field.ok_or_else(|| {
+                declaration_error(format!(
+                    "layer '{}': `membership.attribute` must name the value column the predicate \
+                     reads. An attribute membership with no column is a rule with nothing to \
+                     evaluate:{spellings}",
+                    block.name
+                ))
+            })?;
+            // **Refused at the declaration, before a data file is opened** — the rule an attribute
+            // naming an undeclared vocabulary already follows. A membership over a column nothing
+            // declares is a predicate with nothing to read, and every artifact on that layer would
+            // have an empty membership: served, counted at zero, and indistinguishable from a
+            // layer whose artifacts were all withheld.
+            if !attributes.iter().any(|a| a.name == field) {
+                return Err(declaration_error(format!(
+                    "layer '{}': `membership = {{ attribute = \"{field}\" }}` names no declared \
+                     attribute. Declared: {}. A membership over a column nothing declares reads \
+                     nothing, and every artifact on the layer would be published with an empty \
+                     one",
+                    block.name,
+                    if attributes.is_empty() {
+                        "none".to_string()
+                    } else {
+                        names(attributes.iter().map(|a| a.name.as_str()))
+                    }
+                )));
+            }
+            Ok(MembershipSource::Attribute(field.to_string()))
+        }
+        other => Err(declaration_error(format!(
+            "layer '{}': `membership` is {other}, and it is one of two words or one \
+             table:{spellings}",
+            block.name
+        ))),
+    }
 }
 
 fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {

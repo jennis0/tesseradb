@@ -581,10 +581,15 @@ repaired.
 **Labels are declarable where they are used.** `[layer.labels]` expands to a layer of its own —
 same views, flat, `depends_on` the parent, the content wrapper — because a label is a first-class
 artifact with its own visibility and its own suppression, a synthesis being able to outrank its
-sources in sensitivity. What the sugar supplies is mechanical; what it never supplies is the gate,
-the membership requirement, or the existence of membership data, all of which are written out. The
-label layer's `visibility` defaults to its parent's — a default on a disclosure control, admissible
-because it is the parent's value rather than the widest one, and overridable narrower.
+sources in sensitivity. The expansion happens **before anything compiles**, so the sugared
+declaration and the same layer written out produce a **byte-identical bundle** and nothing below
+the parser has a label layer to treat differently. What the sugar supplies is mechanical; what it
+never supplies is the gate, the membership requirement, or the existence of membership data, all of
+which are written out. The label layer's `visibility` defaults to its parent's — a default on a
+disclosure control, admissible because it is the parent's value rather than the widest one. ⊘ Its
+*narrower, never wider* half is enforced only where it can be computed: `public` under a gated
+parent is refused, and two opaque labels are admitted unordered, the build having no ordering over
+access terms (`configuration.md` §1).
 
 **Members are source ids**, resolved through the build's own assignment exactly as the access
 relation's are; an id the build did not assign refuses the build. **Ordinals are assigned in
@@ -757,6 +762,16 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r8 — 2026-08-19. The label sugar builds, and its one default is bounded.** `[layer.labels]`
+expands to a `[[layer]]` block before anything compiles, and the two spellings are asserted to
+produce a byte-identical bundle — so this section's claim that a label is a first-class artifact is
+now structural rather than aspirational: there is no label layer below the parser to treat
+differently. The sugar needs a member source of its own (`[layer.labels.members]`), a ranked
+content's generating set being a `(artifact, rank, entity)` row and nothing else. **Its
+`visibility` default is the parent's actual value**, and the *never wider* half is enforced only at
+`public`, marked as unbuilt above: access labels are opaque terms and the build has no ordering over two of
+them.
 
 **r7 — 2026-08-19. §6.1's build inputs are built.** One source per layer, one row per artifact with
 `contents` as a ranked list, inline `artifacts`, membership by exclusion, and a layer's `fields` map

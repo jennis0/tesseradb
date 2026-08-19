@@ -150,8 +150,11 @@ pub enum Command {
     /// allocations that follow them, both read state only the executor may write. A handler that
     /// validated first could be overtaken by a registration of the same name between its check and
     /// the enqueue, and would then have acked two layers onto one name.
+    /// **Boxed** so one large variant does not set the size of every command in the queue: a
+    /// declaration is the biggest thing that travels here by a wide margin, and `Ingest` and
+    /// `Change` are the two the executor moves at rate.
     RegisterLayer {
-        declaration: tessera_types::layer::LayerDeclaration,
+        declaration: Box<tessera_types::layer::LayerDeclaration>,
     },
     /// Drop an annotation layer, tombstoning its name for ever.
     DropLayer { name: String },

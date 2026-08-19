@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 /// Where a layer's artifacts get their membership. Levels inherit it — a layer is enumerated or
 /// predicate-backed as a whole, never per level, because the membership source decides what a write
 /// invalidates and a layer is the unit of lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MembershipSource {
     /// A stored set of entities per artifact. Stale between the write and the refresh that rebuilds
@@ -66,8 +66,10 @@ pub enum MembershipSource {
     /// A shape, decomposed to Morton ranges at request time. Never stale — a point ingested inside
     /// a boundary is a member on the next request with nothing rebuilt.
     Spatial,
-    /// A predicate over an existing value column. Never stale, for the same reason.
-    Attribute,
+    /// A predicate over an existing value column, which the variant names: the membership is
+    /// defined by that field's value, so the field is part of the declaration rather than
+    /// something a reader could infer. Never stale, for the same reason `Spatial` is not.
+    Attribute(String),
 }
 
 /// Where each artifact's own access label is, and what one carrying none gets.
@@ -695,7 +697,7 @@ impl LayerDeclaration {
             }
             if matches!(
                 self.membership,
-                MembershipSource::Spatial | MembershipSource::Attribute
+                MembershipSource::Spatial | MembershipSource::Attribute(_)
             ) {
                 return Err(DeclarationError::ProportionalOnPredicate);
             }
@@ -816,7 +818,10 @@ mod tests {
     fn a_proportional_criterion_is_refused_on_a_predicate_layer() {
         // ⊘ Until the denominator is ruled: "the points inside this shape" declares no member set,
         // and its size changes at every write, so there is nothing stable to divide by.
-        for source in [MembershipSource::Spatial, MembershipSource::Attribute] {
+        for source in [
+            MembershipSource::Spatial,
+            MembershipSource::Attribute("severity".into()),
+        ] {
             let mut d = decl(HierarchyKind::Flat, vec![]);
             d.membership = source;
             d.require_member_visibility = Some(ExistenceCriterion::Fraction(0.1));

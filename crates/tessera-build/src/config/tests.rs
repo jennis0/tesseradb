@@ -141,10 +141,9 @@ fn expect_keys(text: &str, block: &str, documented: &[&str]) {
 
 /// **`configuration.md` §1's table, transcribed — and the transcription is the test.**
 ///
-/// One block §1 names is **parsed and not built**: `[layer.labels]`, the sugar expanding to a
-/// second layer. It is accepted by the derive *so that the refusal can name it* — decision 0013's
-/// rule, since "unknown field `labels`" reads as a typo where a caller who wrote one had every
-/// reason to expect it to work, §1 listing it.
+/// `[layer.labels]` is in it on the same footing as everything else: the sugar expands to a
+/// `[[layer]]` before anything compiles, so its key set is a real surface a caller declares
+/// against and a key added to it without an entry in §1 is a control nobody has reasoned about.
 #[test]
 fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
@@ -278,6 +277,28 @@ fn the_accepted_key_set_is_configuration_ms_table() {
         "[[layer]]\nname = \"l\"\n[[layer.content.supplied]]\nnonesuch = 1\n",
         "[[layer.content.supplied]]",
         &["name", "type", "require_member_visibility"],
+    );
+    expect_keys(
+        "[[layer]]\nname = \"l\"\n[layer.labels.content]\nnonesuch = 1\n",
+        "[layer.labels.content]",
+        &["require_member_visibility"],
+    );
+    expect_keys(
+        "[[layer]]\nname = \"l\"\n[layer.labels]\nnonesuch = 1\n",
+        "[layer.labels]",
+        &[
+            "artifact_visibility",
+            "content",
+            "name",
+            "title",
+            "source",
+            "fields",
+            "members",
+            "type",
+            "membership",
+            "require_member_visibility",
+            "visibility",
+        ],
     );
 }
 
@@ -1234,12 +1255,53 @@ fn content_withdrawal_defaults_to_the_half_that_cannot_widen() {
         .withdraw_on_member_deletion);
 }
 
+/// `membership` at its three spellings, and the two ways of getting it wrong.
+///
+/// **The table is not decoration.** An attribute membership is a predicate over one value column,
+/// and which column is part of the declaration — so the bare word `"attribute"`, which was the
+/// spelling before the field had a home, is refused with the table to write instead rather than
+/// as an unknown word (decision 0048: replaced, not aliased).
 #[test]
 fn a_layer_declares_its_membership_source() {
     let text = with_layer("").replace("membership                = \"enumerated\"\n", "");
     assert!(err(&text).contains("`membership` is required"), "{}", err(&text));
     let text = with_layer("").replace("\"enumerated\"", "\"predicate\"");
-    assert!(err(&text).contains("none of"), "{}", err(&text));
+    assert!(err(&text).contains("neither"), "{}", err(&text));
+
+    let spatial = with_layer("")
+        .replace("\"enumerated\"", "\"spatial\"")
+        .replace("require_member_visibility = { fraction = 0.05 }", "require_member_visibility = { count = 3 }");
+    assert_eq!(
+        parse_str(&spatial).unwrap().layers[0].membership,
+        MembershipSource::Spatial
+    );
+
+    let attribute = spatial.replace("\"spatial\"", "{ attribute = \"severity\" }");
+    assert_eq!(
+        parse_str(&attribute).unwrap().layers[0].membership,
+        MembershipSource::Attribute("severity".to_string())
+    );
+
+    // The retired bare word, named rather than reported as an unknown value: a caller who wrote it
+    // is looking for a column to name, not for a fourth kind of membership.
+    let bare = spatial.replace("\"spatial\"", "\"attribute\"");
+    assert!(err(&bare).contains("names no column"), "{}", err(&bare));
+    let empty = spatial.replace("\"spatial\"", "{ attribute = \"\" }");
+    assert!(
+        err(&empty).contains("must name the value column"),
+        "{}",
+        err(&empty)
+    );
+    let two = spatial.replace("\"spatial\"", "{ attribute = \"a\", spatial = true }");
+    assert!(err(&two).contains("takes exactly `attribute`"), "{}", err(&two));
+
+    // A column nothing declares reads nothing, and the layer would publish empty memberships —
+    // refused at the declaration, before a data file is opened, on the rule an attribute naming
+    // an undeclared vocabulary already follows.
+    let absent = spatial.replace("\"spatial\"", "{ attribute = \"nonesuch\" }");
+    let message = err(&absent);
+    assert!(message.contains("names no declared attribute"), "{message}");
+    assert!(message.contains("severity"), "{message}");
 }
 
 /// A computed property outside the closed vocabulary is refused rather than ignored: an artifact
@@ -1608,14 +1670,195 @@ fn a_member_source_needs_the_layers_own_source() {
     assert!(message.contains("roster"), "{message}");
 }
 
-/// ⊘ The label sugar is specified and not built, and the refusal names which it is rather than
-/// reading as a typo.
+// ---------------------------------------------------------------------------------------------
+// `[layer.labels]` — the sugar, and the layer it is sugar for
+// ---------------------------------------------------------------------------------------------
+
+/// The sugar, written under `LAYER`'s clustering.
+const SUGAR: &str = r#"
+  [layer.labels]
+  name                      = "topics/a"
+  title                     = "topics"
+  source                    = "topics.parquet"
+  fields                    = { members = "documents" }
+  type                      = "text"
+  membership                = "enumerated"
+  require_member_visibility = { fraction = 0.05 }
+  artifact_visibility       = { default = "inherited" }
+
+    [layer.labels.content]
+    require_member_visibility = "all"
+"#;
+
+/// The same layer, written out — every key the expansion supplies, spelled by hand.
+const WRITTEN_OUT: &str = r#"
+[[layer]]
+name                      = "topics/a"
+title                     = "topics"
+views                     = ["s0"]
+source                    = "topics.parquet"
+fields                    = { members = "documents" }
+membership                = "enumerated"
+hierarchy                 = { kind = "flat", prune_children = false }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { fraction = 0.05 }
+depends_on                = ["clusters/a"]
+
+  [[layer.content.supplied]]
+  name                      = "topics/a"
+  type                      = "text"
+  require_member_visibility = "all"
+"#;
+
+/// **The definition of sugar, asserted**: the two spellings compile to the same declaration and
+/// the same bound sources, so nothing downstream of the parser can tell them apart. The bundle
+/// half of the same claim is `build_layers.rs`'s
+/// `the_label_sugar_and_the_layer_written_out_build_the_same_bundle`.
 #[test]
-fn the_unbuilt_layer_blocks_name_what_is_absent() {
-    let text = with_layer("  [layer.labels]\n  name = \"topics\"\n");
+fn the_sugar_and_the_layer_written_out_are_one_declaration() {
+    // One directory for both, since a bound source is an absolute path and a `tempdir` per parse
+    // would differ in exactly the field this is asserting is the same.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sugared = parse_at(dir.path(), &with_layer(SUGAR), &HashMap::new())
+        .expect("the sugared declaration parses");
+    let written = parse_at(dir.path(), &with_layer(WRITTEN_OUT), &HashMap::new())
+        .expect("the written-out declaration parses");
+    assert_eq!(sugared.layers, written.layers);
+    assert_eq!(
+        format!("{:?}", sugared.layer_sources),
+        format!("{:?}", written.layer_sources)
+    );
+    // And what it expanded to, stated rather than left implicit in the equality above.
+    let label = &sugared.layers[1];
+    assert_eq!(label.name, "topics/a");
+    assert_eq!(label.views, vec!["s0".to_string()]);
+    assert_eq!(label.hierarchy.kind, HierarchyKind::Flat);
+    assert_eq!(label.depends_on, vec!["clusters/a".to_string()]);
+    assert_eq!(label.levels, Vec::new());
+    assert_eq!(label.content.supplied.len(), 1);
+    assert_eq!(label.content.supplied[0].name, "topics/a");
+    assert_eq!(label.content.supplied[0].ty, "text");
+    assert_eq!(
+        label.artifact_visibility,
+        tessera_types::layer::ArtifactVisibility {
+            field: None,
+            default: MemberDefault::Inherited
+        }
+    );
+}
+
+/// **The one defaulted disclosure control in the surface**, and the only widening it can catch.
+///
+/// The default is the parent's own value — never the widest one — so a label layer under a gated
+/// clustering is gated the same way without a word. `public` written out under a gated parent is
+/// the one case an ordering over access labels is not needed to decide: it is held by every
+/// principal by construction, so it is wider than anything else that could be there.
+#[test]
+fn a_label_layers_gate_defaults_to_its_parents_and_public_under_a_gate_is_refused() {
+    let public_parent = parse_str(&with_layer(SUGAR)).unwrap();
+    assert_eq!(public_parent.layers[0].visibility, None);
+    assert_eq!(public_parent.layers[1].visibility, None);
+
+    let gated = with_layer(SUGAR).replace(
+        "visibility                = \"public\"",
+        "visibility                = \"ir:analyst\"",
+    );
+    let config = parse_str(&gated).expect("a gated parent, and the label layer takes its gate");
+    assert_eq!(
+        config.layers[1].visibility,
+        Some("ir:analyst".to_string()),
+        "the default is the parent's actual gate"
+    );
+
+    // Declared narrower — admitted, and deliberately not ordered against the parent's: two opaque
+    // terms carry no ordering the build could compute (⊘, `expand_labels`).
+    let narrower = gated.replace(
+        "  membership                = \"enumerated\"",
+        "  membership                = \"enumerated\"\n  visibility = \"ir:secret\"",
+    );
+    assert_eq!(
+        parse_str(&narrower).unwrap().layers[1].visibility,
+        Some("ir:secret".to_string())
+    );
+
+    // And the one computable widening.
+    let wider = gated.replace(
+        "  membership                = \"enumerated\"",
+        "  membership                = \"enumerated\"\n  visibility = \"public\"",
+    );
+    let message = err(&wider);
+    assert!(message.contains("never wider"), "{message}");
+    assert!(message.contains("ir:analyst"), "{message}");
+}
+
+/// The reserved word still collides in the sugar's own gate slot, which is a slot that takes a
+/// caller's label.
+#[test]
+fn an_access_label_spelled_inherited_is_refused_in_the_sugar_too() {
+    let text = with_layer(SUGAR).replace(
+        "  membership                = \"enumerated\"",
+        "  membership                = \"enumerated\"\n  visibility = \"inherited\"",
+    );
     let message = err(&text);
-    assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("label sugar"), "{message}");
+    assert!(
+        message.contains("may not be spelled `inherited`"),
+        "{message}"
+    );
+}
+
+/// What the sugar never supplies is what a caller must write. It fills in the mechanical keys — the
+/// views, the flat hierarchy, the dependency on the parent, the content wrapper — and **not one
+/// disclosure control**: both member requirements and the artifact gate are the caller's, and the
+/// layer gate is the single defaulted key in the surface because the value it takes is the
+/// parent's own.
+///
+/// The two requirements are separate keys at separate grains and cannot be one: this one admits
+/// `{ fraction = p }`, and the content's admits exactly `all` or `inherited`.
+#[test]
+fn the_sugar_supplies_the_mechanical_keys_and_no_disclosure_control() {
+    for (removed, expected) in [
+        (
+            "  type                      = \"text\"\n",
+            "`type` is required",
+        ),
+        (
+            "  membership                = \"enumerated\"\n",
+            "`membership` is required",
+        ),
+        (
+            "  require_member_visibility = { fraction = 0.05 }\n",
+            "`require_member_visibility` is required",
+        ),
+        (
+            "  artifact_visibility       = { default = \"inherited\" }\n",
+            "`artifact_visibility` is required",
+        ),
+        (
+            "    require_member_visibility = \"all\"\n",
+            "`[layer.labels.content]` must declare",
+        ),
+    ] {
+        let text = with_layer(SUGAR).replace(removed, "");
+        let message = err(&text);
+        assert!(
+            message.contains(expected)
+                && (message.contains("topics/a") || message.contains("[layer.labels]")),
+            "removing `{removed}` must be refused naming the label layer: {message}"
+        );
+    }
+}
+
+/// A label layer is a layer, so it collides with one: the name is the identity, and two layers
+/// under one name would give bookmarks, edges and suppressions two destinations.
+#[test]
+fn a_label_layer_sharing_a_name_with_a_layer_is_refused() {
+    let text = with_layer(SUGAR).replace(
+        "name                      = \"topics/a\"",
+        "name                      = \"clusters/a\"",
+    );
+    let message = err(&text);
+    assert!(message.contains("declared twice"), "{message}");
 }
 
 // ---------------------------------------------------------------------------------------------

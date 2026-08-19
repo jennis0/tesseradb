@@ -29,9 +29,8 @@ the object. `--extent`, `--id-key`, `--id-key-file`, `--points`, `--pairs`, `--v
 each naming what is absent per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
 
-- **`[layer.labels]`**, a view's own `visibility`, and `withdraw_on_member_deletion = true` on a
-  **layer** (not on its content, which needs a fold path) — each refused at parse rather than
-  accepted and ignored.
+- **A view's own `visibility`**, and `withdraw_on_member_deletion = true` on a **layer** (not on
+  its content, which needs a fold path) — each refused at parse rather than accepted and ignored.
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
@@ -257,8 +256,9 @@ the canonical spelling, so there is no `fields` map beside it and no file for on
 | `attached_layer`, `attached_level`, `attached_key` | O | the edge this artifact hangs from; half an edge is refused |
 
 and four sub-blocks, each below: `[layer.members]` (O), `[layer.content]` (O),
-`[[layer.levels]]` (R for `stacked` and `tiered`, refused for `nested`) and ⊘ `[layer.labels]` (O).
-`[[layer.content.supplied]]` sits under `[layer.content]`, not under the layer.
+`[[layer.levels]]` (R for `stacked` and `tiered`, refused for `nested`) and `[layer.labels]` (O).
+`[[layer.content.supplied]]` sits under `[layer.content]`, not under the layer, and
+`[layer.labels.members]` under `[layer.labels]`.
 
 **`withdraw_on_member_deletion` exists at two levels, and their defaults differ.** On `[[layer]]`
 it governs the **artifact**; on `[layer.content]` it governs **supplied content** alone. Declaring
@@ -365,11 +365,50 @@ same views, flat, `depends_on` the parent, content wrapper supplied.
 
 | Key | | Value |
 |---|---|---|
-| `name`, `title`, `source`, `fields` | as `[[layer]]` | |
+| `name`, `title`, `source`, `fields`, `[layer.labels.members]` | as `[[layer]]` | |
 | `type` | R | the content type — `text`, `polygon`, `extent`, `point` |
 | `membership` | R | written out: a label's members are its generating set, which the build cannot derive |
-| `require_member_visibility` | R | typically `all` — containment |
-| `visibility` | D | the parent layer's; overridable narrower, never wider |
+| `require_member_visibility` | R | the **layer** grain: how much of a label's membership a viewer must see for the label to appear |
+| `artifact_visibility` | R | as `[[layer]]`; declared, never supplied |
+| `[layer.labels.content]` | R | one key, `require_member_visibility` — the **content** grain: `all` where the label text was generated from the documents it names, `inherited` where it is true whether or not any of them exists |
+| `visibility` | D | the parent layer's; narrower is admitted, and only one widening is checkable — see below |
+
+**The two requirements are separate keys because they are separate grains**, and no single key can
+carry both: the layer's admits `{ fraction = p }` and `{ count = n }`, and the content's admits
+exactly `all` or `inherited`. A caller may well want *show the topic to anyone who can see a
+twentieth of its documents, but only serve its text to someone who can see all of them*.
+
+**The expansion is textual, and that is the whole claim**: the block above becomes a `[[layer]]`
+block before anything compiles, so it meets every refusal and every reader a hand-written layer
+meets, and **a declaration written this way and the same one written out as a second `[[layer]]`
+build a byte-identical bundle**. Five things are supplied — the parent's `views`,
+`hierarchy = { kind = "flat" }`, `depends_on = [the parent]`, one
+`[[layer.content.supplied]]` entry named for the label layer, typed by `type` and carrying the
+caller's own `[layer.labels.content]` requirement.
+
+**The sugar supplies mechanism and not one disclosure control.** Everything it fills in is
+structural — which views, which shape, which parent, which wrapper — and every control is the
+caller's: both member requirements and the artifact gate are required keys, and `visibility` is
+the single defaulted one below. An earlier expansion fixed the content requirement at `all` and
+the artifact gate at `inherited`; both were choices belonging to the caller, and a value an
+expansion picks for a caller who wrote nothing is a value nobody chose.
+
+**`visibility` is the one defaulted disclosure control in this surface**, and it is admissible
+because the value it defaults to is the parent layer's own and never the widest one. What the
+default *cannot* be is checked: the design's rule is *narrower, never wider*, and **only one case
+of that is computable**. An access label is an opaque interned term, so whether every principal
+holding one also holds another is a fact about grants, which do not exist in the declaration.
+`public` is the exception — every principal holds it by construction
+(`per-point-attributes.md` §3.8) — so a label layer declaring `public` under a parent gated on
+anything else is refused.
+
+⊘ **Two distinct non-`public` labels are admitted and not ordered.** The parent's gate and the
+child's are then two independent gates, and a principal holding the child's and not the parent's
+reaches the labels without reaching the layer they describe. That is the same declaration a caller
+makes by writing two `[[layer]]` blocks — which this expansion is defined to be identical to — so
+a refusal here would be a lint on one spelling of something the other spelling still admits, not a
+control. Closing it needs an ordering over access labels, which is a question about grants and not
+about configuration.
 
 **Three words are reserved**, and only one occupies a slot that otherwise takes a caller's label:
 
@@ -634,11 +673,21 @@ content                   = { computed = ["centroid", "box"] }
   title                     = "HDBSCAN topics"
   type                      = "text"
   membership                = "enumerated"
-  require_member_visibility = "all"
+  artifact_visibility       = { default = "inherited" }
+  require_member_visibility = { fraction = 0.05 }   # show the topic at a twentieth …
+
+    [layer.labels.content]
+    require_member_visibility = "all"                # … but its text only in full
+
+    # A label's members are the documents it was generated from, and a ranked content's
+    # are the documents that rank was generated from — one row per (artifact, rank, entity).
+    [layer.labels.members]
+    source = "hdbscan_topic_members"
 ```
 
-⊘ **One block of that example does not build today**: `[layer.labels]` is refused whole, the label
-sugar being specified and not built. Every map in it is read, a layer's included.
+**Every block of that example builds**, `[layer.labels]` included: it expands to a
+`topics/hdbscan` layer drawn on `s0`, flat, depending on `clusters/hdbscan`, carrying one supplied
+`text` content, and gated `public` because that is what its parent declared.
 
 **A vocabulary is an object, not three attribute fields.** `name` is the identity, so attributes
 share one by naming it; `source` or an inline `[vocabulary.values]` table is where the values come
@@ -695,6 +744,14 @@ for drill-down to return.
   rosters for one artifact, and every masked count and every criterion divides by one of them, so
   which won would be the reader's order rather than anything the caller wrote. Two rows for one key
   in an artifact source is the same refusal: one row is one artifact;
+- **`membership = "attribute"` as a bare word**, which was the spelling before the field had a
+  home: a predicate over a value column is not declared until the column is named, so the refusal
+  gives the table — `{ attribute = "<field>" }` — rather than reporting an unknown value. **A
+  `membership` naming a column no `[[attribute]]` block declares** is refused with it, at parse and
+  before a data file is opened, on the rule an undeclared vocabulary reference already follows:
+  a predicate with nothing to read publishes every artifact on the layer with an empty membership;
+- **`[layer.labels].visibility = "public"` under a parent gated on anything else**, the one
+  widening an opaque label ordering is not needed to decide;
 - an access label spelled `inherited`, the one reserved word occupying a slot that otherwise takes
   a label (§5). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
   in slots that admit no label.
@@ -802,6 +859,26 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — a membership names its column, and the label sugar is real.** Two changes, and the
+second retires the last ⊘ on a whole block. **`membership` is two words and a table**:
+`{ attribute = "<field>" }` names the value column an attribute membership is a predicate over,
+because a rule with nothing to evaluate is not a declaration — and a column no `[[attribute]]`
+block declares is refused at parse, on the rule an undeclared vocabulary reference follows. The
+bare word `"attribute"` is refused with the table to write instead — it was the spelling, and a caller who writes it is
+looking for a column to name, not for a fourth kind of membership. **`[layer.labels]` builds**: it
+expands to a `[[layer]]` block *before anything compiles*, so the sugar meets every refusal, every
+allocator rule and every reader a hand-written layer meets, and the two spellings are asserted to
+produce a **byte-identical bundle** — the same statement the three membership spellings carry, and
+for the same reason. The expansion supplies the parent's views, a flat hierarchy, `depends_on` the
+parent, the content wrapper around `type`, and `artifact_visibility = { default = "inherited" }`.
+Two things fell out of building it. The block needs **`[layer.labels.members]`**, added to its key
+table above: a ranked content's generating set is a `(artifact, rank, entity)` row and there is no
+other shape that carries one, so without it the sugar could declare content the build would refuse
+to publish — the worked example in §6 was in exactly that state and is corrected with it. And the
+**"never wider" rule is only checkable at `public`**: two opaque access labels carry no ordering
+the build could compute, so the general case is admitted and marked as unenforceable at the claim
+rather than enforced by a check that could not do what it appeared to.
 
 **2026-08-19 — one source per layer, one row per artifact, and membership by exclusion.** The
 artifact grain was one row per `(artifact, rank)` in one file for every layer, which needed a

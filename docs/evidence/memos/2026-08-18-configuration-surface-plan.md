@@ -133,11 +133,19 @@ artifacts under one name.
 
 ### 7 — `membership` as a table, and `[layer.labels]`
 
-`membership = { attribute = "…" }` so attribute membership can name its field. Then the labels
-sugar, expanding to a real layer: same views, flat, `depends_on` the parent, content wrapper
+*Built.* `membership = { attribute = "…" }` so attribute membership can name its field. Then the
+labels sugar, expanding to a real layer: same views, flat, `depends_on` the parent, content wrapper
 supplied; gate, membership requirement and membership data all written out by the caller. The
 label layer's `visibility` defaults to its parent's — the one defaulted disclosure control in the
-surface, admissible because it is the parent's value and never the widest.
+surface, admissible because it is the parent's value and never the widest. Two things fell out of
+building it. The sugar needs **`[layer.labels.members]`**: a ranked content's generating set is an
+`(artifact, rank, entity)` row, so without a member source the block could declare content the
+build refuses to publish — which the worked example in `configuration.md` §6 was doing. And
+**"narrower, never wider" is checkable only at `public`** — two opaque access labels carry no
+ordering the build can compute, so `public` under a gated parent is refused and the general case
+is admitted with the gap marked at the claim rather than guarded by a check that could not do what
+it appeared to. The expansion is textual and happens before anything compiles, which is asserted
+the same way the membership spellings are: a byte-identical bundle.
 
 ### 8 — `tessera check`, `--extent auto`, and the disclosure report
 
