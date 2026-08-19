@@ -401,8 +401,8 @@ async function resolveCategoryCodes(column: string) {
  *
  * **This is a different question from the legend's**, asked of the same endpoint through its other
  * form. The legend resolves the codes it *drew*; this pages the values the server is willing to
- * list, which `listing` gates before answering — `public` publishes taxonomy whose existence
- * discloses nothing, `per_viewer` is refused. Keeping the two results in separate maps is what stops
+ * list, which `visibility` gates before answering — `public` publishes taxonomy whose existence
+ * discloses nothing, `derived` is refused. Keeping the two results in separate maps is what stops
  * a listed-but-undrawn value ever reaching a swatch.
  */
 async function loadFilterValues(column: string) {
@@ -647,7 +647,7 @@ function bindControls() {
           s.ranks = {};
           s.domains = {};
           // The filter *drafts* stay — a user switching principal is asking the same question of a
-          // different viewer. The offered value sets do not: `listing` is evaluated per principal,
+          // different viewer. The offered value sets do not: `visibility` is evaluated per principal,
           // so a picker built under the old token may list values this one may not see.
           s.filterValues = {};
           s.filterValueErrors = {};

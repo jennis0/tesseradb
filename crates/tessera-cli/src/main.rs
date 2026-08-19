@@ -818,7 +818,7 @@ fn parse_file_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// `render_in` is refused outright, so its every-view consequence is stated once rather than per
 /// column.
 ///
-/// **Dense codes under `listing = "per_viewer"` is deliberately not warned about** (owner ruling,
+/// **Dense codes under `visibility = "derived"` is deliberately not warned about** (owner ruling,
 /// 2026-08-07), and this is worth recording because §2.3 asks for the warning and a reader will
 /// otherwise add it. That warning guards vocabulary *cardinality* — a visible code being a lower
 /// bound on how many values exist. The owner does not hold cardinality as a threat. What must be

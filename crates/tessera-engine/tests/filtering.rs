@@ -40,7 +40,7 @@ const N: u64 = 60;
 /// The whole declared extent, so a depth-0 request covers every item.
 const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
-/// Two `u8` categories and a per-item string. `department` is `per_viewer`, which is the shape that
+/// Two `u8` categories and a per-item string. `department` is `derived`, which is the shape that
 /// owes membership postings *and* keeps the scan for filtering (decision 0063); `archive` is
 /// `public`, which is the shape whose filter is routed through those postings. The two carry the
 /// same value distribution under different names, so the routed answer and the scanned one are
@@ -125,8 +125,8 @@ fn department_of(e: u64) -> Option<&'static str> {
     }
 }
 
-/// The `public` column's value, one-to-one with the `per_viewer` one's. Two columns carrying the
-/// same partition of the corpus under different `listing`s is what makes the routed answer and the
+/// The `public` column's value, one-to-one with the `derived` one's. Two columns carrying the
+/// same partition of the corpus under different visibilities is what makes the routed answer and the
 /// scanned answer comparable set for set.
 fn archive_of(e: u64) -> Option<&'static str> {
     match department_of(e) {
@@ -1768,7 +1768,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
 /// **Decision 0062's C11 existence oracle, closed by construction.**
 ///
 /// The attack: `none_of: [every value I was offered]` returning a non-empty set would prove there
-/// exist values of a `per_viewer` category the principal was not shown. It cannot, and not because
+/// exist values of a `derived` category the principal was not shown. It cannot, and not because
 /// of an extra intersection — because evaluation happens inside the candidate, so an entity in the
 /// candidate carrying value *v* is itself the witness that makes *v* visible under C11's
 /// derivation. Every value reachable in the result was therefore offered.
@@ -1787,7 +1787,7 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
     let membership = generation
         .filter_columns
         .category_membership("department", &cand)
-        .expect("a per_viewer category carries membership postings");
+        .expect("a `derived` category carries membership postings");
     let offered: Vec<AttrLocalId> = fx
         .codes
         .values()
@@ -2202,7 +2202,7 @@ fn a_range_composes_with_a_category_and_a_string() {
 }
 
 // =================================================================================================
-// The category postings route (decision 0063) and `/v1/categories` under `per_viewer`
+// The category postings route (decision 0063) and `/v1/categories` under `derived`
 // =================================================================================================
 
 /// Where the build wrote one column's derived postings.
@@ -2292,11 +2292,11 @@ fn a_public_category_route_agrees_with_the_corpus_under_a_real_mask() {
 /// Both columns carry the same partition of the corpus. Each column's postings file is rewritten
 /// with a deliberately wrong mapping — every code claiming entity 0 and nothing else — and the two
 /// then answer differently: the `public` column returns the corrupted postings' answer, because it
-/// is routed through them; the `per_viewer` column returns the *correct* answer, because decision
+/// is routed through them; the `derived` column returns the *correct* answer, because decision
 /// 0063 keeps it on the scan. Nothing else in this file can tell the two routes apart, since a
 /// working route and a working scan agree by construction.
 #[test]
-fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
+fn a_public_column_reads_its_postings_and_a_derived_one_does_not() {
     let fx = fixture();
     let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
 
@@ -2333,9 +2333,9 @@ fn a_public_column_reads_its_postings_and_a_per_viewer_one_does_not() {
     assert_eq!(
         as_vec(&departmental),
         expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng")),
-        "a `per_viewer` column must be answered by the masked scan, whatever its postings say: \
+        "a `derived` column must be answered by the masked scan, whatever its postings say: \
          the postings' work is a function of the value named, which is the disclosure \
-         `listing = \"per_viewer\"` exists to prevent (decision 0063)"
+         `visibility = \"derived\"` exists to prevent (decision 0063)"
     );
     assert!(
         departmental.cardinality() > 1,
@@ -2439,10 +2439,10 @@ fn a_public_column_with_unreadable_postings_refuses_to_open() {
     assert!(reopen(&fx).is_ok(), "restored, it opens again");
 }
 
-/// **A `per_viewer` category column is not filterable merely because it is held.**
+/// **A `derived` category column is not filterable merely because it is held.**
 ///
 /// The map now carries every column the build wrote a value column for, which includes a
-/// `per_viewer` category declared `render`-only — its postings are what `/v1/categories` derives
+/// `derived` category declared `render`-only — its postings are what `/v1/categories` derives
 /// visibility from. Holding it must open no operand the schema did not declare, so `resolve` gates
 /// on the declaration and not on presence. (`department` here *is* declared filterable; the guard
 /// is asserted at the seam it protects, in `filter.rs`'s `Layers::filterable`.)
@@ -2461,7 +2461,7 @@ fn a_column_the_schema_did_not_declare_filterable_is_still_refused() {
 }
 
 // =================================================================================================
-// `/v1/categories` under `listing = "per_viewer"` (per-point-attributes §3.3)
+// `/v1/categories` under `visibility = "derived"` (per-point-attributes §3.3)
 // =================================================================================================
 
 /// Every value `column` offers this principal, in key order, paged at `limit` so the cursor is
@@ -2503,7 +2503,7 @@ fn offered(
 /// is offered, is withheld from this one. `ops` is declared and carried by nobody, so it is offered
 /// to neither: the empty-value case, which membership-derivation answers by hiding.
 #[test]
-fn a_per_viewer_value_is_offered_only_where_a_visible_item_carries_it() {
+fn a_derived_value_is_offered_only_where_a_visible_item_carries_it() {
     let fx = fixture();
     let cache = fx._dir.path().join("cache-cats");
     let wal = fx._dir.path().join("wal-cats");
@@ -2566,7 +2566,7 @@ fn both_category_request_forms_apply_the_membership_gate() {
 /// returns short pages whose length counts what the principal cannot see, and terminates the walk
 /// early — here it would drop `sales` entirely, since `ops` is invisible and sits between.
 #[test]
-fn a_per_viewer_page_is_filtered_before_it_is_cut() {
+fn a_derived_page_is_filtered_before_it_is_cut() {
     let fx = fixture();
     let cache = fx._dir.path().join("cache-cats-page");
     let wal = fx._dir.path().join("wal-cats-page");
@@ -2611,7 +2611,7 @@ fn a_per_viewer_page_is_filtered_before_it_is_cut() {
 
 /// **A `public` vocabulary is served as authored, to every principal alike** — including a value
 /// nothing carries, and including a principal who can see nothing. It derives no membership at all,
-/// which is why its filter may be routed through the postings (decision 0063) while a `per_viewer`
+/// which is why its filter may be routed through the postings (decision 0063) while a `derived`
 /// one may not.
 #[test]
 fn a_public_vocabulary_is_served_as_authored_to_every_principal() {
@@ -2716,9 +2716,9 @@ fn fold(engine: &tessera_engine::Engine) {
 
 /// One operand per family and per route, answered against `columns` under `candidate`.
 ///
-/// **Both routes are here on purpose.** `archive` is `listing = "public"`, so its `eq`/`in` are
+/// **Both routes are here on purpose.** `archive` is `visibility = "public"`, so its `eq`/`in` are
 /// answered by the derived postings — which the fold *rebuilds*, where it *merges* the value column
-/// — and `department` is `per_viewer`, so the same values are answered by the scan. A pass that
+/// — and `department` is `derived`, so the same values are answered by the scan. A pass that
 /// rebuilt one and lost the other would leave half of this table right.
 fn probe_every_operand(
     fx: &Fixture,

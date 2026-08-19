@@ -141,7 +141,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 2,
+        bundle_format: 3,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -195,7 +195,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, 2);
+    assert_eq!(bundle.manifest.bundle_format, 3);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);

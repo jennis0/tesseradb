@@ -933,7 +933,7 @@ pub struct Config {
     /// and the default page size when a caller names none.
     ///
     /// **A performance knob, so it defaults** (SA §7). It bounds a response, not a disclosure:
-    /// what a principal may be *told* is `listing`'s question and is settled before paging starts.
+    /// what a principal may be *told* is `visibility`'s question and is settled before paging starts.
     pub max_category_values: usize,
     /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
     /// even true does nothing in a binary built without the `bench-timing` feature. The header

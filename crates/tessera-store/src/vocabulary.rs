@@ -32,8 +32,8 @@ use rand::RngCore;
 use tessera_spatial::tiler::ScalarType;
 
 use crate::manifest::{
-    DeclaredScalar, Listing, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
-    VocabularyKind,
+    DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
+    Visibility, VocabularyKind,
 };
 
 /// The reserved *absent* code (§3.6). Never drawn and never in a value block, so a row carrying no
@@ -176,17 +176,17 @@ impl Minted {
 pub struct VocabularyMinter {
     name: String,
     kind: VocabularyKind,
-    listing: Listing,
+    visibility: Visibility,
     width: ScalarType,
     codes: BTreeMap<String, u32>,
-    /// Per-value presentation, keyed as `codes` is; absent for a value given no label, which is
+    /// Per-value presentation, keyed as `codes` is; absent for a value given no title, which is
     /// every value a *discovered* vocabulary mints — there was no author to write one.
     ///
     /// **Here rather than read back from the manifest at the point of use**, because a bound value
     /// lives in one of two homes (the manifest, or a `SEGMENTS-<n>.json` extension) and a reader
     /// that consulted only the first would serve a legend missing every value minted since the
     /// last build. This type already exists to be the union of those homes.
-    labels: BTreeMap<String, String>,
+    titles: BTreeMap<String, String>,
     /// Every code that must never be drawn: bound values and authored `reserved` retirements
     /// alike. [`ABSENT_CODE`] is excluded by the draw itself rather than held here, so that a
     /// vocabulary's assigned count is the number of codes it has actually spent.
@@ -202,16 +202,16 @@ impl VocabularyMinter {
     pub fn new(
         name: impl Into<String>,
         kind: VocabularyKind,
-        listing: Listing,
+        visibility: Visibility,
         width: ScalarType,
     ) -> Self {
         VocabularyMinter {
             name: name.into(),
             kind,
-            listing,
+            visibility,
             width,
             codes: BTreeMap::new(),
-            labels: BTreeMap::new(),
+            titles: BTreeMap::new(),
             assigned: BTreeSet::new(),
         }
     }
@@ -264,8 +264,8 @@ impl VocabularyMinter {
     ) -> Result<(), BindingConflict> {
         for value in &vocabulary.values {
             self.seed_value(&value.key, value.code)?;
-            if let Some(label) = &value.label {
-                self.labels.insert(value.key.clone(), label.clone());
+            if let Some(title) = &value.title {
+                self.titles.insert(value.key.clone(), title.clone());
             }
         }
         for &code in &vocabulary.reserved {
@@ -280,8 +280,8 @@ impl VocabularyMinter {
 
     /// Whether the existence of this vocabulary's values is sensitive (§3.8) — what
     /// `/v1/categories` gates on.
-    pub fn listing(&self) -> Listing {
-        self.listing
+    pub fn visibility(&self) -> Visibility {
+        self.visibility
     }
 
     pub fn width(&self) -> ScalarType {
@@ -318,10 +318,10 @@ impl VocabularyMinter {
         self.codes.iter().map(|(k, &c)| (k.as_str(), c))
     }
 
-    /// This value's presentation label, where an author wrote one. `None` is ordinary — the key is
+    /// This value's presentation title, where an author wrote one. `None` is ordinary — the key is
     /// the display fallback, and a discovered value never has one.
-    pub fn label_of(&self, key: &str) -> Option<&str> {
-        self.labels.get(key).map(String::as_str)
+    pub fn title_of(&self, key: &str) -> Option<&str> {
+        self.titles.get(key).map(String::as_str)
     }
 
     /// How many codes are spent — the quantity a cardinality alarm watches.
@@ -521,7 +521,7 @@ impl Vocabularies {
             let mut minter = VocabularyMinter::new(
                 vocabulary.name.clone(),
                 vocabulary.kind,
-                vocabulary.listing,
+                vocabulary.visibility,
                 width,
             );
             minter.seed_manifest(vocabulary)?;
@@ -578,7 +578,7 @@ impl Vocabularies {
                 .map(|(key, code)| ManifestVocabularyValue {
                     key: key.to_string(),
                     code,
-                    label: None,
+                    title: None,
                 })
                 .collect();
             if !values.is_empty() {
@@ -651,7 +651,7 @@ pub fn values_of(minter: &VocabularyMinter) -> Vec<ManifestVocabularyValue> {
         .map(|(key, code)| ManifestVocabularyValue {
             key: key.to_string(),
             code,
-            label: None,
+            title: None,
         })
         .collect()
 }
@@ -664,7 +664,7 @@ mod tests {
         VocabularyMinter::new(
             "departments",
             VocabularyKind::Discovered,
-            Listing::PerViewer,
+            Visibility::Derived,
             width,
         )
     }
@@ -679,12 +679,12 @@ mod tests {
         m.seed_manifest(&ManifestVocabulary {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
-            listing: Listing::PerViewer,
+            visibility: Visibility::Derived,
             values: (1..=100)
                 .map(|c| ManifestVocabularyValue {
                     key: format!("built-{c}"),
                     code: c,
-                    label: None,
+                    title: None,
                 })
                 .collect(),
             reserved: (101..=150).collect(),
@@ -834,13 +834,13 @@ mod tests {
         ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Declared,
-            listing: Listing::PerViewer,
+            visibility: Visibility::Derived,
             values: values
                 .iter()
                 .map(|(key, code)| ManifestVocabularyValue {
                     key: key.to_string(),
                     code: *code,
-                    label: None,
+                    title: None,
                 })
                 .collect(),
             reserved: Vec::new(),
@@ -951,7 +951,7 @@ mod tests {
                 values: vec![ManifestVocabularyValue {
                     key: "k".to_string(),
                     code: 4,
-                    label: None,
+                    title: None,
                 }],
             }],
         )
@@ -970,11 +970,11 @@ mod tests {
         let mut built = vec![ManifestVocabulary {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
-            listing: Listing::PerViewer,
+            visibility: Visibility::Derived,
             values: vec![ManifestVocabularyValue {
                 key: "ops".to_string(),
                 code: 4711,
-                label: Some("Operations".to_string()),
+                title: Some("Operations".to_string()),
             }],
             reserved: vec![99],
         }];
@@ -984,13 +984,13 @@ mod tests {
                 ManifestVocabularyValue {
                     key: "k9-unit".to_string(),
                     code: 31_337,
-                    label: None,
+                    title: None,
                 },
                 // Restated from an earlier manifest: folded once, not twice.
                 ManifestVocabularyValue {
                     key: "ops".to_string(),
                     code: 4711,
-                    label: None,
+                    title: None,
                 },
             ],
         }];
@@ -1004,9 +1004,9 @@ mod tests {
             .collect();
         assert_eq!(folded, vec![("ops", 4711), ("k9-unit", 31_337)]);
         assert_eq!(
-            built[0].values[0].label.as_deref(),
+            built[0].values[0].title.as_deref(),
             Some("Operations"),
-            "a restated binding must not strip the label the build gave it"
+            "a restated binding must not strip the title the build gave it"
         );
         assert_eq!(built[0].reserved, vec![99], "retirements are carried");
 
@@ -1028,7 +1028,7 @@ mod tests {
                 values: vec![ManifestVocabularyValue {
                     key: "k".to_string(),
                     code: 4,
-                    label: None,
+                    title: None,
                 }],
             }],
         );

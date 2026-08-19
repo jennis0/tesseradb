@@ -66,7 +66,7 @@ class UnknownColumn(Exception):
 
     Contracts §3.2: an unknown *column* is a `422`, an unknown *value* is an empty operand — the
     two must not be conflated, because refusing a value would make the filter surface an
-    existence oracle over exactly what `listing = "per_viewer"` hides. This module mirrors the
+    existence oracle over exactly what `visibility = "derived"` hides. This module mirrors the
     distinction: an unknown column raises (the test asserts the server's 422), while an unknown
     value falls out of the arithmetic below as an operand matching nothing.
     """

@@ -79,7 +79,7 @@ pub use tessera_store::manifest::DeclaredScalar;
 // The ingest handler resolves category keys to codes and must name the reserved *absent* code and
 // the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
 pub use tessera_store::manifest::{
-    Listing, ManifestVocabulary, ManifestVocabularyValue, VocabularyKind,
+    Visibility, ManifestVocabulary, ManifestVocabularyValue, VocabularyKind,
 };
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
@@ -279,7 +279,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         files: std::collections::BTreeMap::new(),
     };
     let bundle_manifest = tessera_store::manifest::Manifest {
-        bundle_format: 2,
+        bundle_format: 3,
         created_at: String::new(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),

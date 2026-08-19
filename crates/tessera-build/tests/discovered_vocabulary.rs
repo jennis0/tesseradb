@@ -1,7 +1,7 @@
 //! Build-level tests for `value_set = "open"` (issue #82's build half).
 //!
 //! `schema.rs`'s unit tests cover the parse-time rules (the refusal lifted, the empty-start
-//! case, the relaxed `listing = "public"` combination). These exercise the whole build: minting
+//! case, the relaxed `visibility = "public"` combination). These exercise the whole build: minting
 //! through `tessera_store::vocabulary::VocabularyMinter`, the batch-level pre-pass in
 //! `input::scan_attributes`, and the result landing in `MANIFEST.vocabularies`.
 
@@ -275,7 +275,7 @@ fn discovered_vocabulary_mints_every_novel_key_and_records_it() {
         .iter()
         .find(|v| v.name == "department")
         .expect("MANIFEST.vocabularies carries 'department'");
-    assert_eq!(vocab.listing, tessera_store::manifest::Listing::PerViewer);
+    assert_eq!(vocab.visibility, tessera_store::manifest::Visibility::Derived);
     assert!(vocab.reserved.is_empty());
     let mut got_keys: Vec<&str> = vocab.values.iter().map(|v| v.key.as_str()).collect();
     got_keys.sort_unstable();
@@ -574,10 +574,10 @@ vocabulary = "department"
     );
 }
 
-/// `listing = "public"` with a discovered vocabulary now builds (warns rather than refuses) —
+/// `visibility = "public"` with a discovered vocabulary now builds (warns rather than refuses) —
 /// the end-to-end counterpart of `schema.rs`'s parse-level test.
 #[test]
-fn public_listing_with_a_discovered_vocabulary_builds() {
+fn public_visibility_with_a_discovered_vocabulary_builds() {
     let temp = tempfile::tempdir().unwrap();
     let points = temp.path().join("points.parquet");
     let pairs = temp.path().join("pairs.parquet");

@@ -3279,7 +3279,7 @@ pub(crate) fn scalar_schema_of(
 /// building this from that list would read a filter column's value out of a neighbouring column's
 /// slot wherever the two differ, which is most schemas.
 ///
-/// **A `listing = "per_viewer"` category is here whether or not it is declared filterable**, and
+/// **A `visibility = "derived"` category is here whether or not it is declared filterable**, and
 /// that is the same rule the build applies when it decides which columns owe a value column and
 /// derived postings (`filter-index.md` §2.3). Its member sets are what `/v1/categories` derives
 /// value visibility from, and the postings cover the build alone — so without an extent, a value
@@ -3491,7 +3491,7 @@ mod segment_schema_tests {
     #[test]
     fn a_segments_writer_schema_omits_filter_only_columns() {
         let manifest = tessera_store::manifest::Manifest {
-            bundle_format: 2,
+            bundle_format: 3,
             created_at: String::new(),
             data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
@@ -3584,7 +3584,7 @@ mod vocabulary_extensions_tests {
         ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
-            listing: crate::Listing::PerViewer,
+            visibility: crate::Visibility::Derived,
             values: Vec::new(),
             reserved: Vec::new(),
         }
@@ -3608,7 +3608,7 @@ mod vocabulary_extensions_tests {
             values: vec![ManifestVocabularyValue {
                 key: "held".to_string(),
                 code: 7,
-                label: None,
+                title: None,
             }],
         });
 
@@ -3636,7 +3636,7 @@ mod vocabulary_extensions_tests {
             values: vec![ManifestVocabularyValue {
                 key: "eng".to_string(),
                 code: 4,
-                label: None,
+                title: None,
             }],
         });
 

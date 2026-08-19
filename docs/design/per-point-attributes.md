@@ -63,17 +63,17 @@ principal cannot see.
 > code no key explains can no longer be stored.
 >
 > **`/v1/categories` is built** (2026-08-07, contracts r25). `/v1/meta` publishes the column schema
-> in full — a `category` block of `{vocabulary, kind, listing}` whose absence marks a column plain —
+> in full — a `category` block of `{vocabulary, kind, visibility}` whose absence marks a column plain —
 > and `/v1/categories/{column}` serves the values: the codes a caller names, or the set paged by
-> value key, both behind one `listing` check. The column name is the identifier, and is not
+> value key, both behind one `visibility` check. The column name is the identifier, and is not
 > view-qualified, because membership is entity-space and a column rendered in several views has
 > one member set.
 >
 > **Vocabulary visibility is built.** §3.3's predicate runs against the per-value member sets — a
 > postings artifact keyed by `(column, code)`, measured at 0.31–1.01× the column it indexes, which a
-> `per_viewer` category gets whatever its flags say — unioned with the value-column extents a
+> `derived` category gets whatever its flags say — unioned with the value-column extents a
 > flush writes, so a value carried only by entities ingested since the build is still offered.
-> `listing` is enforced in both directions: `public` publishes as authored, `per_viewer` is filtered
+> `visibility` is enforced in both directions: `public` publishes as authored, `derived` is filtered
 > per principal, and a column whose member sets cannot be read is refused rather than served empty,
 > which would be indistinguishable from a correctly-computed empty answer.
 >
@@ -413,7 +413,7 @@ would silently fail to hold codes minted for a wider one.
 **A vocabulary is a named object and a column references one** (`values_of`). Keys, codes and
 properties are shared — the part humans maintain; postings, membership and therefore visibility stay
 per-column, since points where `owner_department = eng` and where `reviewing_department = eng` are
-different sets. **Attributes sharing a vocabulary must agree on `listing`, `vocabulary` and
+different sets. **Attributes sharing a vocabulary must agree on `visibility`, `vocabulary` and
 `width`**, or the weaker setting governs both and the gated column's value set publishes through the
 published one. Refused at parse.
 

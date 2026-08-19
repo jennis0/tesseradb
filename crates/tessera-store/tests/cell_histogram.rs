@@ -136,7 +136,7 @@ fn build_bundle(root: &Path) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 2,
+        bundle_format: 3,
         created_at: "2026-07-31T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),

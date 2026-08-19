@@ -31,7 +31,7 @@ export type ArrowType =
  */
 export type CategoryDescriptor = {
   /**
-   * The value set this column's codes index. Two columns may share one — keys, codes and labels
+   * The value set this column's codes index. Two columns may share one — keys, codes and titles
    * are shared with it, so a resolved palette may be reused across them.
    *
    * **Visibility may not be reused across them.** Member sets are per column, so a value visible
@@ -41,10 +41,11 @@ export type CategoryDescriptor = {
   /** Whether the value set is closed at build (`declared`) or grows from the corpus. */
   kind: 'declared' | 'discovered';
   /**
-   * Whether the *existence* of a value is sensitive. `per_viewer` means `/v1/categories` filters
-   * the set per principal — and today refuses it, the predicate being unbuilt.
+   * Whether the *existence* of a value is sensitive. `derived` means `/v1/categories` filters the
+   * set per principal — the value is offered only where the viewer can already see a point
+   * carrying it.
    */
-  listing: 'per_viewer' | 'public';
+  visibility: 'derived' | 'public';
 };
 
 /** One declared per-item column. `category` is present only for a category column. */
@@ -195,10 +196,10 @@ export type Meta = {
 /** One category value: what a code stands for, and how to show it. */
 export type CategoryValue = {
   code: number;
-  /** The stable key the code is bound to. The display fallback when there is no label. */
+  /** The stable key the code is bound to. The display fallback when there is no title. */
   key: string;
   /** Presentation, amendable without a build. Absent for every value a discovered vocabulary mints. */
-  label: string | null;
+  title: string | null;
 };
 
 export type ViewportRequest = {

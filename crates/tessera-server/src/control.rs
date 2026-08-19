@@ -2482,11 +2482,11 @@ mod tests {
                 &[tessera_engine::ManifestVocabulary {
                     name: "departments".to_string(),
                     kind,
-                    listing: tessera_engine::Listing::PerViewer,
+                    visibility: tessera_engine::Visibility::Derived,
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
                         code: CODE_OPS,
-                        label: None,
+                        title: None,
                     }],
                     reserved: Vec::new(),
                 }],

@@ -56,7 +56,7 @@ export type AppState = {
    * value no mark carries, which is precisely the disclosure the legend's construction avoids.
    */
   filterValues: Record<string, CategoryValue[]>;
-  /** A refused enumeration, per column — a `per_viewer` listing is the expected one. */
+  /** A refused enumeration, per column — a `derived` visibility is the expected one. */
   filterValueErrors: Record<string, {code: string; detail: string}>;
   /** Undefined means "do not send k", so the deployment's own ceiling applies (contracts §3.2). */
   k: number | undefined;
@@ -177,7 +177,7 @@ export type AppState = {
    * another. Sharing the map would be the one shortcut that turns a correct gate into a leak.
    */
   categories: Record<string, CategoryValue[]>;
-  /** A refused `/v1/categories` call, per column — notably the ⊘ `per_viewer` refusal. */
+  /** A refused `/v1/categories` call, per column — notably the ⊘ `derived` refusal. */
   categoryErrors: Record<string, {code: string; detail: string}>;
   /**
    * Palette rank per code, per column: assigned by observed frequency and never reordered, so a

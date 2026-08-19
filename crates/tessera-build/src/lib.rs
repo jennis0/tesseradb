@@ -1193,7 +1193,7 @@ fn write_manifests(
                         Some(minter) => tessera_store::vocabulary::values_of(minter)
                             .into_iter()
                             .map(|value| ManifestVocabularyValue {
-                                label: v.titles.get(&value.key).cloned(),
+                                title: v.titles.get(&value.key).cloned(),
                                 ..value
                             })
                             .collect(),
@@ -1203,7 +1203,7 @@ fn write_manifests(
                             .map(|(key, &code)| ManifestVocabularyValue {
                                 key: key.clone(),
                                 code,
-                                label: v.titles.get(key).cloned(),
+                                title: v.titles.get(key).cloned(),
                             })
                             .collect(),
                     };
@@ -1220,7 +1220,7 @@ fn write_manifests(
                                 tessera_store::manifest::VocabularyKind::Discovered
                             }
                         },
-                        listing: v.visibility,
+                        visibility: v.visibility,
                         values,
                         reserved: v.reserved.clone(),
                     }

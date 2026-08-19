@@ -407,11 +407,11 @@ fn the_postings_file_is_under_the_manifest_digest() {
     );
 }
 
-/// A `per_viewer` category gets postings whatever its `index` says, because the listing control
+/// A `derived` category gets postings whatever its `index` says, because the visibility control
 /// is membership-derived and the member sets *are* these postings (per-point-attributes §3.3).
-/// `RENDER_ONLY_SCHEMA` declares `listing = "per_viewer"` without `filter`, so this is the case.
+/// `RENDER_ONLY_SCHEMA` declares `visibility = "derived"` without `filter`, so this is the case.
 #[test]
-fn per_viewer_owes_postings_without_a_filter_declaration() {
+fn derived_owes_postings_without_a_filter_declaration() {
     let dir = build_with(RENDER_ONLY_SCHEMA);
     let out = dir.path().join("bundle");
     let column = ColumnPostings::open_keyed(&postings_path(&out, "department")).unwrap();

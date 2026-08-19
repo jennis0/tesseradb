@@ -18,14 +18,14 @@
 //!
 //! ## What is gated, and what is not
 //!
-//! `listing = "public"` is an authored assertion that the *existence* of these value names
+//! `visibility = "public"` is an authored assertion that the *existence* of these value names
 //! discloses nothing (§3.8) — the names came from an artefact someone wrote, not from the corpus —
 //! so the set is served as authored to any principal with a session.
 //!
-//! `listing = "per_viewer"` is the C11 channel: a value is visible iff at least one item carrying
+//! `visibility = "derived"` is the C11 channel: a value is visible iff at least one item carrying
 //! it is (§3.3), derived per request from inside `M_auth`, never maintained. The per-`(column,
 //! code)` membership sets it needs are the category's derived postings, which the build writes for
-//! every `per_viewer` column whatever its `index` says (`filter-index.md` §2.3) — so the
+//! every `derived` column whatever its `index` says (`filter-index.md` §2.3) — so the
 //! predicate is `members(code) ∩ candidate ≠ ∅` against the *composed* candidate, the same
 //! entity-space set a filter is evaluated under. **Derivation self-retires**: a value whose last
 //! visible member is suppressed stops being offered with no third retirement rule, which is why
@@ -50,11 +50,11 @@
 //!
 //! **An unresolvable code is omitted, never refused.** "No such code", "a code no key explains"
 //! and "a value you cannot see" are one outcome, because distinguishing them makes this endpoint
-//! an existence oracle over exactly what `per_viewer` hides — the same rule §3.8 states for a
+//! an existence oracle over exactly what `derived` hides — the same rule §3.8 states for a
 //! filter naming an invisible value, and the same precedent contracts §3.2 sets for an unmatched
 //! token.
 
-use tessera_store::manifest::{Listing, VocabularyKind};
+use tessera_store::manifest::{Visibility, VocabularyKind};
 use tessera_store::vocabulary::ABSENT_CODE;
 
 use crate::session::{EngineError, Result, Session};
@@ -73,19 +73,19 @@ pub struct CategoryColumn {
     pub column: String,
     pub vocabulary: String,
     pub kind: VocabularyKind,
-    pub listing: Listing,
+    pub visibility: Visibility,
 }
 
 /// One value: the stable key a row's code stands for, and its presentation.
 ///
-/// **The key is not the display name** (§3.1). `label` is amendable without a build; the key is
-/// what the code means and is the display fallback when no author wrote a label — which is every
+/// **The key is not the display name** (§3.1). `title` is amendable without a build; the key is
+/// what the code means and is the display fallback when no author wrote a title — which is every
 /// value a discovered vocabulary mints.
 #[derive(Debug, Clone)]
 pub struct CategoryValue {
     pub code: u32,
     pub key: String,
-    pub label: Option<String>,
+    pub title: Option<String>,
 }
 
 /// Which values a caller wants.
@@ -124,7 +124,7 @@ impl Engine {
             .iter()
             .filter_map(|scalar| {
                 let name = scalar.vocabulary.as_deref()?;
-                // Both `kind` and `listing` are read from the **vocabulary**, which is the object
+                // Both `kind` and `visibility` are read from the **vocabulary**, which is the object
                 // that carries them; a column referencing one that does not exist is refused at
                 // seed (`Vocabularies::seed`), so this cannot silently drop a declared column.
                 let vocabulary = generation.vocabularies.get(name)?;
@@ -132,7 +132,7 @@ impl Engine {
                     column: scalar.name.clone(),
                     vocabulary: name.to_string(),
                     kind: vocabulary.kind(),
-                    listing: vocabulary.listing(),
+                    visibility: vocabulary.visibility(),
                 })
             })
             .collect()
@@ -176,10 +176,10 @@ impl Engine {
         //
         // **A `public` set has no predicate at all**, and that is the whole of the difference: the
         // names came from an artefact someone wrote, so there is nothing to derive and no mask to
-        // consult. A `per_viewer` set is derived from inside `M_auth` per request, per §3.3.
-        let candidate = match vocabulary.listing() {
-            Listing::Public => None,
-            Listing::PerViewer => {
+        // consult. A `derived` set is derived from inside `M_auth` per request, per §3.3.
+        let candidate = match vocabulary.visibility() {
+            Visibility::Public => None,
+            Visibility::Derived => {
                 // **The session's own fragment is not enough.** It is a snapshot taken at
                 // authorise, and composition treats entities below the live watermark as
                 // fragment-resident — so a value carried only by entities a flush has published
@@ -234,7 +234,7 @@ impl Engine {
                     values.push(CategoryValue {
                         code,
                         key: key.to_string(),
-                        label: vocabulary.label_of(key).map(str::to_string),
+                        title: vocabulary.title_of(key).map(str::to_string),
                     });
                 }
                 (values, None)
@@ -242,7 +242,7 @@ impl Engine {
             CategoryQuery::Page { after, limit } => {
                 // **Filtered before the page is cut, never after.** Taking `limit` values and then
                 // dropping the invisible ones would return short pages whose length is a count of
-                // what the principal cannot see — a per-page disclosure of exactly what `listing`
+                // what the principal cannot see — a per-page disclosure of exactly what `visibility`
                 // withholds — and would terminate the walk early, hiding visible values behind
                 // invisible ones.
                 let mut page: Vec<CategoryValue> = Vec::new();
@@ -260,7 +260,7 @@ impl Engine {
                     page.push(CategoryValue {
                         code,
                         key: key.to_string(),
-                        label: vocabulary.label_of(key).map(str::to_string),
+                        title: vocabulary.title_of(key).map(str::to_string),
                     });
                 }
                 (page, next)

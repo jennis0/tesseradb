@@ -21,8 +21,8 @@ import {
  * ## The two enumerations a viewer performs, and why they are not the same
  *
  * A category **filter** offers the value set `/v1/categories` pages, which the server gates by
- * `listing` before it answers: `public` means the keys are published taxonomy whose existence
- * discloses nothing, and `per_viewer` is refused outright today. A category **legend** offers
+ * `visibility` before it answers: `public` means the keys are published taxonomy whose existence
+ * discloses nothing, and `derived` is refused outright today. A category **legend** offers
  * something quite different — only the codes the marks on screen actually carry — because a legend
  * naming every declared value would name values that exist solely in items this principal cannot
  * see. Both are correct for their purpose and neither may be substituted for the other; the panel
@@ -135,7 +135,7 @@ function categoryBody(state: AppState, column: string, draft: {keys: string[]}):
   ];
   const ticks = ordered
     .map((v) => {
-      const text = v.label && v.label !== v.key ? `${v.key} — ${v.label}` : v.key;
+      const text = v.title && v.title !== v.key ? `${v.key} — ${v.title}` : v.key;
       return `<label class="tick"><input type="checkbox" data-cat="${esc(column)}"
         value="${esc(v.key)}"${chosen.has(v.key) ? ' checked' : ''} /> ${esc(text)}</label>`;
     })

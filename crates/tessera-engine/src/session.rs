@@ -440,7 +440,7 @@ pub enum EngineError {
     MultiPartitionView(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
-    /// `/v1/categories` was asked for a `listing = "per_viewer"` column whose per-`(column, code)`
+    /// `/v1/categories` was asked for a `visibility = "derived"` column whose per-`(column, code)`
     /// membership sets could not be read — they are the column's derived postings, and either the
     /// bundle carries none for it or the file failed to read.
     ///
@@ -554,7 +554,7 @@ impl std::fmt::Display for EngineError {
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
             EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
                 f,
-                "column '{column}' declares `listing = \"per_viewer\"`, and its per-viewer value \
+                "column '{column}' declares `visibility = \"derived\"`, and its per-viewer value \
                  visibility could not be derived ({detail}). This column's values are refused \
                  rather than published unfiltered, and rather than served empty — an empty value \
                  set is what a principal who may see none of them is told"

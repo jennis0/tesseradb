@@ -250,7 +250,7 @@ console.log('--- canvas ---');
 console.log(' ', JSON.stringify(canvasPixels));
 // A refusal the contract *requires* still makes the browser log "Failed to load resource", so the
 // two are separated rather than one hiding the other. `/v1/categories` answers 500 for a
-// `per_viewer` column by design (contracts §3.2: the visibility predicate is ⊘ unbuilt, and
+// `derived` column by design (contracts §3.2: the visibility predicate is ⊘ unbuilt, and
 // serving the set empty would be indistinguishable from a computed empty answer), so the viewer
 // exercising that column is the instrument working, not breaking. Only the *unexplained* ones fail
 // the run — and the explained ones are still printed, or this becomes a place to hide a real 500.

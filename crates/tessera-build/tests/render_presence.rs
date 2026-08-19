@@ -23,7 +23,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Attribute, Listing, Schema, Vocabulary, ValueSet};
+use tessera_build::config::{Attribute, Visibility, Schema, Vocabulary, ValueSet};
 use tessera_build::{build, BuildArgs};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
@@ -145,7 +145,7 @@ fn schema() -> Schema {
                 title: None,
                 value_set: ValueSet::Closed,
                 width: ScalarType::U8,
-                visibility: Listing::Public,
+                visibility: Visibility::Public,
                 codes: ARCHIVE_VALUES
                     .iter()
                     .map(|(k, c)| (k.to_string(), *c))

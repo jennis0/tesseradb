@@ -54,7 +54,7 @@ value is derived on top as an accelerator. This document owns the artefact and i
 query does with it is [`filter-surface.md`](filter-surface.md).
 
 **Which declarations reach this artefact, and which do not.** `index = true` is the plain one. A
-category whose vocabulary is `listing = "per_viewer"` owes the column and its postings whatever its
+category whose vocabulary is `visibility = "derived"` owes the column and its postings whatever its
 flags say, because that disclosure control is membership-derived (§2.3). A column with neither
 `render` nor `index` is **blob-resident** and owns nothing here — its values are the record blob's
 and it is no operand at all (records §3). And a **rendered category** is filterable over the
@@ -76,7 +76,7 @@ the candidate mask and the column, never of the value — which is what makes a 
 nonexistent one indistinguishable **in work**, as per-point-attributes §3.8 requires (§2.2).
 
 Two further consequences. The artefact is the same one per-point-attributes §3.3 needs for vocabulary
-visibility, so building it closed the `listing = "per_viewer"` refusal rather than deferring it. And it
+visibility, so building it closed the `visibility = "derived"` refusal rather than deferring it. And it
 is **entity-space, so it is view-invariant**: a view attaches, populates or drops without touching any
 of it (§7).
 
@@ -84,7 +84,7 @@ of it (§7).
 > the masked scan behind every operator each family declares, and `entity → value` all exist for
 > categories, strings and numerics, in both build implementations and under the manifest digest; a
 > category's derived per-value postings answer `eq` and `in` where its vocabulary is
-> `listing = "public"`, and serve `/v1/categories`' membership question on every category that has
+> `visibility = "public"`, and serve `/v1/categories`' membership question on every category that has
 > them (§2.3). A flush appends an extent per column and a generation composes them (§5), and the
 > **fold folds them back in**, blanks the deleted entities' slots and rebuilds the postings from the
 > folded column (§6.2), and merges a text column's layers into one index (§2.6). Lists are unbuilt
@@ -106,7 +106,7 @@ it. What remains at [#44] is the *trigram acceleration* of substring, which is a
 from whether substring is expressible.
 
 **No column's values are enumerated except a category's.** `/v1/categories` serves a category's value
-set because a category *has* one. No other family does, so none acquires a listing surface: no value
+set because a category *has* one. No other family does, so none acquires a visibility surface: no value
 list, and in particular **no prefix autocomplete** — offering suggestions over a string column would
 manufacture a value set for a type that has none. §2.5 argues the distinction.
 
@@ -340,16 +340,16 @@ near-total coverage inside the band as well. Because it is derived, a deployment
 that does not answer identically and differ only in latency — so this is ordinarily a per-column build
 choice, not part of the contract.
 
-**The exception is `listing = "per_viewer"`, where the postings are owed** (owner ruling, 2026-08-08).
+**The exception is `visibility = "derived"`, where the postings are owed** (owner ruling, 2026-08-08).
 That control gates the existence of a value name, and the gate is membership-derived: a value is offered
 only if the principal can see an item carrying it (per-point-attributes §3.3). The member sets it needs
 *are* these postings. Deriving them instead by scanning the value column per request is inside a
 *filter's* latency budget but not inside `/v1/categories`', and it would falsify contracts §3.2's
 compute-admission justification for that endpoint — "no mask composition, no projection, no file IO".
-So a `per_viewer` category gets postings whatever its flags say, where a `public` one gets them only
+So a `derived` category gets postings whatever its flags say, where a `public` one gets them only
 from `index = true` — a published value set is served as authored and derives no membership at all.
 
-**The postings answer a filter only under `listing = "public"`** (decision 0063). Under `per_viewer`
+**The postings answer a filter only under `visibility = "public"`** (decision 0063). Under `derived`
 they exist for the membership question above and the *filter* is answered by the masked scan, for the
 timing reason the note below this section records. The route is a function of the **declaration** —
 never of the request, the principal, or any statistic, which §8.2 forbids because a statistics-driven
@@ -391,9 +391,9 @@ buys nothing, so it is not adopted.
 > **The case an earlier revision marked unmeasured is now measured, and the residual is real**
 > (probe arm 9): a scattered posting whose containers the candidate meets while no bits match costs
 > ~2 ms per operand at 10⁹ against ~0 for an absent value — container-proportional work for an
-> empty result. That measurement is what decision 0063 is built on: a `per_viewer` column never
+> empty result. That measurement is what decision 0063 is built on: a `derived` column never
 > takes the postings route, because under that control the ~2 ms *is* the disclosure, while under
-> `listing = "public"` what the timing distinguishes is a fact `/v1/categories` already serves.
+> `visibility = "public"` what the timing distinguishes is a fact `/v1/categories` already serves.
 
 ### 2.4 Separate files, separate types, and a shared format core
 
@@ -487,7 +487,7 @@ category's value is a **vocabulary entry**: a named object with an identity, a p
 and a lifecycle, existing independently of any row, referenced from a row by its code, and served as a
 set by `/v1/categories`. A string is **row data**, exactly as a number or a timestamp is — its visibility
 is the visibility of the rows that carry it, and no object stands behind it. So only a category has a
-value set, and therefore only a category has a `listing`: the `per_viewer` control gates the *existence
+value set, and therefore only a category has a `visibility`: the `derived` setting gates the *existence
 of a value name* (C11), and a string column has no name to gate, publishes no value list, and
 contributes no C11 surface.
 
@@ -681,14 +681,14 @@ the same set and says which presence each clause requires, so nothing is lost bu
 
 > **⊘ Built, and the accelerator's tail is answered by scanning it.** A flush writes one extent per
 > column that **owes a value column** — `index = true`, *or* a category whose vocabulary is
-> `listing = "per_viewer"`, which is the build's own `postings_are_owed` rule mirrored on the write
+> `visibility = "derived"`, which is the build's own `postings_are_owed` rule mirrored on the write
 > side (§2.3). It writes one for a column no flushed entity carries a value in too, so the file set
 > is a function of the schema rather than of the data; it names both files in the partition's
 > side-manifest, digests them, and composes them onto the live generation's columns before the
 > manifest commits.
 >
 > **The two halves of that rule have to agree, and for a while they did not.** The build owed a
-> `per_viewer` render-only category its postings — that column's postings are not an accelerator but
+> `derived` render-only category its postings — that column's postings are not an accelerator but
 > the evidence §3.3's visibility predicate is derived from — while the flush selected extents on
 > the placement flag alone. A value first carried by an entity ingested after the build then existed in no
 > artefact any reader consults, so `/v1/categories` could never offer it, permanently and with no
@@ -955,7 +955,7 @@ holds unchanged.
 **A category's postings are rebuilt whole from the folded column** — the self-retiring derivation
 §2.3 requires, and after the rebuild they cover the new `fold_watermark`, closing the un-folded
 tail the flush marker in §5 records. Where the rebuilt postings serve a *filter* — a `public`
-listing's route under decision 0063 — this rests on the leak-register row 0062 names as a
+the visibility's route under decision 0063 — this rests on the leak-register row 0062 names as a
 condition of itself, **which does not exist yet in Appendix C and is being registered on the
 postings track**; until that row lands, 0063's condition is unmet and this paragraph inherits the
 dependency. The rebuild reuses the build's emit — one banded emit over a
@@ -1178,7 +1178,7 @@ declared column while the mapped path pays it for the columns actually scanned.
 > per value would reacquire it, and the figure to expect is the file.
 >
 > **A category's postings are read, not mapped, and are therefore fully resident** — 6–12 MB per
-> column here, and by decision 0063 they are now on the serving path for a `public` listing. That is
+> column here, and by decision 0063 they are now on the serving path for a `public` vocabulary. That is
 > correct as designed and is not covered by the table either.
 
 - **Category membership at 0.31–1.01× the render column it indexes** (*measured* at 2.4×10⁶ items; the 10⁹
@@ -1267,7 +1267,7 @@ the dependency one-way and the read crate's codegen a function of its own source
 ## Appendix R — review trail
 
 **2026-08-12 — re-read against the built declaration surface.** The placement key this document
-spelt is gone: a column earns its value column from `index = true`, or from being a `per_viewer`
+spelt is gone: a column earns its value column from `index = true`, or from being a `derived`
 category, and §1 now says which declarations reach the artefact and which do not — a blob-resident
 column owning nothing here, and a rendered category filterable over the request's own rows through
 a second evaluation space rather than a second artefact (decision 0068). §2.6's list refusal lifts
@@ -1453,7 +1453,7 @@ decision 0042 (§3.1); the argument that `∧ M_auth` makes stale postings harml
 suppressions never fold and the entity-space verbs use the composed verdict (§6.1); floats have no total
 order under raw IEEE bits, so range answers over a signed float column would be wrong rather than slow
 (§3.3); and a category's posting ordinal comes from the vocabulary table rather than a second interner
-(§2.4). Owner corrections at the same time: **strings are not categories** — no value set, no listing, no
+(§2.4). Owner corrections at the same time: **strings are not categories** — no value set, no visibility, no
 autocomplete, and the dictionary's interning is a posting key rather than a vocabulary (§2.3).
 
 [#44]: https://github.com/jennis0/tessera-index/issues/44

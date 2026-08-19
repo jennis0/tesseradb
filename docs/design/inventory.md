@@ -83,8 +83,8 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 22 |
-| `conformance.md` | Normative — r12 | 15 |
-| `contracts.md` | Normative — r34 | 22 |
+| `conformance.md` | Normative — r13 | 16 |
+| `contracts.md` | Normative — r35 | 22 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
@@ -92,7 +92,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `delta-serving.md` | Provisional — under review | 3 |
 | `filter-index.md` | Provisional — under review | 12 |
 | `filter-result-cache.md` | Provisional — under review | 7 |
-| `filter-surface.md` | Provisional — under review | 9 |
+| `filter-surface.md` | Provisional — under review | 8 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |

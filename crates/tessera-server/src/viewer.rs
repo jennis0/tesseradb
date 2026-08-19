@@ -163,7 +163,7 @@ async fn meta(
             "y_max": meta.quantisation.y_max,
         },
         // The column schema, and the **whole** of it: name, storage type, and — for a category —
-        // the vocabulary it draws from, that vocabulary's kind and its `listing`. Without the
+        // the vocabulary it draws from, that vocabulary's kind and its `visibility`. Without the
         // `category` block a client cannot tell a `u16` category from a `u16` integer, since the
         // hot path ships the code and nothing else.
         //
@@ -172,7 +172,7 @@ async fn meta(
         // path-safe character set for that reason, so no second identifier is minted for it.
         //
         // **Values are not here.** A large vocabulary is megabytes against a measured 79 KB
-        // viewport response, and `per_viewer` filtering means no shared cache — so values are a
+        // viewport response, and `derived` filtering means no shared cache — so values are a
         // separate, paged, per-principal endpoint and this stays a small shared document
         // (per-point-attributes §3.8).
         "declared_scalars": meta.declared_scalars.iter().map(|s| {
@@ -184,7 +184,7 @@ async fn meta(
                         tessera_engine::VocabularyKind::Declared => "declared",
                         tessera_engine::VocabularyKind::Discovered => "discovered",
                     },
-                    "listing": vocabulary.listing().as_str(),
+                    "visibility": vocabulary.visibility().as_str(),
                 }))
             });
             serde_json::json!({
@@ -371,7 +371,7 @@ struct CategoriesQuery {
 ///
 /// **Two forms, one gate.** `?codes=` resolves the codes a caller already holds — the viewer's
 /// normal path, since it knows exactly which codes it drew — and the bare form pages the whole
-/// value set. Both run `Engine::categories`, which applies `listing` before the forms diverge; a
+/// value set. Both run `Engine::categories`, which applies `visibility` before the forms diverge; a
 /// gate reached by one door and not the other is the existence oracle by another route.
 ///
 /// **404 `unknown` covers three cases and distinguishes none of them**: no such column, a column
@@ -444,7 +444,7 @@ async fn categories(
             "key": v.key,
             // Omitted rather than null when no author wrote one — which is every value a
             // discovered vocabulary mints. The key is the display fallback (§3.1).
-            "label": v.label,
+            "title": v.title,
         })).collect::<Vec<_>>(),
         "next": page.next,
     })))

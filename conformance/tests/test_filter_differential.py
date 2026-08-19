@@ -165,7 +165,7 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
     line and this test follows without an edit here.
 
     Two of the individual facts the expectation encodes are worth their own words. **The route
-    is invisible on the wire**: `archive` is `public` and `department` is `per_viewer`, so
+    is invisible on the wire**: `archive` is `public` and `department` is `derived`, so
     decision 0063 answers the first from its derived postings and the second by scanning — and
     the published family and operand list are identical for both, because routing is a property
     of the deployment's declaration, never of the query surface. And a string column's family is
@@ -385,7 +385,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
         assert _answer(body) == _answer(first), (
             f"the {label!r} response differs from the {first_label!r} response — the outcomes "
             "are distinguishable, so the filter surface is an existence oracle over what "
-            "`listing = \"per_viewer\"` hides (C11)"
+            "`visibility = \"derived\"` hides (C11)"
         )
 
     tiles, points = decode_viewport(first)
@@ -430,7 +430,7 @@ ROUTED_EXPRS = [
 def test_a_public_category_answers_exactly_what_the_definition_says(
     catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases, case_name, name, expr
 ):
-    """**The routed differential.** `archive` is `listing = "public"`, so decision 0063 answers its
+    """**The routed differential.** `archive` is `visibility = "public"`, so decision 0063 answers its
     `eq` and `in` from the column's derived per-value postings — a corpus-wide set intersected with
     the candidate — where `department` is answered by scanning the candidate's values. The oracle
     has one evaluation for both, so agreement here is agreement between two constructions rather
@@ -462,7 +462,7 @@ def test_a_public_category_answers_exactly_what_the_definition_says(
 def test_the_two_routes_compose_with_each_other(
     catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases
 ):
-    """A `public` leaf and a `per_viewer` leaf in one expression. The two are evaluated by
+    """A `public` leaf and a `derived` leaf in one expression. The two are evaluated by
     different constructions and must still intersect and union as sets — a routed leaf that
     returned a set outside the candidate would show up here first, since the conjunction's later
     leaf is evaluated under the earlier one's result."""
@@ -660,7 +660,7 @@ def test_an_operator_outside_the_columns_family_refuses(catalogue_server, sweep_
     The distinction is which side of the trust boundary the fact lives on. A column's family is
     deployment schema — `/v1/meta` publishes it "so a client need not infer it" — and is identical
     for every principal, so refusing discloses nothing. A *value*'s existence is viewer data, and
-    refusing that would be an existence oracle over exactly the vocabulary `per_viewer` hides. So
+    refusing that would be an existence oracle over exactly the vocabulary `derived` hides. So
     the two get opposite treatments on purpose, and this test pins the family half.
 
     Recorded as a divergence when this suite was first written, and ruled the other way: the

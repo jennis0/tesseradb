@@ -10,7 +10,7 @@
 //! # Never served, and the ordinals are not durable
 //!
 //! **The dictionary is an index internal.** No key and no ordinal crosses the trust boundary
-//! (**I10**): a keyword has no value set, no `listing`, no `/v1/categories` counterpart and no
+//! (**I10**): a keyword has no value set, no `visibility`, no `/v1/categories` counterpart and no
 //! autocomplete, and records §4.3 refuses each by name. A client that could enumerate keys would be
 //! reading a corpus-wide, pre-mask fact — which is what makes this file's audience the scan, and
 //! only the scan.

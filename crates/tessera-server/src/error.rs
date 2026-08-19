@@ -365,7 +365,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
              partially"
                 .to_string(),
         ),
-        // `/v1/categories` on a `per_viewer` column whose membership sets could not be read.
+        // `/v1/categories` on a `derived` column whose membership sets could not be read.
         // Fail-closed 500 rather than an empty 200, because an empty value set is a *real* answer —
         // it is what a principal who may see none of these values is told — and returning it for an
         // underivable predicate would make the two indistinguishable. Named explicitly, though the

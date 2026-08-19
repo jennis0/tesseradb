@@ -366,7 +366,7 @@ fn a_closed_vocabulary_compiles_to_a_width_and_a_pinned_code_set() {
     let vocab = &config.schema.vocabularies["severity"];
     assert_eq!(vocab.code_of("low"), Some(1));
     assert_eq!(vocab.code_of("nonesuch"), None);
-    assert_eq!(vocab.visibility, Listing::Public);
+    assert_eq!(vocab.visibility, Visibility::Public);
     assert_eq!(vocab.value_set, ValueSet::Closed);
     assert_eq!(vocab.width, ScalarType::U8);
     assert_eq!(vocab.title.as_deref(), Some("Severity"));
@@ -459,7 +459,7 @@ fn a_vocabularys_visibility_admits_exactly_two_words() {
     let config = parse_str(&derived).expect("`derived` is the other setting");
     assert_eq!(
         config.schema.vocabularies["severity"].visibility,
-        Listing::PerViewer
+        Visibility::Derived
     );
 
     for word in ["ir:analyst", "per_viewer", "inherited", "none", "Public"] {

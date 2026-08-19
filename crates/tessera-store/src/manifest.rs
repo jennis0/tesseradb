@@ -206,7 +206,7 @@ pub struct ManifestVocabulary {
     pub kind: VocabularyKind,
     /// Whether the *existence* of a value is sensitive (§3.8) — the disclosure control
     /// `/v1/categories` gates on.
-    pub listing: Listing,
+    pub visibility: Visibility,
     pub values: Vec<ManifestVocabularyValue>,
     /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
     /// schema file so that a later build reading this bundle's lineage can see which codes are
@@ -233,27 +233,39 @@ pub enum VocabularyKind {
 /// Whether the *existence* of a value is sensitive — the disclosure control of §3.8, orthogonal to
 /// [`VocabularyKind`]'s operational question.
 ///
-/// **Typed rather than a string, because it is now load-bearing.** It decides whether
-/// `/v1/categories` filters a value set per principal, so a spelling no reader recognises must
-/// refuse the manifest at the parse rather than fall through to a default — and both defaults are
-/// wrong in a direction that matters: `public` publishes a gated value set, `per_viewer` withholds
-/// a published one and looks like a permission bug.
+/// **One spelling, from the declaration through to the wire** (`configuration.md` §1): the config
+/// word, the manifest discriminant and what `/v1/meta` publishes are the same two strings. The
+/// second spelling this type used to carry — `derived` on the manifest against `derived` in the
+/// declaration — cost a translation table in the build and gave one control two words in review.
+///
+/// **Typed rather than a string, because it is load-bearing.** It decides whether `/v1/categories`
+/// filters a value set per principal, so a spelling no reader recognises must refuse the manifest
+/// at the parse rather than fall through to a default — and both defaults are wrong in a direction
+/// that matters: `public` publishes a gated value set, `derived` withholds a published one and
+/// looks like a permission bug.
+///
+/// **`Derived` is the membership axis and `Public` the label one**
+/// (decision 0088): `Derived` says the viewer must already see *some* member —
+/// `require_member_visibility = "any"` — where `Public` names an access label. They share a key
+/// because that is what the configuration surface declares today (`configuration.md` §1); the
+/// decision retires the word `derived` without ruling on what fills the slot, so the surface
+/// governs the spelling and this note records why one type carries two readings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Listing {
+pub enum Visibility {
     /// The value set is filtered per principal: a value appears only if the principal can see at
     /// least one item carrying it (per-point-attributes §3.3).
-    PerViewer,
+    Derived,
     /// The value set is published as authored, to every principal with a session. Legal only for a
     /// `declared` vocabulary, where an accountable party wrote the names down (§3.8).
     Public,
 }
 
-impl Listing {
+impl Visibility {
     pub fn as_str(self) -> &'static str {
         match self {
-            Listing::PerViewer => "per_viewer",
-            Listing::Public => "public",
+            Visibility::Derived => "derived",
+            Visibility::Public => "public",
         }
     }
 }
@@ -262,13 +274,13 @@ impl Listing {
 ///
 /// **The key is not the display name** (§3.4). `sev_1` is the key a row's code stands for;
 /// "Critical" is a property of it. Conflating them makes renaming for display a rewrite of every
-/// row, which is why `label` is separate and amendable without a build.
+/// row, which is why `title` is separate and amendable without a build.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestVocabularyValue {
     pub key: String,
     pub code: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub title: Option<String>,
 }
 
 /// `quantisation`: the extent Morton codes are computed against (contracts §2.5).

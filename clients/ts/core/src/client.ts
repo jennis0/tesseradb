@@ -126,7 +126,7 @@ export class TesseraClient {
         // Null for a plain column, and the absence is the whole signal: without it a `u16`
         // category is indistinguishable from a `u16` integer, since the hot path ships the code.
         category: s.category
-          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, listing: s.category.listing}
+          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, visibility: s.category.visibility}
           : null,
         render: s.render,
         index: s.index
@@ -245,7 +245,7 @@ export class TesseraClient {
    * than a refusal, and must not treat a missing code as a failure. A code the client actually
    * *drew* always resolves: its point was admitted by the mask, so the value has a visible member.
    *
-   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `per_viewer`
+   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `derived`
    * column, whose gate is specified and unbuilt.
    */
   async categories(
@@ -287,7 +287,7 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawCategories;
     return {
-      values: body.values.map((v) => ({code: v.code, key: v.key, label: v.label ?? null})),
+      values: body.values.map((v) => ({code: v.code, key: v.key, title: v.title ?? null})),
       next: body.next
     };
   }
@@ -370,7 +370,7 @@ type RawMeta = {
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;
-    category: {vocabulary: string; kind: 'declared' | 'discovered'; listing: 'per_viewer' | 'public'} | null;
+    category: {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'} | null;
     render: boolean;
     index: boolean;
   }[];
@@ -402,6 +402,6 @@ type RawMeta = {
 /** `GET /v1/categories/{column}`'s wire shape. */
 type RawCategories = {
   column: string;
-  values: {code: number; key: string; label?: string | null}[];
+  values: {code: number; key: string; title?: string | null}[];
   next: string | null;
 };

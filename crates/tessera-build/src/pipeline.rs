@@ -1910,7 +1910,7 @@ pub(crate) fn write_record_blob(
     // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
     // Records §4.2 exempts categories from the blob because their entity-space structures are the
     // vocabulary machinery's constant floor, but that floor is `postings_are_owed`, which holds
-    // for an *indexed* or `per_viewer` category and not for a `public` one. A `public` category
+    // for an *indexed* or `derived` category and not for a `public` one. A `public` category
     // declared with neither flag therefore has no hot column, no value column and no postings, so
     // excluding every category here stored its values nowhere at all and refused nothing —
     // silent loss of a field the caller declared. Asking the same question the entity-space pass
@@ -2387,7 +2387,7 @@ fn push_numeric_chunks(
 /// **`index = true`** is the obvious one: the column is declared filterable, and postings are
 /// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
 ///
-/// **`listing = "per_viewer"`** is the other, and it is *not* optional. That control gates the
+/// **`visibility = "derived"`** is the other, and it is *not* optional. That control gates the
 /// existence of a value name, and the gate is membership-derived: a value is offered only if the
 /// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
 /// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
@@ -2395,7 +2395,7 @@ fn push_numeric_chunks(
 /// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
 /// compute-admission justification ("no mask composition, no projection, no file IO") false.
 ///
-/// So a `per_viewer` category gets postings whatever its `index` says. This is the one place the
+/// So a `derived` category gets postings whatever its `index` says. This is the one place the
 /// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
 /// that does not answer identically and differ only in latency, but here a disclosure control depends
 /// on them existing.
@@ -2499,7 +2499,7 @@ fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::
         .vocabulary
         .as_ref()
         .and_then(|name| schema.vocabularies.get(name))
-        .is_some_and(|v| v.visibility == crate::config::Listing::PerViewer)
+        .is_some_and(|v| v.visibility == crate::config::Visibility::Derived)
 }
 
 /// The vocabulary code a category column's value carries.
@@ -2986,9 +2986,9 @@ mod tests {
 
     /// **Every declared field lands in exactly one home, and the two placement passes must agree
     /// on which** (records §3). The blob takes a field the entity-space pass declines, so the
-    /// question both ask is `postings_are_owed`: a `per_viewer` category keeps its entity-space
+    /// question both ask is `postings_are_owed`: a `derived` category keeps its entity-space
     /// floor and gets no blob row, while a `public` category with neither flag — which that pass
-    /// declines, having no `index` and no per-viewer listing — must land here rather than
+    /// declines, having no `index` and no `derived` visibility — must land here rather than
     /// nowhere.
     ///
     /// The `public` half is a regression test. Excluding every category from the blob reads as
@@ -3020,8 +3020,8 @@ mod tests {
             render: false,
         };
 
-        // A `per_viewer` listing is what gives a category its entity-space floor.
-        let per_viewer = |listing| {
+        // A `derived` visibility is what gives a category its entity-space floor.
+        let vocabularies_at = |visibility| {
             let mut v = std::collections::HashMap::new();
             v.insert(
                 "departments".to_string(),
@@ -3029,7 +3029,7 @@ mod tests {
                     name: "departments".to_string(),
                     title: None,
                     value_set: crate::config::ValueSet::Closed,
-                    visibility: listing,
+                    visibility,
                     width: ScalarType::U16,
                     codes: Default::default(),
                     titles: Default::default(),
@@ -3042,7 +3042,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = crate::config::Schema {
             attributes: vec![category.clone(), note.clone()],
-            vocabularies: per_viewer(crate::config::Listing::PerViewer),
+            vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
@@ -3074,11 +3074,11 @@ mod tests {
         );
         assert_eq!(fields[0].tag, 1, "the surviving field is `note`, tag 1");
 
-        // Alone, the `per_viewer` category leaves the stage with nothing to write at all.
+        // Alone, the `derived` category leaves the stage with nothing to write at all.
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = crate::config::Schema {
             attributes: vec![category.clone()],
-            vocabularies: per_viewer(crate::config::Listing::PerViewer),
+            vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
         let only_category =
             [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
@@ -3087,12 +3087,12 @@ mod tests {
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
 
-        // But the same category under a `public` listing owes no value column and no postings, so
+        // But the same category under `public` owes no value column and no postings, so
         // the blob is its only home and must take it.
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = crate::config::Schema {
             attributes: vec![category],
-            vocabularies: per_viewer(crate::config::Listing::Public),
+            vocabularies: vocabularies_at(crate::config::Visibility::Public),
         };
         let only_category =
             [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")

@@ -326,7 +326,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .iter()
         .find(|v| v.name == "band")
         .expect("the declared vocabulary reaches the manifest");
-    assert_eq!(vocabulary.listing, tessera_store::manifest::Listing::Public);
+    assert_eq!(vocabulary.visibility, tessera_store::manifest::Visibility::Public);
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
         .iter()
@@ -1143,7 +1143,7 @@ name = "revision"
 type = "i64"
 
 # **A `public` category with neither flag.** §4.2's entity-space floor belongs to a category's
-# *readers* — `/v1/categories` and the `per_viewer` gate — so this shape has no reader, no floor,
+# *readers* — `/v1/categories` and the `derived` gate — so this shape has no reader, no floor,
 # and no home but the blob. Declared last so the existing field tags do not move.
 
 [[attribute]]

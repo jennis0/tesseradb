@@ -123,7 +123,7 @@ export type Encoding =
   | {kind: 'uniform'}
   /**
    * A column was chosen and its values cannot be named — a refused `/v1/categories`, today the
-   * `per_viewer` gate. Distinct from `uniform`, which means no column was chosen: the marks are
+   * `derived` gate. Distinct from `uniform`, which means no column was chosen: the marks are
    * still all drawn, but the map must show that their value is unknown rather than that no
    * encoding was asked for.
    */

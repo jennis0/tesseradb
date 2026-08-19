@@ -7,7 +7,7 @@
       "arrow_type": "u8",
       "category": {
         "kind": "declared",
-        "listing": "public",
+        "visibility": "public",
         "vocabulary": "archive"
       },
       "index": false,
@@ -19,7 +19,7 @@
       "arrow_type": "u16",
       "category": {
         "kind": "declared",
-        "listing": "public",
+        "visibility": "public",
         "vocabulary": "primary_category"
       },
       "index": false,
@@ -31,7 +31,7 @@
       "arrow_type": "u16",
       "category": {
         "kind": "declared",
-        "listing": "public",
+        "visibility": "public",
         "vocabulary": "primary_category"
       },
       "index": false,
@@ -43,7 +43,7 @@
       "arrow_type": "u16",
       "category": {
         "kind": "discovered",
-        "listing": "per_viewer",
+        "visibility": "derived",
         "vocabulary": "category_suffix"
       },
       "index": false,

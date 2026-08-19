@@ -146,7 +146,7 @@ DEPLOYMENT_NAME = "catalogue-tessera.toml"
 # would pass vacuously, and the differential would prove nothing. The decorrelation is asserted
 # by a test, not just stated here.
 #
-# `listing = "per_viewer"` on `department`, deliberately: the hidden-value/nonexistent-value
+# `visibility = "derived"` on `department`, deliberately: the hidden-value/nonexistent-value
 # outcome rule (per-point-attributes §3.8, C11) is only *about* a gated vocabulary, and `omega`
 # — planted only in `high_tail`, a block no catalogue mask case is granted — is the value a test
 # principal provably cannot see a member of. `hollow` is declared and planted nowhere: a known
@@ -155,8 +155,8 @@ DEPLOYMENT_NAME = "catalogue-tessera.toml"
 #
 # **`archive` is the `public` counterpart, and it exists to be *routed*.** Decision 0063 answers a
 # category operand from the column's derived postings where the vocabulary is `public` and from the
-# masked scan where it is `per_viewer` — two evaluation routes that must produce the same sets. A
-# corpus carrying only a `per_viewer` category exercises one of them, so the differential would
+# masked scan where it is `derived` — two evaluation routes that must produce the same sets. A
+# corpus carrying only a `derived` category exercises one of them, so the differential would
 # ratify the scan and say nothing about the route that replaced it. `archive` cycles on a fourth
 # period (`(source_id // 5) % 3`), decorrelated from the term blocks, the department cycle's 6 and
 # the title cycle's 12; `void` is declared and planted nowhere, which is the routed reading of an
@@ -166,7 +166,7 @@ DEPLOYMENT_NAME = "catalogue-tessera.toml"
 # codes ride the hot column and today it publishes no filter operand. It exists for the row-space
 # route (records §6.2, decision 0068): when that lands, `render = true` implies filterable and
 # `/v1/meta` widens — [`filter_operands_expected`] is the one place that widening is recorded.
-# `public`, so the routed reading stays clear of the vocabulary-control ruling a `per_viewer`
+# `public`, so the routed reading stays clear of the vocabulary-control ruling a `derived`
 # rendered category waits on; a fifth period (`(source_id // 7) % 3`), decorrelated like the rest.
 #
 # **`title` and `submitter` are the two keyword columns** (records §4.3) — the only declarable

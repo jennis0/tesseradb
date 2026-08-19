@@ -171,10 +171,7 @@ impl Disclosure {
                 let vocabulary = &config.schema.vocabularies[name];
                 VocabularyDisclosure {
                     name: vocabulary.name.clone(),
-                    visibility: match vocabulary.visibility {
-                        crate::config::Listing::Public => "public",
-                        crate::config::Listing::PerViewer => "derived",
-                    },
+                    visibility: vocabulary.visibility.as_str(),
                     value_set: match vocabulary.value_set {
                         ValueSet::Closed => "closed",
                         ValueSet::Open => "open",

@@ -1157,12 +1157,12 @@ pub enum ValueSet {
 pub struct Vocabulary {
     pub name: String,
     /// ⊘ Recorded and not yet published — see [`View::title`]. A **value's** title is published,
-    /// as `MANIFEST.vocabularies[..].values[..].label`.
+    /// as `MANIFEST.vocabularies[..].values[..].title`.
     pub title: Option<String>,
     pub value_set: ValueSet,
     /// `public` or `derived` (`per-point-attributes.md` §3.8). Recorded and published; **not yet
     /// enforced anywhere**, there being no `/v1/categories` to filter.
-    pub visibility: Listing,
+    pub visibility: Visibility,
     /// The **code space's** width, which is why it lives here and not on a column
     /// (`per-point-attributes.md` §3.9).
     pub width: ScalarType,
@@ -1197,10 +1197,9 @@ pub struct DeclaredValues {
 ///
 /// The manifest's own type, re-exported rather than mirrored: the config compiles straight into
 /// `MANIFEST.vocabularies`, and a second spelling of a two-variant disclosure control is a second
-/// place for `derived` to become `public` in translation. Its variants keep the manifest's older
-/// spelling (`PerViewer` is the config's `derived`); what §1 closes is the **config's** word set,
-/// and renaming a manifest discriminant buys nothing a reader of this module can see.
-pub use tessera_store::manifest::Listing;
+/// place for `derived` to become `public` in translation. Declaration, discriminant and wire now
+/// carry the same two words, so there is no translation left to get wrong.
+pub use tessera_store::manifest::Visibility;
 
 impl Attribute {
     /// The column in `[corpus]`'s source this attribute's values are read from: the declared
@@ -2102,8 +2101,8 @@ fn compile_vocabularies(
         };
 
         let visibility = match block.visibility.as_deref() {
-            Some("public") => Listing::Public,
-            Some("derived") => Listing::PerViewer,
+            Some("public") => Visibility::Public,
+            Some("derived") => Visibility::Derived,
             Some(other) => {
                 return Err(declaration_error(format!(
                     "vocabulary '{}': `visibility = \"{other}\"` is neither \"public\" nor \
@@ -2132,7 +2131,7 @@ fn compile_vocabularies(
         // vocabulary's values are inferred from whatever is in the corpus, so publishing them
         // discloses data-derived names on nobody's authority — but the operator may have a reason,
         // and there is still no `/v1/categories` for the disclosure to reach.
-        if visibility == Listing::Public && value_set == ValueSet::Open {
+        if visibility == Visibility::Public && value_set == ValueSet::Open {
             eprintln!(
                 "warning: vocabulary '{}': `visibility = \"public\"` with `value_set = \"open\"` \
                  publishes data-derived value names on nobody's authority (per-point-attributes \

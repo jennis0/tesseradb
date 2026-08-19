@@ -1351,7 +1351,7 @@ mod tests {
 
     fn generation_of(overlay: Overlay, buffer: IngestBuffer) -> Generation {
         let manifest = Manifest {
-            bundle_format: 2,
+            bundle_format: 3,
             created_at: "2026-08-02T00:00:00Z".to_string(),
             data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
