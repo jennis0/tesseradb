@@ -418,6 +418,158 @@ fn auto_clamps_nothing() {
 }
 
 // -------------------------------------------------------------------------------------------
+// The occupancy report
+// -------------------------------------------------------------------------------------------
+
+/// A corpus of `n` points at the positions `place` gives, with the pairs file that matches it —
+/// the fixture for data whose *size relative to its frame* is the thing under test.
+fn write_corpus(dir: &Path, n: u64, place: impl Fn(u64) -> (f64, f64)) {
+    let points = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<u64> = (0..n).collect();
+    let (xs, ys): (Vec<f64>, Vec<f64>) = ids.iter().map(|e| place(*e)).unzip();
+    let batch = RecordBatch::try_new(
+        points.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids.clone())),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let path = dir.join("points.parquet");
+    let mut w = ArrowWriter::try_new(File::create(&path).unwrap(), points, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let pairs = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("term_id", DataType::UInt32, false),
+    ]));
+    let terms: Vec<u32> = ids.iter().map(|e| (e % 5) as u32 + 1).collect();
+    let batch = RecordBatch::try_new(
+        pairs.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(UInt32Array::from(terms)),
+        ],
+    )
+    .unwrap();
+    let path = dir.join("pairs.parquet");
+    let mut w = ArrowWriter::try_new(File::create(&path).unwrap(), pairs, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Ten thousand points on a hundredth-unit lattice inside 100…118 — a corpus that is fine against
+/// a frame fitted to it and destroyed by one a thousand times its size.
+fn tiny_against_the_grid(e: u64) -> (f64, f64) {
+    (
+        100.0 + (e % 1800) as f64 / 100.0,
+        118.0 - (e % 1700) as f64 / 100.0,
+    )
+}
+
+/// **The second way a frame goes wrong, and the case the clamp count cannot see.** Coordinates
+/// spanning 100…118 against a 0…65536 frame put every point inside the frame — nothing clamps,
+/// nothing is refused — and collapse ten thousand points into a few hundred cells, where points a
+/// long way apart in the source are stored at the same position.
+#[test]
+fn data_far_too_small_for_its_frame_is_warned_about() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_corpus(tmp.path(), 10_000, tiny_against_the_grid);
+    declare_extent(tmp.path(), "{ min = 0.0, max = 65536.0 }");
+
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    // Not one point on the boundary: the clamp report has nothing to say about this corpus.
+    assert!(text.contains("none on the frame's edge"), "{text}");
+    // The raw numbers, then the warning in the caller's terms.
+    assert!(text.contains("10000 point(s) landed in"), "{text}");
+    assert!(text.contains("have a position of their own"), "{text}");
+    assert!(text.contains("RESOLUTION LOST"), "{text}");
+    assert!(
+        text.contains("stored at the same position and cannot be told apart"),
+        "{text}"
+    );
+    // A warning, not a refusal — the owner's call: the positions written are correct, only coarse.
+    assert!(
+        tmp.path().join("bundles/corpus/CURRENT").is_file(),
+        "a sparse frame is stored correctly and must still build"
+    );
+}
+
+/// The same ten thousand points, framed by `auto`: every point gets a cell of its own, so the
+/// numbers are printed and nothing is warned about.
+#[test]
+fn a_well_fitted_frame_reports_the_numbers_and_warns_about_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_corpus(tmp.path(), 10_000, tiny_against_the_grid);
+    declare_extent(tmp.path(), "\"auto\"");
+
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("10000 point(s) landed in 10000 distinct cell(s)"),
+        "{text}"
+    );
+    assert!(text.contains("100.0% of them have a position of their own"), "{text}");
+    assert!(!text.contains("RESOLUTION LOST"), "{text}");
+}
+
+/// **A legitimately tiny corpus is not scolded.** Ten points in ten cells is a perfectly framed
+/// corpus, not a sparse one — which is why the measure is a proportion of the points and not a
+/// count of cells, a count being unable to tell the two apart.
+#[test]
+fn a_tiny_corpus_is_not_warned_about() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_corpus(tmp.path(), 10, |e| (e as f64, e as f64));
+    declare_extent(tmp.path(), "\"auto\"");
+
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("10 point(s) landed in 10 distinct cell(s)"),
+        "{text}"
+    );
+    assert!(!text.contains("RESOLUTION LOST"), "{text}");
+}
+
+/// **The case the bounding-box figure missed.** A dense cluster and two far-off points: the box is
+/// derived from the extremes, so it spans the whole grid and looks healthy, while the cluster —
+/// 998 of the thousand points — shares a handful of cells. Occupancy is counted over every point,
+/// so it sees what the box cannot.
+#[test]
+fn a_dense_cluster_behind_two_outliers_is_warned_about() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_corpus(tmp.path(), 1_000, |e| match e {
+        998 => (10_000.0, 10_000.0),
+        999 => (10_000.0, 0.0),
+        e => ((e % 100) as f64 / 100.0, ((e / 100) % 10) as f64 / 100.0),
+    });
+    declare_extent(tmp.path(), "\"auto\"");
+
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    // The bounding box says the data fills the grid, which is true and useless.
+    assert!(text.contains("of the 65536 x 65536 cells"), "{text}");
+    assert!(text.contains("none on the frame's edge"), "{text}");
+    // What the points actually do inside it.
+    assert!(text.contains("RESOLUTION LOST"), "{text}");
+}
+
+// -------------------------------------------------------------------------------------------
 // `--file`, the override
 // -------------------------------------------------------------------------------------------
 

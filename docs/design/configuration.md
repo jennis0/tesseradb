@@ -165,6 +165,60 @@ paying, now paid either way, which is what stops a caller avoiding it by writing
 A Morton points source arrives already placed, so nothing is quantised and nothing clamps; that
 line says so instead.
 
+**A frame goes wrong the other way too, and the clamp count cannot see it.** Data *outside* the
+frame is pushed onto its edge, so those positions are actively wrong — that is the clamp above.
+Data *tiny inside* the frame clamps nothing at all: every position is correct, and nearly all of
+the resolution is gone, because points a long way apart in the source land in one cell and can no
+longer be told apart. Coordinates spanning 100…118 against a 0…65536 frame do exactly this with
+**zero** clamps. The bounding box printed above does not close the gap either, being derived from
+the data's extremes: two far-flung outliers make the box span most of the grid while the rest of
+the corpus shares a handful of cells.
+
+So every build also reports **how many cells the points actually landed in**, counted exactly over
+every point it placed, with the point count and the average points per occupied cell beside it. The
+numbers are printed whether or not anything is wrong, so a frame this does not warn about is still
+one the caller can judge, and silence never means nobody looked.
+
+```
+view 's0': 10000 point(s) landed in 122 distinct cell(s) of the 65536 x 65536 grid — 82.0 point(s) per occupied cell
+view 's0': RESOLUTION LOST — on average 82.0 points share each occupied cell, so points that are
+far apart in the source are stored at the same position and cannot be told apart. […]
+```
+
+**Below a tenth of the points having a position of their own, the build says so emphatically, and
+it is never a refusal.** The reported figure is that proportion — 100% is a point per cell, 10%
+means nine points in ten share a position with another. The obvious reading of *how full is the
+grid* is not usable: a corpus can never occupy more cells than it has points, so a perfectly framed
+ten-thousand-point build fills 0.0002% of the 4.3×10⁹ cells and a collapsed one fills 0.000003% —
+both round to nothing, and the figure measures corpus size rather than the frame. Against the
+corpus's own points those two builds read 100% and 1.2%. The measure is a proportion rather than a
+count of cells because ten points in ten cells is a perfectly framed tiny corpus and only a count
+would scold it.
+
+A tenth is the line because 4.3×10⁹ cells exist, so points spread over the whole grid collide
+rarely: about 99% of them keep a position of their own at 10⁸ and 89% at 10⁹, and a corpus
+concentrated into a tenth of its frame's *area* still holds 89% at 10⁸.
+
+**Where that argument stops holding, stated rather than glossed:** the ratio a uniform corpus
+reaches depends on points per available cell, so it climbs with both scale and concentration. At
+10⁹ points in a hundredth of the frame's area only 4% keep a position of their own, and that build
+warns even under `extent = "auto"` — a dense core with two distant outliers stretching the box is
+exactly such a corpus. At 10⁸ and below, which is this system's measured operating point, no concentration falls
+that far. The warning is therefore reliable at the scale it was chosen for and can fire on a
+well-framed 10⁹ corpus, which costs a line of output rather than a build.
+
+The other corpus it warns about honestly and unhelpfully is a source whose positions genuinely
+coincide. In both cases the printed numbers beside the data's own bounds are what let a caller tell
+a real collapse from one of these.
+
+Not a refusal, unlike the clamp: a clamped corpus is stored **wrong** and is worth stopping for,
+while a sparse one is stored **correctly but coarsely** — a pilot corpus, a deliberately coarse
+frame, or headroom left for data still to arrive are all reasons to mean it, and refusing would
+block builds the caller intended. The count is taken at each build's segment write, off the codes
+it is about to write to `morton.u32`: they are `(morton, tessera_id)` ascending by contract, so
+distinct cells is one comparison per point with nothing retained, and both build paths — the
+linear one and the streaming pipeline — report the identical figure.
+
 **A point's label comes from a field or from a source, never both.** `field` names a field of the
 view's own source, one value or a list per point. `source` names a separate exploded
 `(entity_id, term_id)` relation — the shape the probe generators produce natively at 10⁹, and the
@@ -962,6 +1016,23 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — the frame report also says how much resolution the corpus actually got.** The clamp
+count caught data *outside* the frame and nothing else, so the opposite failure was still silent:
+data far too small for its frame clamps nothing, every stored position is correct, and nearly all
+the resolution is gone — coordinates spanning 100…118 against a 0…65536 frame with **zero** clamps.
+The bounding box already printed could not close it either, being derived from the extremes, so two
+outliers make the box look healthy while the corpus shares a handful of cells. Every build now
+counts **how many cells the points actually landed in** and prints it with the point count and the
+average points per occupied cell, warning emphatically past ten per cell. A ratio rather than a
+count, because ten points in ten cells is a well-framed tiny corpus; ten because uniformly spread
+data averages about 1.1 per occupied cell even at 10⁹ and heavy clustering only reaches about 1.2,
+so an order of magnitude past it is a statement about the frame. **A warning and never a refusal**
+(owner's ruling): a clamped corpus is stored wrong, a sparse one is stored correctly but coarsely,
+which a pilot corpus or a deliberately wide frame may well mean. Counted at each build's segment
+write off the codes bound for `morton.u32`, which are already in `(morton, tessera_id)` order — one
+comparison per point, nothing retained, and the same figure from the linear build and the streaming
+pipeline, which the byte-equality oracle now asserts.
 
 **2026-08-19 — the build says what the frame does to the data, and `tessera check` is the CI half.**
 Three things, and the first is the one that matters. **The clamp report**: a coordinate is

@@ -463,6 +463,11 @@ fn streaming_build_is_byte_identical_to_the_reference_build() {
     assert_eq!(reference.terms, streaming.terms);
     assert_eq!(reference.pairs, streaming.pairs);
     assert_eq!(reference.bundle_bytes, streaming.bundle_bytes);
+    // **The occupancy figure is one of the report's numbers, not one path's.** It is counted at
+    // each build's own segment write, and a resolution warning that appeared on one path and not
+    // the other would be worse than none — which path ran is not something the caller chose.
+    assert_eq!(reference.occupancy, streaming.occupancy);
+    assert_eq!(reference.occupancy.points, reference.items);
     assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
 }
 

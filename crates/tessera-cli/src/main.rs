@@ -1326,6 +1326,16 @@ fn main() -> ExitCode {
                     // `tessera check` can emit the identical document without opening a data file.
                     // `reports/containment.json` is the other way round: a result, needing every
                     // artifact published.
+                    // **The other half of the frame report**, and the half the clamp count
+                    // cannot see: data far too small for its frame clamps nothing, and every
+                    // stored position is correct while nearly all the resolution is gone.
+                    // Printed as raw numbers always — a frame this does not warn about is one
+                    // the caller can still judge — and emphatically past the collapse threshold.
+                    // Never a refusal: a coarse map is stored correctly, and may be meant.
+                    eprintln!("{}", report.occupancy.report(&report.view_id));
+                    if let Some(detail) = report.occupancy.warning(&report.view_id) {
+                        eprintln!("{detail}");
+                    }
                     if let Err(e) = tessera_build::write_disclosure_report(&out, &disclosure) {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");
                         return ExitCode::FAILURE;

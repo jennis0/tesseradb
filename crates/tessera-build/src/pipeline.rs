@@ -1350,6 +1350,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // ---- 10. the segment -------------------------------------------------------------
     let morton_path = segment_dir.join("morton.u32");
+    // **The resolution this frame actually gave the corpus**, counted off the same sorted codes
+    // that are about to become `morton.u32` — the linear build counts the identical thing at its
+    // own segment write. Nothing is retained: `rows` is already `(morton, tessera_id)` ascending,
+    // so distinct cells is a comparison per row (see `Occupancy::of_sorted_codes`).
+    let occupancy = crate::Occupancy::of_sorted_codes(rows.iter().map(|r| r.morton));
     write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
         .map_err(|e| BuildError::io(&morton_path, e))?;
 
@@ -1471,6 +1476,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         plan.recorded_batch_items,
         &minters,
         &published_layers,
+        occupancy,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.

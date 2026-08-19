@@ -231,6 +231,150 @@ pub struct BuildReport {
     pub pairs: u64,
     /// Total size on disk of every file the manifests name.
     pub bundle_bytes: u64,
+    /// How much of the frame's resolution the points actually used.
+    pub occupancy: Occupancy,
+}
+
+/// **How many of the grid's cells the placed points actually landed in**, beside how many points
+/// there were.
+///
+/// A frame goes wrong in two ways and the clamp count (`config::Frame`) sees only one of them.
+/// Data *outside* the frame is pushed onto its edge, so those positions are actively wrong — that
+/// is the clamp, and past half the corpus it is a refusal. Data *tiny inside* the frame clamps
+/// nothing at all: every position is correct, and nearly all of the resolution is gone, because
+/// points a long way apart in the source land in one cell and can no longer be told apart.
+/// Coordinates spanning 100…118 against a 0…65536 frame do this with zero clamps.
+///
+/// **The frame report's bounding box cannot close that gap**, because it is derived from the
+/// data's extremes: two far-flung outliers make the box span most of the grid while 99% of the
+/// corpus still shares a handful of cells. The number that cannot be fooled that way is how many
+/// cells hold at least one point, counted exactly over every point the build placed.
+///
+/// **A warning, never a refusal.** A clamped corpus is stored *wrong* and is worth stopping for; a
+/// sparse one is stored *correctly but coarsely*, which is a legitimate thing to want — a small
+/// pilot corpus, a deliberately coarse frame, headroom left for data still to arrive. Refusing it
+/// would block builds the caller meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Occupancy {
+    /// Points placed — one per row written.
+    pub points: u64,
+    /// Distinct cells those points landed in. Zero only for a build with no points, which is
+    /// refused before it reaches here.
+    pub cells: u64,
+}
+
+/// The average points per occupied cell at which the build says so emphatically.
+///
+/// **Ten, because nothing at this system's operating point reaches it on a frame that fits.**
+/// 4.3×10⁹ cells exist, so points spread over the whole grid collide rarely — about 1.0 per
+/// occupied cell at 10⁸ and 1.1 at 10⁹ — and a corpus concentrated into a tenth of the frame's
+/// area still only reaches 1.1 at 10⁸. The measure is a ratio rather than a count for a second
+/// reason: ten points in ten cells is a perfectly framed tiny corpus, not a sparse one, and only a
+/// count would scold it.
+///
+/// **The bound is not scale-free, and the limit is stated rather than left to be discovered.** A
+/// uniform corpus's ratio climbs with points per *available* cell, so it rises with both scale and
+/// concentration: at 10⁹ points in a hundredth of the frame's area it reaches about 23 and warns
+/// even under a frame `auto` fitted, a dense core with two distant outliers being exactly that
+/// corpus. Below 10⁹ no concentration reaches ten. This is a warning and not a refusal, so the
+/// cost of that case is a line of output.
+///
+/// The one corpus this warns about honestly and unhelpfully is a source whose positions genuinely
+/// coincide — a hundred documents recorded at one place really are one point. The raw numbers are
+/// printed either way, beside the data's own bounds in the frame report, which is what lets a
+/// caller tell the two apart.
+pub const COLLAPSE_WARNING_POINTS_PER_CELL: f64 = 10.0;
+
+impl Occupancy {
+    /// Count the distinct cells over a build's Morton codes **in tiler order**.
+    ///
+    /// **A run count over the sorted codes, not a bitmap.** Both builds reach this holding the
+    /// codes they are about to write to `morton.u32`, which is `(morton, tessera_id)` ascending
+    /// by contract (contracts §2.6 r6) — so equal codes are adjacent and the exact answer is one
+    /// comparison per point with nothing retained. A Roaring bitmap of the codes gives the same
+    /// exact answer for unsorted input, and is what this would need if the count moved anywhere
+    /// else; here it would allocate up to half a gigabyte (65,536 dense containers at 10⁹ points)
+    /// at the segment write, which is precisely the stage the pipeline holds as little as possible
+    /// beside. The order is asserted rather than assumed — out of order, a run count silently
+    /// over-reports, and an over-report is a warning that does not fire.
+    pub(crate) fn of_sorted_codes(codes: impl IntoIterator<Item = u32>) -> Occupancy {
+        let (mut points, mut cells) = (0u64, 0u64);
+        let mut previous: Option<u32> = None;
+        for code in codes {
+            points += 1;
+            match previous {
+                Some(last) => {
+                    assert!(
+                        code >= last,
+                        "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
+                    );
+                    cells += u64::from(code != last);
+                }
+                None => cells = 1,
+            }
+            previous = Some(code);
+        }
+        Occupancy { points, cells }
+    }
+
+    /// Points per occupied cell — one where every point has a cell to itself, and the factor by
+    /// which the frame is coarser than this corpus needs where it is more. The reporting form is
+    /// [`Self::distinct_fraction`]; this is what the threshold is expressed in.
+    pub fn points_per_cell(&self) -> f64 {
+        if self.cells == 0 {
+            0.0
+        } else {
+            self.points as f64 / self.cells as f64
+        }
+    }
+
+    /// **What is reported: how many of this corpus's points have a position of their own.** One
+    /// hundred per cent is a point per cell; ten per cent means nine points in ten share a
+    /// position with another and cannot be told apart.
+    ///
+    /// The obvious reading of "how full is the grid" — occupied cells over the 4.3×10⁹ that exist
+    /// — is unreadable and nearly always wrong-looking: a corpus can never occupy more cells than
+    /// it has points, so a perfectly framed ten-thousand-point build fills 0.0002% of the grid and
+    /// a collapsed one fills 0.000003%. Both round to nothing, and the figure measures corpus size
+    /// far more than it measures the frame. Against the corpus's own points the same two builds
+    /// read 100% and 1.2%.
+    pub fn distinct_fraction(&self) -> f64 {
+        if self.points == 0 {
+            return 1.0;
+        }
+        self.cells as f64 / self.points as f64
+    }
+
+    /// **What the build says about resolution, every time, whether or not anything is wrong.**
+    /// The raw numbers, so a caller can judge a frame this does not warn about — and so silence
+    /// never means nobody looked.
+    pub fn report(&self, view: &str) -> String {
+        format!(
+            "view '{view}': {} point(s) landed in {} distinct cell(s) — {:.1}% of them have a \
+             position of their own",
+            self.points,
+            self.cells,
+            self.distinct_fraction() * 100.0
+        )
+    }
+
+    /// The emphatic line this occupancy earns, if any — past
+    /// [`COLLAPSE_WARNING_POINTS_PER_CELL`], and never a refusal.
+    pub fn warning(&self, view: &str) -> Option<String> {
+        if self.points_per_cell() < COLLAPSE_WARNING_POINTS_PER_CELL {
+            return None;
+        }
+        Some(format!(
+            "view '{view}': RESOLUTION LOST — only {:.1}% of these points have a position of \
+             their own, so points far apart in the source are stored at the same position and \
+             cannot be told apart. That is a frame far wider than the data it holds, unless the \
+             source's own positions genuinely coincide. Built anyway: every position written is \
+             correct, only coarse, and a pilot corpus, a deliberately wide frame or headroom for \
+             data still to arrive are all reasons to mean it. Write `extent = \"auto\"` to fit \
+             the frame to this data if it was not intended",
+            self.distinct_fraction() * 100.0
+        ))
+    }
 }
 
 /// The signature-sorted assignment key (§11.1): an item's **sorted term-ID list**.
@@ -766,6 +910,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
     let scalar_schema = scalar_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
+    // **The resolution this frame actually gave the corpus**, counted here because `codes` is the
+    // row order — `(morton, tessera_id)` ascending — and is the same vector `write_segment` puts
+    // into `morton.u32` below. The streaming pipeline counts the identical thing at its own
+    // segment write; a figure that appeared on one path and not the other would be worse than
+    // none, since which path ran is not something the caller chose.
+    let occupancy = Occupancy::of_sorted_codes(codes.iter().copied());
 
     // The render columns' presence, after the sort because the bitmap is over **rows**, and before
     // the substitution below because that is what erases the distinction: `columns.arrow` is
@@ -870,6 +1020,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         args.batch_items.filter(|&b| b < n),
         &minters,
         &published_layers,
+        occupancy,
     )
 }
 
@@ -913,6 +1064,7 @@ fn write_manifests(
     batch_items_recorded: Option<u64>,
     minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     published_layers: &crate::layers::PublishedLayers,
+    occupancy: Occupancy,
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -1130,6 +1282,7 @@ fn write_manifests(
         terms: term_count,
         pairs: pair_count,
         bundle_bytes,
+        occupancy,
     })
 }
 
@@ -1620,6 +1773,53 @@ fn relative_to(prefix_dir: &Path, path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The count is over *distinct* codes, and every point is counted — the two numbers the
+    /// report prints are not derived from each other.
+    #[test]
+    fn occupancy_counts_distinct_cells_and_every_point() {
+        let o = Occupancy::of_sorted_codes([7u32, 7, 7, 9, 9, 40]);
+        assert_eq!((o.points, o.cells), (6, 3));
+        assert!((o.points_per_cell() - 2.0).abs() < 1e-9);
+        assert_eq!(Occupancy::of_sorted_codes([]).cells, 0);
+    }
+
+    /// A run count is exact only in tiler order, and out of order it *over*-reports cells — which
+    /// would be a warning that quietly stops firing. Loud instead.
+    #[test]
+    #[should_panic(expected = "tiler order")]
+    fn occupancy_refuses_codes_out_of_tiler_order() {
+        Occupancy::of_sorted_codes([9u32, 7]);
+    }
+
+    /// **Ten points in ten cells is a perfectly framed corpus, not a sparse one.** The measure is
+    /// a ratio for exactly this reason: a count of cells would scold every small corpus.
+    #[test]
+    fn a_tiny_well_framed_corpus_earns_no_warning() {
+        let o = Occupancy::of_sorted_codes(0..10u32);
+        assert_eq!(o.warning("s0"), None);
+        assert!(o.report("s0").contains("10 point(s) landed in 10 distinct cell(s)"));
+    }
+
+    /// The threshold is a ratio, so it fires at the same proportion at any scale — and the raw
+    /// numbers are printed either side of it. Ten points per occupied cell is the same statement
+    /// as a tenth of the points having a position of their own, which is how it is reported.
+    #[test]
+    fn the_warning_fires_on_the_ratio_not_the_size() {
+        let just_under = Occupancy { points: 99, cells: 10 };
+        let just_over = Occupancy { points: 100, cells: 10 };
+        assert_eq!(just_under.warning("s0"), None);
+        assert!(just_under.report("s0").contains("10.1% of them have a position of their own"));
+        let warning = just_over.warning("s0").expect("10 points per cell is the threshold");
+        assert!(warning.contains("RESOLUTION LOST"), "{warning}");
+        assert!(
+            warning.contains("stored at the same position and cannot be told apart"),
+            "{warning}"
+        );
+        // The same ratio a thousand times larger says the same thing.
+        let big = Occupancy { points: 100_000, cells: 10_000 };
+        assert!(big.warning("s0").is_some());
+    }
 
     /// `BuildArgs` carries the deployment key's plaintext hex beside the redacted `IdentityKey`.
     /// A derived `Debug` would undo the redaction on the first `tracing::error!("{args:?}")`.
