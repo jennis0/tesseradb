@@ -176,6 +176,12 @@ struct Fixture {
 
 /// A bundle built **with** its layers and artifacts — no control-plane call anywhere.
 fn fixture() -> Fixture {
+    try_fixture(write_topics).expect("a build carrying layers")
+}
+
+/// The same build, with the label file written by `topics` — so a case about what the build
+/// *refuses* runs the whole pipeline the accepted case runs, rather than a reconstruction of it.
+fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
@@ -187,7 +193,7 @@ fn fixture() -> Fixture {
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture config parses");
     write_clusters(&tmp.path().join("clusters.parquet"));
-    write_topics(&tmp.path().join("topics.parquet"));
+    topics(&tmp.path().join("topics.parquet"));
     write_members(&tmp.path().join("clusters_members.parquet"), &cluster_members());
     write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
@@ -214,13 +220,13 @@ fn fixture() -> Fixture {
         band_rows: None,
         schema: Default::default(),
     };
-    tessera_build::build(&args).expect("a build carrying layers");
-    Fixture {
+    tessera_build::build(&args)?;
+    Ok(Fixture {
         root,
         cache: tmp.path().join("cache"),
         wal: tmp.path().join("wal.log"),
         _tmp: tmp,
-    }
+    })
 }
 
 impl Fixture {
@@ -406,4 +412,52 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     for expected in [CLUSTERS, LABELS, "clusters/online"] {
         assert!(names.iter().any(|n| n == expected), "{expected} missing from {names:?}");
     }
+}
+
+/// The label layer's file with its edge columns left out — one label, attached to nothing.
+fn write_topics_without_edges(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "contents",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ))),
+            true,
+        ),
+    ]));
+    let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    contents.values().values().append_value("the whole cluster");
+    contents.values().append(true);
+    contents.values().values().append_value("the subset's own");
+    contents.values().append(true);
+    contents.append(true);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["l-0000"])) as ArrayRef,
+            Arc::new(contents.finish()),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// **The build refuses what the ingest refuses** — an artifact declaring no dependency in a layer
+/// that declares one ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)).
+///
+/// A dependent is served only where the artifact it attaches to is served, so a label with no
+/// attachment has nothing for that prerequisite to gate on: it would serve on its own conjuncts
+/// alone, over a cluster layer that gates every one of its clusters. A build that admitted it while
+/// the control plane refused it is the fail-open half of one rule stated twice.
+#[test]
+fn the_build_refuses_a_label_that_attaches_to_nothing() {
+    let err = try_fixture(write_topics_without_edges)
+        .err()
+        .expect("a label layer's artifacts attach to something");
+    let message = format!("{err}");
+    assert!(message.contains("attaches to nothing"), "{message}");
+    assert!(message.contains("topics/x"), "{message}");
 }

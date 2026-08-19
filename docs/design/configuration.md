@@ -240,7 +240,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `artifact_visibility` | R | `{ field, default }`; `default` may be `inherited` |
 | `require_member_visibility` | R | `all` \| `any` \| `{ fraction = p }` \| `{ count = n }` \| `none` |
 | `withdraw_on_member_deletion` | D `false` | drop the **whole artifact** when one of its members is deleted, rather than letting its membership shrink. ⊘ `true` is refused at parse: the fold has no artifact-withdrawal path (`annotation-write-cycle.md` §6.1) |
-| `depends_on` | O | layers this one's edges point into; must be declared before it |
+| `depends_on` | O | layers this one's edges point into; must be declared before it. **The edge carries deletion and visibility, neither configurable** ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)): an artifact here is deleted when the artifact it attaches to is deleted, and served only where that artifact is served. Every artifact of a layer declaring this must declare an attachment, into a layer named here — refused at build and at ingest alike |
 
 **`artifacts = [{ … }]`** — one authored artifact, on the canonical field names. An inline row *is*
 the canonical spelling, so there is no `fields` map beside it and no file for one to locate.
@@ -371,7 +371,7 @@ same views, flat, `depends_on` the parent, content wrapper supplied.
 | `require_member_visibility` | R | the **layer** grain: how much of a label's membership a viewer must see for the label to appear |
 | `artifact_visibility` | R | as `[[layer]]`; declared, never supplied |
 | `[layer.labels.content]` | R | one key, `require_member_visibility` — **where the text came from**: `all` if it was generated from the documents it names, `inherited` if it is true whether or not any of them exists |
-| `visibility` | D | the parent layer's; narrower is admitted, and only one widening is checkable — see below |
+| `visibility` | D | the parent layer's; any declared label is taken as written, because the dependency edge is what bounds it — see below |
 
 **The two requirements are not one dial at two grains, and that is why they are two keys.** The
 layer's is a threshold — *how much of this set must a viewer already see for the label to appear at
@@ -404,21 +404,20 @@ the artifact gate at `inherited`; both were choices belonging to the caller, and
 expansion picks for a caller who wrote nothing is a value nobody chose.
 
 **`visibility` is the one defaulted disclosure control in this surface**, and it is admissible
-because the value it defaults to is the parent layer's own and never the widest one. What the
-default *cannot* be is checked: the design's rule is *narrower, never wider*, and **only one case
-of that is computable**. An access label is an opaque interned term, so whether every principal
-holding one also holds another is a fact about grants, which do not exist in the declaration.
-`public` is the exception — every principal holds it by construction
-(`per-point-attributes.md` §3.8) — so a label layer declaring `public` under a parent gated on
-anything else is refused.
+because the value it defaults to is the parent layer's own and never the widest one. **A gate
+declared here is taken as written, and nothing compares it against the parent's.** It does not need
+to: a label is served only where the cluster it attaches to is served
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)), so a
+gate written here can narrow what a principal sees and cannot widen it. A `public` label layer
+under a parent gated on `ir:analyst` discloses nothing — the viewer who cannot reach the cluster
+cannot reach its labels either — and two distinct opaque labels need no ordering, which is
+fortunate, because whether every principal holding one also holds the other is a fact about grants
+and grants do not exist in the declaration.
 
-⊘ **Two distinct non-`public` labels are admitted and not ordered.** The parent's gate and the
-child's are then two independent gates, and a principal holding the child's and not the parent's
-reaches the labels without reaching the layer they describe. That is the same declaration a caller
-makes by writing two `[[layer]]` blocks — which this expansion is defined to be identical to — so
-a refusal here would be a lint on one spelling of something the other spelling still admits, not a
-control. Closing it needs an ordering over access labels, which is a question about grants and not
-about configuration.
+The expansion used to refuse the `public` case, and that refusal is deleted. It was the one place
+the sugar was *stricter* than the two `[[layer]]` blocks it expands to, escapable by writing them
+out — and the rule that made it unnecessary is stronger than the check ever was, because it holds
+for the two hand-written blocks as well. **A check became a property.**
 
 **Three words are reserved**, and only one occupies a slot that otherwise takes a caller's label:
 
@@ -763,8 +762,11 @@ for drill-down to return.
   `membership` naming a column no `[[attribute]]` block declares** is refused with it, at parse and
   before a data file is opened, on the rule an undeclared vocabulary reference already follows:
   a predicate with nothing to read publishes every artifact on the layer with an empty membership;
-- **`[layer.labels].visibility = "public"` under a parent gated on anything else**, the one
-  widening an opaque label ordering is not needed to decide;
+- **an artifact declaring no attachment in a layer that declares `depends_on`**, and one attaching
+  into a layer that layer did not name. A dependent is served only where what it depends on is
+  served ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
+  so an artifact with no dependency would be gated on nothing — refused here and at ingest alike,
+  an ingest that admitted what the build refuses being the fail-open half of one rule;
 - an access label spelled `inherited`, the one reserved word occupying a slot that otherwise takes
   a label (§5). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
   in slots that admit no label.
@@ -872,6 +874,20 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — a dependency edge carries deletion and visibility, so one refusal became a
+property.** `depends_on` declared an edge and said nothing about what it meant once both ends
+existed. It now means both things the member grain already means at the other grain
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)): an
+artifact is deleted when the artifact it attaches to is deleted, and served only where that
+artifact is served — **per artifact, not per layer**, and neither configurable. Two consequences
+reach this document. Every artifact of a layer declaring `depends_on` must declare an attachment
+into a declared layer, refused at build and at ingest alike, because an artifact with no dependency
+has nothing for the prerequisite to gate on. And the **`public`-under-a-gated-parent refusal is
+deleted**: it was the one place the sugar was stricter than the two `[[layer]]` blocks it expands
+to, and rule 2 makes it unnecessary rather than merely inconsistent — a viewer who cannot reach the
+cluster cannot reach its labels, whatever the label layer's own gate says. With it gone,
+`[layer.labels]` supplies mechanism only.
 
 **2026-08-19 — a membership names its column, and the label sugar is real.** Two changes, and the
 second retires the last ⊘ on a whole block. **`membership` is two words and a table**:

@@ -511,10 +511,23 @@ predicate is per-artifact by construction, so suppressing a cluster stops the *c
 its labels go on serving on every route that does not traverse the edge: search, a held identifier, a
 filter. Those labels name and describe the thing that was just hidden. The conjunctive rule the model
 states for edge *traversal* does not reach them, because those routes never traverse the edge — they
-reach the label directly. The term is one extra `verdict` lookup on the attachment target, on an
-identifier the label already stores, and it is the same lookup the predicate's first branch already
-performs. **The same argument covers the target's gate**, not only its deny state: a label must not
-outlive the reachability of what it labels.
+reach the label directly.
+
+**The term is the target's whole predicate, and it is a prerequisite**
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 2):
+a dependent is served only where the artifact it attaches to is served, evaluated before and in
+addition to the dependent's own gate and criterion, and gated on **that artifact** rather than on
+the parent layer holding something. So a target's deny state, its layer's reachability, its
+existence, its own access label, its existence criterion against this viewer's masked count and its
+containment all decide here — and a dependent whose dependency is invisible is **absent**,
+contributing to no count a viewer is shown, on the same rule every other invisible artifact follows
+(**I2**). The conjunction can only narrow what a principal sees, so it opens no channel and adds no
+leak-register row. What it costs is the target's masked count per attached artifact per request,
+which is what makes it a term worth stating: the cheaper three-part form this replaced left a
+cluster withheld by its own criterion still nameable by a label declaring a weaker one
+([decision 0086](../decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md),
+superseded on that point). A single sweep in declaration order resolves every prerequisite without
+search, because a layer is declared after every layer it names in `depends_on`.
 
 **Artifacts still get entity IDs**, because the deny lane, `tessera_id` and the overlay all address
 by entity. What they do not get is membership in `M_auth`, or the assumption that a bitmap
@@ -744,9 +757,11 @@ The packed extent carries a hole as an empty blob, which the offsets already exp
 distinction matters because the obvious reading is fail-open. Dropping the edge from a label that
 pointed at the deleted artifact would leave the label *unattached* — and an unattached artifact
 serves on its own conjuncts, so the deletion of a cluster would publish every label written about
-it. What holds instead is an existence term beside the disposition one: an attachment must still
-**resolve**, and a hole resolves to nothing. The withholding then survives the retirement of the
-entry that first caused it, with no state to remember and no edge to rewrite.
+it. What holds instead is the prerequisite of §4: the target must still be **served**, and a hole is
+served to nobody. The withholding then survives the retirement of the entry that first caused it,
+with no state to remember and no edge to rewrite. The label is also deleted in its own right — a
+deletion cascades to its dependents (§5.0.4) — so what the fold finds at the label's ordinal is a
+hole of its own, retired in the same publication and by the same rule.
 
 ⊘ **Content is not reclaimed.** A retired artifact's supplied content stays in the record-blob
 extents the fold carries forward, unreferenced: nothing addresses it once the slot is a hole, so
@@ -806,6 +821,16 @@ them first — the refusal is the caller declaring an intent whose dependents th
 not a tax on every refresh. The alternative — cascading silently — would leave labels attached to
 clusters they were not generated from, which is worse than an outage and is exactly the class
 **I8** exists to prevent.
+
+**That argument is about repointing, and it does not reach deletion.** A deleted artifact leaves
+nothing to point at, so nothing can be mispointed: deleting an artifact deletes the artifacts
+depending on it ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+rule 1), which is the *drop them first* sequence above, performed rather than demanded. **A
+replacement still refuses rather than repointing, and a deletion cascades rather than stranding.**
+The cascade is a deletion and takes the deletion lane — a record of its own in the same window, and
+retirement at the compaction fold that executes it (Rule F, write-path §5.4), never by any other
+route. The edge's second meaning is a serving rule and is stated with the predicate it belongs to
+(§4): a dependent is served only where the artifact it depends on is served, per artifact.
 
 ### 5.1 Runtime-created artifacts
 
@@ -1422,6 +1447,16 @@ document had one cause — reasoning about entity space while designing a row-sp
 error was invisible from inside the argument that made it.
 
 ## Appendix R
+
+**r7 — 2026-08-19. A dependency edge carries deletion and visibility.** §4's extra term was three
+cheap questions — the target's deny state, its layer's reachability, and whether its slot still
+exists — and is now the target's whole `verdict`
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 2):
+a dependent is served only where what it depends on is served, per artifact, which closes the case
+0086 left open and pays the masked count 0086 declined to. §5.0.4 keeps its refusal and gains its
+boundary: replacement mints identities and so still refuses rather than repointing, while deletion
+cascades to dependents and rides the deletion lane, retiring at the fold that executes it. Both
+rules are non-configurable, and neither widens what a principal sees.
 
 **r6 — 2026-08-19. Vocabulary only.** *Variation* becomes an entry of an artifact's ranked
 **`contents`**, indexed by its **rank**, matching `annotations.md` §2.3 and `configuration.md` §1.

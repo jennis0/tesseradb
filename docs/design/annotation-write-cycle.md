@@ -575,8 +575,8 @@ supplied content and keeps the artifact, this drops the artifact at the same fol
 semantic declaration rather than a disclosure control — an artifact carries no residue of a deleted
 member, its computed properties being recomputed per viewer — so the default is to keep it, and
 `true` is for the artifact whose exact membership *is* the object. Withdrawal is a removal like any
-other: the dangling-dependent rule below governs anything attached to it, refused rather than
-repaired.
+other: what is attached to the artifact is governed by the dependency rules below — a replacement
+refused rather than repaired, a deletion cascaded.
 
 **Labels are declarable where they are used.** `[layer.labels]` expands to a layer of its own —
 same views, flat, `depends_on` the parent, the content wrapper — because a label is a first-class
@@ -586,10 +586,12 @@ declaration and the same layer written out produce a **byte-identical bundle** a
 the parser has a label layer to treat differently. What the sugar supplies is mechanical; what it
 never supplies is the gate, the membership requirement, or the existence of membership data, all of
 which are written out. The label layer's `visibility` defaults to its parent's — a default on a
-disclosure control, admissible because it is the parent's value rather than the widest one. ⊘ Its
-*narrower, never wider* half is enforced only where it can be computed: `public` under a gated
-parent is refused, and two opaque labels are admitted unordered, the build having no ordering over
-access terms (`configuration.md` §1).
+disclosure control, admissible because it is the parent's value rather than the widest one — and a
+gate declared there is taken as written, nothing comparing it against the parent's. It does not
+need to: a label is served only where the cluster it attaches to is served
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)), so a
+gate declared here narrows what a principal sees and cannot widen it, `public` included
+(`configuration.md` §1).
 
 **Members are source ids**, resolved through the build's own assignment exactly as the access
 relation's are; an id the build did not assign refuses the build. **Ordinals are assigned in
@@ -618,13 +620,21 @@ exists to close, arriving through the cache instead of the gate. Layer suppressi
 emergency path: it acts at the ack, ahead of any resolution, and holds while the gate is edited
 underneath it.
 
-**Why the dangling-dependent case is refused rather than repaired:** repointing edges automatically
-fails open exactly when the caller reshaped the layer — a renamed artifact, a split cluster — and
-each such failure attaches a label to a cluster it was not generated from (I8's class). A refusal
-makes the operator perform the reconciliation the service cannot verify. Suppressions take the
-other posture: a replacement ends the entities they address, so they end too — the meaning of the
-operation, not an accident — and the operator is told by the report rather than blocked. (Rep
-§5.0.2 and §5.0.4 carry the full arguments; this table only inherits them.)
+**Why a dangling dependent is refused rather than repaired, and why a deleted one is not:** the two
+operations are different, and the boundary is the whole of the rule. **A replacement** mints new
+identities, so repointing its dependents automatically fails open exactly when the caller reshaped
+the layer — a renamed artifact, a split cluster — and each such failure attaches a label to a
+cluster it was not generated from (I8's class). It is refused, and the operator performs the
+reconciliation the service cannot verify. **A deletion** leaves nothing to point at, so nothing can
+be mispointed: it cascades, deleting the artifacts that depend on the one deleted
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 1) —
+which is the manual sequence the refusal already directs a caller to, performed by the service. A
+cascaded deletion is a deletion in every respect: its own record, applied in the same window as the
+deletion that caused it, retiring at the compaction fold that executes it (Rule F, write-path §5.4)
+and by no other route. Suppressions take a third posture: a replacement ends the entities they
+address, so they end too — the meaning of the operation, not an accident — and the operator is told
+by the report rather than blocked. (Rep §5.0.2 and §5.0.4 carry the full arguments; this table only
+inherits them.)
 
 **Recovery**, stated once for the whole surface: registry ops and artifact records replay from the
 WAL under the durable-prefix rules (write-path §1.3); artifact deny state rides the overlay
@@ -762,6 +772,17 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r9 — 2026-08-19. A deletion cascades where a replacement refuses.** `depends_on` said what an
+edge constrains and nothing about what it means, leaving a label whose cluster is deleted, and a
+label whose cluster the viewer cannot see, both undefined. Both are answered
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)): a
+dependent is deleted with its dependency and served only where its dependency is served. The
+boundary against §5.0.4 is the operation, and it is now stated at the site rather than left to be
+inferred — replacement mints identities and so refuses rather than repointing; deletion leaves
+nothing to point at and so cascades rather than stranding, taking the deletion lane and retiring at
+the fold that executes it. The label sugar's `public`-under-a-gated-parent refusal goes with it: a
+gate declared on a label layer can no longer widen anything, so there is nothing left to check.
 
 **r8 — 2026-08-19. The label sugar builds, and its one default is bounded.** `[layer.labels]`
 expands to a `[[layer]]` block before anything compiles, and the two spellings are asserted to

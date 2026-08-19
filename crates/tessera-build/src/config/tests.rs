@@ -1748,14 +1748,16 @@ fn the_sugar_and_the_layer_written_out_are_one_declaration() {
     );
 }
 
-/// **The one defaulted disclosure control in the surface**, and the only widening it can catch.
+/// **The one defaulted disclosure control in the surface.**
 ///
 /// The default is the parent's own value — never the widest one — so a label layer under a gated
-/// clustering is gated the same way without a word. `public` written out under a gated parent is
-/// the one case an ordering over access labels is not needed to decide: it is held by every
-/// principal by construction, so it is wider than anything else that could be there.
+/// clustering is gated the same way without a word. What a *declared* gate is not is compared
+/// against the parent's: a dependency edge makes a label visible only where its cluster is visible
+/// (decision 0089), so no gate written here can widen what a principal is shown, and the refusal
+/// this expansion once carried for `public` under a gated parent is gone with the property that
+/// replaced it.
 #[test]
-fn a_label_layers_gate_defaults_to_its_parents_and_public_under_a_gate_is_refused() {
+fn a_label_layers_gate_defaults_to_its_parents_and_any_declared_gate_is_taken() {
     let public_parent = parse_str(&with_layer(SUGAR)).unwrap();
     assert_eq!(public_parent.layers[0].visibility, None);
     assert_eq!(public_parent.layers[1].visibility, None);
@@ -1772,7 +1774,7 @@ fn a_label_layers_gate_defaults_to_its_parents_and_public_under_a_gate_is_refuse
     );
 
     // Declared narrower — admitted, and deliberately not ordered against the parent's: two opaque
-    // terms carry no ordering the build could compute (⊘, `expand_labels`).
+    // terms carry no ordering the build could compute (`expand_labels`).
     let narrower = gated.replace(
         "  membership                = \"enumerated\"",
         "  membership                = \"enumerated\"\n  visibility = \"ir:secret\"",
@@ -1782,14 +1784,20 @@ fn a_label_layers_gate_defaults_to_its_parents_and_public_under_a_gate_is_refuse
         Some("ir:secret".to_string())
     );
 
-    // And the one computable widening.
+    // And `public` under a gated parent, which was the one refusal here: admitted now, because a
+    // viewer who cannot reach the cluster cannot reach its labels whatever this says.
     let wider = gated.replace(
         "  membership                = \"enumerated\"",
         "  membership                = \"enumerated\"\n  visibility = \"public\"",
     );
-    let message = err(&wider);
-    assert!(message.contains("never wider"), "{message}");
-    assert!(message.contains("ir:analyst"), "{message}");
+    assert_eq!(
+        parse_str(&wider)
+            .expect("a public label layer under a gated parent is a declaration, not a leak")
+            .layers[1]
+            .visibility,
+        None,
+        "`public` compiles to no gate at all, which is what it means"
+    );
 }
 
 /// The reserved word still collides in the sugar's own gate slot, which is a slot that takes a

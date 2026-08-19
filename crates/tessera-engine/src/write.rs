@@ -1581,15 +1581,6 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
-    /// A layer's own entity — where its suppression lands — without cloning its declaration.
-    ///
-    /// The attachment term asks this per attached artifact of a response, and a declaration carries
-    /// a name, a title, a view list and a content vocabulary; cloning all of it to read one `u64`
-    /// would put the cost of the term on the wrong side of the argument that it is one lookup.
-    pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
-        lock_recover(&self.registry).get(name).map(|layer| layer.entity)
-    }
-
     fn registry_for_publication(&self) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
@@ -2583,11 +2574,6 @@ impl WritePath {
         name: &str,
     ) -> Option<tessera_types::layer::RegisteredLayer> {
         self.live.registered_layer(name)
-    }
-
-    /// See [`LiveState::layer_entity`] — the attachment term's lookup, without the declaration.
-    pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
-        self.live.layer_entity(name)
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order.
@@ -3986,7 +3972,13 @@ struct DenyEntry {
     record: WalRecord,
     entity: EntityId,
     op: ChangeOp,
-    respond: Responder,
+    /// The waiter, or `None` for an entry nobody asked for.
+    ///
+    /// **`None` is the cascade** (`Executor::cascade_dependents`): deleting an artifact deletes
+    /// the artifacts depending on it, and those deletions have no caller to answer. They are
+    /// entries in every other respect — their own WAL record, applied in the same window, retired
+    /// at the same fold — so the ack is the only thing that distinguishes them.
+    respond: Option<Responder>,
 }
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
@@ -6611,15 +6603,60 @@ impl Executor {
                 },
                 entity,
                 op,
-                respond,
+                respond: Some(respond),
             });
         }
 
         if entries.is_empty() {
             return false;
         }
+        self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
+    }
+
+    /// Add a deletion for every artifact that depends on one this window deletes
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+    /// rule 1).
+    ///
+    /// **Extra entries in the window, and nothing else.** A cascaded deletion is a deletion: it
+    /// gets its own `ChangeByEntity` record in the same append, is applied to the same overlay
+    /// clone, hides its artifact at the same ack, and retires at the compaction fold that executes
+    /// it — Rule F (write-path §5.4), by the same route as the deletion that caused it. There is no
+    /// second removal rule here and there must never be one; a cascade that retired anywhere else
+    /// is the fail-open two removal rules have been conflated into twice already.
+    ///
+    /// **Before the append, so a restart agrees with the live node.** The records are in the log,
+    /// so replay rebuilds the same overlay rather than re-deriving the cascade from a store whose
+    /// edges a later publication may have changed.
+    ///
+    /// Only `Delete` cascades. A suppression is reversible and retires only on unsuppress (Rule S),
+    /// so cascading one would need an inverse nothing carries — and the dependent is withheld while
+    /// its target is suppressed anyway, by the serving predicate's dependency term rather than by
+    /// any state.
+    fn cascade_dependents(&mut self, entries: &mut Vec<DenyEntry>) {
+        let deleted: Vec<EntityId> = entries
+            .iter()
+            .filter(|e| matches!(e.op, ChangeOp::Delete))
+            .map(|e| e.entity)
+            .collect();
+        if deleted.is_empty() {
+            return;
+        }
+        let cascade = self
+            .live
+            .with_artifacts(|store| store.cascade_from(&deleted));
+        for entity in cascade {
+            entries.push(DenyEntry {
+                record: WalRecord::ChangeByEntity {
+                    entity_id: entity,
+                    op: ChangeOp::Delete,
+                },
+                entity,
+                op: ChangeOp::Delete,
+                respond: None,
+            });
+        }
     }
 
     /// `append × k → one fsync → apply → one swap → ack × k`, with lifecycle §4's deny-op
@@ -6734,7 +6771,9 @@ impl Executor {
                 } else {
                     WalError::Poisoned
                 };
-                self.ack_failed(&entry.respond, ExecError::Wal(e));
+                if let Some(respond) = &entry.respond {
+                    self.ack_failed(respond, ExecError::Wal(e));
+                }
             }
             return;
         }
@@ -6764,7 +6803,9 @@ impl Executor {
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its change is durably in force.
         for entry in entries {
-            self.ack(&entry.respond, Ack::Changed, &published);
+            if let Some(respond) = &entry.respond {
+                self.ack(respond, Ack::Changed, &published);
+            }
         }
     }
 
@@ -7603,15 +7644,22 @@ impl Executor {
             }
             // A window of one entry is exactly the per-command semantics this path used to have,
             // which is why there is no second deny implementation to keep in step with the first.
-            Command::Change { entity, op } => self.commit_denies(vec![DenyEntry {
-                record: WalRecord::ChangeByEntity {
-                    entity_id: entity,
+            Command::Change { entity, op } => {
+                let mut entries = vec![DenyEntry {
+                    record: WalRecord::ChangeByEntity {
+                        entity_id: entity,
+                        op,
+                    },
+                    entity,
                     op,
-                },
-                entity,
-                op,
-                respond,
-            }]),
+                    respond: Some(respond),
+                }];
+                // The cascade rides this path too — a window of one is still a window, and a
+                // deletion admitted here that skipped it would strand every artifact depending on
+                // the one deleted.
+                self.cascade_dependents(&mut entries);
+                self.commit_denies(entries)
+            }
             Command::RegisterLayer { declaration } => self.commit_registry(
                 |registry, alloc| registry.prepare_create(*declaration, alloc),
                 |record| match record {

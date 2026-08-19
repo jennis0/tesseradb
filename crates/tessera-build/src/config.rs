@@ -1551,24 +1551,19 @@ fn check_fields(
 ///   labels of their own is written out as a `[[layer]]`, where the field can be named;
 /// * **`visibility` defaults to the parent's** — the one defaulted disclosure control here.
 ///
-/// ## What "narrower, never wider" can actually be checked
+/// ## Why no gate is compared against the parent's
 ///
-/// The design says the gate is overridable narrower and never wider. **Only one case of that is
-/// computable, and it is the one implemented**: an access label is an opaque interned term, so
-/// given two of them the build has no ordering — whether every principal holding `ir:secret` also
-/// holds `ir:analyst` is a fact about grants, which live outside the bundle entirely. What *is*
-/// decidable is `public`: it is held by every principal by construction
-/// (`per-point-attributes.md` §3.8), so it is the widest label there is, and a label layer
-/// declaring it under a parent that declared anything else is refused.
-///
-/// ⊘ **Two distinct non-`public` labels are admitted and not ordered.** The parent's gate and the
-/// child's are then two independent gates, and a principal holding the child's and not the
-/// parent's reaches the labels without reaching the layer they describe. That is a caller's
-/// declaration rather than a service behaviour — the same declaration the caller would make by
-/// writing two `[[layer]]` blocks, which the surface has always admitted and which this expansion
-/// is defined to be identical to — so the refusal here would be a lint on one spelling of a thing
-/// the other spelling still admits, not a control. Closing it needs an ordering over access
-/// labels, which is a grants question and not a configuration one.
+/// The expansion once refused a `public` label layer under a gated parent — the one place the sugar
+/// was stricter than the two `[[layer]]` blocks it expands to, and escapable by writing them out.
+/// **The check is now a property**
+/// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)):
+/// a label is served only where the cluster it attaches to is served, so a `public` label layer
+/// under a gated parent discloses nothing — a viewer who cannot reach the cluster cannot reach its
+/// labels either, whatever the label layer's own gate says. The same rule closes the case a
+/// comparison could never have decided: two distinct non-`public` labels carry no ordering the
+/// build can compute, because whether every principal holding `ir:secret` also holds `ir:analyst`
+/// is a fact about grants, which live outside the bundle entirely. Under rule 2 neither case needs
+/// deciding here.
 fn expand_labels(blocks: &[LayerBlock]) -> Result<Vec<LayerBlock>> {
     let mut expanded: Vec<LayerBlock> = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -1583,16 +1578,6 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<Vec<LayerBlock>> {
         // than from anything compiled: a parent that declares no gate is refused on its own
         // account, and its refusal fires first, the parent being pushed before this block.
         let visibility = match (&labels.visibility, &parent.visibility) {
-            (Some(declared), Some(parent_gate)) if declared == PUBLIC && parent_gate != PUBLIC => {
-                return Err(declaration_error(format!(
-                    "{object}: `visibility = \"public\"` under a layer gated on \
-                     '{parent_gate}'. A label layer's gate defaults to its parent's and is \
-                     overridable narrower, never wider — and `public` is the widest label there \
-                     is, held by every principal by construction, so this one would serve every \
-                     label of a layer whose own existence is gated. Omit the key to take \
-                     '{parent_gate}', or write the narrower label a viewer must hold"
-                )));
-            }
             (Some(declared), _) => Some(declared.clone()),
             (None, parent_gate) => parent_gate.clone(),
         };

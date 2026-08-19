@@ -11,28 +11,33 @@
 //!    it is accepted, whatever else is true, so an artifact reaches the same `deleted > suppressed`
 //!    composition a point does, by the same route.
 //! 2. **The layer's gate.** Whether this viewer may know the layer exists at all.
-//! 3. **What it is attached to, if it is an attachment.** An artifact that exists only as an
-//!    attachment to another — a toponymy label on a cluster — is tested on its target's disposition
-//!    and reachability as well as on its own. Without that term the predicate is per-artifact by
-//!    construction, so suppressing a cluster stops the cluster serving while every label naming and
-//!    describing it goes on serving to whoever reaches it directly: by search, by a held identifier,
-//!    by a filter. The model's conjunctive rule covers edge *traversal* and those routes traverse
-//!    nothing (`annotation-representation.md` §4).
+//! 3. **The artifact it depends on, if it depends on one — visible to this viewer, entire.** An
+//!    artifact published as an attachment to another — a toponymy label on a cluster — is served
+//!    only where the artifact it attaches to is served
+//!    ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+//!    rule 2). Without that term the predicate is per-artifact by construction, so suppressing a
+//!    cluster stops the cluster serving while every label naming and describing it goes on serving
+//!    to whoever reaches it directly: by search, by a held identifier, by a filter. The model's
+//!    conjunctive rule covers edge *traversal* and those routes traverse nothing
+//!    (`annotation-representation.md` §4).
 //!
-//!    **Three terms and not the target's whole predicate**, which is what §4 asks for and where its
-//!    cost argument comes from — disposition is the lookup branch 1 already performs and existence
-//!    is one store probe, while the target's criterion and containment would need the target level's
-//!    projection on every request. The residue is that a target withheld by *its own* criterion can
-//!    still be named by a label on a layer that declares a weaker one:
-//!    [decision 0086](../../../docs/decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md)
-//!    rules that it stays that way, because a label is an artifact with its own declaration and the
-//!    surface is C1's r43 one — several layers over one corpus are governed by the most permissive
-//!    declaration among them.
+//!    **The target's whole predicate, and per artifact rather than per layer.** The term was once
+//!    three cheaper ones — the target's disposition, its layer's reachability, and whether its slot
+//!    still exists — which left a target withheld by *its own* criterion still nameable by a label
+//!    on a layer declaring a weaker one
+//!    ([decision 0086](../../../docs/decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md),
+//!    superseded on this point by 0089). Rule 2 closes it: the prerequisite is the same `verdict`
+//!    call evaluated for the target's layer, so the criterion, the own-terms gate and containment
+//!    all count, and the conjunction can only narrow what a principal sees. It costs the target's
+//!    masked count per attached artifact per request, which is what 0086 declined to pay and 0089
+//!    rules is paid.
 //!
-//!    **Existence is a separate term from disposition because of the fold.** An overlay entry says
-//!    *deleted*; the fold that executes that deletion retires the entry in the same publication that
-//!    drops the target's slot, so a term resting on the overlay alone would start serving every
-//!    label attached to a deleted cluster at the next nightly fold.
+//!    Existence is inside that call rather than beside it, and the fold is why it has to be asked
+//!    at all: an overlay entry says *deleted*, and the fold that executes the deletion retires the
+//!    entry in the same publication that drops the target's slot — so a term resting on the overlay
+//!    alone would start serving every label attached to a deleted cluster at the next nightly fold.
+//!    A hole answers *not served*, which makes the fold's own hole the durable form of the
+//!    withholding rather than a state something has to remember.
 //! 4. **The artifact's own terms, if its layer declared that its artifacts carry them.**
 //! 5. **The existence criterion, if declared** — the masked count against a declared bar.
 //!
@@ -428,29 +433,25 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     pub layer_reachable: bool,
     /// This view's row form of the layer's membership.
     pub rows: &'a ArtifactRows,
-    /// The gate half of the attachment term: the target layer's own entity where this viewer
-    /// reaches that layer, and `None` where they do not.
+    /// The dependency prerequisite: **is the artifact this one attaches to served to this
+    /// viewer?**
     ///
-    /// **A hook rather than a resolved answer, because the target is another layer.** The layer this
-    /// view is for was resolved once per session; a label's target may live in any layer its own
-    /// declares in `depends_on`, and which of those a viewer reaches is the same one set probe
-    /// `ResolvedLayers` answers for its own. Returning the layer's entity rather than a bool is what
-    /// lets the **live** suppression check run here too, in the order it runs for the layer being
-    /// served — a cached reachability outliving a layer suppression is the fail-open that ordering
-    /// exists to avoid.
-    pub attachment_gate: &'a dyn Fn(&str) -> Option<EntityId>,
-    /// The existence half of the attachment term: whether the target artifact is still there.
+    /// **A hook rather than a resolved answer, because the target is another layer.** The layer
+    /// this view is for was resolved once per session; a label's target may live in any layer its
+    /// own declares in `depends_on`, and answering for it means that layer's reachability, its live
+    /// suppression, its row form and its declaration — a second `verdict`, which the caller is the
+    /// one holding the pieces for.
     ///
-    /// **Not the same question as the disposition check beside it, and the difference is a fold.**
-    /// An overlay entry says *deleted*; the fold that executes that deletion retires the entry in
-    /// the same publication that drops the artifact's slot (Rule F's artifact arm, write-path
-    /// §5.4). After it, nothing in the overlay says anything about that entity — so a term resting
-    /// on disposition alone would start serving every label attached to it, and *a label does not
-    /// outlive what it labels* would hold only until the next nightly fold.
+    /// **Every failure to answer is `false`.** A target layer this viewer does not reach, a layer
+    /// dropped since the resolution, a level absent from this view, a slot a fold has emptied, and
+    /// a target this viewer is simply not shown are one answer here, for the reason they are one
+    /// answer everywhere else: which of them applies is exactly the fact being withheld.
     ///
-    /// A hole answers `false` here, which is what makes the fold's own hole the durable form of the
-    /// withholding rather than a state something has to remember.
-    pub attachment_resolves: &'a dyn Fn(&Attachment) -> bool,
+    /// **Nothing about the target is cached across the call.** A suppression takes effect at the
+    /// ack, so its layer's live disposition is asked here in the same order it is asked for the
+    /// layer being served — a cached reachability outliving a layer suppression is the fail-open
+    /// that ordering exists to avoid.
+    pub dependency_served: &'a dyn Fn(&Attachment) -> bool,
     /// The viewer's **composed** mask — see [`MaskedSet`] for why the type forbids anything else.
     pub mask: &'a M,
 }
@@ -482,25 +483,15 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             return ArtifactVerdict::Absent(Withheld::LayerGate);
         }
 
-        // 3. What it hangs from, if it hangs from anything. Both halves — the target's own
-        //    disposition and the reachability of the target's layer — because a label must not
-        //    outlive either the existence or the reachability of what it labels. Running it here is
-        //    what puts it on every route: search, a held identifier and a filter reach a label
-        //    directly and traverse no edge, so a rule stated only for traversal never reaches them.
+        // 3. What it depends on, if it depends on anything: served to this viewer, or this
+        //    artifact is absent (decision 0089, rule 2). Running it here is what puts it on every
+        //    route — search, a held identifier and a filter reach a label directly and traverse no
+        //    edge, so a rule stated only for traversal never reaches them — and running it *before*
+        //    the artifact's own terms and its own criterion is what makes it a prerequisite rather
+        //    than one conjunct among several: an artifact whose dependency is invisible is absent
+        //    without its own membership being touched at all.
         if let Some(attachment) = self.rows.attachment(ordinal) {
-            let Some(target_layer_entity) = (self.attachment_gate)(&attachment.layer) else {
-                return ArtifactVerdict::Absent(Withheld::Attachment);
-            };
-            for entity in [target_layer_entity, attachment.entity] {
-                if self.overlay.is_deleted(entity) || self.overlay.is_suppressed(entity) {
-                    return ArtifactVerdict::Absent(Withheld::Attachment);
-                }
-            }
-            // And that the target is still *there*. Once a fold has executed the target's deletion
-            // its overlay entry is gone — retired in the same publication that dropped its slot —
-            // so the two checks above go quiet on an artifact that no longer exists. This is what
-            // carries the withholding past that fold.
-            if !(self.attachment_resolves)(attachment) {
+            if !(self.dependency_served)(attachment) {
                 return ArtifactVerdict::Absent(Withheld::Attachment);
             }
         }
@@ -605,21 +596,16 @@ mod tests {
         }
     }
 
-    /// The gate an unattached artifact's test passes: nothing calls it, and a `None` if anything did
-    /// is the fail-closed answer rather than a pass nobody wrote.
-    fn no_targets(_layer: &str) -> Option<EntityId> {
-        None
-    }
-
-    /// The existence half where the target is still there — the ordinary state, so that a case
-    /// about disposition or reachability is not silently answered by this half instead.
-    fn target_present(_attachment: &Attachment) -> bool {
+    /// The prerequisite where the dependency is served — the ordinary state, so that a case about
+    /// some other conjunct is not silently answered by this one instead.
+    fn dependency_served(_attachment: &Attachment) -> bool {
         true
     }
 
-    /// The existence half after a fold has retired the target: its slot is a hole, and no overlay
-    /// entry survives to say why.
-    fn target_gone(_attachment: &Attachment) -> bool {
+    /// The prerequisite where the dependency is not served to this viewer: suppressed, deleted,
+    /// gone at a fold, in a layer they do not reach, or simply below its own layer's bar. The
+    /// predicate treats them alike, and which of them applies is exactly what is withheld.
+    fn dependency_absent(_attachment: &Attachment) -> bool {
         false
     }
 
@@ -669,8 +655,7 @@ mod tests {
                 layer_reachable: reachable,
                 rows: &self.rows,
                 mask: &self.mask,
-                attachment_gate: &no_targets,
-                attachment_resolves: &target_present,
+                dependency_served: &dependency_served,
             }
         }
     }
@@ -869,8 +854,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &all,
-            attachment_gate: &no_targets,
-                attachment_resolves: &target_present,
+                dependency_served: &dependency_served,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -890,8 +874,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &nearly,
-            attachment_gate: &no_targets,
-                attachment_resolves: &target_present,
+                dependency_served: &dependency_served,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -919,8 +902,7 @@ mod tests {
                 layer_reachable: true,
                 rows: &rows,
                 mask,
-                attachment_gate: &no_targets,
-                attachment_resolves: &target_present,
+                dependency_served: &dependency_served,
             }
             .verdict(EntityId::new(999), 0, None)
         };
@@ -963,8 +945,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &everything,
-            attachment_gate: &no_targets,
-                attachment_resolves: &target_present,
+                dependency_served: &dependency_served,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -974,11 +955,10 @@ mod tests {
         );
     }
 
-    // ---- the attachment term ------------------------------------------------------------------
+    // ---- the dependency prerequisite --------------------------------------------------------
 
     /// The cluster a label hangs from, as these tests address it.
     const CLUSTERS: &str = "clusters/a";
-    const CLUSTER_LAYER_ENTITY: EntityId = EntityId::new(4_294_967_290);
     const CLUSTER_ENTITY: EntityId = EntityId::new(4_294_901_760);
     const LABEL_ENTITY: EntityId = EntityId::new(4_294_836_224);
 
@@ -996,67 +976,18 @@ mod tests {
         }
     }
 
-    fn reaches_clusters(layer: &str) -> Option<EntityId> {
-        (layer == CLUSTERS).then_some(CLUSTER_LAYER_ENTITY)
-    }
-
-    /// **The fail-open this term closes.** Suppressing a cluster hides the cluster; without the
-    /// extra term every label naming and describing it goes on serving to anyone holding their
-    /// identifier — and those labels *are* the description of the thing that was just hidden.
+    /// **The whole of rule 2 at this level**: a label whose cluster is not served to this viewer is
+    /// absent, with every other conjunct passing — its own layer reachable, its own entity
+    /// untouched, its whole membership visible and no criterion to fail. Whether the cluster was
+    /// suppressed, deleted, folded away, gated or simply below its own bar is the caller's
+    /// business, and every one of those answers arrives here as the same `false`.
     #[test]
-    fn suppressing_a_cluster_withholds_the_labels_attached_to_it() {
+    fn a_label_whose_dependency_is_not_served_is_absent() {
         let d = declaration(false, None);
         let rows = attached_rows(&[1, 2, 3]);
         let mask = Bitmap::of(&[1, 2, 3]);
-
-        let verdict = |overlay: &Overlay| {
-            ArtifactView {
-                declaration: &d,
-                overlay,
-                satisfied: &FxHashSet::default(),
-                layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
-                attachment_gate: &reaches_clusters,
-                attachment_resolves: &target_present,
-            }
-            .verdict(LABEL_ENTITY, 0, None)
-        };
-
-        let mut overlay = Overlay::new();
-        assert!(verdict(&overlay).is_served());
-
-        // The label's own entity is untouched; only the cluster's is suppressed.
-        overlay.apply(CLUSTER_ENTITY, ChangeOp::Suppress);
-        assert_eq!(
-            verdict(&overlay),
-            ArtifactVerdict::Absent(Withheld::Attachment)
-        );
-
-        // And a deletion, which is the irreversible one.
-        let mut overlay = Overlay::new();
-        overlay.apply(CLUSTER_ENTITY, ChangeOp::Delete);
-        assert_eq!(
-            verdict(&overlay),
-            ArtifactVerdict::Absent(Withheld::Attachment)
-        );
-    }
-
-    /// **The fold's own fail-open, and the one this term's third half exists for.** A deletion's
-    /// overlay entry is retired by the fold that executes it — in the same publication that drops
-    /// the target's slot — so after that fold nothing in the overlay says the cluster was ever
-    /// deleted. A term resting on disposition alone reads "not deleted, not suppressed" and serves
-    /// every label attached to it, which turns *a label does not outlive what it labels* into a rule
-    /// that holds until the next nightly maintenance window.
-    #[test]
-    fn a_label_stays_withheld_after_the_fold_that_retired_its_targets_entry() {
-        let d = declaration(false, None);
-        let rows = attached_rows(&[1, 2, 3]);
-        let mask = Bitmap::of(&[1, 2, 3]);
-        // The post-fold state exactly: a clean overlay — the entry retired with the deletion it
-        // executed — and a target whose slot is now a hole.
         let overlay = Overlay::new();
-        let view = |resolves: &dyn Fn(&Attachment) -> bool| {
+        let verdict = |prerequisite: &dyn Fn(&Attachment) -> bool| {
             ArtifactView {
                 declaration: &d,
                 overlay: &overlay,
@@ -1064,32 +995,56 @@ mod tests {
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
-                attachment_gate: &reaches_clusters,
-                attachment_resolves: resolves,
+                dependency_served: prerequisite,
             }
             .verdict(LABEL_ENTITY, 0, None)
         };
 
         assert!(
-            view(&target_present).is_served(),
-            "the same overlay and the same gate serve the label while its target is there — so \
-             what the case below asserts is the existence term and nothing else"
+            verdict(&dependency_served).is_served(),
+            "the same label with its cluster served — so what the case below asserts is the \
+             prerequisite and nothing else"
         );
         assert_eq!(
-            view(&target_gone),
+            verdict(&dependency_absent),
             ArtifactVerdict::Absent(Withheld::Attachment)
         );
     }
 
-    /// **The gate half, which is not optional**: a label must not outlive the *reachability* of what
-    /// it labels, not only its existence. A viewer who cannot reach the cluster layer would
-    /// otherwise be told what its clusters are called by a label layer they can reach.
+    /// **A suppression of the label's own entity still beats everything**, prerequisite included:
+    /// the overlay is branch 1 and the dependency term is branch 3, so a served cluster cannot
+    /// rescue a suppressed label.
     #[test]
-    fn a_label_is_withheld_where_the_target_layer_is_not_reached() {
+    fn a_suppressed_label_stays_absent_with_its_dependency_served() {
         let d = declaration(false, None);
         let rows = attached_rows(&[1, 2, 3]);
         let mask = Bitmap::of(&[1, 2, 3]);
-        let verdict = |gate: &dyn Fn(&str) -> Option<EntityId>| {
+        let mut overlay = Overlay::new();
+        overlay.apply(LABEL_ENTITY, ChangeOp::Suppress);
+        assert_eq!(
+            ArtifactView {
+                declaration: &d,
+                overlay: &overlay,
+                satisfied: &FxHashSet::default(),
+                layer_reachable: true,
+                rows: &rows,
+                mask: &mask,
+                dependency_served: &dependency_served,
+            }
+            .verdict(LABEL_ENTITY, 0, None),
+            ArtifactVerdict::Absent(Withheld::Verdict)
+        );
+    }
+
+    /// **The prerequisite is asked before the artifact's own membership is looked at**, which is
+    /// what makes it a prerequisite: a label whose cluster is invisible is absent for *that*
+    /// reason, not because it also happened to fail its own criterion.
+    #[test]
+    fn the_prerequisite_precedes_the_labels_own_criterion() {
+        let d = declaration(false, Some(ExistenceCriterion::Count(50)));
+        let rows = attached_rows(&[1, 2, 3]);
+        let mask = Bitmap::of(&[1, 2, 3]);
+        assert_eq!(
             ArtifactView {
                 declaration: &d,
                 overlay: &Overlay::new(),
@@ -1097,58 +1052,34 @@ mod tests {
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
-                attachment_gate: gate,
-                attachment_resolves: &target_present,
-            }
-            .verdict(LABEL_ENTITY, 0, None)
-        };
-
-        assert!(verdict(&reaches_clusters).is_served());
-        // Unreachable, dropped, never registered: one answer, because which of them applies is
-        // exactly what the gate withholds.
-        assert_eq!(
-            verdict(&no_targets),
-            ArtifactVerdict::Absent(Withheld::Attachment)
-        );
-    }
-
-    /// Suppressing the *layer* the target lives in withholds the labels too — the live half of the
-    /// gate, which a cached reachability would otherwise outlive.
-    #[test]
-    fn suppressing_the_target_layer_withholds_the_labels_attached_into_it() {
-        let d = declaration(false, None);
-        let rows = attached_rows(&[1, 2, 3]);
-        let mask = Bitmap::of(&[1, 2, 3]);
-        let mut overlay = Overlay::new();
-        overlay.apply(CLUSTER_LAYER_ENTITY, ChangeOp::Suppress);
-
-        assert_eq!(
-            ArtifactView {
-                declaration: &d,
-                overlay: &overlay,
-                satisfied: &FxHashSet::default(),
-                layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
-                attachment_gate: &reaches_clusters,
-                attachment_resolves: &target_present,
+                dependency_served: &dependency_absent,
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Attachment)
         );
     }
 
-    /// An artifact that hangs from nothing asks nothing, so a clustering pays no lookup per cluster
-    /// for a relationship it does not have.
+    /// An artifact that depends on nothing asks nothing, so a clustering pays no second verdict
+    /// per cluster for a relationship it does not have.
     #[test]
-    fn an_unattached_artifact_never_consults_the_gate() {
+    fn an_unattached_artifact_never_consults_the_prerequisite() {
         let d = declaration(false, None);
-        // `no_targets` refuses every layer; the artifact serves anyway, because nothing asks.
-        let fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
-        assert!(fx
-            .view(&d, true)
-            .verdict(EntityId::new(999), 0, None)
-            .is_served());
+        let rows = rows_of(&[&[1, 2, 3]]);
+        let mask = Bitmap::of(&[1, 2, 3]);
+        // A prerequisite that panics rather than one that refuses: refusing would let this pass
+        // for a predicate that asked and was told no, which is a different property.
+        let never = |_: &Attachment| -> bool { panic!("an unattached artifact asked its dependency") };
+        assert!(ArtifactView {
+            declaration: &d,
+            overlay: &Overlay::new(),
+            satisfied: &FxHashSet::default(),
+            layer_reachable: true,
+            rows: &rows,
+            mask: &mask,
+            dependency_served: &never,
+        }
+        .verdict(EntityId::new(999), 0, None)
+        .is_served());
     }
 
     /// A layer declaring no supplied content has nothing to contain, and its artifacts serve on the

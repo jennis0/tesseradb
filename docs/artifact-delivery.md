@@ -527,13 +527,21 @@ checked against when it was made.
   overlay's `deleted > suppressed` composition, which is what `annotation-representation.md` §4
   means by *the target's `verdict`* — the same lookup the predicate's first branch performs) **and**
   on its target's gate, in the one predicate, so it holds on every route rather than on the ones
-  that traverse the edge. ⊘ What the term deliberately does **not** re-evaluate is the target's own
-  criterion and containment: those need the target level's projection per request, where this is one
-  lookup, and a target withheld by *its own* criterion while its label serves is the surface C1's
-  r43 annotation already governs — several layers over one corpus are governed by the most
-  permissive declaration among them. Raised by review 2026-08-16; an owner ruling, not a defect. Suppress a cluster and its labels stop serving in the viewport *and* on an
+  that traverse the edge. Suppress a cluster and its labels stop serving in the viewport *and* on an
   identifier a viewer already holds; the same for a deletion, for the target layer's own
   suppression, and for a viewer who does not reach the target's layer at all.
+- ✔ **The edge carries both of the member grain's meanings**
+  ([decision 0089](decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), owner
+  ruling): a dependent is **deleted when its dependency is deleted**, and **served only where its
+  dependency is served** — per artifact, neither configurable. The visibility half is the target's
+  whole `verdict` rather than the three cheaper questions above, so a cluster withheld by its own
+  criterion no longer has its label announcing it; that was 0086's accepted residue and 0089
+  supersedes it, paying the target's masked count per attached artifact per request. The deletion
+  half rides the deny lane — a record of its own in the same window as the deletion that caused it,
+  retiring at the compaction fold that executes it (Rule F), never by a second removal route — and
+  it is transitive, a label on a label going with both. **Every artifact of a layer that declares
+  `depends_on` must declare an attachment into a declared layer**, refused at the build and at the
+  control plane alike.
   - **The caller names a target by its key**, because an ordinal never crosses the boundary
     (C8) and a `tessera_id` in durable state would be reinterpreted by the next key rotation. What
     is stored is the resolved `(layer, level, ordinal, entity)`, which is what makes the extra term

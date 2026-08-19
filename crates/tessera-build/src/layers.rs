@@ -564,6 +564,8 @@ pub fn publish(
         registry.apply(&record);
     }
 
+    verify_dependencies(plan)?;
+
     // **Every membership is materialised here, before anything else looks at one.** A membership
     // declared by exclusion is complemented against the entity space this build assigned, once, so
     // the hierarchy checks below and the store beneath them see the same set an inclusion would
@@ -638,6 +640,49 @@ pub fn publish(
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     Ok(published)
+}
+
+/// Every artifact of a layer that declares a dependency must declare one, into a layer that
+/// layer named ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)).
+///
+/// **The same two refusals the control plane makes, made here where the input is a file.** A
+/// dependent is served only where the artifact it attaches to is served, so an artifact carrying no
+/// attachment has nothing for that prerequisite to gate on — and a build that admitted what an
+/// ingest refuses is the fail-open half of one rule stated twice. What this adds over the registry's
+/// own refusal is the address: the layer and key an operator has to go and fix, before the first
+/// entity is allocated.
+fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
+    let declared: BTreeMap<&str, &[String]> = plan
+        .declarations
+        .iter()
+        .map(|d| (d.name.as_str(), d.depends_on.as_slice()))
+        .collect();
+    for ((layer, _, key), artifact) in &plan.artifacts {
+        let Some(depends_on) = declared.get(layer.as_str()) else {
+            continue;
+        };
+        match &artifact.attached_to {
+            None if !depends_on.is_empty() => {
+                return Err(BuildError::Invalid(format!(
+                    "layer '{layer}' declares depends_on {depends_on:?}, so every artifact it \
+                     publishes attaches to one — and {key} attaches to nothing. A dependent is \
+                     visible only where what it depends on is visible, so an artifact with no \
+                     dependency would be gated on nothing: give it attached_layer and \
+                     attached_key, or drop depends_on from the layer"
+                )));
+            }
+            Some(attachment) if !depends_on.contains(&attachment.layer) => {
+                return Err(BuildError::Invalid(format!(
+                    "layer '{layer}' publishes {key} attached into '{}', which it does not declare \
+                     in depends_on {depends_on:?} — a dependency nobody declared is one no \
+                     replacement checks, and one the publication order does not honour",
+                    attachment.layer
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Check every declared parent/child edge, refusing the malformed and reporting the uncontained.

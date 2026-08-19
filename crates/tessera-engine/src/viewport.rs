@@ -2962,6 +2962,30 @@ fn present_rows(segment: &SegmentData, column: &str, row_base: u32) -> Option<cr
 /// the viewport — so the ratio is *modelled* to survive, not shown to.
 /// `Engine::filter_crossing_routes` is the observable that would catch it being wrong in a way a
 /// bench never reproduces.
+/// How long a chain of dependencies one request will follow.
+///
+/// **A backstop, not a limit anyone should reach.** A dependency graph is acyclic by construction —
+/// a layer is registered only after every layer it names in `depends_on` — so a real chain is
+/// bounded by the number of declared layers and is one or two links deep in practice. This bounds
+/// the recursion anyway, because the alternative to a bound on a request path is a stack that a
+/// disagreeing store could run off; refusing a chain longer than this withholds artifacts, which is
+/// the direction a backstop must fail in.
+const DEPENDENCY_CHAIN_MAX: u32 = 16;
+
+/// One request's state, as the dependency prerequisite needs it.
+///
+/// Gathered once per response rather than per artifact: every field is a property of the request —
+/// the viewer, the generation, the view and the composed mask — and none of them is a property of
+/// the artifact being tested.
+struct DependencyContext<'a> {
+    generation: &'a crate::Generation,
+    satisfied: &'a rustc_hash::FxHashSet<tessera_types::TermId>,
+    view: &'a str,
+    view_data: &'a tessera_store::ViewData,
+    mask: &'a crate::compose::EffectiveMask,
+    reachable: &'a tessera_lifecycle::ResolvedLayers,
+}
+
 const PER_TILE_CROSSING_RATIO: u64 = 3;
 
 /// Split a chunk of the crossing domain no smaller than this, so a viewport small enough that the
@@ -3103,8 +3127,15 @@ impl Engine {
                 &view_data.row_space,
             )
         });
-        let attachment_gate = self.attachment_gate(&reachable);
-        let attachment_resolves = self.attachment_resolves();
+        let ctx = DependencyContext {
+            generation: &generation,
+            satisfied: &session.satisfied,
+            view,
+            view_data,
+            mask: &mask,
+            reachable: &reachable,
+        };
+        let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
@@ -3112,8 +3143,7 @@ impl Engine {
             layer_reachable: true,
             rows: &rows,
             mask: &mask,
-            attachment_gate: &attachment_gate,
-            attachment_resolves: &attachment_resolves,
+            dependency_served: &dependency_served,
         };
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
         // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
@@ -3257,44 +3287,110 @@ impl Engine {
         Some(values)
     }
 
-    /// The attachment term's gate half, shared by both serving routes.
+    /// The dependency prerequisite, shared by both serving routes: **is the artifact this one
+    /// attaches to served to this viewer?**
     ///
-    /// Answers *this viewer reaches that layer, and here is its own entity* — or `None`, which the
-    /// predicate reads as absence. One function rather than two call sites doing the same two steps,
-    /// on the argument the shared predicate itself rests on: a route that gated attachments
-    /// differently from the other would be two transcriptions of one rule, and the one that drifted
-    /// would be serving labels for hidden clusters.
+    /// One function rather than two call sites doing the same steps, on the argument the shared
+    /// predicate itself rests on: a route that gated dependencies differently from the other would
+    /// be two transcriptions of one rule, and the one that drifted would be serving labels for
+    /// clusters their viewer cannot see.
     ///
-    /// **A dropped target layer answers `None`**, and so does a name this principal cannot reach.
-    /// The two are the same answer here for the same reason they are the same answer everywhere
-    /// else: which of them applies is exactly the fact the gate withholds.
-    fn attachment_gate<'a>(
-        &'a self,
-        reachable: &'a tessera_lifecycle::ResolvedLayers,
-    ) -> impl Fn(&str) -> Option<EntityId> + 'a {
-        move |layer: &str| {
-            if !reachable.contains(layer) {
-                return None;
-            }
-            self.write.layer_entity(layer)
+    /// **The target's own `verdict`, not a cheaper summary of it**
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+    /// rule 2). Its layer's gate, its live suppression, its existence, its own terms, its existence
+    /// criterion against *this viewer's* masked count, and its containment all decide here, because
+    /// "visible" means the same thing for a dependency as it does for anything else. The
+    /// conjunction can only narrow, so the term introduces no disclosure of its own.
+    ///
+    /// **The order matters and is the order the served layer's own path takes**: reachability
+    /// first, then the layer's live disposition, then the level and the slot, then the predicate.
+    /// A reachability resolved once per session may be cached; a disposition may not, and asking
+    /// them in this order is what keeps a layer suppression from being outlived by a session.
+    ///
+    /// **Recursion, bounded by the declaration graph.** A dependency may itself be a dependent — a
+    /// label on a label — and the chain terminates because a layer is registered only after every
+    /// layer it names in `depends_on`, which makes the graph acyclic by construction. `depth` is a
+    /// backstop for a store that somehow disagrees with that, and it fails closed rather than
+    /// deep: a chain longer than any real declaration is refused, not followed.
+    fn dependency_served(
+        &self,
+        ctx: &DependencyContext<'_>,
+        attachment: &tessera_lifecycle::membership::Attachment,
+        depth: u32,
+    ) -> bool {
+        if depth == 0 {
+            return false;
         }
-    }
-
-    /// The existence half of the attachment term — see
-    /// [`ArtifactView::attachment_resolves`](crate::artifacts::ArtifactView::attachment_resolves).
-    ///
-    /// One store lookup per **attached** artifact of a response, and none for a clustering that
-    /// hangs from nothing. It asks the level directly rather than going through the registry,
-    /// because the registry's reserved runs answer for the *layer* and would resolve an ordinal a
-    /// fold has emptied.
-    fn attachment_resolves(&self) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + '_ {
-        move |attachment| {
-            self.write.with_artifacts(|store| {
+        // A name this principal does not reach, and a layer dropped since the resolution, are one
+        // answer here for the reason they are one answer everywhere: which of them applies is
+        // exactly the fact being withheld.
+        if !ctx.reachable.contains(&attachment.layer) {
+            return false;
+        }
+        let Some(layer) = self.write.registered_layer(&attachment.layer) else {
+            return false;
+        };
+        if ctx.generation.overlay.is_deleted(layer.entity)
+            || ctx.generation.overlay.is_suppressed(layer.entity)
+        {
+            return false;
+        }
+        // A layer that does not live in this view has no membership in this row space, so there is
+        // nothing here that could be served.
+        if !layer.declaration.views.iter().any(|s| s == ctx.view) {
+            return false;
+        }
+        let (store_version, record) = self.write.with_artifacts(|store| {
+            (
+                store.version(),
                 store
                     .get(&attachment.layer, attachment.level, attachment.ordinal)
-                    .is_some()
-            })
+                    .map(|record| record.entity),
+            )
+        });
+        // **The slot answers, and it must answer with the entity the edge names.** A hole is what
+        // the fold leaves where it executed a deletion — in the same publication that retired the
+        // overlay entry saying so — and an ordinal holding a *different* entity is an edge into an
+        // artifact that is gone and has been republished over. Both are absent.
+        let Some(entity) = record.filter(|entity| *entity == attachment.entity) else {
+            return false;
+        };
+        let rows = self.write.with_artifacts(|store| {
+            self.artifact_projections.get_or_build(
+                &ctx.generation.prefix,
+                ctx.view,
+                &attachment.layer,
+                attachment.level,
+                store,
+                store_version,
+                &ctx.view_data.row_space,
+            )
+        });
+        let nested = |a: &tessera_lifecycle::membership::Attachment| {
+            self.dependency_served(ctx, a, depth - 1)
+        };
+        crate::artifacts::ArtifactView {
+            declaration: &layer.declaration,
+            overlay: &ctx.generation.overlay,
+            satisfied: ctx.satisfied,
+            layer_reachable: true,
+            rows: &rows,
+            mask: ctx.mask,
+            dependency_served: &nested,
         }
+        // ⊘ Per-artifact terms arrive with content, so the target's own label is `None` here
+        // exactly as it is on the two serving routes — the same fail-closed answer reached by the
+        // same call.
+        .verdict(entity, attachment.ordinal, None)
+        .is_served()
+    }
+
+    /// The prerequisite as the predicate takes it: a closure over one request's state.
+    fn dependency_gate<'a>(
+        &'a self,
+        ctx: &'a DependencyContext<'a>,
+    ) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + 'a {
+        move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
     // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
@@ -3335,8 +3431,15 @@ impl Engine {
         // Built once for the whole response, and from the *same* resolution the names above came
         // from: a label's target may live in any layer its own declares in `depends_on`, reachable
         // or not, and asking a second resolution would be a second answer to one question.
-        let attachment_gate = self.attachment_gate(&reachable);
-        let attachment_resolves = self.attachment_resolves();
+        let ctx = DependencyContext {
+            generation,
+            satisfied: &session.satisfied,
+            view,
+            view_data,
+            mask,
+            reachable: &reachable,
+        };
+        let dependency_served = self.dependency_gate(&ctx);
 
         // The viewport as one row-space set, built once for every layer: the merged global spans of
         // every tile this request resolved. `crossing_domain` already merges and globalises them
@@ -3418,8 +3521,7 @@ impl Engine {
                     layer_reachable: true,
                     rows: &rows,
                     mask,
-                    attachment_gate: &attachment_gate,
-                    attachment_resolves: &attachment_resolves,
+                    dependency_served: &dependency_served,
                 };
                 // **Every candidate is tested before any is cut**, and the two passes are separate
                 // for a reason that is not performance: the verdict is a per-artifact question

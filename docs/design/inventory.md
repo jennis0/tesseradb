@@ -74,7 +74,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | Document | Status | ⊘ |
 |---|---|---|
 | `annotation-representation.md` | Normative for the annotation representat | 39 |
-| `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
+| `annotation-write-cycle.md` | Normative for the annotation write cycle | 17 |
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r48 | 35 |
 | `caching.md` | Provisional — under review |  |
@@ -82,7 +82,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 21 |
+| `configuration.md` | Normative for the build-time configurati | 20 |
 | `conformance.md` | Normative — r11 | 15 |
 | `contracts.md` | Normative — r34 | 22 |
 | `core-access-expressions.md` | Provisional — under review | 1 |

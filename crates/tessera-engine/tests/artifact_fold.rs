@@ -1112,3 +1112,94 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     assert_eq!(served.len(), 1, "the artifact is served rather than withheld");
     assert_eq!(served[0].content, vec!["a label from the whole sample"]);
 }
+
+/// **Deleting a cluster deletes its labels, and the removal retires where every other deletion
+/// retires** ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+/// rule 1).
+///
+/// The distinction this test carries, and the reason it is here rather than beside the serving
+/// tests: the label vanishing at the ack proves only the *visibility* rule, which would hold with
+/// the label's record sitting in its level for ever. What rule 1 adds is that the label is
+/// **deleted** — one more entry in the overlay, one more record in the WAL, and one more slot the
+/// fold empties. A cascade retiring by any other route would be a second removal rule, which is the
+/// fail-open write-path §5.4 exists to prevent.
+#[test]
+fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
+    let fx = fixture();
+    let cluster_entity = {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        engine.register_layer(labels_over("clusters/a")).unwrap();
+        let cluster_id = engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![IncomingArtifact::from_entities(
+                    Some("c0".into()),
+                    fx.members(0..300),
+                )],
+            )
+            .unwrap()[0];
+        engine
+            .publish_artifacts(
+                "topics/x".into(),
+                0,
+                vec![IncomingArtifact::attached(
+                    Some("l0".into()),
+                    fx.members(0..300),
+                    vec![IncomingContent::new(
+                        vec!["shipping and logistics".into()],
+                        Vec::new(),
+                    )],
+                    tessera_lifecycle::membership::IncomingAttachment {
+                        layer: "clusters/a".into(),
+                        level: 0,
+                        key: "c0".into(),
+                    },
+                )],
+            )
+            .unwrap();
+        wait_for_publication(&fx, &engine, 2);
+        assert_eq!(artifacts_of(&engine).len(), 2);
+        assert_eq!(engine.published_artifacts(), 2);
+
+        let cluster = artifact_entity(&engine, cluster_id);
+        assert_eq!(engine.overlay_depth(), 0, "nothing is denied yet");
+        engine
+            .accept_change(cluster, ChangeOp::Delete)
+            .expect("the delete is accepted");
+
+        // **Two dispositions from one command.** The cluster's own, and the label's — the cascade,
+        // carried in the same window, on the same lane, with its own durable record.
+        assert_eq!(
+            engine.overlay_depth(),
+            2,
+            "the label was deleted with its cluster rather than merely withheld behind it"
+        );
+        assert!(artifacts_of(&engine).is_empty(), "both go at the ack");
+
+        fold(&engine);
+
+        assert_eq!(
+            engine.published_artifacts(),
+            0,
+            "and both slots left their levels at the fold that executed the deletions — the \
+             label's by the same route as the cluster's"
+        );
+        cluster
+    };
+
+    // **Reopened, which is where a cascade that only hid the label would show.** The overlay
+    // entries are retired and gone from the manifest, so nothing but the absence of the records
+    // keeps either artifact away.
+    let engine = fx.open();
+    assert!(
+        artifacts_of(&engine).is_empty(),
+        "the label stayed gone across the retirement of the entry that was hiding it"
+    );
+    assert_eq!(engine.published_artifacts(), 0);
+    assert!(
+        engine.locate_artifact(cluster_entity).and_then(|at| at.key).is_none(),
+        "and the cluster's own slot is a hole, as it was before this rule existed"
+    );
+}

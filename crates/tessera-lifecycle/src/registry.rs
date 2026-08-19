@@ -80,6 +80,14 @@ pub enum RegistryError {
     /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
     /// nobody declared is an edge nothing protects.
     UndeclaredAttachment { layer: String, target: String },
+    /// An artifact declares no dependency in a layer that declares one.
+    ///
+    /// **Fail-closed, because a dependency edge is a visibility term**
+    /// ([decision 0089](../../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)):
+    /// a dependent is served only where the artifact it attaches to is served, so an artifact with
+    /// no attachment has nothing for that prerequisite to gate on. Admitting it would make the
+    /// prerequisite silently optional — the caller's producer error becoming a permission.
+    MissingAttachment { layer: String, key: String },
     /// An artifact attaches to a target that does not exist — no such layer, no such level, or no
     /// artifact under that key.
     ///
@@ -145,6 +153,12 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact attached into {target}, which it does not declare in \
                  depends_on — an attached artifact is withheld with its target, and a dependency \
                  nobody declared is one no replacement checks"
+            ),
+            RegistryError::MissingAttachment { layer, key } => write!(
+                f,
+                "{layer} declares depends_on, so every artifact it publishes attaches to one — and \
+                 {key} attaches to nothing. A dependent is visible only where what it depends on \
+                 is visible, so an artifact with no dependency would be gated on nothing"
             ),
             RegistryError::NoSuchAttachmentTarget {
                 layer,
@@ -462,6 +476,16 @@ impl LayerRegistry {
             .iter()
             .map(|artifact| {
                 let Some(wanted) = &artifact.attached_to else {
+                    // **A layer that declares a dependency publishes only dependents** (decision
+                    // 0089). Refused here rather than served ungated: the serving predicate reads
+                    // the prerequisite off the attachment, so an artifact carrying none would be
+                    // the one artifact of a label layer that answered on its own conjuncts alone.
+                    if !layer.declaration.depends_on.is_empty() {
+                        return Err(RegistryError::MissingAttachment {
+                            layer: layer_name.to_string(),
+                            key: artifact.key.clone().unwrap_or_else(|| "<no key>".to_string()),
+                        });
+                    }
                     return Ok(None);
                 };
                 if !layer.declaration.depends_on.contains(&wanted.layer) {

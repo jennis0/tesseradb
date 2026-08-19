@@ -341,6 +341,16 @@ pub struct ArtifactStore {
     /// Per `(layer, level)`, the ordinal high-water already durable in a manifest. Everything at or
     /// above it lives only in the WAL, which is what the rotation pin holds the log for.
     published_through: BTreeMap<(String, u32), u32>,
+    /// `target entity → the entities of the artifacts attached to it`.
+    ///
+    /// **The inverse of [`Attachment`], maintained here because the deny lane reads it.** Deleting
+    /// an artifact deletes the artifacts depending on it
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
+    /// and the lane holds an entity rather than an address — so the alternative to this index is a
+    /// scan of every level per deletion, on the one lane whose ack latency is a guarantee. It is an
+    /// index and not a second copy of the truth: every entry is derived from a record's
+    /// `attached_to`, added where the record enters and removed where it leaves.
+    dependents: BTreeMap<EntityId, Vec<EntityId>>,
     /// Bumped by every publication and every layer removal. **A derived row-space projection is
     /// valid only for the version it was built from**: a cache that missed a bump would serve a
     /// level with its newest artifacts absent, which a viewer cannot tell from artifacts that
@@ -360,15 +370,77 @@ impl ArtifactStore {
             self.keys
                 .insert((layer.to_string(), level, key.clone()), ordinal);
         }
-        let slots = self
-            .levels
-            .entry((layer.to_string(), level))
-            .or_default();
+        let edge = record
+            .attached_to
+            .as_ref()
+            .map(|attachment| (attachment.entity, record.entity));
         let idx = ordinal as usize;
-        if slots.len() <= idx {
-            slots.resize(idx + 1, None);
+        let previous = {
+            let slots = self
+                .levels
+                .entry((layer.to_string(), level))
+                .or_default();
+            if slots.len() <= idx {
+                slots.resize(idx + 1, None);
+            }
+            // The slot's previous occupant, if any, takes its edge with it — replay applies the
+            // same publication twice on a re-read prefix, and an index that accumulated a
+            // duplicate would cascade one deletion into the same dependent twice.
+            let previous = slots[idx].take();
+            slots[idx] = Some(record);
+            previous
+        };
+        if let Some(previous) = previous {
+            self.forget_dependency(&previous);
         }
-        slots[idx] = Some(record);
+        if let Some((target, dependent)) = edge {
+            let entry = self.dependents.entry(target).or_default();
+            if !entry.contains(&dependent) {
+                entry.push(dependent);
+            }
+        }
+    }
+
+    /// Drop one record's outgoing dependency edge from the index.
+    fn forget_dependency(&mut self, record: &ArtifactRecord) {
+        let Some(attachment) = &record.attached_to else {
+            return;
+        };
+        if let Some(entry) = self.dependents.get_mut(&attachment.entity) {
+            entry.retain(|dependent| *dependent != record.entity);
+            if entry.is_empty() {
+                self.dependents.remove(&attachment.entity);
+            }
+        }
+    }
+
+    /// Every artifact that depends, directly or transitively, on one of `roots` — the deletions
+    /// rule 1 of [decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)
+    /// adds to a caller's own.
+    ///
+    /// **Never contains a root**, so a caller can submit these beside the deletions it was given
+    /// without deleting anything twice. The walk terminates without a visited set of its own on
+    /// the dedup below plus the acyclicity the registry enforces — a layer is registered after
+    /// every layer it names in `depends_on`, so no edge can point back up the chain — and the
+    /// dedup is what makes it safe anyway: an entity already collected is never expanded again.
+    ///
+    /// An entity that is not an artifact — a point, a layer — has no dependents and answers
+    /// empty, which is what lets the deny lane ask this of every deletion it carries.
+    pub fn cascade_from(&self, roots: &[EntityId]) -> Vec<EntityId> {
+        let mut collected: std::collections::BTreeSet<EntityId> = std::collections::BTreeSet::new();
+        let mut frontier: Vec<EntityId> = roots.to_vec();
+        while let Some(entity) = frontier.pop() {
+            let Some(dependents) = self.dependents.get(&entity) else {
+                continue;
+            };
+            for dependent in dependents {
+                if roots.contains(dependent) || !collected.insert(*dependent) {
+                    continue;
+                }
+                frontier.push(*dependent);
+            }
+        }
+        collected.into_iter().collect()
     }
 
     /// The next ordinal a publication into this level would claim.
@@ -532,8 +604,29 @@ impl ArtifactStore {
     /// the pin is a single bound rather than a set. Holding it costs a longer log; recomputing it
     /// wrongly costs a membership.
     pub fn remove_layer(&mut self, layer: &str) {
+        // Rebuilt from what survives rather than patched from what left: a dropped layer is both
+        // ends of an edge — its artifacts' own outgoing edges, and the edges of layers that
+        // attached into it — and one full pass over the remaining records is simpler to audit than
+        // two removals whose union has to be argued. A layer drop is rare and never on a request
+        // path.
         self.levels.retain(|(l, _), _| l != layer);
         self.keys.retain(|(l, _, _), _| l != layer);
+        self.dependents.clear();
+        let edges: Vec<(EntityId, EntityId)> = self
+            .levels
+            .values()
+            .flatten()
+            .flatten()
+            .filter_map(|record| {
+                record
+                    .attached_to
+                    .as_ref()
+                    .map(|attachment| (attachment.entity, record.entity))
+            })
+            .collect();
+        for (target, dependent) in edges {
+            self.dependents.entry(target).or_default().push(dependent);
+        }
         self.version += 1;
     }
 
@@ -741,6 +834,9 @@ impl ArtifactStore {
         if retired.is_empty() {
             return;
         }
+        // Collected during the walk and applied after it: the index is a field beside `levels`,
+        // which is borrowed mutably here.
+        let mut gone: Vec<(EntityId, EntityId)> = Vec::new();
         for ((layer, level), slots) in self.levels.iter_mut() {
             let on_deletion = policy(layer);
             for slot in slots.iter_mut() {
@@ -749,6 +845,9 @@ impl ArtifactStore {
                     if let Some(key) = &record.key {
                         self.keys.remove(&(layer.clone(), *level, key.clone()));
                     }
+                    if let Some(attachment) = &record.attached_to {
+                        gone.push((attachment.entity, record.entity));
+                    }
                     *slot = None;
                     continue;
                 }
@@ -756,6 +855,19 @@ impl ArtifactStore {
                 apply_deletion_policy(record, retired, on_deletion);
             }
         }
+        // A retired artifact's edge leaves with it, in both directions: its own outgoing edge here,
+        // and any edges pointing *at* it — nothing can attach to an artifact that is gone, and a
+        // stale entry would cascade a later deletion into an ordinal a republication now holds.
+        for (target, dependent) in gone {
+            if let Some(entry) = self.dependents.get_mut(&target) {
+                entry.retain(|e| *e != dependent);
+                if entry.is_empty() {
+                    self.dependents.remove(&target);
+                }
+            }
+        }
+        self.dependents
+            .retain(|target, _| !retired.contains(target.raw() as u32));
         // Every row-space projection built from these is now wrong in both directions — memberships
         // that shrank, and artifacts that are gone.
         self.version += 1;
@@ -1129,6 +1241,61 @@ mod tests {
             attached_to: None,
             parent: None,
         }
+    }
+
+    /// A record attached to `target`.
+    fn attached(entity: u64, target: u64, layer: &str, ordinal: u32) -> ArtifactRecord {
+        ArtifactRecord {
+            attached_to: Some(Attachment {
+                layer: layer.to_string(),
+                level: 0,
+                ordinal,
+                entity: EntityId::new(target),
+            }),
+            ..record(entity, &[1])
+        }
+    }
+
+    /// **A chain, not a level.** A label on a cluster and a label on that label both go when the
+    /// cluster does, which is what makes rule 1 transitive — and the roots are never in the answer,
+    /// so the deny lane can submit it beside the deletions it was given without deleting one twice.
+    #[test]
+    fn a_cascade_follows_the_whole_chain_and_never_returns_a_root() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]));
+        store.put("clusters/a", 0, 1, record(101, &[4]));
+        store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0));
+        store.put("topics/x", 0, 1, attached(201, 101, "clusters/a", 1));
+        store.put("glosses/y", 0, 0, attached(300, 200, "topics/x", 0));
+
+        assert_eq!(
+            store.cascade_from(&[EntityId::new(100)]),
+            vec![EntityId::new(200), EntityId::new(300)],
+            "the label and the label on the label, and neither of the untouched cluster's"
+        );
+        assert_eq!(
+            store.cascade_from(&[EntityId::new(100), EntityId::new(200)]),
+            vec![EntityId::new(300)],
+            "a dependent already being deleted is not deleted a second time"
+        );
+        assert!(
+            store.cascade_from(&[EntityId::new(999)]).is_empty(),
+            "an entity that is not an artifact has no dependents"
+        );
+    }
+
+    /// A retired artifact takes its edges with it, so a later deletion of something else does not
+    /// cascade into an ordinal that is now a hole — or into whatever a republication put there.
+    #[test]
+    fn retiring_an_artifact_takes_its_dependency_edges_with_it() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]));
+        store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0));
+        store.retire(&Bitmap::of(&[200]), &|_| false);
+        assert!(
+            store.cascade_from(&[EntityId::new(100)]).is_empty(),
+            "the label is gone, so deleting its cluster cascades into nothing"
+        );
     }
 
     #[test]
