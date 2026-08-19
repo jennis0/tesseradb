@@ -189,10 +189,22 @@ Full guide in [docs/agents/writing.md](docs/agents/writing.md). The rules that m
 ## The gate
 
 ```bash
-cargo test --workspace
+cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check-layers.sh
+bash scripts/check-clients.sh
 python3 scripts/check-doc-links.py
 ```
 
 Run them and read the output before claiming anything passes.
+
+**`--no-fail-fast`, and read the count.** Without it cargo stops at the first failing binary and
+skips the rest, so a run that reports no failures alongside a *smaller* passing total reads as
+success. That has already been mistaken for a green gate here.
+
+**The TypeScript client is in the gate**, and is there because one rename shipped three defects
+into `clients/` — two app-state fields collapsed onto one name, a `.slice()` call renamed to
+`.view()`, and a shadowed `const` that threw before its initialiser ran — none caught, each found
+later by a separate investigation. A client that does not compile is not a smaller failure than a
+crate that does not compile. The operator `.mjs` scripts are typechecked with `checkJs` rather than
+parsed, because the third defect is a type error and not a syntax one.

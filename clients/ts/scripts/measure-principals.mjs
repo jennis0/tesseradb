@@ -164,11 +164,13 @@ if (args.ranks) {
     return {n: lo, visible: await unionOf(lo)};
   };
 
-  for (const [label, fraction] of [
+  /** @type {[string, number][]} */
+  const bands = [
     ['sparse', 0.01],
     ['medium', 0.1],
     ['heavy', 0.5]
-  ]) {
+  ];
+  for (const [label, fraction] of bands) {
     const start = startFor(fraction);
     const {n, visible} = await runReaching(start, corpus * fraction);
     const pct = (100 * visible) / corpus;
