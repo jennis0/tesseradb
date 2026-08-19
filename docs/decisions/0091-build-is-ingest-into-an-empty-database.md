@@ -57,23 +57,26 @@ since the last structural pass contributes to no masked count, hull or criterion
 membership was recorded. Nothing is observable before the fold, and the fold already rewrites every
 level whole. What the interval needs is durability and a pin that holds — not a second packing rule.
 
-## The asymmetries this rule does not yet close
+## What may differ, and what may not
 
-Stated rather than implied, because a rule whose exceptions are unlisted is a rule nobody can
-apply:
+The rule is about **functionality and client experience**. Internals may differ freely, and two do:
 
-- **Entity id assignment differs by construction.** A build assigns ids in signature-sorted order
-  across the whole corpus; ingest allocates above the high-water. The same corpus built and
-  ingested therefore carries different permanent ids, and `tessera_id` derives from them. This is
-  the one place the byte-identical test cannot hold, it is deliberate (§11.1), and it is the
-  reason `--carry-id-key-from` exists — which itself does not yet carry the term dictionary.
-- **Acquisition is build-only and always was.** `source`, `fields`, inline `artifacts`, `--file`,
-  `--limit` and extent fitting say where rows come from, not what they mean, and a deployment that
-  never builds simply omits them ([`configuration.md`](../design/configuration.md) §2). Not an
-  exception to this rule: nothing a caller can *say* differs.
-- ⊘ **The wire cannot yet say everything the build can.** A point may name its artifacts in a file
-  and not on the wire, which is the gap `artifacts-from-points.md` §6 exists to close and the first
-  thing this rule obliges.
+- **Entity id assignment.** A build assigns ids in signature-sorted order across the whole corpus;
+  ingest allocates above the high-water. The same corpus therefore carries different permanent ids
+  each way — an internal difference, since a client is handed an opaque `tessera_id` either way and
+  can tell nothing from it. It is why `--carry-id-key-from` exists, and why the byte-identical test
+  is a test of *inputs spelled two ways*, not of the two entry points producing identical bytes.
+- **Scheduling and packing.** A build batches, sorts and packs in one pass because the corpus is
+  empty and nothing is being served. Nothing a caller can say depends on it.
+
+Acquisition is build-only and is not an exception: `source`, `fields`, inline `artifacts`,
+`--file`, `--limit` and extent fitting say where rows come from rather than what they mean, and a
+deployment that never builds omits them ([`configuration.md`](../design/configuration.md) §2).
+
+⊘ **The wire cannot yet say everything a file can.** A point may name its artifacts in a file and
+not on the wire. That is a genuine breach of this rule rather than an internal difference, it is
+the gap `artifacts-from-points.md` §6 exists to close, and it is the first thing this rule
+obliges.
 
 ## Consequences
 
