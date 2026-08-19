@@ -520,12 +520,10 @@ peculiar to them.
 discriminator: there is no `layer` column to select on, no filter to configure, and no way for a
 layer to ingest another's rows.
 
-⊘ **A layer's `fields` map does not yet move a field**, and the example below's
-`parent = "parent_id"` is therefore refused at parse rather than read. Every other object's map
-reaches its reader — a view's geometry, `[corpus]`'s identity, a vocabulary's `key`/`code`/`title`,
-an attribute's `field` — but the artifact and member readers take `rank` and `entity` while still
-reading a `layer` discriminator, a per-row `values` and a `parent_key`, none of which this surface
-names, so there is nothing for a map to move until those sources are rebuilt on the names above.
+**A layer's `fields` map moves a field and the readers take the name it moved it to**, as every
+other object's does. The two exceptions are `level` and `attached_level`, read under their own
+names because [`configuration.md`](configuration.md) §1's tables do not name them — a level is an
+address rather than a value, and the map's key set is that closed one.
 
 ```toml
 [[layer]]
@@ -555,6 +553,9 @@ by a producer.
 Collapsing the artifact source to one row each is what retires the agreement refusal the old
 `(artifact, rank)` grain needed: `key`, `parent` and the attachment were repeated on every row of
 one artifact so that a single column could differ, and the build had to check the copies matched.
+The refusal is *retired* rather than moved — with one row per artifact there are no copies to
+disagree — and what the grain still admits, one key on two rows, is refused as two artifacts under
+one name.
 The member source's entity column is `entity` rather than `member`, a column named `member` on a
 long source reading as though it should hold the whole membership.
 
@@ -591,7 +592,10 @@ relation's are; an id the build did not assign refuses the build. **Ordinals are
 and a key is required — it is what an edge into the layer names.
 
 **Small layers need no data file at all**: `artifacts = [{ key = …, contents = [ … ] }]` inline, for
-what a person authors rather than what a pipeline produces.
+what a person authors rather than what a pipeline produces. It is a spelling and never a second kind
+of layer, which the build asserts the hard way: an inline layer and the same layer read from a file
+produce a **byte-identical bundle**, as do `excluding` and the inclusion it complements to, and a
+membership on the artifact row and the same one in `[layer.members]`.
 
 The layer entity exists for one reason: an operator discovering a leaking layer needs immediate,
 reversible, fail-closed hiding, and a gate re-evaluated only at authorise cannot give it — a layer
@@ -753,6 +757,17 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**r7 — 2026-08-19. §6.1's build inputs are built.** One source per layer, one row per artifact with
+`contents` as a ranked list, inline `artifacts`, membership by exclusion, and a layer's `fields` map
+reaching its readers — all of which this section already specified and none of which the build did.
+Three consequences worth stating. The **cross-row agreement refusal is retired, not moved**: with
+one row per artifact the disagreement it detected cannot be written, and what the grain still admits
+— one key on two rows — is refused as two artifacts under one name. The **complement happens once,
+at the build**, and no type below it carries the spelling, which is what makes *no request-time
+complement* structural; an excluded id the build did not assign refuses it, an exclusion resolving
+to nothing being a silent widening. And each pair of spellings is asserted to produce a
+**byte-identical bundle**. No rule of the write cycle moved.
 
 **r6 — 2026-08-19. Vocabulary only.** The renames §6.1 announced are performed workspace-wide:
 `rank` and `entity` are what the artifact and member readers spell, and an artifact's caller-supplied

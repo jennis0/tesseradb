@@ -109,10 +109,15 @@
 //! object never declared, because both are answerable from the declaration alone; the *readers*
 //! refuse a name the file does not carry, because that needs the file open.
 //!
-//! ⊘ **A layer's map is the exception and is still refused.** The artifact and member readers take
-//! `rank` and `entity`, but still read a `layer` discriminator column, a per-row `values` and a
-//! `parent_key` — none of which this surface names — so a layer field map has nothing to move
-//! until those sources are rebuilt on §8's names.
+//! **A layer's map reaches its readers too.** One source per layer is what made that possible:
+//! there is no `layer` discriminator column left to select on, an artifact is one row carrying its
+//! `contents` as a ranked list, and both readers take the names the map resolved. The two fields a
+//! map may not move are `level` and `attached_level`, which `configuration.md` §1's table does not
+//! name — they are read under their own names or not at all.
+//!
+//! **Or the artifacts are written out here**, `artifacts = [{ key = …, contents = [ … ] }]`, for a
+//! layer a person authors rather than a pipeline produces. It is a spelling and not a second kind
+//! of layer: the planned artifacts are the same, so the bundle is byte-identical either way.
 //!
 //! ## The access relation, in three shapes
 //!
@@ -370,8 +375,11 @@ struct LayerBlock {
     source: Option<String>,
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
+    /// The artifacts written out in the document itself, instead of `source`
+    /// (`configuration.md` §1). Typed here rather than held as a `toml::Value`, so the inline
+    /// row's own key set is closed by the same `deny_unknown_fields` rule every block is under.
     #[serde(default)]
-    artifacts: Option<toml::Value>,
+    artifacts: Option<Vec<InlineArtifact>>,
     #[serde(default)]
     membership: Option<String>,
     #[serde(default)]
@@ -390,6 +398,42 @@ struct LayerBlock {
     levels: Vec<LevelBlock>,
     #[serde(default)]
     content: Option<ContentBlock>,
+}
+
+/// One artifact written into the document itself — `artifacts = [{ key = …, contents = [ … ] }]`.
+///
+/// **For what a person authors**, a dozen curated regions rather than a corpus
+/// (`annotation-write-cycle.md` §6.1). Its keys are the artifact grain's canonical field names and
+/// nothing else: an inline row *is* the canonical spelling, so there is no `fields` map to move one
+/// — which is why declaring both is refused.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InlineArtifact {
+    /// The caller's own name for the artifact, which is what an edge into it names.
+    pub key: String,
+    /// The resolution this artifact sits at. `0` for a layer with no levels.
+    #[serde(default)]
+    pub level: u32,
+    /// The membership, by inclusion.
+    #[serde(default)]
+    pub members: Option<Vec<u64>>,
+    /// The membership, by exclusion — the entities it leaves out. Complemented once at build
+    /// against the view's entity set, so the published artifact is the one `members` would have
+    /// produced (`annotation-write-cycle.md` §6.1). Declaring both is refused.
+    #[serde(default)]
+    pub excluding: Option<Vec<u64>>,
+    /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
+    #[serde(default)]
+    pub contents: Vec<Vec<String>>,
+    /// The parent artifact in a hierarchy, by its key.
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub attached_layer: Option<String>,
+    #[serde(default)]
+    pub attached_level: u32,
+    #[serde(default)]
+    pub attached_key: Option<String>,
 }
 
 /// `[layer.members]` — membership as its own source, instead of a list field on the artifact row.
@@ -484,13 +528,38 @@ pub struct Corpus {
 }
 
 /// One layer's bound acquisition keys.
+///
+/// **One source per layer**, which is what removes the discriminator: there is no `layer` column
+/// to select on, no filter to configure, and no way for a layer to ingest another's rows
+/// (`annotation-write-cycle.md` §6.1).
 #[derive(Debug, Clone)]
 pub struct LayerSources {
     pub name: String,
-    /// `[[layer]].source` — one row per artifact.
-    pub artifacts: Option<PathBuf>,
+    /// Where this layer's artifacts come from — its own file, or the rows written inline. `None`
+    /// for a layer declared and empty, which is legal (`configuration.md` §2).
+    pub artifacts: Option<ArtifactSource>,
     /// `[layer.members].source` — one row per `(artifact, entity)`.
-    pub members: Option<PathBuf>,
+    pub members: Option<MemberSource>,
+}
+
+/// One layer's artifacts: the file it names, or the rows the document carries itself.
+///
+/// **Two spellings of one thing.** Both produce the same planned artifacts, so a layer written
+/// inline and the same layer written to a file build a byte-identical bundle — the inline route
+/// exists for what a person authors, not for a different kind of artifact.
+#[derive(Debug, Clone)]
+pub enum ArtifactSource {
+    /// `[[layer]].source` — one row per artifact, read under the names `fields` resolved.
+    File { path: PathBuf, fields: Fields },
+    /// `[[layer]].artifacts` — the rows themselves, on the canonical names.
+    Inline(Vec<InlineArtifact>),
+}
+
+/// `[layer.members].source`, and where its fields sit in it.
+#[derive(Debug, Clone)]
+pub struct MemberSource {
+    pub path: PathBuf,
+    pub fields: Fields,
 }
 
 /// One declared coordinate system.
@@ -1042,13 +1111,7 @@ impl Config {
             points,
             point_fields: declared.fields.clone(),
             access,
-            artifacts: one_source(&self.layer_sources, |s| &s.artifacts, "[[layer]]", "source")?,
-            artifact_members: one_source(
-                &self.layer_sources,
-                |s| &s.members,
-                "[layer.members]",
-                "source",
-            )?,
+            layers: self.layer_sources.clone(),
         })
     }
 }
@@ -1072,42 +1135,9 @@ pub struct Acquisition {
     pub point_fields: Fields,
     /// Where this view's points get their access terms, and what a point carrying none gets.
     pub access: AccessInput,
-    /// The layers' `source`, and the memberships beside it.
-    pub artifacts: Option<PathBuf>,
-    pub artifact_members: Option<PathBuf>,
-}
-
-/// The one path every layer declaring this key binds, or a refusal naming the two that disagree.
-///
-/// ⊘ **One file per layer is not built.** Today's artifact and member files carry a `layer`
-/// discriminator column and the reader takes a single path, so two layers naming different keys
-/// would have one of the two files silently unread. Refused until the reader is per layer
-/// (`configuration.md` §7).
-fn one_source(
-    sources: &[LayerSources],
-    pick: impl Fn(&LayerSources) -> &Option<PathBuf>,
-    block: &str,
-    key: &str,
-) -> Result<Option<PathBuf>> {
-    let mut chosen: Option<(&str, &PathBuf)> = None;
-    for source in sources {
-        let Some(path) = pick(source) else { continue };
-        match chosen {
-            None => chosen = Some((&source.name, path)),
-            Some((first, already)) if already != path => {
-                return Err(declaration_error(format!(
-                    "layers '{first}' and '{}' bind different files to `{block}`'s `{key}`, and \
-                     one file per layer is specified and not built (configuration.md §8). The \
-                     artifact and member files carry a `layer` column and the build reads one \
-                     path, so the second would go unread. Bind both layers to one key until the \
-                     reader is per layer",
-                    source.name
-                )));
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(chosen.map(|(_, path)| path.clone()))
+    /// Each layer's own artifacts and members, in declaration order. **One source per layer**, so
+    /// no row anywhere names the layer it belongs to.
+    pub layers: Vec<LayerSources>,
 }
 
 /// A comma-separated list for a refusal, or `none`.
@@ -1424,33 +1454,6 @@ fn check_fields(
         object: object.to_string(),
         map: map.clone(),
     })
-}
-
-/// ⊘ A **layer's** field map may not yet move a field, refused rather than accepted and
-/// disregarded.
-///
-/// Every other object's map reaches its reader (`input`'s readers take the resolved names), but the
-/// artifact and member readers read their own column names — `rank` and `entity` now, beside a
-/// `layer` discriminator, a per-row `values` and a `parent_key` this surface does not name — so a
-/// map naming one of the canonical fields would parse, validate and do nothing. Refused until the
-/// artifact and member sources are rebuilt on §8's names (`configuration.md` §7, the stage that
-/// retires the `layer` discriminator column with them).
-fn refuse_layer_rename(object: &str, map: Option<&BTreeMap<String, String>>) -> Result<()> {
-    let Some(map) = map else { return Ok(()) };
-    for (canonical, actual) in map {
-        if canonical == actual {
-            continue;
-        }
-        return Err(declaration_error(format!(
-            "{object}: the field map reads `{canonical}` from a column named '{actual}', which is \
-             specified and not built for a layer (configuration.md §8). The artifact and member \
-             readers still read their own column names, so the column read would be `{canonical}` \
-             whatever the map said. Refused rather than ignored: a rename that parses and does \
-             nothing is a column its author believes is being read. Name the column `{canonical}` \
-             in the source until the artifact readers take the map"
-        )));
-    }
-    Ok(())
 }
 
 /// The one sub-block `configuration.md` §1 declares and no stage has built.
@@ -2342,16 +2345,6 @@ fn compile_layers(
         }
         refuse_unbuilt_labels(&block.name, block.labels.is_some())?;
         let object = format!("layer '{}'", block.name);
-        if block.artifacts.is_some() {
-            return Err(declaration_error(format!(
-                "{object}: an inline `artifacts` list is specified and not built \
-                 (`annotation-write-cycle.md` §6.1). An authored layer's artifacts are read from \
-                 the file `source` names, and nothing yet reads a \
-                 layer's artifacts out of the config document. Refused rather than ignored: an \
-                 authored artifact that parses and is never published is a layer its author \
-                 believes is populated"
-            )));
-        }
 
         // **Refused here, before the artifacts file is opened**: a layer appears only in the views
         // it declares, so a mistyped view name would produce a bundle whose layer is registered,
@@ -2497,17 +2490,56 @@ fn compile_layers(
         // `hierarchy` is what says there are parent edges, `depends_on` that there are attachment
         // edges, `content.supplied` that there is content, and `membership` that there are members
         // — so each of those keys decides whether the map may name the field that carries it.
+        // **A layer names its own file or writes its artifacts out, never both.** They are two
+        // spellings of one thing, so a layer declaring each leaves two answers to what its
+        // artifacts are — and which one won would be this function's iteration order rather than
+        // anything the caller wrote.
+        if block.source.is_some() && block.artifacts.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: `source` and an inline `artifacts` list are both declared. They are two \
+                 spellings of one thing — a file this layer reads, or the artifacts written out in \
+                 this document — so declaring both is a parse error rather than a precedence \
+                 question"
+            )));
+        }
         let source = match &block.source {
             Some(declared) => {
                 Some(sources.resolve(&format!("layer:{}", block.name), &object, declared)?)
             }
             None => None,
         };
+        // **An inline row is already the canonical spelling**, so there is nothing for a map to
+        // move: `fields` locates a column in a file, and a layer written out here names no file.
+        if block.artifacts.is_some() && block.fields.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: `fields` beside an inline `artifacts` list. The map locates this \
+                 layer's fields in the file its `source` names, and an inline artifact carries the \
+                 canonical names already — so there is no file for the names to be read out of"
+            )));
+        }
         let members_block = block.members.as_ref();
-        let carries_members = block
-            .fields
-            .as_ref()
-            .is_some_and(|f| f.contains_key("members") || f.contains_key("excluding"));
+        let named = |field: &str| {
+            block
+                .fields
+                .as_ref()
+                .is_some_and(|f| f.contains_key(field))
+        };
+        // **A membership is included or excluded, never both.** The two are one field written two
+        // ways — the entities in the set, or the entities out of it — so a row carrying each would
+        // have two memberships, and every masked count and every criterion divides by one of them.
+        if named("members") && named("excluding") {
+            return Err(declaration_error(format!(
+                "{object}: `fields` names both `members` and `excluding`. They are two spellings of \
+                 one field — the entities in the membership, or the entities it leaves out — and \
+                 the build complements the second into the first, so naming both leaves two \
+                 memberships for one artifact"
+            )));
+        }
+        let inline_carries_members = block.artifacts.as_ref().is_some_and(|rows| {
+            rows.iter()
+                .any(|a| a.members.is_some() || a.excluding.is_some())
+        });
+        let carries_members = named("members") || named("excluding") || inline_carries_members;
         // **A layer's membership has two shapes, and it names whichever it uses** (§7). A list
         // field on the artifact row, or a source of its own, one row per `(artifact, entity)` —
         // for a membership no single cell should hold. Declaring both leaves two answers to what
@@ -2522,7 +2554,25 @@ fn compile_layers(
             )));
         }
         let enumerated = membership == MembershipSource::Enumerated;
-        check_fields(
+        for artifact in block.artifacts.iter().flatten() {
+            if artifact.members.is_some() && artifact.excluding.is_some() {
+                return Err(declaration_error(format!(
+                    "{object}: artifact '{}' declares both `members` and `excluding`. They are two \
+                     spellings of one membership — the entities in it, or the entities it leaves \
+                     out — so declaring both leaves two memberships for one artifact",
+                    artifact.key
+                )));
+            }
+            if !enumerated && (artifact.members.is_some() || artifact.excluding.is_some()) {
+                return Err(declaration_error(format!(
+                    "{object}: artifact '{}' carries a stored membership and this layer's \
+                     `membership` is not `enumerated` — its members are computed from a shape or a \
+                     predicate, so a stored set here is one nothing would read",
+                    artifact.key
+                )));
+            }
+        }
+        let artifact_fields = check_fields(
             &object,
             source.as_ref(),
             &[
@@ -2564,7 +2614,6 @@ fn compile_layers(
             ],
             block.fields.as_ref(),
         )?;
-        refuse_layer_rename(&object, block.fields.as_ref())?;
 
         let members = match members_block {
             None => None,
@@ -2585,17 +2634,18 @@ fn compile_layers(
                     )?),
                     None => None,
                 };
-                // **The artifacts file is the roster** (`layers`): a member row names an artifact,
-                // and without the layer's own source there is nothing for the name to resolve
-                // against — a mistyped key would publish a phantom artifact rather than fail.
-                if path.is_some() && source.is_none() {
+                // **The artifacts are the roster** (`layers`): a member row names an artifact, and
+                // without them there is nothing for the name to resolve against — a mistyped key
+                // would publish a phantom artifact rather than fail.
+                if path.is_some() && source.is_none() && block.artifacts.is_none() {
                     return Err(declaration_error(format!(
-                        "{object}: a member source without the layer's own `source`. The layer's \
-                         file is the roster of artifacts a member row names, so members with no \
-                         roster would make every key its own artifact rather than a refusal"
+                        "{object}: a member source without the layer's own artifacts. The layer's \
+                         `source` — or its inline `artifacts` list — is the roster a member row \
+                         names, so members with no roster would make every key its own artifact \
+                         rather than a refusal"
                     )));
                 }
-                check_fields(
+                let fields = check_fields(
                     &object,
                     path.as_ref(),
                     &[
@@ -2610,13 +2660,22 @@ fn compile_layers(
                     ],
                     members.fields.as_ref(),
                 )?;
-                refuse_layer_rename(&object, members.fields.as_ref())?;
-                path
+                path.map(|path| MemberSource { path, fields })
             }
         };
         per_layer.push(LayerSources {
             name: block.name.clone(),
-            artifacts: source,
+            artifacts: match (source, block.artifacts.clone()) {
+                (Some(path), _) => Some(ArtifactSource::File {
+                    path,
+                    fields: artifact_fields,
+                }),
+                (None, Some(rows)) => Some(ArtifactSource::Inline(rows)),
+                // Legal, and the object declared and empty (`configuration.md` §2): a layer with
+                // no artifacts yet is the normal state for a deployment that writes through the
+                // service, and the empty bundle is what carries its schema.
+                (None, None) => None,
+            },
             members,
         });
 

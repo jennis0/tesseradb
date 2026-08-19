@@ -235,6 +235,21 @@ fn the_accepted_key_set_is_configuration_ms_table() {
         ],
     );
     expect_keys(
+        "[[layer]]\nname = \"l\"\nartifacts = [{ nonesuch = 1 }]\n",
+        "an inline artifact",
+        &[
+            "key",
+            "level",
+            "members",
+            "excluding",
+            "contents",
+            "parent",
+            "attached_layer",
+            "attached_level",
+            "attached_key",
+        ],
+    );
+    expect_keys(
         "[[layer]]\nname = \"l\"\nhierarchy = { nonesuch = 1 }\n",
         "hierarchy",
         &["kind", "prune_children"],
@@ -1467,17 +1482,69 @@ fn an_empty_field_name_is_refused() {
     assert!(message.contains("names no column"), "{message}");
 }
 
-/// ⊘ A **layer's** map may not yet move a field: the artifact and member readers still read their
-/// own column names, so an entry that renamed one would parse and do nothing.
+/// **A layer's map moves a field, and the reader takes the name it moved it to** — the same rule
+/// every other object's map follows now that a layer reads its own source.
 #[test]
-fn a_renamed_layer_field_is_refused_rather_than_disregarded() {
+fn a_layer_field_map_resolves_to_the_column_it_names() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
         "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { key = \"cluster_id\" }",
     );
+    let config = bound_ok(&text, &[]);
+    let Some(crate::config::ArtifactSource::File { fields, .. }) = &config.layer_sources[0].artifacts
+    else {
+        panic!("the layer names a file");
+    };
+    assert_eq!(fields.of("key"), "cluster_id");
+    assert_eq!(fields.of("contents"), "contents", "an unmoved field keeps its own name");
+}
+
+/// **A membership is included or excluded, never both.** The two are one field written two ways,
+/// and the build complements the second into the first — so naming each leaves two memberships for
+/// one artifact, and every masked count divides by one of them.
+#[test]
+fn a_layer_naming_both_members_and_excluding_is_refused() {
+    let text = with_layer("").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { members = \"m\", excluding = \"x\" }",
+    );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("specified and not built for a layer"), "{message}");
-    assert!(message.contains("'cluster_id'"), "{message}");
+    assert!(message.contains("two spellings of one field"), "{message}");
+}
+
+/// **A layer's artifacts come from its file or from the declaration, never both.** Two answers to
+/// what its artifacts are would be resolved by nothing the caller wrote.
+#[test]
+fn a_layer_declaring_a_source_and_inline_artifacts_is_refused() {
+    let text = with_layer("").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nartifacts                 = [{ key = \"c-0\" }]",
+    );
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("two spellings of one thing"), "{message}");
+}
+
+/// An inline artifact is already on the canonical names, so there is no file for a `fields` map to
+/// locate anything in.
+#[test]
+fn a_field_map_beside_inline_artifacts_is_refused() {
+    let text = with_layer("").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\" }]\nfields                    = { key = \"cluster_id\" }",
+    );
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("no file for the names"), "{message}");
+}
+
+/// The same rule on the inline row: one membership per artifact, whichever way it is spelled.
+#[test]
+fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
+    let text = with_layer("").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = [1], excluding = [2] }]",
+    );
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("two spellings of one membership"), "{message}");
 }
 
 /// **A comma is an ordinary byte in an access label.** The build hands the plugin a term *list*,
@@ -1541,18 +1608,10 @@ fn a_member_source_needs_the_layers_own_source() {
     assert!(message.contains("roster"), "{message}");
 }
 
-/// ⊘ The label sugar and an inline artifact list are specified and not built, and each refusal
-/// names which it is rather than reading as a typo.
+/// ⊘ The label sugar is specified and not built, and the refusal names which it is rather than
+/// reading as a typo.
 #[test]
 fn the_unbuilt_layer_blocks_name_what_is_absent() {
-    let text = with_layer("").replace(
-        "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nartifacts                 = []",
-    );
-    let message = err(&text);
-    assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("read from the file `source` names"), "{message}");
-
     let text = with_layer("  [layer.labels]\n  name = \"topics\"\n");
     let message = err(&text);
     assert!(message.contains("specified and not built"), "{message}");
@@ -1576,8 +1635,7 @@ fn acquisition_names_the_files_this_build_reads() {
         acquired.access
     );
     assert_eq!(acquired.corpus, Some(dir.path().join("corpus.parquet")));
-    assert_eq!(acquired.artifacts, None);
-    assert_eq!(acquired.artifact_members, None);
+    assert!(acquired.layers.is_empty());
     assert_eq!(
         acquired.extent,
         Extent::Auto {
@@ -1600,9 +1658,9 @@ fn a_layer_names_its_artifacts_and_its_members() {
     let config = parse_at(dir.path(), &text, &HashMap::new())
         .expect("the layer's two sources are declared");
     let acquired = config.acquire("s0").unwrap();
-    assert_eq!(acquired.artifacts, Some(dir.path().join("hdbscan.parquet")));
+    assert_eq!(artifact_path(&acquired.layers[0]), Some(dir.path().join("hdbscan.parquet")));
     assert_eq!(
-        acquired.artifact_members,
+        acquired.layers[0].members.as_ref().map(|m| m.path.clone()),
         Some(dir.path().join("hdbscan_members.parquet"))
     );
     // And the members source is overridable on its own key, without disturbing the roster.
@@ -1613,17 +1671,25 @@ fn a_layer_names_its_artifacts_and_its_members() {
     )
     .expect("one source staged elsewhere");
     let acquired = config.acquire("s0").unwrap();
-    assert_eq!(acquired.artifacts, Some(dir.path().join("hdbscan.parquet")));
+    assert_eq!(artifact_path(&acquired.layers[0]), Some(dir.path().join("hdbscan.parquet")));
     assert_eq!(
-        acquired.artifact_members,
+        acquired.layers[0].members.as_ref().map(|m| m.path.clone()),
         Some(PathBuf::from("/elsewhere/layer-clusters/a-members.parquet"))
     );
 }
 
-/// ⊘ One file per layer is not built: the artifact file carries a `layer` column and the build
-/// reads one path, so two layers naming different keys would leave the second unread.
+/// The file one layer's artifacts are read from, where it names one.
+fn artifact_path(layer: &crate::config::LayerSources) -> Option<PathBuf> {
+    match &layer.artifacts {
+        Some(crate::config::ArtifactSource::File { path, .. }) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+/// **One source per layer.** Two layers naming two files is the ordinary case now: each reads its
+/// own, and there is no discriminator column for either to select on.
 #[test]
-fn two_layers_binding_different_artifact_files_are_refused() {
+fn two_layers_read_their_own_files() {
     let second = LAYER
         .replace("clusters/a", "clusters/b")
         .replace(
@@ -1634,11 +1700,18 @@ fn two_layers_binding_different_artifact_files_are_refused() {
         "views                     = [\"s0\"]",
         "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"",
     );
+    let dir = tempfile::tempdir().expect("tempdir");
     let text = format!("{ACQUIRED}{first}{second}");
-    let config = parse_bound(&text, &HashMap::new()).expect("both layers parse");
-    let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
-    assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("one file per layer"), "{message}");
+    let config = parse_at(dir.path(), &text, &HashMap::new()).expect("both layers parse");
+    let acquired = config.acquire("s0").expect("both sources acquire");
+    let paths: Vec<Option<PathBuf>> = acquired.layers.iter().map(artifact_path).collect();
+    assert_eq!(
+        paths,
+        vec![
+            Some(dir.path().join("hdbscan.parquet")),
+            Some(dir.path().join("other.parquet"))
+        ]
+    );
 }
 
 /// The build materialises one view and reads its source, so a `--view` it cannot find is a build

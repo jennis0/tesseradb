@@ -39,6 +39,7 @@ point_visibility = { default = "public" }
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
+source = "clusters.parquet"
 membership = "enumerated"
 visibility = "public"
 artifact_visibility = { default = "inherited" }
@@ -46,10 +47,14 @@ require_member_visibility = { count = 2 }
 hierarchy = { kind = "flat" }
 content = { computed = ["centroid"] }
 
+  [layer.members]
+  source = "clusters_members.parquet"
+
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
+source = "topics.parquet"
 membership = "enumerated"
 visibility = "public"
 artifact_visibility = { default = "inherited" }
@@ -57,87 +62,109 @@ require_member_visibility = "none"
 hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
-[[layer.content.supplied]]
-name = "topic"
-type = "text"
-require_member_visibility = "all"
+  [layer.members]
+  source = "topics_members.parquet"
+
+  [[layer.content.supplied]]
+  name = "topic"
+  type = "text"
+  require_member_visibility = "all"
 "#;
 
-fn write_artifacts(path: &Path) {
+/// The clustering: one row, one artifact, no content and no edges.
+fn write_clusters(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(vec!["c-0000"])) as ArrayRef],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// The label layer: one row, whose `contents` is the whole ranking — best first.
+fn write_topics(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
-        Field::new("rank", DataType::UInt32, true),
         Field::new(
-            "values",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            "contents",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ))),
             true,
         ),
         Field::new("attached_layer", DataType::Utf8, true),
         Field::new("attached_key", DataType::Utf8, true),
     ]));
-    let mut values = ListBuilder::new(StringBuilder::new());
-    values.append(false);
-    values.values().append_value("the whole cluster");
-    values.append(true);
-    values.values().append_value("the subset's own");
-    values.append(true);
+    let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    contents.values().values().append_value("the whole cluster");
+    contents.values().append(true);
+    contents.values().values().append_value("the subset's own");
+    contents.values().append(true);
+    contents.append(true);
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(vec![CLUSTERS, LABELS, LABELS])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["c-0000", "l-0000", "l-0000"])),
-            Arc::new(UInt32Array::from(vec![None, Some(0), Some(1)])),
-            Arc::new(values.finish()),
-            Arc::new(StringArray::from(vec![None, Some(CLUSTERS), Some(CLUSTERS)])),
-            Arc::new(StringArray::from(vec![None, Some("c-0000"), Some("c-0000")])),
+            Arc::new(StringArray::from(vec!["l-0000"])) as ArrayRef,
+            Arc::new(contents.finish()),
+            Arc::new(StringArray::from(vec![Some(CLUSTERS)])),
+            Arc::new(StringArray::from(vec![Some("c-0000")])),
         ],
     )
     .unwrap();
+    write(path, schema, batch);
+}
+
+/// One row per `(artifact, entity)` for one layer — the layer being the file's, not a column's.
+fn write_members(path: &Path, rows: &[(&str, Option<u32>, u64)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("rank", DataType::UInt32, true),
+        Field::new("entity", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|(k, _, _)| *k).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(UInt32Array::from(
+                rows.iter().map(|(_, r, _)| *r).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|(_, _, e)| *e).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+fn write(path: &Path, schema: Arc<Schema>, batch: RecordBatch) {
     let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
 }
 
-fn write_members(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("rank", DataType::UInt32, true),
-        Field::new("entity", DataType::UInt64, false),
-    ]));
-    let (mut layers, mut keys, mut rank, mut entity) =
-        (Vec::new(), Vec::new(), Vec::<Option<u32>>::new(), Vec::new());
-    let mut row = |layer: &str, key: &str, v: Option<u32>, m: u64| {
-        layers.push(layer.to_string());
-        keys.push(key.to_string());
-        rank.push(v);
-        entity.push(m);
-    };
+fn cluster_members() -> Vec<(&'static str, Option<u32>, u64)> {
+    MEMBERS.map(|m| ("c-0000", None, m)).collect()
+}
+
+fn topic_members() -> Vec<(&'static str, Option<u32>, u64)> {
+    let mut rows = Vec::new();
     for m in MEMBERS {
-        row(CLUSTERS, "c-0000", None, m);
-        row(LABELS, "l-0000", None, m);
+        rows.push(("l-0000", None, m));
         // Rank 0 is generated from the whole cluster — no principal below contains it —
         // and rank 1 from the documents the subset term grants, which the subset principal
         // contains entirely.
-        row(LABELS, "l-0000", Some(0), m);
+        rows.push(("l-0000", Some(0), m));
         if terms_of(m).contains(&SUBSET_TERM) {
-            row(LABELS, "l-0000", Some(1), m);
+            rows.push(("l-0000", Some(1), m));
         }
     }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(layers)) as ArrayRef,
-            Arc::new(StringArray::from(keys)),
-            Arc::new(UInt32Array::from(rank)),
-            Arc::new(UInt64Array::from(entity)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    rows
 }
 
 struct Fixture {
@@ -154,15 +181,15 @@ fn fixture() -> Fixture {
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
     let config_path = tmp.path().join("config.toml");
-    let artifacts = tmp.path().join("artifacts.parquet");
-    let members = tmp.path().join("members.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
     std::fs::write(&config_path, CONFIG_TOML).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture config parses");
-    write_artifacts(&artifacts);
-    write_members(&members);
+    write_clusters(&tmp.path().join("clusters.parquet"));
+    write_topics(&tmp.path().join("topics.parquet"));
+    write_members(&tmp.path().join("clusters_members.parquet"), &cluster_members());
+    write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
     let args = BuildArgs {
         point_fields: Default::default(),
@@ -179,8 +206,7 @@ fn fixture() -> Fixture {
         idset: 1,
         shard_id: 0,
         layers: config.layers,
-        artifacts: Some(artifacts),
-        artifact_members: Some(members),
+        layer_inputs: config.layer_sources,
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,

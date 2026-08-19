@@ -1263,11 +1263,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(
-                &args.layers,
-                args.artifacts.as_deref(),
-                args.artifact_members.as_deref(),
-            )?;
+            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
             crate::layers::publish(
                 &plan,
                 &|source| {

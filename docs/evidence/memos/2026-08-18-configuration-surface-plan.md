@@ -119,12 +119,17 @@ differently.
 
 ### 6 — Artifact and member sources
 
-One row per artifact with `contents` as a ranked list, retiring the cross-row agreement refusal;
+*Built.* One row per artifact with `contents` as a ranked list, retiring the cross-row agreement refusal;
 `variation` → `rank`, `member` → `entity`. One source per layer, so the `layer` discriminator
 column goes. Membership by exclusion as an input spelling — complement once at build, materialise
 the same set, and **no request-time complement**. Inline `artifacts = [...]` for authored layers.
 `stable_key` → `key` throughout, including `IncomingArtifact` and the registry, and
-`children_keys` is deleted — it is read, validated and never walked.
+`children_keys` is deleted — it is read, validated and never walked. Two things fell out of
+building it. A layer's **`fields` map reaches its readers**, the ⊘ that held it back being the
+discriminator and the two columns this grain no longer has — `level` and `attached_level` stay
+unmovable, §1's tables not naming them. And the agreement refusal's *successor* is the duplicate-key
+refusal: one row per artifact cannot disagree with itself, but two rows for one key are two
+artifacts under one name.
 
 ### 7 — `membership` as a table, and `[layer.labels]`
 

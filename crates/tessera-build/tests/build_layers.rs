@@ -95,6 +95,7 @@ const LAYERS_TOML: &str = r#"
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
+source = "clusters.parquet"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -102,10 +103,14 @@ require_member_visibility = { count = 2 }
 hierarchy = { kind = "flat", prune_children = false }
 content = { computed = ["centroid"] }
 
+  [layer.members]
+  source = "clusters_members.parquet"
+
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
+source = "topics.parquet"
 membership = "enumerated"
 visibility = "public"
 artifact_visibility = { default = "inherited" }
@@ -113,119 +118,117 @@ require_member_visibility = "none"
 hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
-[[layer.content.supplied]]
-name = "topic"
-type = "text"
-require_member_visibility = "all"
+  [layer.members]
+  source = "topics_members.parquet"
+
+  [[layer.content.supplied]]
+  name = "topic"
+  type = "text"
+  require_member_visibility = "all"
 "#;
 
-/// One row per `(artifact, rank)`: two clusters with no content, and one label carrying two
-/// ranked descriptions and hanging from the first cluster. No parent/child edges in this fixture.
-fn write_artifacts(path: &Path) {
-    write_artifacts_named(path, "topics/x")
-}
-
-/// The same, with the label layer under another name — so a test can put it either side of the
-/// cluster layer alphabetically.
-fn write_artifacts_named(path: &Path, labels: &str) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("rank", DataType::UInt32, true),
-        Field::new(
-            "values",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ),
-        Field::new("attached_layer", DataType::Utf8, true),
-        Field::new("attached_key", DataType::Utf8, true),
-        Field::new("parent_key", DataType::Utf8, true),
-    ]));
-    let layers = StringArray::from(vec!["clusters/a", "clusters/a", labels, labels]);
-    let keys = StringArray::from(vec!["c-0000", "c-0001", "l-0000", "l-0000"]);
-    let rank = UInt32Array::from(vec![None, None, Some(0), Some(1)]);
-    let mut values = ListBuilder::new(StringBuilder::new());
-    values.append(false);
-    values.append(false);
-    values.values().append_value("the whole cluster");
-    values.append(true);
-    values.values().append_value("the visible part");
-    values.append(true);
-    let attached_layer = StringArray::from(vec![None, None, Some("clusters/a"), Some("clusters/a")]);
-    let attached_key = StringArray::from(vec![None, None, Some("c-0000"), Some("c-0000")]);
-    let parent_key: StringArray = vec![None::<&str>, None, None, None].into();
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(layers) as ArrayRef,
-            Arc::new(keys),
-            Arc::new(rank),
-            Arc::new(values.finish()),
-            Arc::new(attached_layer),
-            Arc::new(attached_key),
-            Arc::new(parent_key),
-        ],
-    )
-    .unwrap();
+/// Write one Parquet file.
+fn write(path: &Path, schema: Arc<Schema>, batch: RecordBatch) {
     let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
 }
 
-/// One row per `(artifact, entity)`, in **source** entity ids — and deliberately shuffled, since
-/// ordinals must be a function of the artifacts and not of the file's row order.
-fn write_members(path: &Path, members_of_first_cluster: &[u64]) {
-    write_members_of(path, members_of_first_cluster, "topics/x")
+/// The clustering: **one row per artifact**, and no column names the layer — the file is the
+/// layer's own.
+fn write_clusters(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(vec!["c-0000", "c-0001"])) as ArrayRef],
+    )
+    .unwrap();
+    write(path, schema, batch);
 }
 
-fn write_members_named(path: &Path, labels: &str) {
-    write_members_of(path, &(0..30).collect::<Vec<u64>>(), labels)
-}
-
-fn write_members_of(path: &Path, members_of_first_cluster: &[u64], labels: &str) {
+/// The label layer: one row, carrying its whole ranking in `contents` — best first — and the edge
+/// it hangs from.
+fn write_topics(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
+        Field::new("contents", ranked(), true),
+        Field::new("attached_layer", DataType::Utf8, true),
+        Field::new("attached_key", DataType::Utf8, true),
+    ]));
+    let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    contents.values().values().append_value("the whole cluster");
+    contents.values().append(true);
+    contents.values().values().append_value("the visible part");
+    contents.values().append(true);
+    contents.append(true);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["l-0000"])) as ArrayRef,
+            Arc::new(contents.finish()),
+            Arc::new(StringArray::from(vec![Some("clusters/a")])),
+            Arc::new(StringArray::from(vec![Some("c-0000")])),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// The `contents` column's type: one entry per rank, each a value per supplied kind.
+fn ranked() -> DataType {
+    DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    )))
+}
+
+/// One row per `(artifact, entity)` for **one layer**, deliberately in the order given — ordinals
+/// must be a function of the artifacts and not of the file's row order.
+fn write_members_rows(path: &Path, rows: &[(&str, Option<u32>, u64)]) {
+    let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("rank", DataType::UInt32, true),
         Field::new("entity", DataType::UInt64, false),
     ]));
-    let mut layers = Vec::new();
-    let mut keys = Vec::new();
-    let mut rank: Vec<Option<u32>> = Vec::new();
-    let mut entity = Vec::new();
-    let mut row = |layer: &str, key: &str, v: Option<u32>, m: u64| {
-        layers.push(layer.to_string());
-        keys.push(key.to_string());
-        rank.push(v);
-        entity.push(m);
-    };
-    for &m in members_of_first_cluster {
-        row("clusters/a", "c-0000", None, m);
-        row(labels, "l-0000", None, m);
-        // Rank 0 was generated from the whole cluster; rank 1 from a third of it.
-        row(labels, "l-0000", Some(0), m);
-        if m % 3 == 0 {
-            row(labels, "l-0000", Some(1), m);
-        }
-    }
-    for m in 100..110u64 {
-        row("clusters/a", "c-0001", None, m);
-    }
-
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(layers)) as ArrayRef,
-            Arc::new(StringArray::from(keys)),
-            Arc::new(UInt32Array::from(rank)),
-            Arc::new(UInt64Array::from(entity)),
+            Arc::new(StringArray::from(
+                rows.iter().map(|(k, _, _)| *k).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(UInt32Array::from(
+                rows.iter().map(|(_, r, _)| *r).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|(_, _, e)| *e).collect::<Vec<_>>(),
+            )),
         ],
     )
     .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write(path, schema, batch);
+}
+
+fn cluster_member_rows(members_of_first_cluster: &[u64]) -> Vec<(&'static str, Option<u32>, u64)> {
+    let mut rows: Vec<(&str, Option<u32>, u64)> = members_of_first_cluster
+        .iter()
+        .map(|&m| ("c-0000", None, m))
+        .collect();
+    rows.extend((100..110u64).map(|m| ("c-0001", None, m)));
+    rows
+}
+
+fn topic_member_rows(members_of_first_cluster: &[u64]) -> Vec<(&'static str, Option<u32>, u64)> {
+    let mut rows = Vec::new();
+    for &m in members_of_first_cluster {
+        rows.push(("l-0000", None, m));
+        // Rank 0 was generated from the whole cluster; rank 1 from a third of it.
+        rows.push(("l-0000", Some(0), m));
+        if m % 3 == 0 {
+            rows.push(("l-0000", Some(1), m));
+        }
+    }
+    rows
 }
 
 struct Inputs {
@@ -233,9 +236,14 @@ struct Inputs {
     points: PathBuf,
     pairs: PathBuf,
     config: PathBuf,
-    artifacts: PathBuf,
-    members: PathBuf,
     dir: PathBuf,
+}
+
+impl Inputs {
+    /// A file in the fixture's directory, which is also what a relative `source` resolves against.
+    fn at(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
 }
 
 fn inputs() -> Inputs {
@@ -244,20 +252,25 @@ fn inputs() -> Inputs {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     let config = dir.join("config.toml");
-    let artifacts = dir.join("artifacts.parquet");
-    let members = dir.join("members.parquet");
     write_points(&points);
     write_pairs(&pairs);
     std::fs::write(&config, format!("{VIEW_TOML}{LAYERS_TOML}")).unwrap();
-    write_artifacts(&artifacts);
-    write_members(&members, &(0..30).collect::<Vec<u64>>());
+    write_clusters(&dir.join("clusters.parquet"));
+    write_topics(&dir.join("topics.parquet"));
+    let members: Vec<u64> = (0..30).collect();
+    write_members_rows(
+        &dir.join("clusters_members.parquet"),
+        &cluster_member_rows(&members),
+    );
+    write_members_rows(
+        &dir.join("topics_members.parquet"),
+        &topic_member_rows(&members),
+    );
     Inputs {
         _tmp: tmp,
         points,
         pairs,
         config,
-        artifacts,
-        members,
         dir,
     }
 }
@@ -278,8 +291,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         idset: 1,
         shard_id: 0,
         layers: Vec::new(),
-        artifacts: Some(inputs.artifacts.clone()),
-        artifact_members: Some(inputs.members.clone()),
+        layer_inputs: Vec::new(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -295,6 +307,7 @@ fn run(inputs: &Inputs, out: &Path) -> Result<tessera_build::BuildReport, tesser
     let config = tessera_build::config::Config::parse(&inputs.config, &Default::default())?;
     let mut args = args(inputs, out);
     args.layers = config.layers;
+    args.layer_inputs = config.layer_sources;
     args.schema = config.schema;
     build(&args)
 }
@@ -369,6 +382,7 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
         .expect("the fixture config parses");
     let mut linear_args = args(&inputs, &linear);
     linear_args.layers = config.layers;
+    linear_args.layer_inputs = config.layer_sources;
     linear_args.schema = config.schema;
     run(&inputs, &streamed).unwrap();
     build_in_memory(&linear_args).unwrap();
@@ -406,7 +420,10 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
 #[test]
 fn a_member_naming_nothing_this_build_assigned_refuses_it() {
     let inputs = inputs();
-    write_members(&inputs.members, &[0, 1, N_ITEMS + 500]);
+    write_members_rows(
+        &inputs.at("clusters_members.parquet"),
+        &cluster_member_rows(&[0, 1, N_ITEMS + 500]),
+    );
     let out = inputs.dir.join("bundle");
     let err = run(&inputs, &out).expect_err("an unknown member is a refusal");
     let message = format!("{err}");
@@ -439,24 +456,10 @@ fn the_registrys_refusals_are_the_builds_refusals() {
 fn a_member_row_naming_an_undeclared_artifact_is_refused() {
     let inputs = inputs();
     // Every member of `c-0000` except one, whose key is mistyped.
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("entity", DataType::UInt64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["clusters/a", "clusters/a"])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["c-0000", "c-OOO0"])),
-            Arc::new(UInt64Array::from(vec![0u64, 1])),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(&inputs.members).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-
+    write_members_rows(
+        &inputs.at("clusters_members.parquet"),
+        &[("c-0000", None, 0), ("c-OOO0", None, 1)],
+    );
     let out = inputs.dir.join("bundle");
     let err = run(&inputs, &out).expect_err("an undeclared key is a refusal");
     assert!(format!("{err}").contains("c-OOO0"), "{err}");
@@ -469,22 +472,18 @@ fn a_member_row_naming_an_undeclared_artifact_is_refused() {
 fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
     let inputs = inputs();
     let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
         Field::new("entity", DataType::UInt64, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(vec!["clusters/a", "clusters/a"])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["c-0000", "c-0000"])),
+            Arc::new(StringArray::from(vec!["c-0000", "c-0000"])) as ArrayRef,
             Arc::new(UInt64Array::from(vec![Some(7u64), None])),
         ],
     )
     .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(&inputs.members).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write(&inputs.at("clusters_members.parquet"), schema, batch);
 
     let out = inputs.dir.join("bundle");
     let err = run(&inputs, &out).expect_err("a null entity is a refusal");
@@ -501,8 +500,6 @@ fn a_label_layer_sorting_before_its_target_still_publishes() {
     // order would refuse with "holds no such artifact" for a target that is plainly there.
     let renamed = |text: &str| text.replace("topics/x", "annotations/topics");
     std::fs::write(&inputs.config, renamed(&format!("{VIEW_TOML}{LAYERS_TOML}"))).unwrap();
-    write_artifacts_named(&inputs.artifacts, "annotations/topics");
-    write_members_named(&inputs.members, "annotations/topics");
 
     let out = inputs.dir.join("bundle");
     run(&inputs, &out).expect("declaration order is what decides, not the layer's name");
@@ -559,8 +556,10 @@ fn a_layer_naming_a_view_this_build_does_not_write_is_refused() {
 #[test]
 fn artifacts_without_a_layer_file_are_refused() {
     let inputs = inputs();
+    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
     let out = inputs.dir.join("bundle");
-    let args = args(&inputs, &out);
+    let mut args = args(&inputs, &out);
+    args.layer_inputs = config.layer_sources;
     let err = build(&args).expect_err("artifacts need layers");
     assert!(format!("{err}").contains("no `[[layer]]` block"), "{err}");
 }
@@ -577,107 +576,64 @@ const TREED_LAYERS_TOML: &str = r#"
 name = "clusters/tree"
 title = "a hierarchy"
 views = ["s0"]
+source = "tree.parquet"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
 require_member_visibility = { count = 2 }
 hierarchy = { kind = "nested", prune_children = false }
 content = { computed = ["centroid"] }
+
+  [layer.members]
+  source = "tree_members.parquet"
 "#;
 
-/// A three-node tree: one root and two children, written with `parent_key` on each child.
+/// A three-node tree: one root and two children, written with `parent` on each child.
 ///
 /// The parent direction is the only one written, and the only one there is: the child direction is
 /// derived by inverting these edges, so there is no second column for it to disagree with.
 fn write_treed_artifacts(path: &Path, child_parent: &[(&str, Option<&str>)]) {
-    write_edged_artifacts(path, "clusters/tree", &child_parent
-        .iter()
-        .map(|(k, p)| (0u32, *k, *p))
-        .collect::<Vec<_>>())
+    write_edged_artifacts(
+        path,
+        &child_parent
+            .iter()
+            .map(|(k, p)| (0u32, *k, *p))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The same with an explicit level per artifact, for a layer whose edges run between levels.
-fn write_edged_artifacts(path: &Path, layer: &str, rows: &[(u32, &str, Option<&str>)]) {
+fn write_edged_artifacts(path: &Path, rows: &[(u32, &str, Option<&str>)]) {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
         Field::new("level", DataType::UInt32, true),
         Field::new("key", DataType::Utf8, false),
-        Field::new("parent_key", DataType::Utf8, true),
+        Field::new("parent", DataType::Utf8, true),
     ]));
-    let layers = StringArray::from(vec![layer; rows.len()]);
-    let levels = UInt32Array::from(rows.iter().map(|(l, ..)| Some(*l)).collect::<Vec<_>>());
-    let keys = StringArray::from(rows.iter().map(|(_, k, _)| *k).collect::<Vec<_>>());
-    let parents = StringArray::from(rows.iter().map(|(.., p)| *p).collect::<Vec<_>>());
-
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(layers) as ArrayRef,
-            Arc::new(levels),
-            Arc::new(keys),
-            Arc::new(parents),
+            Arc::new(UInt32Array::from(
+                rows.iter().map(|(l, ..)| Some(*l)).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                rows.iter().map(|(_, k, _)| *k).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|(.., p)| *p).collect::<Vec<_>>(),
+            )),
         ],
     )
     .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-#[allow(dead_code)]
-fn write_treed_artifacts_unused(path: &Path, child_parent: &[(&str, Option<&str>)]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("parent_key", DataType::Utf8, true),
-    ]));
-    let layers = StringArray::from(vec!["clusters/tree"; child_parent.len()]);
-    let keys = StringArray::from(child_parent.iter().map(|(k, _)| *k).collect::<Vec<_>>());
-    let parents = StringArray::from(child_parent.iter().map(|(_, p)| *p).collect::<Vec<_>>());
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(layers) as ArrayRef,
-            Arc::new(keys),
-            Arc::new(parents),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write(path, schema, batch);
 }
 
 /// Memberships for a treed level, one row per `(artifact, entity)`.
 fn write_treed_members(path: &Path, membership: &[(&str, Vec<u64>)]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("entity", DataType::UInt64, false),
-    ]));
-    let mut layers = Vec::new();
-    let mut keys = Vec::new();
-    let mut entity = Vec::new();
-    for (key, members) in membership {
-        for &m in members {
-            layers.push("clusters/tree".to_string());
-            keys.push(key.to_string());
-            entity.push(m);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(layers)) as ArrayRef,
-            Arc::new(StringArray::from(keys)),
-            Arc::new(UInt64Array::from(entity)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    let rows: Vec<(&str, Option<u32>, u64)> = membership
+        .iter()
+        .flat_map(|(key, members)| members.iter().map(move |&m| (*key, None, m)))
+        .collect();
+    write_members_rows(path, &rows);
 }
 
 /// Build a treed fixture and return the containment report the build wrote.
@@ -687,8 +643,8 @@ fn treed_build(
 ) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{TREED_LAYERS_TOML}")).unwrap();
-    write_treed_artifacts(&inputs.artifacts, child_parent);
-    write_treed_members(&inputs.members, membership);
+    write_treed_artifacts(&inputs.at("tree.parquet"), child_parent);
+    write_treed_members(&inputs.at("tree_members.parquet"), membership);
     let out = inputs.dir.join("bundle");
     let result = run(&inputs, &out).map(|_| ());
     (result, out, inputs._tmp)
@@ -838,12 +794,16 @@ const TIERED_LAYERS_TOML: &str = r#"
 name = "admin/boundaries"
 title = "administrative boundaries"
 views = ["s0"]
+source = "admin.parquet"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
 require_member_visibility = { count = 1 }
 hierarchy = { kind = "tiered", prune_children = false }
 content = { computed = ["centroid"] }
+
+  [layer.members]
+  source = "admin_members.parquet"
 
 [[layer.levels]]
 level = 0
@@ -864,24 +824,22 @@ fn tiered_build(
 ) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{TIERED_LAYERS_TOML}")).unwrap();
-    write_edged_artifacts(&inputs.artifacts, "admin/boundaries", rows);
-    write_levelled_members(&inputs.members, "admin/boundaries", membership);
+    write_edged_artifacts(&inputs.at("admin.parquet"), rows);
+    write_levelled_members(&inputs.at("admin_members.parquet"), membership);
     let out = inputs.dir.join("bundle");
     let result = run(&inputs, &out).map(|_| ());
     (result, out, inputs._tmp)
 }
 
-fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Vec<u64>)]) {
+fn write_levelled_members(path: &Path, membership: &[(u32, &str, Vec<u64>)]) {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
         Field::new("level", DataType::UInt32, true),
         Field::new("key", DataType::Utf8, false),
         Field::new("entity", DataType::UInt64, false),
     ]));
-    let (mut layers, mut levels, mut keys, mut entity) = (vec![], vec![], vec![], vec![]);
+    let (mut levels, mut keys, mut entity) = (vec![], vec![], vec![]);
     for (level, key, members) in membership {
         for &m in members {
-            layers.push(layer.to_string());
             levels.push(Some(*level));
             keys.push(key.to_string());
             entity.push(m);
@@ -890,16 +848,13 @@ fn write_levelled_members(path: &Path, layer: &str, membership: &[(u32, &str, Ve
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(layers)) as ArrayRef,
-            Arc::new(UInt32Array::from(levels)),
+            Arc::new(UInt32Array::from(levels)) as ArrayRef,
             Arc::new(StringArray::from(keys)),
             Arc::new(UInt64Array::from(entity)),
         ],
     )
     .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write(path, schema, batch);
 }
 
 /// **The headline for the administrative shape: it builds, and its containment is checked across
@@ -968,16 +923,317 @@ fn edges_on_a_layer_declaring_no_lineage_are_refused() {
     )
     .unwrap();
     write_edged_artifacts(
-        &inputs.artifacts,
-        "admin/boundaries",
+        &inputs.at("admin.parquet"),
         &[(0, "country", None), (1, "state-a", Some("country"))],
     );
     write_levelled_members(
-        &inputs.members,
-        "admin/boundaries",
+        &inputs.at("admin_members.parquet"),
         &[(0, "country", (0..20).collect()), (1, "state-a", (0..10).collect())],
     );
     let out = inputs.dir.join("bundle");
     let err = run(&inputs, &out).expect_err("a stacked layer has no lineage");
     assert!(format!("{err}").contains("no lineage"), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The spellings: three ways to say one membership, and one bundle out of each
+// ---------------------------------------------------------------------------------------------
+
+/// One flat layer whose artifacts are written a different way in each case below. Everything a
+/// bundle is built from is held constant apart from the spelling, so the comparison is exactly the
+/// property being asserted.
+const CURATED_LAYER: &str = r#"
+[[layer]]
+name = "curated/a"
+title = "curated"
+views = ["s0"]
+membership = "enumerated"
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 1 }
+hierarchy = { kind = "flat" }
+"#;
+
+/// The two artifacts every spelling below describes.
+const CURATED: [(&str, &[u64]); 2] = [("c-0", &[0, 1, 2]), ("c-1", &[3, 4])];
+
+/// Build a bundle from `layers` — the `[[layer]]` block — with `write` laying down whatever files
+/// it names. Returns the bundle root, and the tempdir that must outlive it.
+fn build_spelling(
+    layers: &str,
+    write_sources: impl FnOnce(&Inputs),
+) -> (PathBuf, tempfile::TempDir) {
+    let inputs = inputs();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{layers}")).unwrap();
+    write_sources(&inputs);
+    let out = inputs.dir.join("spelled");
+    run(&inputs, &out).expect("the spelling builds");
+    (out, inputs._tmp)
+}
+
+/// Every file of two bundles, compared byte for byte — `MANIFEST.json` with its wall-clock
+/// `created_at` blanked, and `CURRENT`, which is nothing but that manifest's digest, skipped with
+/// it. Every digest the manifest records for every other file is compared verbatim, so a
+/// membership that differed by one entity fails here.
+fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
+    fn collect(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(
+            root: &Path,
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.insert(rel, std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+    let (a, b) = (collect(left), collect(right));
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "{what}: the two bundles do not contain the same files"
+    );
+    for (name, left_bytes) in &a {
+        let right_bytes = &b[name];
+        if name.ends_with("MANIFEST.json") {
+            let normalise = |bytes: &[u8]| {
+                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                value["created_at"] = serde_json::Value::Null;
+                value
+            };
+            assert_eq!(
+                normalise(left_bytes),
+                normalise(right_bytes),
+                "{what}: MANIFEST.json differs (ignoring created_at)"
+            );
+            continue;
+        }
+        if name == "CURRENT" {
+            continue;
+        }
+        assert_eq!(left_bytes, right_bytes, "{what}: {name} is not byte-identical");
+    }
+    assert!(a.len() > 6, "{what}: expected a full bundle, found {}", a.len());
+}
+
+/// The artifact row carrying its own membership as a list.
+fn write_curated_with_members(path: &Path, artifacts: &[(&str, Vec<u64>)]) {
+    write_curated_column(path, "members", artifacts)
+}
+
+fn write_curated_column(path: &Path, column: &str, artifacts: &[(&str, Vec<u64>)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            column,
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+            true,
+        ),
+        ]));
+    let mut lists = ListBuilder::new(arrow::array::UInt64Builder::new());
+    for (_, members) in artifacts {
+        for &m in members {
+            lists.values().append_value(m);
+        }
+        lists.append(true);
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                artifacts.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(lists.finish()),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+fn curated() -> Vec<(&'static str, Vec<u64>)> {
+    CURATED
+        .iter()
+        .map(|(key, members)| (*key, members.to_vec()))
+        .collect()
+}
+
+/// **A layer written out in the declaration and the same layer read from a file build the same
+/// bundle, byte for byte.** Inline exists so a handful of curated sets need no Parquet file — it
+/// is a spelling, and a spelling that produced a different bundle would be a second kind of layer.
+#[test]
+fn an_inline_layer_and_a_sourced_layer_build_the_same_bundle() {
+    let sourced = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let (from_file, _a) = build_spelling(&sourced, |inputs| {
+        write_curated_with_members(&inputs.at("curated.parquet"), &curated())
+    });
+    let inline = format!(
+        "{CURATED_LAYER}artifacts = [{}]\n",
+        CURATED
+            .iter()
+            .map(|(key, members)| format!(
+                "{{ key = \"{key}\", members = {members:?} }}"
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let (from_declaration, _b) = build_spelling(&inline, |_| {});
+    assert_bundles_identical(&from_file, &from_declaration, "inline against sourced");
+}
+
+/// **A membership named by exclusion and the same membership named by inclusion build the same
+/// bundle, byte for byte.** The complement happens once, at the build, against the corpus — so
+/// nothing downstream carries the spelling, and no request-time complement is expressible: one
+/// evaluated against a viewer's mask would disclose the existence of items outside it.
+#[test]
+fn an_excluded_membership_and_its_complement_build_the_same_bundle() {
+    let excluded: Vec<u64> = vec![5, 7, 9];
+    let included: Vec<u64> = (0..N_ITEMS).filter(|e| !excluded.contains(e)).collect();
+
+    let by_inclusion = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let (from_members, _a) = build_spelling(&by_inclusion, |inputs| {
+        write_curated_with_members(&inputs.at("curated.parquet"), &[("c-0", included)])
+    });
+    let by_exclusion = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let (from_excluding, _b) = build_spelling(&by_exclusion, |inputs| {
+        write_curated_column(
+            &inputs.at("curated.parquet"),
+            "excluding",
+            &[("c-0", excluded)],
+        )
+    });
+    assert_bundles_identical(&from_members, &from_excluding, "excluding against members");
+}
+
+/// **A membership on the artifact row and the same membership in a `[layer.members]` source build
+/// the same bundle, byte for byte.** The second exists for a membership no single cell should hold
+/// — a condensed tree's root — and not to mean anything different.
+#[test]
+fn a_row_membership_and_a_member_source_build_the_same_bundle() {
+    let on_the_row = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let (from_row, _a) = build_spelling(&on_the_row, |inputs| {
+        write_curated_with_members(&inputs.at("curated.parquet"), &curated())
+    });
+    let in_a_source = format!(
+        "{CURATED_LAYER}source = \"curated.parquet\"\n  [layer.members]\n  source = \"curated_members.parquet\"\n"
+    );
+    let (from_source, _b) = build_spelling(&in_a_source, |inputs| {
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(
+                CURATED.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            )) as ArrayRef],
+        )
+        .unwrap();
+        write(&inputs.at("curated.parquet"), schema, batch);
+        let rows: Vec<(&str, Option<u32>, u64)> = CURATED
+            .iter()
+            .flat_map(|(key, members)| members.iter().map(move |&m| (*key, None, m)))
+            .collect();
+        write_members_rows(&inputs.at("curated_members.parquet"), &rows);
+    });
+    assert_bundles_identical(&from_row, &from_source, "a member source against a row");
+}
+
+/// **An excluded id this build did not assign refuses the build**, where an unknown *member*
+/// refuses it for the mirror-image reason: an exclusion that resolves to nothing silently widens
+/// the membership by the item it was written to keep out.
+#[test]
+fn an_exclusion_naming_nothing_this_build_assigned_refuses_it() {
+    let inputs = inputs();
+    std::fs::write(
+        &inputs.config,
+        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated.parquet\"\n"),
+    )
+    .unwrap();
+    write_curated_column(
+        &inputs.at("curated.parquet"),
+        "excluding",
+        &[("c-0", vec![1, N_ITEMS + 500])],
+    );
+    let out = inputs.dir.join("bundle");
+    let err = run(&inputs, &out).expect_err("an unknown exclusion is a refusal");
+    let message = format!("{err}");
+    assert!(message.contains(&format!("{}", N_ITEMS + 500)), "{message}");
+    assert!(message.contains("exclusion"), "{message}");
+}
+
+/// **A file carrying both a `members` and an `excluding` column has two memberships for one
+/// artifact**, and every masked count divides by one of them. Refused, as the declaration naming
+/// both is.
+#[test]
+fn a_source_carrying_both_members_and_excluding_is_refused() {
+    let inputs = inputs();
+    std::fs::write(
+        &inputs.config,
+        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated.parquet\"\n"),
+    )
+    .unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "members",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+            true,
+        ),
+        Field::new(
+            "excluding",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+            true,
+        ),
+    ]));
+    let mut members = ListBuilder::new(arrow::array::UInt64Builder::new());
+    members.values().append_value(0);
+    members.append(true);
+    let mut excluding = ListBuilder::new(arrow::array::UInt64Builder::new());
+    excluding.values().append_value(1);
+    excluding.append(true);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["c-0"])) as ArrayRef,
+            Arc::new(members.finish()),
+            Arc::new(excluding.finish()),
+        ],
+    )
+    .unwrap();
+    write(&inputs.at("curated.parquet"), schema, batch);
+    let out = inputs.dir.join("bundle");
+    let err = run(&inputs, &out).expect_err("two memberships is a refusal");
+    assert!(format!("{err}").contains("two spellings"), "{err}");
+}
+
+/// **One row is one artifact.** The `(artifact, rank)` grain needed a cross-row agreement check
+/// because a key spanned several rows; one row per artifact removes the disagreement rather than
+/// detecting it — and what it leaves, a key written twice, is two artifacts under one name.
+#[test]
+fn an_artifact_written_on_two_rows_is_refused() {
+    let inputs = inputs();
+    std::fs::write(
+        &inputs.config,
+        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated.parquet\"\n"),
+    )
+    .unwrap();
+    write_curated_with_members(
+        &inputs.at("curated.parquet"),
+        &[("c-0", vec![0, 1]), ("c-0", vec![2])],
+    );
+    let out = inputs.dir.join("bundle");
+    let err = run(&inputs, &out).expect_err("one key is one artifact");
+    let message = format!("{err}");
+    assert!(message.contains("more than one row"), "{message}");
+    assert!(message.contains("c-0"), "{message}");
 }

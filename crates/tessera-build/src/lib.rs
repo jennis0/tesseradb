@@ -136,15 +136,13 @@ pub struct BuildArgs {
     /// authority: the declarations run through the same registry and the same allocator the
     /// control plane uses, so both routes refuse the same declarations and place the same ids.
     pub layers: Vec<tessera_types::layer::LayerDeclaration>,
-    /// Parquet of one row per `(artifact, rank)`: `layer`, `key`, and optionally
-    /// `level`, `rank`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
-    /// [`BuildArgs::layers`]. A layer's own `source`, resolved.
-    pub artifacts: Option<PathBuf>,
-    /// Parquet of one row per `(artifact, entity)`: `layer`, `key`, `entity` — a **source**
-    /// entity id — and optionally `level` and `rank`, a null rank being the artifact's
-    /// membership and `k` the generating set of `contents[k]`. Requires [`BuildArgs::layers`].
-    /// `[layer.members].source`, resolved.
-    pub artifact_members: Option<PathBuf>,
+    /// Where each layer's artifacts come from — its own Parquet of one row per artifact, or the
+    /// rows written inline — and the `[layer.members]` source beside it, one row per
+    /// `(artifact, entity)`. Parallel to [`BuildArgs::layers`] and refused against it: an input
+    /// naming a layer this build does not declare is a name the manifest cannot carry.
+    ///
+    /// **One source per layer**, so no row carries the layer it belongs to.
+    pub layer_inputs: Vec<crate::config::LayerSources>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
     /// The file is read by nothing on any request path — its consumers are the test-only
@@ -375,7 +373,7 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     // resolvable. Refused rather than ignored: a build that quietly dropped the artifacts would
     // produce a bundle whose clusters are absent, which no viewer can tell from clusters that
     // failed their existence criterion.
-    if args.layers.is_empty() && (args.artifacts.is_some() || args.artifact_members.is_some()) {
+    if args.layers.is_empty() && !args.layer_inputs.is_empty() {
         return Err(BuildError::Invalid(
             "an artifact source names artifacts in layers, and the config declares no `[[layer]]` \
              block for them to belong to"
@@ -825,11 +823,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(
-                &args.layers,
-                args.artifacts.as_deref(),
-                args.artifact_members.as_deref(),
-            )?;
+            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
             let by_source: HashMap<u64, u64> = staged
                 .iter()
                 .enumerate()
@@ -1649,8 +1643,7 @@ mod tests {
             idset: 1,
             shard_id: 0,
             layers: Vec::new(),
-            artifacts: None,
-            artifact_members: None,
+            layer_inputs: Vec::new(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,

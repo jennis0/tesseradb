@@ -1162,8 +1162,7 @@ fn main() -> ExitCode {
                 band_rows: None,
                 schema,
                 layers: config.layers,
-                artifacts: acquired.artifacts,
-                artifact_members: acquired.artifact_members,
+                layer_inputs: acquired.layers,
             };
             match tessera_build::build(&args) {
                 Ok(report) => {

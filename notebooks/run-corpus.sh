@@ -90,8 +90,6 @@ if [[ ! -d "$BUNDLE" ]]; then
     --pairs "$OUT/pairs.parquet" \
     --schema "$OUT/schema.toml" \
     --layers "$OUT/layers.toml" \
-    --artifacts "$OUT/artifacts.parquet" \
-    --artifact-members "$OUT/members.parquet" \
     --values "archive=$OUT/archive.parquet" \
     --values "primary_category=$OUT/primary_category.parquet" \
     --out "$BUNDLE" --view s0 --extent 0,65536,0,65536 --mint-id-key
@@ -277,19 +275,21 @@ import pyarrow.parquet as pq
 out, dest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 points = pq.read_table(out / "points.parquet", columns=["entity_id", "x", "y"]).to_pydict()
 xy = {e: (x, y) for e, x, y in zip(points["entity_id"], points["x"], points["y"])}
-members = pq.read_table(out / "members.parquet").to_pydict()
-
 # The centroid of an artifact's **declared** membership, which is the publisher's own knowledge and
 # not a served quantity. Rows carrying a rank are generating sets, not memberships, and are skipped.
+#
+# **One member source per layer**, named for the layer it belongs to — no file carries a layer
+# column, there being no second layer's rows in it to tell apart.
 acc = collections.defaultdict(lambda: [0.0, 0.0, 0])
-for layer, key, rank, entity in zip(
-    members["layer"], members["key"], members["rank"], members["entity"]
-):
-    if rank is not None:
-        continue
-    x, y = xy[entity]
-    a = acc[(layer, key)]
-    a[0] += x; a[1] += y; a[2] += 1
+for path in sorted(out.glob("*-members.parquet")):
+    layer = path.name[: -len("-members.parquet")].replace("-", "/", 1)
+    members = pq.read_table(path).to_pydict()
+    for key, rank, entity in zip(members["key"], members["rank"], members["entity"]):
+        if rank is not None:
+            continue
+        x, y = xy[entity]
+        a = acc[(layer, key)]
+        a[0] += x; a[1] += y; a[2] += 1
 
 layers = collections.defaultdict(list)
 for (layer, key), (sx, sy, n) in acc.items():

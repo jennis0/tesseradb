@@ -29,16 +29,9 @@ the object. `--extent`, `--id-key`, `--id-key-file`, `--points`, `--pairs`, `--v
 each naming what is absent per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
 
-- **A `fields` map on a `[[layer]]` or a `[layer.members]`.** Every other object's map moves its
-  field and the reader takes the name it moved it to. The artifact and member readers take `rank`
-  and `entity`, but still read a `layer` discriminator, a per-row `values` and a `parent_key` —
-  none of which this surface names — so a layer map has nothing to move until those sources are
-  rebuilt on §8's names, and one naming a different column is refused rather than read as canonical.
-- **One file per layer.** A layer's `source` is real, but the artifact and member files still carry
-  a `layer` column and the build reads one path, so two layers binding *different* files is
-  refused; and `[layer.labels]`, a layer's inline `artifacts`, a view's own `visibility` and
-  `withdraw_on_member_deletion = true` on a **layer** (not on its content, which needs a fold path)
-  are refused at parse.
+- **`[layer.labels]`**, a view's own `visibility`, and `withdraw_on_member_deletion = true` on a
+  **layer** (not on its content, which needs a fold path) — each refused at parse rather than
+  accepted and ignored.
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
@@ -239,9 +232,9 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `name` | R | identity; tombstoned on drop |
 | `title` | O | human-readable; absent is served as absent |
 | `views` | R | the views this layer's artifacts are drawn on |
-| `source` | R unless inline | one file per layer, so no discriminator field exists |
-| `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row |
-| `artifacts` | O | inline array, instead of `source`, for an authored layer |
+| `source` | R unless inline | one file per layer, so no discriminator field exists. Declaring it beside `artifacts` is refused |
+| `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
+| `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }` |
 | `hierarchy` | R | `{ kind = flat \| nested \| stacked \| tiered, prune_children = bool }` — see below |
 | `visibility` | R | an access label, or `public` |
@@ -250,7 +243,20 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `withdraw_on_member_deletion` | D `false` | drop the **whole artifact** when one of its members is deleted, rather than letting its membership shrink. ⊘ `true` is refused at parse: the fold has no artifact-withdrawal path (`annotation-write-cycle.md` §6.1) |
 | `depends_on` | O | layers this one's edges point into; must be declared before it |
 
-and four sub-blocks, each below: ⊘ `[layer.members]` (O), `[layer.content]` (O),
+**`artifacts = [{ … }]`** — one authored artifact, on the canonical field names. An inline row *is*
+the canonical spelling, so there is no `fields` map beside it and no file for one to locate.
+
+| Key | | Value |
+|---|---|---|
+| `key` | R | the caller's own name for it, which is what an edge into it names |
+| `level` | D `0` | the resolution it sits at |
+| `members` | O | the membership, by inclusion |
+| `excluding` | O | the membership, by exclusion. Declaring both is refused |
+| `contents` | D `[]` | the ranking, best first: one entry per rank, each a value per supplied kind |
+| `parent` | O | the parent artifact, by key |
+| `attached_layer`, `attached_level`, `attached_key` | O | the edge this artifact hangs from; half an edge is refused |
+
+and four sub-blocks, each below: `[layer.members]` (O), `[layer.content]` (O),
 `[[layer.levels]]` (R for `stacked` and `tiered`, refused for `nested`) and ⊘ `[layer.labels]` (O).
 `[[layer.content.supplied]]` sits under `[layer.content]`, not under the layer.
 
@@ -282,6 +288,10 @@ repaired, and nothing here changes that.
 |---|---|---|
 | `source` | R | a path, relative to this document; one row per `(artifact, entity)` |
 | `fields` | D | canonical `key`, `entity`, `rank` — a null `rank` is the artifact's own membership, `k` the generating set of `contents[k]` |
+
+A member source without the layer's own artifacts — its `source` or its inline `artifacts` — is
+refused: they are the roster a member row's key resolves against, and without one a mistyped key
+would publish a phantom artifact rather than fail to find one.
 
 **The four hierarchy kinds, and which of them carry levels.** The kind is declared and never
 inferred from the edges, and the levels rule follows from it:
@@ -627,12 +637,8 @@ content                   = { computed = ["centroid", "box"] }
   require_member_visibility = "all"
 ```
 
-⊘ **Three lines of that example do not build today**, and the ⊘ note at the head says why: the two
-renamed fields (`parent = "parent_id"`, and `contents = "text"` under `[layer.labels]`) are refused
-because a **layer's** map has nothing to move until the artifact and member sources are rebuilt on
-this document's names, and `[layer.labels]` is refused whole. Every other map in the example — the
-view's `fields = { x = "x", y = "y" }` among them — is read. It is written as the surface is, not as
-this build reads it.
+⊘ **One block of that example does not build today**: `[layer.labels]` is refused whole, the label
+sugar being specified and not built. Every map in it is read, a layer's included.
 
 **A vocabulary is an object, not three attribute fields.** `name` is the identity, so attributes
 share one by naming it; `source` or an inline `[vocabulary.values]` table is where the values come
@@ -683,6 +689,12 @@ for drill-down to return.
   §8 forbids, arriving through a typo. Two blocks of one name likewise;
 - **`value_set = "closed"` with no value source**; and **attributes sharing a vocabulary declaring
   different widths** is not expressible, `width` having moved to the vocabulary (`per-point-attributes.md` §3.9);
+- **two answers to one question on a layer**: `source` beside an inline `artifacts` list, a `fields`
+  map beside one, `members` beside `excluding` — in the map, on an inline row, or as two columns of
+  one file — and a `[layer.members]` source beside either. Each leaves two memberships or two
+  rosters for one artifact, and every masked count and every criterion divides by one of them, so
+  which won would be the reader's order rather than anything the caller wrote. Two rows for one key
+  in an artifact source is the same refusal: one row is one artifact;
 - an access label spelled `inherited`, the one reserved word occupying a slot that otherwise takes
   a label (§5). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
   in slots that admit no label.
@@ -722,6 +734,11 @@ turns a silent empty column into a build failure. Silence is the whole reason it
 geometry column puts every point at the origin, and an absent access column puts every point in no
 principal's mask. A map with no `source` is refused too: it locates fields in a file the object
 never names.
+
+**`level` and `attached_level` are read under their own names.** A layer's `fields` map is closed
+to the names §1's tables give it, and a level is an address rather than a value — it is what makes
+`(layer, level, key)` an artifact's identity. A producer whose source spells one otherwise renames
+the column.
 
 **A layer's membership has two shapes, and it names whichever it uses.** A `members` field on the
 artifact row carries the membership as a list — the natural shape, and the one that makes an
@@ -785,6 +802,26 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — one source per layer, one row per artifact, and membership by exclusion.** The
+artifact grain was one row per `(artifact, rank)` in one file for every layer, which needed a
+`layer` discriminator column, repeated each artifact's key, parent and attachment on every row of
+it, and needed a cross-row agreement refusal to catch the copies disagreeing. **A layer now names
+its own source**, so the discriminator is gone — there is no second layer's rows to tell apart —
+and **an artifact is one row carrying its `contents` as a ranked list**, so the agreement refusal
+is retired rather than replaced: the condition it detected is not expressible when a key appears
+once. What one row per artifact does admit — the same key written twice — is refused as two
+artifacts under one name. **A layer's `fields` map reaches its readers**, the ⊘ that held it back
+being exactly the discriminator and the two columns this grain no longer has; `level` and
+`attached_level` stay unmovable, this section's tables not naming them. **`artifacts = [{ … }]`
+writes a layer out in the declaration** for what a person authors, with its own key table above and
+its own row in §1's closure test. **`excluding` names the entities a membership leaves out**,
+complemented once at build against the corpus and materialised: the three pairs of spellings —
+inline against sourced, `excluding` against `members`, a row's membership against a
+`[layer.members]` source — are each asserted to produce a **byte-identical bundle**, which is the
+strongest statement of the property and the one that makes *no request-time complement* structural.
+An excluded id this build did not assign refuses the build, an exclusion resolving to nothing being
+a silent widening where an unknown member is a silent narrowing.
 
 **2026-08-19 — the artifact and member readers take `rank` and `entity`.** §1's field tables were
 already written on these names; the readers now use them, so §8's unbuilt note narrows: what still
