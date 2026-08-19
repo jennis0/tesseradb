@@ -138,7 +138,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::Bounds;
+use tessera_spatial::{cell, Bounds};
 use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
@@ -147,6 +147,7 @@ use tessera_types::layer::{
 };
 
 use crate::error::{BuildError, Result};
+use crate::input::{CoordinateSurvey, PointSurvey};
 
 /// A parse or consistency failure in the config, or in a vocabulary file bound to it.
 ///
@@ -573,6 +574,15 @@ pub struct Config {
     /// In declaration order, which is registration order: a layer must be declared after every
     /// layer it names in `depends_on`.
     pub layers: Vec<LayerDeclaration>,
+    /// Which of [`Config::layers`] the `[layer.labels]` sugar wrote, and which layer each was
+    /// written for.
+    ///
+    /// **Recorded because nothing else can recover it.** The expansion is textual and happens
+    /// before anything compiles, so a label layer and the same layer written out by hand are
+    /// indistinguishable everywhere below it — which is exactly the property the sugar claims. A
+    /// reviewer diffing two builds' disclosure decisions still needs to know that a layer they did
+    /// not write appeared because a `[layer.labels]` block asked for it.
+    pub label_layers: BTreeMap<String, String>,
     /// Each layer's bound sources, parallel to [`Config::layers`] and by the same name.
     ///
     /// **Beside the declarations rather than inside them.** A [`LayerDeclaration`] is exactly what
@@ -679,28 +689,170 @@ pub enum Extent {
 /// boundary point is inside it. A corpus that will *grow* needs a real margin, and says so.
 pub const DEFAULT_AUTO_MARGIN: f64 = 0.01;
 
-/// Turn a declared [`Extent`] into the [`Bounds`] this build quantises against.
+/// The share of a view's points that may sit on the frame's boundary before the build refuses
+/// rather than reports.
 ///
-/// `Fixed` is already the answer. `Auto` reads `points` — the view's own geometry source — and
-/// fits a **square** box around it: fitting each axis tightly would use the grid better and
-/// silently stretch the map, which is a rendering decision a build has no business making. The
-/// margin is a fraction of that square's span, added on each side.
+/// **Half, and the argument is what a clamped point *is*.** A clamped point's stored position is
+/// not its own — it is the frame's — so a frame that misplaces the majority of a corpus is not
+/// that corpus's frame; it describes some other data. Below half a clamp is a tail (outliers, a
+/// margin left for growth, a deliberately generous box) and the caller may well mean it, which is
+/// why the report is unconditional and only this is a refusal. There is no escape flag: the extent
+/// quantises, it never filters, so a frame chosen to *crop* piles the rest of the corpus onto the
+/// border instead of excluding it — filtering the source is what that caller wants.
+pub const CLAMP_REFUSAL_FRACTION: f64 = 0.5;
+
+/// The frame a view is quantised against, beside what the data actually does inside it.
+///
+/// **The two travel together because neither is readable alone.** An extent is four numbers that
+/// look plausible whatever the corpus holds; a data box is four numbers with nothing to be right or
+/// wrong against. The failure this exists for shipped a degenerate map from exactly that gap — a
+/// grid-shaped extent over UMAP coordinates spanning about −17…18, every point folded into a
+/// nineteen-cell corner, and the build silent.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub view: String,
+    /// What every stored position in this view is quantised across.
+    pub extent: Bounds,
+    /// The data's own box and the frame's effect on it. [`PointSurvey::Quantised`] for a Morton
+    /// source, which arrives already placed.
+    pub survey: PointSurvey,
+}
+
+impl Frame {
+    /// The rows this frame misplaces, or `None` where nothing was quantised.
+    fn coordinates(&self) -> Option<&CoordinateSurvey> {
+        match &self.survey {
+            PointSurvey::Coordinates(survey) => Some(survey),
+            PointSurvey::Quantised => None,
+        }
+    }
+
+    /// **What the build says about this frame, every time, whether or not anything is wrong.**
+    /// The extent, the data's own bounds beside it, how much of the grid that leaves the data
+    /// occupying, and how many points land on the boundary rather than where they were written.
+    ///
+    /// Reported rather than merely available: the whole defect this closes was a build that had
+    /// every one of these numbers and printed none of them.
+    pub fn report(&self) -> String {
+        let e = &self.extent;
+        let mut out = format!(
+            "view '{}': quantising against x [{}, {}], y [{}, {}]",
+            self.view, e.x_min, e.x_max, e.y_min, e.y_max
+        );
+        let Some(survey) = self.coordinates() else {
+            out.push_str(
+                "\n        points arrive as Morton codes, already placed in this frame — nothing \
+                 is quantised here and nothing clamps",
+            );
+            return out;
+        };
+        let Some(data) = survey.bounds else {
+            out.push_str("\n        the source selects no rows, so nothing was placed");
+            return out;
+        };
+        // Cells, not proportions: 65,536 per axis is the resolution a view actually has, and
+        // "the data occupies 19 of them" is the sentence the degenerate map needed.
+        let cells_x = u32::from(cell(data.x_max, e.x_min, e.x_max))
+            - u32::from(cell(data.x_min, e.x_min, e.x_max))
+            + 1;
+        let cells_y = u32::from(cell(data.y_max, e.y_min, e.y_max))
+            - u32::from(cell(data.y_min, e.y_min, e.y_max))
+            + 1;
+        out.push_str(&format!(
+            "\n        the data spans x [{}, {}], y [{}, {}] — {cells_x} x {cells_y} of the \
+             65536 x 65536 cells",
+            data.x_min, data.x_max, data.y_min, data.y_max
+        ));
+        if survey.clamped == 0 {
+            out.push_str(&format!(
+                "\n        {} point(s) placed, none on the frame's edge",
+                survey.rows
+            ));
+        } else {
+            out.push_str(&format!(
+                "\n        {} of {} point(s) ({:.1}%) CLAMP onto the frame's edge — {} on x, {} \
+                 on y. A clamped point is stored at the boundary, not where it was written",
+                survey.clamped,
+                survey.rows,
+                survey.clamped_fraction() * 100.0,
+                survey.clamped_x,
+                survey.clamped_y,
+            ));
+        }
+        out
+    }
+
+    /// The refusal this frame earns, if any: past [`CLAMP_REFUSAL_FRACTION`] the frame is not
+    /// this corpus's frame, and building would write a bundle that is well-formed with the
+    /// geometry wrong.
+    pub fn refusal(&self) -> Option<String> {
+        let survey = self.coordinates()?;
+        if survey.clamped_fraction() <= CLAMP_REFUSAL_FRACTION {
+            return None;
+        }
+        let data = survey.bounds?;
+        Some(format!(
+            "view '{}': {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
+             than where they were written. The frame is x [{}, {}], y [{}, {}]; the data spans x \
+             [{}, {}], y [{}, {}]. Past half the corpus this is not a tail, it is the wrong frame \
+             — quantisation clamps rather than filters, so a bundle built here is well-formed \
+             with the geometry wrong. Write `extent = \"auto\"` to fit the data, or state the box \
+             the data is actually in; filter the source if the intent was to crop",
+            self.view,
+            survey.clamped,
+            survey.rows,
+            survey.clamped_fraction() * 100.0,
+            self.extent.x_min,
+            self.extent.x_max,
+            self.extent.y_min,
+            self.extent.y_max,
+            data.x_min,
+            data.x_max,
+            data.y_min,
+            data.y_max,
+        ))
+    }
+}
+
+/// Resolve a view's declared [`Extent`] into the frame this build quantises against, **and survey
+/// what that frame does to the data** in the same pass.
+///
+/// `Fixed` is already the frame; the pass is what establishes how much of the corpus it clamps.
+/// `Auto` reads `points` — the view's own geometry source — and fits a **square** box around it:
+/// fitting each axis tightly would use the grid better and silently stretch the map, which is a
+/// rendering decision a build has no business making. The margin is a fraction of that square's
+/// span, added on each side.
+///
+/// **One pass either way**, which is what makes the clamp report affordable at every build rather
+/// than a cost a caller avoids by stating their extent by hand — which is the caller this exists
+/// for.
 ///
 /// The refusals here are the ones `auto` cannot answer for itself: an empty selection frames
 /// nothing, and a Morton points file carries no coordinates to frame (that one is refused by
-/// [`crate::input::data_bounds`], naming the extent to write instead).
-pub fn resolve_extent(
+/// [`crate::input::survey_points`], naming the extent to write instead).
+pub fn frame_view(
     view: &str,
     extent: &Extent,
     points: &Path,
     fields: &Fields,
     limit: Option<u64>,
-) -> Result<Bounds> {
+) -> Result<Frame> {
     let margin = match extent {
-        Extent::Fixed(bounds) => return Ok(*bounds),
+        Extent::Fixed(bounds) => {
+            let survey = crate::input::survey_points(points, fields, limit, Some(bounds))?;
+            return Ok(Frame {
+                view: view.to_string(),
+                extent: *bounds,
+                survey,
+            });
+        }
         Extent::Auto { margin } => *margin,
     };
-    let data = crate::input::data_bounds(points, fields, limit)?.ok_or_else(|| {
+    let survey = crate::input::survey_points(points, fields, limit, None)?;
+    let PointSurvey::Coordinates(survey) = survey else {
+        unreachable!("survey_points refuses a Morton source when no frame is supplied")
+    };
+    let data = survey.bounds.ok_or_else(|| {
         declaration_error(format!(
             "view '{view}': `extent` is `auto` and the points source selects no rows, so there is \
              no data to fit a box around. Either the source is empty or `--limit` excludes every \
@@ -721,10 +873,14 @@ pub fn resolve_extent(
         (data.y_min + data.y_max) / 2.0,
     );
     let bounds = Bounds {
-        x_min: cx - half,
-        x_max: cx + half,
-        y_min: cy - half,
-        y_max: cy + half,
+        // **Widened to the data it was fitted to, which the arithmetic above does not guarantee.**
+        // Centre and half-span are each rounded, so at `margin = 0` the fitted edge can land an ulp
+        // inside the data and clamp the extreme row. A no-op for every non-degenerate margin, and
+        // what lets `auto` report *no clamps* as a fact rather than as an expectation.
+        x_min: (cx - half).min(data.x_min),
+        x_max: (cx + half).max(data.x_max),
+        y_min: (cy - half).min(data.y_min),
+        y_max: (cy + half).max(data.y_max),
     };
     bounds.validate().map_err(|detail| {
         declaration_error(format!(
@@ -734,7 +890,11 @@ pub fn resolve_extent(
             data.x_min, data.x_max, data.y_min, data.y_max
         ))
     })?;
-    Ok(bounds)
+    Ok(Frame {
+        view: view.to_string(),
+        extent: bounds,
+        survey: PointSurvey::Coordinates(survey),
+    })
 }
 
 /// Compile a view's `extent`, in any of `configuration.md` §1's four spellings.
@@ -1086,7 +1246,7 @@ impl Config {
         let views = compile_views(&file.view, &mut sources)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &mut sources)?;
         let attributes = compile_attributes(&file.attribute, &vocabularies)?;
-        let (layers, layer_sources) =
+        let (layers, layer_sources, label_layers) =
             compile_layers(&file.layer, &views, &attributes, &mut sources)?;
         sources.every_override_is_claimed()?;
 
@@ -1099,6 +1259,7 @@ impl Config {
             views,
             layers,
             layer_sources,
+            label_layers,
         })
     }
 
@@ -1564,8 +1725,12 @@ fn check_fields(
 /// build can compute, because whether every principal holding `ir:secret` also holds `ir:analyst`
 /// is a fact about grants, which live outside the bundle entirely. Under rule 2 neither case needs
 /// deciding here.
-fn expand_labels(blocks: &[LayerBlock]) -> Result<Vec<LayerBlock>> {
+fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<String, String>)> {
     let mut expanded: Vec<LayerBlock> = Vec::with_capacity(blocks.len());
+    // Which layers the sugar wrote, and for whom. Nothing below this line can tell them from a
+    // hand-written `[[layer]]` — that is the property — so the fact is recorded here or nowhere,
+    // and `reports/disclosure.json` is where a reviewer reads it back.
+    let mut from_labels: BTreeMap<String, String> = BTreeMap::new();
     for block in blocks {
         let mut parent = block.clone();
         let Some(labels) = parent.labels.take() else {
@@ -1642,10 +1807,11 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<Vec<LayerBlock>> {
         };
         // **Immediately after its parent**, because a layer is declared after every layer it names
         // in `depends_on` and the expansion has just named one.
+        from_labels.insert(child.name.clone(), block.name.clone());
         expanded.push(parent);
         expanded.push(child);
     }
-    Ok(expanded)
+    Ok((expanded, from_labels))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2502,14 +2668,20 @@ fn check_column_name(name: &str) -> Result<()> {
 // Layers
 // ---------------------------------------------------------------------------------------------
 
+/// What [`compile_layers`] hands back: the declarations, each layer's bound sources beside them,
+/// and which layers the `[layer.labels]` sugar wrote, by parent — three parallel views of one pass,
+/// kept apart because a [`LayerDeclaration`] is exactly the control-plane payload and must carry
+/// neither of the others.
+type CompiledLayers = (Vec<LayerDeclaration>, Vec<LayerSources>, BTreeMap<String, String>);
+
 fn compile_layers(
     declared: &[LayerBlock],
     views: &[View],
     attributes: &[Attribute],
     sources: &mut Sources,
-) -> Result<(Vec<LayerDeclaration>, Vec<LayerSources>)> {
+) -> Result<CompiledLayers> {
     // Sugar first, so nothing below this line knows a label layer from a layer.
-    let blocks = expand_labels(declared)?;
+    let (blocks, from_labels) = expand_labels(declared)?;
     let mut layers = Vec::with_capacity(blocks.len());
     let mut per_layer = Vec::with_capacity(blocks.len());
     let mut seen: HashSet<&str> = HashSet::new();
@@ -2856,7 +3028,7 @@ fn compile_layers(
         })?;
         layers.push(declaration);
     }
-    Ok((layers, per_layer))
+    Ok((layers, per_layer, from_labels))
 }
 
 /// `membership` — where a layer's artifacts get their members, at its three spellings.

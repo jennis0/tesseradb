@@ -133,6 +133,43 @@ enum Command {
         #[arg(long)]
         idset: Option<u32>,
     },
+    /// Check the declaration against the files it names — **schemas only, never a row** — and
+    /// print the disclosure decisions it makes.
+    ///
+    /// **What a CI job runs.** It resolves exactly what `tessera build` resolves — the same
+    /// `tessera.toml` found the same way, the same declaration, the same `--file` overrides — and
+    /// then opens each source's Parquet footer to ask whether the columns the declaration named
+    /// are there and can carry what it said they carry. Seconds, and every finding rather than the
+    /// first: a build stops at the first thing wrong because everything after it is wasted work,
+    /// and a check exists to be fixed in one pass.
+    ///
+    /// It cannot answer anything needing a row — whether a closed vocabulary covers the keys in
+    /// the data, whether a member id resolves, or where the data sits inside its view's extent,
+    /// which is the build's own clamp report.
+    Check {
+        /// This deployment's `tessera.toml`, instead of the one found by walking up.
+        #[arg(long, value_name = "PATH")]
+        deployment: Option<PathBuf>,
+        /// The corpus declaration, overriding `tessera.toml`'s `build.schema`.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// Read one of the declaration's sources from somewhere else: `--file KEY=PATH`,
+        /// repeatable — the same override `tessera build` takes, so a check and the build it
+        /// guards see one set of files.
+        #[arg(long = "file", value_name = "KEY=PATH", value_parser = parse_file_binding)]
+        file: Vec<(String, PathBuf)>,
+        /// Write the control-plane payloads to stdout instead of the disclosure table: one JSON
+        /// array of `PUT /control/layers` bodies, in declaration order.
+        ///
+        /// **This is the one thing a declare-only deployment cannot get anywhere else.** Such a
+        /// deployment authors every layer twice — once as TOML to compile an empty bundle, once as
+        /// JSON to create it online — and a `[[layer]]` block minus its acquisition keys *is* that
+        /// payload (`configuration.md` §2). The parser has already produced it by the time this
+        /// runs. Findings still go to stderr and still decide the exit status, so a payload is
+        /// never emitted from a declaration that failed its check.
+        #[arg(long)]
+        payloads: bool,
+    },
     /// Verify a bundle: the read protocol (digests, manifests) plus permutation bijectivity and
     /// the identity column (contracts §2.6: `tessera_id` re-derived from the key).
     Verify {
@@ -698,6 +735,38 @@ fn load_deployment(
     Ok((path, config))
 }
 
+/// Everything `tessera build` and `tessera check` both resolve, before either does its own work.
+///
+/// **One resolution, not two.** The deployment file found by walking up, the declaration it names,
+/// the `--file` overrides against it — a second copy of that in the check verb would be a copy
+/// free to drift, and the whole value of a check is that it saw what the build will see.
+struct Declaration {
+    deployment_path: PathBuf,
+    deployment: tessera_server::config::Config,
+    config: tessera_build::config::Config,
+}
+
+fn resolve_declaration(
+    deployment: Option<&Path>,
+    config: Option<PathBuf>,
+    file: Vec<(String, PathBuf)>,
+) -> Result<Declaration, String> {
+    // **The deployment file first, because everything else is read through it**: where the
+    // declaration is, where the bundle goes, and which environment variable carries the key. A
+    // missing one is a refusal naming what to create (configuration.md §3) — never a silent set of
+    // defaults, since every path in it is a decision.
+    let (deployment_path, deployment) = load_deployment(deployment)?;
+    let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
+    let bindings = collect_bindings(file)?;
+    let config = tessera_build::config::Config::parse(&schema_path, &bindings)
+        .map_err(|e| e.to_string())?;
+    Ok(Declaration {
+        deployment_path,
+        deployment,
+        config,
+    })
+}
+
 /// The `--file` bindings as one map, refusing a key bound twice.
 ///
 /// **Last-one-wins is not available to a binding**: the two paths are two corpora, and a build that
@@ -785,6 +854,92 @@ fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) 
         "        every column materialises in EVERY view — including ones whose items carry no \
          value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration"
     );
+}
+
+/// The disclosure decisions a declaration makes, as a table an operator reads.
+///
+/// **The same values `reports/disclosure.json` carries**, and deliberately a second rendering of
+/// one source rather than a second derivation: the file is for a diff between builds and this is
+/// for a person deciding whether the declaration says what they meant. Neither reads the other's
+/// format well.
+fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
+    println!("views");
+    for view in &disclosure.views {
+        println!(
+            "  {:<26} labels from {}, default '{}'",
+            view.name, view.labels_from, view.default
+        );
+    }
+    if !disclosure.vocabularies.is_empty() {
+        println!("\nvocabularies");
+        for vocabulary in &disclosure.vocabularies {
+            println!(
+                "  {:<26} {}, {}, {} declared value(s){}",
+                vocabulary.name,
+                vocabulary.visibility,
+                vocabulary.value_set,
+                vocabulary.declared_values,
+                if vocabulary.reserved.is_empty() {
+                    String::new()
+                } else {
+                    format!(", reserved {:?}", vocabulary.reserved)
+                }
+            );
+        }
+    }
+    if !disclosure.attributes.is_empty() {
+        println!("\nattributes (in declaration order, which is the stored column order)");
+        for attribute in &disclosure.attributes {
+            println!(
+                "  {:<26} {}{}, {}, from column '{}'",
+                attribute.name,
+                attribute.ty,
+                match &attribute.vocabulary {
+                    Some(v) => format!(" over vocabulary '{v}'"),
+                    None => String::new(),
+                },
+                attribute.placement,
+                attribute.field
+            );
+        }
+    }
+    if !disclosure.layers.is_empty() {
+        println!("\nlayers (in declaration order, which is registration order)");
+        for layer in &disclosure.layers {
+            println!("  {}", layer.name);
+            if let Some(parent) = &layer.expanded_from {
+                println!("      written by `[layer.labels]` on '{parent}'");
+            }
+            println!(
+                "      gate '{}' | artifacts {} | members {}",
+                layer.visibility,
+                match &layer.artifact_visibility.field {
+                    Some(field) =>
+                        format!("carry their own in '{field}', else '{}'", layer.artifact_visibility.default),
+                    None => format!("'{}'", layer.artifact_visibility.default),
+                },
+                match layer.require_member_visibility.as_str() {
+                    Some(word) => word.to_string(),
+                    None => layer.require_member_visibility.to_string(),
+                }
+            );
+            if !layer.depends_on.is_empty() {
+                println!(
+                    "      served only where {} is served (decision 0089)",
+                    layer.depends_on.join(", ")
+                );
+            }
+            if !layer.content.computed.is_empty() {
+                println!("      computed {}", layer.content.computed.join(", "));
+            }
+            for supplied in &layer.content.supplied {
+                println!(
+                    "      supplied {} '{}' requires {}",
+                    supplied.ty, supplied.name, supplied.require_member_visibility
+                );
+            }
+        }
+    }
 }
 
 /// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
@@ -993,14 +1148,23 @@ fn main() -> ExitCode {
             // declaration is, where the bundle goes, and which environment variable carries the
             // key. A missing one is a refusal naming what to create (configuration.md §3) —
             // never a silent set of defaults, since every path in it is a decision.
-            let (deployment_path, deployment) = match load_deployment(deployment.as_deref()) {
-                Ok(pair) => pair,
+            //
+            // Parsed and refused before any work, for the identity key's reason: a declaration
+            // refusal is an operator's typo, and discovering it after a multi-minute build has
+            // written a bundle prefix costs the whole build. Every rule in `tessera_build::config`
+            // fires here, against no data at all — which is also the whole of what `tessera check`
+            // does, through this same function.
+            let Declaration {
+                deployment_path,
+                deployment,
+                config,
+            } = match resolve_declaration(deployment.as_deref(), config, file) {
+                Ok(resolved) => resolved,
                 Err(detail) => {
                     eprintln!("build refused: {detail}");
                     return ExitCode::FAILURE;
                 }
             };
-            let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
             let out = out.unwrap_or_else(|| deployment.bundle_path.clone());
 
             // CRITICAL N-1: resolved and refused, if it refuses, before any work — before `df`,
@@ -1030,24 +1194,6 @@ fn main() -> ExitCode {
                 );
             }
 
-            // Parsed and refused before any work, for the identity key's reason: a declaration
-            // refusal is an operator's typo, and discovering it after a multi-minute build has
-            // written a bundle prefix costs the whole build. Every rule in
-            // `tessera_build::config` fires here, against no data at all.
-            let bindings = match collect_bindings(file) {
-                Ok(bindings) => bindings,
-                Err(detail) => {
-                    eprintln!("build refused: {detail}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            let config = match tessera_build::config::Config::parse(&schema_path, &bindings) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("build refused: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
             // **A build materialises one view.** With one declared, naming it is noise; with
             // several, choosing for the operator would publish a coordinate system nobody asked
             // for, so `sole_view` refuses and lists them.
@@ -1069,27 +1215,36 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // **The frame, resolved before any work.** `auto` costs a pass over the points file's
-            // two coordinate columns; every other spelling is already the answer. Printed either
-            // way, because the extent is what every stored cell is relative to and a fitted one is
-            // not otherwise visible anywhere.
-            let extent = match tessera_build::config::resolve_extent(
+            // **The frame, resolved before any work — and surveyed in the same pass.** `auto`
+            // fits the box; every other spelling is already the answer and the pass is what
+            // establishes how much of the corpus that frame clamps.
+            let frame = match tessera_build::config::frame_view(
                 &view_id,
                 &acquired.extent,
                 &acquired.points,
                 &acquired.point_fields,
                 limit,
             ) {
-                Ok(extent) => extent,
+                Ok(frame) => frame,
                 Err(e) => {
                     eprintln!("build refused: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            eprintln!(
-                "view '{view_id}': quantising against x [{}, {}], y [{}, {}]",
-                extent.x_min, extent.x_max, extent.y_min, extent.y_max
-            );
+            // **The frame, and what it does to the data — printed before any work, always.** The
+            // extent alone is four plausible-looking numbers; beside the data's own box it is
+            // checkable, and the clamp count is the number that says whether this bundle's
+            // geometry means anything. Past half the corpus on the boundary it is a refusal, and
+            // it fires here rather than after a multi-minute build.
+            eprintln!("{}", frame.report());
+            if let Some(detail) = frame.refusal() {
+                eprintln!("build refused: {detail}");
+                return ExitCode::FAILURE;
+            }
+            let extent = frame.extent;
+            // Read out before the declaration is broken up into build arguments: it is a
+            // property of the declaration, and every value in it exists by now.
+            let disclosure = tessera_build::disclosure::Disclosure::of(&config);
             let schema = config.schema;
             // §2.3: the cost is reported, never hidden — a hot column is baked into every row and
             // is unalterable without rewriting the corpus, so the operator sees the per-row and
@@ -1166,6 +1321,15 @@ fn main() -> ExitCode {
             };
             match tessera_build::build(&args) {
                 Ok(report) => {
+                    // **Written beside the build rather than inside it**, because it is derived
+                    // from the declaration and from nothing the build computes — which is also why
+                    // `tessera check` can emit the identical document without opening a data file.
+                    // `reports/containment.json` is the other way round: a result, needing every
+                    // artifact published.
+                    if let Err(e) = tessera_build::write_disclosure_report(&out, &disclosure) {
+                        eprintln!("build FAILED: writing reports/disclosure.json: {e}");
+                        return ExitCode::FAILURE;
+                    }
                     println!(
                         "built {} ({}): {} items, {} terms, {} pairs, {} bytes on disk",
                         out.display(),
@@ -1273,6 +1437,67 @@ fn main() -> ExitCode {
                 extent,
             } => corpus_census(seed, n, zoom, &grant, extent),
         },
+        Command::Check {
+            deployment,
+            config,
+            file,
+            payloads,
+        } => {
+            let declaration = match resolve_declaration(deployment.as_deref(), config, file) {
+                Ok(resolved) => resolved,
+                Err(detail) => {
+                    eprintln!("check FAILED: {detail}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let config = declaration.config;
+            let report = tessera_build::check::check(&config);
+            for source in &report.sources {
+                match &source.path {
+                    Some(path) => eprintln!("  read schema  {:<34} {path}", source.object),
+                    None => eprintln!("  no source    {:<34} (declared and empty)", source.object),
+                }
+            }
+            for finding in &report.findings {
+                eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
+            }
+            if !report.is_clean() {
+                eprintln!(
+                    "check FAILED: {} finding(s) across {} source(s). Nothing was read but \
+                     Parquet schemas, so a clean check is not a clean build: it cannot see a \
+                     value against a closed vocabulary, a member id that resolves to nothing, or \
+                     where the data sits inside a view's extent",
+                    report.findings.len(),
+                    report.sources.len()
+                );
+                return ExitCode::FAILURE;
+            }
+            if payloads {
+                // **The declaration, minus its acquisition keys, is the payload**
+                // (`configuration.md` §2) — so this is a serialisation and not a translation, and
+                // there is no second authority to drift. On stdout alone, so the stream a CI job
+                // pipes into `curl` carries nothing else.
+                match serde_json::to_string_pretty(&config.layers) {
+                    Ok(json) => println!("{json}"),
+                    Err(e) => {
+                        eprintln!("check FAILED: serialising the layer payloads: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                print_disclosure(&tessera_build::disclosure::Disclosure::of(&config));
+            }
+            eprintln!(
+                "check OK: {} source(s), {} view(s), {} vocabulary(ies), {} attribute(s), {} \
+                 layer(s)",
+                report.sources.len(),
+                config.views.len(),
+                config.schema.vocabularies.len(),
+                config.schema.attributes.len(),
+                config.layers.len()
+            );
+            ExitCode::SUCCESS
+        }
         Command::Serve { deployment } => {
             tracing_subscriber::fmt::init();
             let deployment = match tessera_server::config::discover(

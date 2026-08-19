@@ -816,31 +816,90 @@ fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) 
     })
 }
 
-/// The tightest box holding every point this build would read — `auto`'s input
-/// (`configuration.md` §1), or `None` when the selection is empty.
+/// What one pass over a view's geometry establishes: the box the data actually occupies, and how
+/// many of its rows a stated extent would **clamp** onto the frame's boundary.
+///
+/// **Both halves come out of one pass**, which is what makes reporting the clamp affordable at
+/// every build rather than only under `auto`. `auto` needs the box; a stated extent needs the
+/// clamp count; neither needs the other's pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PointSurvey {
+    /// The source carries coordinates, so a frame decides where every point lands.
+    Coordinates(CoordinateSurvey),
+    /// The source carries Morton codes: the position is already quantised, in the grid's own
+    /// frame, and [`scan_points`] reassembles it rather than quantising it. Nothing clamps, and
+    /// there is no box to fit — which is why `auto` over such a file is refused instead.
+    Quantised,
+}
+
+/// The box the data occupies, and what a frame does to it.
+///
+/// **A clamp is `v < min` or `v > max`, and `v == max` is not one.** Cells are half-open and the
+/// maximum lands in the top cell by construction (`tessera_spatial::morton`), so counting the
+/// boundary value as a clamp would report every tightly-fitted corpus as damaged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoordinateSurvey {
+    /// Rows the build would place — `limit` honoured.
+    pub rows: u64,
+    /// The tightest box holding every one of them. `None` when the selection is empty.
+    pub bounds: Option<Bounds>,
+    /// Rows clamped on **either** axis: their stored position is the frame's boundary rather than
+    /// their own. Always `0` where no frame was supplied.
+    pub clamped: u64,
+    /// Rows clamped on x, and on y. A row outside on both axes counts in both, and once in
+    /// [`CoordinateSurvey::clamped`].
+    pub clamped_x: u64,
+    pub clamped_y: u64,
+}
+
+impl CoordinateSurvey {
+    /// The share of surveyed rows whose stored position is the frame's boundary rather than their
+    /// own. `0.0` for an empty selection, there being no row to misplace.
+    pub fn clamped_fraction(&self) -> f64 {
+        if self.rows == 0 {
+            0.0
+        } else {
+            self.clamped as f64 / self.rows as f64
+        }
+    }
+}
+
+/// The tightest box holding every point this build would read, and — where `against` supplies a
+/// frame — how many of those rows that frame clamps.
 ///
 /// **A full pass over two columns, not the file's statistics.** Parquet min/max are per row group
 /// and may be absent, so a statistics route would make the extent — and therefore every stored
 /// cell — depend on how the producer happened to lay the file out, and would silently widen the
 /// box for a file that carries none. `auto` is already the spelling that says *fit the data I have*
 /// (`configuration.md` §1); making it also mean *approximately, depending on the writer* is the
-/// kind of quiet dependence a rebuild discovers as moved geometry. One pass over `entity_id`,
-/// `x` and `y` is the price, and it is paid only when a view declares `auto`.
+/// kind of quiet dependence a rebuild discovers as moved geometry. It also could not answer the
+/// clamp question at all: a row group's bounds say nothing about how many of its rows sit outside
+/// the frame.
 ///
 /// `limit` is honoured, because the extent must frame the rows the build actually places: a
 /// prefix build whose box was computed over the whole file would quantise its rows into a
 /// fraction of the grid.
 ///
-/// A Morton points file has no coordinates to bound, and is refused here rather than defaulted
-/// to the grid's own extent: the two Morton branches are exact only against
-/// [`IDENTITY_EXTENT`], so the answer is a line in the config rather than a guess in the reader.
-pub fn data_bounds(path: &Path, fields: &Fields, limit: Option<u64>) -> Result<Option<Bounds>> {
+/// A Morton points file has no coordinates to bound. With a frame in hand that is simply
+/// [`PointSurvey::Quantised`] — nothing is quantised at build, so nothing clamps. With none it is
+/// refused rather than defaulted to the grid's own extent: the two Morton branches are exact only
+/// against [`IDENTITY_EXTENT`], so the answer is a line in the config rather than a guess in the
+/// reader.
+pub fn survey_points(
+    path: &Path,
+    fields: &Fields,
+    limit: Option<u64>,
+    against: Option<&Bounds>,
+) -> Result<PointSurvey> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
     let (x_name, y_name) = (fields.of("x"), fields.of("y"));
     if schema.column_with_name(x_name).is_none() || schema.column_with_name(y_name).is_none() {
+        if against.is_some() && schema.column_with_name(fields.of("morton")).is_some() {
+            return Ok(PointSurvey::Quantised);
+        }
         return Err(BuildError::Schema {
             path: path.to_path_buf(),
             detail: if schema.column_with_name(fields.of("morton")).is_some() {
@@ -881,6 +940,13 @@ pub fn data_bounds(path: &Path, fields: &Fields, limit: Option<u64>) -> Result<O
     let mut found = false;
     let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut survey = CoordinateSurvey {
+        rows: 0,
+        bounds: None,
+        clamped: 0,
+        clamped_x: 0,
+        clamped_y: 0,
+    };
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
@@ -906,18 +972,30 @@ pub fn data_bounds(path: &Path, fields: &Fields, limit: Option<u64>) -> Result<O
                 });
             }
             found = true;
+            survey.rows += 1;
             x_min = x_min.min(x);
             x_max = x_max.max(x);
             y_min = y_min.min(y);
             y_max = y_max.max(y);
+            if let Some(frame) = against {
+                // `v == max` is **not** a clamp: cells are half-open and the maximum lands in the
+                // top cell by construction, so a tightly-fitted corpus must not report its own
+                // boundary rows as misplaced.
+                let out_x = x < frame.x_min || x > frame.x_max;
+                let out_y = y < frame.y_min || y > frame.y_max;
+                survey.clamped_x += u64::from(out_x);
+                survey.clamped_y += u64::from(out_y);
+                survey.clamped += u64::from(out_x || out_y);
+            }
         }
     }
-    Ok(found.then_some(Bounds {
+    survey.bounds = found.then_some(Bounds {
         x_min,
         x_max,
         y_min,
         y_max,
-    }))
+    });
+    Ok(PointSurvey::Coordinates(survey))
 }
 
 /// The points file's total row count, from parquet metadata alone — no decode.
@@ -1614,6 +1692,46 @@ impl BatchColumn {
         })
     }
 
+    /// Whether a source column of type `found` can carry an attribute declared as `attribute` —
+    /// **the schema-only half of [`BatchColumn::decode_values`]**, which is what `tessera check`
+    /// can answer without reading a row.
+    ///
+    /// It restates the downcasts above rather than sharing them, because a schema has no array to
+    /// downcast; the two are held together by `column_carries_agrees_with_the_decoder`, which
+    /// walks every declared type against every Arrow type this build can meet and asserts the two
+    /// give one answer. Without that test this function is a second opinion, and a check that says
+    /// *fine* where the build says *mismatch* is worse than no check at all.
+    fn carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
+        if attribute.vocabulary.is_some() {
+            // A category arrives as its *key*, never as a code.
+            return matches!(found, DataType::Utf8);
+        }
+        match attribute.ty {
+            ScalarType::Bool => matches!(found, DataType::Boolean),
+            // `f32` accepts `f64` and rounds; `f64` accepts `f32` and widens.
+            ScalarType::F32 | ScalarType::F64 => {
+                matches!(found, DataType::Float32 | DataType::Float64)
+            }
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                matches!(found, DataType::Utf8)
+            }
+            // Every integer family widens to `i64` and is range-checked per row, which a schema
+            // cannot anticipate — so this is presence and family, never fit.
+            _ => matches!(
+                found,
+                DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::UInt64
+                    | DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::Timestamp(TimeUnit::Microsecond, _)
+            ),
+        }
+    }
+
     fn value(
         &self,
         row: usize,
@@ -1812,6 +1930,12 @@ fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
     })
 }
 
+/// Whether `[corpus]`'s column of type `found` can carry `attribute` — see
+/// [`BatchColumn::carries`], whose rule this is.
+pub fn column_carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
+    BatchColumn::carries(attribute, found)
+}
+
 /// A value that must fit the declared width, refused rather than truncated.
 ///
 /// **The refusal is the point.** A `u8` category column whose data carries 300 is a build that
@@ -1833,6 +1957,98 @@ fn narrow(value: i64, min: i64, max: i64, attribute: &crate::config::Attribute) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The schema-only type check and the decoder must give one answer**, for every declared
+    /// type against every Arrow type this build can meet. A `tessera check` that passes a column
+    /// the build then refuses is a wasted CI run; one that refuses a column the build accepts is
+    /// worse — it makes the check something a caller learns to ignore.
+    #[test]
+    fn column_carries_agrees_with_the_decoder() {
+        use arrow::array::{
+            ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+            Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
+            UInt64Array, UInt8Array,
+        };
+        use arrow::datatypes::TimeUnit;
+        use std::sync::Arc;
+
+        fn attribute(ty: ScalarType, vocabulary: Option<&str>) -> crate::config::Attribute {
+            crate::config::Attribute {
+                name: "a".to_string(),
+                title: None,
+                field: None,
+                ty,
+                analyser: None,
+                vocabulary: vocabulary.map(str::to_string),
+                value_set: vocabulary.map(|_| crate::config::ValueSet::Closed),
+                index: false,
+                render: false,
+            }
+        }
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(BooleanArray::from(vec![true])),
+            Arc::new(UInt8Array::from(vec![1u8])),
+            Arc::new(UInt16Array::from(vec![1u16])),
+            Arc::new(UInt32Array::from(vec![1u32])),
+            Arc::new(UInt64Array::from(vec![1u64])),
+            Arc::new(Int8Array::from(vec![1i8])),
+            Arc::new(Int16Array::from(vec![1i16])),
+            Arc::new(Int32Array::from(vec![1i32])),
+            Arc::new(Int64Array::from(vec![1i64])),
+            Arc::new(Float32Array::from(vec![1.0f32])),
+            Arc::new(Float64Array::from(vec![1.0f64])),
+            Arc::new(StringArray::from(vec!["k"])),
+            Arc::new(TimestampMicrosecondArray::from(vec![1i64])),
+            // The near miss the decoder names outright: a timestamp in the wrong unit.
+            Arc::new(
+                arrow::array::TimestampMillisecondArray::from(vec![1i64]),
+            ),
+        ];
+        let declared = [
+            ScalarType::Bool,
+            ScalarType::U8,
+            ScalarType::U16,
+            ScalarType::U32,
+            ScalarType::U64,
+            ScalarType::I8,
+            ScalarType::I16,
+            ScalarType::I32,
+            ScalarType::I64,
+            ScalarType::F32,
+            ScalarType::F64,
+            ScalarType::TimestampUs,
+            ScalarType::Utf8,
+            ScalarType::Keyword,
+            ScalarType::Text,
+        ];
+        let path = Path::new("in-memory");
+        for ty in declared {
+            for vocabulary in [None, Some("v")] {
+                // A category's width is the vocabulary's, so only the integer widths pair with one.
+                if vocabulary.is_some() && !matches!(ty, ScalarType::U8 | ScalarType::U16 | ScalarType::U32) {
+                    continue;
+                }
+                let attribute = attribute(ty, vocabulary);
+                for column in &columns {
+                    let mut minters = HashMap::new();
+                    let decoded =
+                        BatchColumn::decode_values(path, column, &attribute, &mut minters).is_ok();
+                    assert_eq!(
+                        column_carries(&attribute, column.data_type()),
+                        decoded,
+                        "declared {ty:?} (vocabulary {vocabulary:?}) against {:?}",
+                        column.data_type()
+                    );
+                }
+            }
+        }
+        // And the unit that must not pass, stated outright rather than left to the loop.
+        assert!(!column_carries(
+            &attribute(ScalarType::TimestampUs, None),
+            &DataType::Timestamp(TimeUnit::Millisecond, None)
+        ));
+    }
 
     #[test]
     fn deinterleave_inverts_the_worked_example() {

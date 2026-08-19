@@ -19,8 +19,10 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+pub mod check;
 pub mod config;
 pub mod deep;
+pub mod disclosure;
 pub mod error;
 pub mod input;
 pub mod layers;
@@ -57,6 +59,7 @@ use tessera_types::{
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
+pub use disclosure::write_disclosure_report;
 pub use error::{BuildError, Result};
 pub use observer::{BuildObserver, BuildStage, NoopObserver};
 
@@ -1529,7 +1532,7 @@ pub(crate) fn write_containment_report(
     )
 }
 
-fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| BuildError::Invalid(format!("serialising {}: {e}", path.display())))?;
     write_bytes(path, &bytes)

@@ -149,6 +149,14 @@ the same way the membership spellings are: a byte-identical bundle.
 
 ### 8 — `tessera check`, `--extent auto`, and the disclosure report
 
+*Built.* The clamp report is unconditional and refuses past half the corpus (`configuration.md`
+§1); `tessera check` resolves through the same code the build does, collects every finding rather
+than stopping at the first, and `--payloads` closes §2's ⊘; `reports/disclosure.json` is written
+from the declaration alone, which is why the check can emit it without opening a data file. One
+thing fell out of building it: the report and the extent want the *same* pass over the coordinate
+columns, so `auto` and a stated extent now cost the same — which is what stops a caller avoiding
+the report by writing their frame out by hand.
+
 **`tessera check` should also emit control-plane payloads** (`configuration.md` §2). A deployment
 that declares but never builds authors the same layer twice — once as TOML to compile an empty
 bundle, once as JSON to create it online — and the parser has already done the work by the time it

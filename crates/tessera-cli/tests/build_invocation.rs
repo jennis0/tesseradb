@@ -296,6 +296,128 @@ fn several_views_refuse_rather_than_choosing_one() {
 }
 
 // -------------------------------------------------------------------------------------------
+// The clamp report
+// -------------------------------------------------------------------------------------------
+
+/// Points at real projection coordinates — the shape a UMAP produces, spanning roughly −17…18 and
+/// −21…23 about the origin.
+fn write_projection_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<u64> = (0..N).collect();
+    // Deterministic, spread across the sign on both axes, and the two axes run **opposite ways**
+    // — a projection's two components are independent, so the points outside a grid-shaped frame
+    // on x are not the same points that are outside it on y. Ramping them together would make the
+    // union of the two halves one half, which is a corpus no projection produces.
+    let xs: Vec<f64> = ids.iter().map(|e| -17.0 + (*e as f64) * 35.0 / 63.0).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| 23.0 - (*e as f64) * 44.0 / 63.0).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn declare_extent(dir: &Path, extent: &str) {
+    std::fs::write(
+        dir.join("schema.toml"),
+        format!(
+            "[[view]]\nname = \"s0\"\nextent = {extent}\nsource = \"points.parquet\"\n\
+             point_visibility = {{ source = \"pairs.parquet\", default = \"public\" }}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// **The notebook's own failure, and the reason this report exists.** A grid-shaped extent was
+/// declared over projection coordinates, every point folded into a nineteen-cell corner, the
+/// bundle came out well-formed with the geometry wrong — and the build said nothing at all.
+///
+/// It must now say all three things: how many points land on the frame's edge, what the frame is,
+/// and what the data's own bounds are. And past half the corpus it must refuse rather than report,
+/// because a frame that misplaces the majority of a corpus is not that corpus's frame.
+#[test]
+fn the_notebook_failure_is_loud() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_projection_points(&tmp.path().join("points.parquet"));
+    declare_extent(tmp.path(), "{ min = 0.0, max = 65536.0 }");
+
+    let stderr = refusal(tmp.path(), &[]);
+    // The clamp count, as a count and as a share.
+    assert!(stderr.contains("CLAMP onto the frame's edge"), "{stderr}");
+    assert!(stderr.contains("of 64 point(s)"), "{stderr}");
+    // The frame it was given, and the data's own bounds beside it — the pair is the diagnosis.
+    assert!(stderr.contains("quantising against x [0, 65536]"), "{stderr}");
+    assert!(stderr.contains("the data spans x [-17"), "{stderr}");
+    // And how little of the grid that leaves, which is the number the degenerate map needed.
+    assert!(stderr.contains("of the 65536 x 65536 cells"), "{stderr}");
+    // A refusal, not a warning: the build wrote nothing.
+    assert!(
+        !tmp.path().join("bundles/corpus/CURRENT").is_file(),
+        "a refused build must not have written a bundle"
+    );
+}
+
+/// **A tail of clamped points is reported and built.** Outliers, or headroom a caller left for
+/// growth, are a frame the caller may well mean — so under the threshold the build says what it
+/// did and goes on. A refusal here would make the report something a caller works around.
+#[test]
+fn a_minority_of_clamped_points_is_reported_and_built() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    // The fixture's data is x 0..63, y 1000..1010. This frame leaves the last few x outside it.
+    declare_extent(tmp.path(), "{ x = [0.0, 60.0], y = [999.0, 1011.0] }");
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("CLAMP onto the frame's edge"), "{text}");
+    assert!(text.contains("3 of 64 point(s) (4.7%)"), "{text}");
+}
+
+/// **A point sitting exactly at the maximum is not a clamp.** Cells are half-open and `v = max`
+/// lands in the top cell by construction, so counting it would report every tightly-fitted corpus
+/// as damaged — and a frame stated to fit the data exactly is the case a careful caller writes.
+#[test]
+fn a_point_at_the_maximum_is_not_a_clamp() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    // Exactly the fixture's own bounds: x 0..63, y 1000..1010, both endpoints on the boundary.
+    declare_extent(tmp.path(), "{ x = [0.0, 63.0], y = [1000.0, 1010.0] }");
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("64 point(s) placed, none on the frame's edge"), "{text}");
+}
+
+/// `auto` fits the box around the data it read, so nothing it framed can clamp — reported as a
+/// fact rather than left to be assumed, since the fitted edge is arithmetic and arithmetic rounds.
+#[test]
+fn auto_clamps_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_projection_points(&tmp.path().join("points.parquet"));
+    declare_extent(tmp.path(), "{ auto = true, margin = 0.0 }");
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("none on the frame's edge"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+// -------------------------------------------------------------------------------------------
 // `--file`, the override
 // -------------------------------------------------------------------------------------------
 

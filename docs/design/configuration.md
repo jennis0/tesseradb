@@ -21,7 +21,9 @@ govern; where they differ on *spelling*, this does.
 
 **The declaration, the acquisition and the readers are built.** `tessera build` — with no flags at
 all — finds `tessera.toml`, reads the declaration it names, compiles the blocks below with every
-refusal §7 states, and reads each object's source under the names its `fields` map resolved. Every
+refusal §7 states, and reads each object's source under the names its `fields` map resolved.
+`tessera check` is the same resolution against Parquet schemas alone, in seconds, and emits the
+control-plane payloads (§2, §3). Every
 `source` is a path relative to the declaring document; `--file KEY=PATH` overrides one, keyed by
 the object. `--extent`, `--id-key`, `--id-key-file`, `--points`, `--pairs`, `--values`,
 `--artifacts`, `--artifact-members`, `--schema`, `--layers`, `schema.toml` as a fixed name and
@@ -131,6 +133,37 @@ needs headroom or the first out-of-range ingest clamps. A caller who knows the b
 There is no constant for the full float range: spanning ±3.4×10³⁸ over 65,536 cells makes each cell
 10³⁴ wide, so every real dataset lands in one of them — it avoids clamping by destroying all
 resolution.
+
+**Every build reports what the frame does to the data, and past half the corpus it refuses.** The
+extent alone is four plausible-looking numbers whatever the corpus holds, so the build prints the
+data's own bounds beside them, how much of the 65,536² grid that leaves the data occupying, and how
+many points **clamp** — land on the frame's boundary rather than where they were written. The
+report is unconditional, `auto` and a stated extent alike: `auto` only moves the trap, because a
+caller who states a frame by hand is exactly the caller who gets it wrong, and a report they pay a
+pass for is a report they would rather not have.
+
+```
+view 's0': quantising against x [0, 65536], y [0, 65536]
+        the data spans x [-16.99, 17.76], y [-20.83, 22.55] — 18 x 23 of the 65536 x 65536 cells
+        154 of 200 point(s) (77.0%) CLAMP onto the frame's edge — 109 on x, 97 on y
+```
+
+A point sitting exactly at the maximum is **not** clamped: cells are half-open and the maximum
+lands in the top cell by construction, so counting it would report every tightly-fitted corpus as
+damaged. The count is `v < min` or `v > max`, per axis.
+
+**Past half the points, the build refuses**, and half is chosen for what a clamped point *is*: its
+stored position is not its own, it is the frame's — so a frame that misplaces the majority of a
+corpus is not that corpus's frame, it describes some other data. Below half a clamp is a tail —
+outliers, headroom left for growth, a deliberately generous box — and the caller may well mean it,
+which is why only this one is a refusal. There is **no flag that admits it**: quantisation clamps
+rather than filters, so a frame chosen to crop piles the rest of the corpus onto the border instead
+of excluding it, and filtering the source is what that caller wants.
+
+The report costs one pass over the view's two coordinate columns — the pass `auto` was already
+paying, now paid either way, which is what stops a caller avoiding it by writing their extent out.
+A Morton points source arrives already placed, so nothing is quantised and nothing clamps; that
+line says so instead.
 
 **A point's label comes from a field or from a source, never both.** `field` names a field of the
 view's own source, one value or a list per point. `source` names a separate exploded
@@ -489,11 +522,18 @@ That is a records-and-search question rather than a configuration one; it is nam
 caller reading §2's *declare now, write later* will reasonably expect it and there is no answer to
 give them.
 
-⊘ **The two routes are one implementation and are not yet one file.** The build reads TOML and the
-control plane takes JSON; nothing today reads this config and emits control-plane payloads, so a
-write-path deployment authors the declaration twice — once to build the empty bundle, once per
-online creation. Making `tessera check` emit the payloads it has already parsed is the obvious
-close, and is not proposed here.
+**`tessera check --payloads` writes the layer bodies out**, which is what closes the gap between
+declaring here and creating online. A write-path deployment used to author every layer twice —
+once as TOML to compile the empty bundle, once as JSON to `PUT /control/layers` — and the parser
+has produced the second by the time it could print it. The output is a JSON array of
+`LayerDeclaration` bodies in declaration order, on stdout alone, so a CI job pipes it straight at
+the control plane. It is a **serialisation and not a translation**: the payload type is the type
+the build compiled to, so there is no second authority to drift, and `[layer.labels]` appears as
+the layer it expands to.
+
+⊘ **Views and vocabularies have no payload to write**, and their absence here is the endpoints'
+rather than this verb's: view creation is specified and not implemented (views §6), and
+`/control/categories` is owed. When either lands its payload is the same serialisation.
 
 ## 3. Three files, three jobs
 
@@ -513,8 +553,56 @@ ordinary case neither verb takes a flag:
 
 ```bash
 tessera build      # finds tessera.toml, reads the declaration, writes the declared bundle path
+tessera check      # same file, same declaration, same overrides — schemas only, no row read
 tessera serve      # same file, opens what that build wrote
 ```
+
+**`tessera check` is the seconds-long half of a build, and it is what a CI job calls.** It resolves
+exactly what `tessera build` resolves — the same deployment file found the same way, the same
+declaration, the same `--file` overrides, through the same code, so a check cannot see a different
+set of files from the build it guards. It then opens each source's Parquet **footer** and asks
+three things of it: that every declared attribute's column is there and can carry the type declared
+for it, that every source a declaration names is present and readable, and that every field a
+`fields` map locates exists in the file it locates it in. Every layer's `views` and every
+disclosure decision are already settled by the parse. It prints those decisions as a table, or —
+under `--payloads` — the control-plane bodies (§2).
+
+**It collects rather than stopping.** A build refuses at the first thing wrong because everything
+after it is work nobody wants; a check exists to be run and fixed in one pass, so it reports every
+finding and its exit status is the summary.
+
+⊘ **A clean check is not a clean build**, and the list of what it cannot see is short and worth
+knowing: whether a closed vocabulary's keys cover the values in the data, whether a member id
+resolves to an entity the build would assign, whether two artifact rows share a key, whether the
+hierarchy's edges contain one another, and where the data actually sits inside its view's extent.
+All five need a row. The last is the build's own clamp report (§1). It also cannot see a canonical
+column a `fields` map never named and the file does not carry — the readers treat that as absent by
+design, `fields` locating what is declared rather than asserting it (§8).
+
+**Two reports land beside the bundle**, in `reports/`, and neither is read by anything that serves:
+
+| File | Written by | Holds |
+|---|---|---|
+| `containment.json` | the build | edges whose child holds a member its parent does not, and the splits that lose the most |
+| `disclosure.json` | the build, and `tessera check` computes the same document | every layer's `visibility` and `require_member_visibility`, every vocabulary's `visibility` and `value_set`, every attribute's placement, each view's point-label default, and which layers `[layer.labels]` wrote and for whom |
+
+**`disclosure.json` exists for the diff.** The controls it records are individually small and
+collectively the whole of who may see what, and a reviewer's real question — *which disclosure
+decision moved between these two builds?* — has no cheap answer from a config written to be
+authored or from a manifest interleaved with segment digests. So it carries **no timestamp, no
+path and no machine-dependent value**, keeps declaration order where declaration order is
+load-bearing (attributes, layers) and sorts what has none (vocabularies), and is derived from the
+declaration and from nothing the build computes — which is why the check can emit it without
+opening a data file. `containment.json` is the other way round: a result, needing every artifact
+published. A declaration with no layer, no vocabulary and no attribute writes neither and creates
+no `reports/` — a bare-geometry bundle's only control is the label every point takes, and creating
+the directory an operator polls for the fold's notices to say nothing is worse than saying nothing.
+
+A layer's `depends_on` is in there, which is not obviously a disclosure decision and is one: an
+artifact is served only where the artifact it attaches to is served
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)), so
+adding an edge narrows this layer and removing one widens it, neither visible in the layer's own
+gate.
 
 **A missing `tessera.toml` is a refusal naming what to create**, never a silent set of defaults:
 every path in it is a decision, and a guessed one is a build writing where nobody asked or a server
@@ -874,6 +962,29 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — the build says what the frame does to the data, and `tessera check` is the CI half.**
+Three things, and the first is the one that matters. **The clamp report**: a coordinate is
+quantised across its view's extent and quantisation *clamps*, and the notebook shipped a
+grid-shaped extent over UMAP coordinates spanning about −17…18 — every point folded into a
+nineteen-cell corner, the bundle well-formed, and the build silent. `extent = "auto"` only moved
+that trap, since a caller who states a frame by hand still got silence. So every build now prints
+the data's own bounds beside the extent it was given, how much of the grid that leaves the data
+occupying, and how many points land on the boundary rather than where they were written — and
+**refuses past half of them**, on the argument that a clamped point's position is the frame's
+rather than its own, so a frame misplacing the majority of a corpus is not that corpus's frame. A
+point exactly at the maximum is not counted: cells are half-open and it lands in the top cell by
+construction. The cost is the pass `auto` already paid, now paid either way, which is what stops a
+caller avoiding the report by writing their extent out. **`tessera check`** parses the declaration
+and reads only Parquet schemas — every declared attribute against the field that must carry it,
+every source present, every located field there — collecting every finding rather than stopping at
+the first, and printing the disclosure decisions as a table. It resolves through the same code
+`tessera build` does, so the two cannot see different files. Its `--payloads` closes §2's ⊘: the
+control-plane bodies a declare-only deployment used to author a second time by hand are a
+serialisation of the type the build already compiled to. And **`reports/disclosure.json`** lands
+beside `containment.json`, written to be diffed between builds — stable order, no timestamp, no
+path — so which disclosure decision moved is a question with a cheap answer for the first time.
+`depends_on` is in it, decision 0089 having made a dependency edge a gate.
 
 **2026-08-19 — a dependency edge carries deletion and visibility, so one refusal became a
 property.** `depends_on` declared an edge and said nothing about what it meant once both ends
