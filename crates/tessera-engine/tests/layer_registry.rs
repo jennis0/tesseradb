@@ -22,6 +22,7 @@ fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
         visibility: visibility.map(str::to_string),
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(50)),

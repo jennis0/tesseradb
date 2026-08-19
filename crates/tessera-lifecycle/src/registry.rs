@@ -878,6 +878,7 @@ mod tests {
             title: Some(name.into()),
             views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
             visibility: None,
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: Some(ExistenceCriterion::Count(50)),

@@ -221,6 +221,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "fields",
             "artifacts",
             "membership",
+            "value_set",
             "hierarchy",
             "visibility",
             "artifact_visibility",
@@ -1668,6 +1669,37 @@ fn a_member_source_needs_the_layers_own_source() {
     let text = with_layer("  [layer.members]\n  source = \"hdbscan_members.parquet\"\n");
     let message = bound_err(&text, &[]);
     assert!(message.contains("roster"), "{message}");
+    // …and the refusal names the way to ask for exactly that.
+    assert!(message.contains("value_set"), "{message}");
+}
+
+/// **`value_set` decides whether a member key may create an artifact**
+/// (`artifacts-from-points.md` §3). Closed is the default and is the roster rule; open makes the
+/// artifacts source enrichment, so a member source with no roster at all is then a declaration
+/// rather than a mistake — a bare clustering, whose clusters exist because its points name them.
+#[test]
+fn a_layers_value_set_decides_whether_a_key_may_create_an_artifact() {
+    let closed = parse_str(&with_layer("")).expect("a layer parses");
+    assert_eq!(closed.layers[0].value_set, ValueSet::Closed);
+
+    let declared = |word: &str, extra: &str| {
+        format!(
+            "{}{extra}",
+            with_layer("").replace(
+                "membership                = \"enumerated\"",
+                &format!("membership                = \"enumerated\"\nvalue_set = \"{word}\""),
+            )
+        )
+    };
+    let open = parse_str(&declared(
+        "open",
+        "\n  [layer.members]\n  source = \"hdbscan_members.parquet\"\n",
+    ))
+    .expect("an open layer needs no roster");
+    assert_eq!(open.layers[0].value_set, ValueSet::Open);
+
+    let message = err(&declared("partial", ""));
+    assert!(message.contains("neither"), "{message}");
 }
 
 // ---------------------------------------------------------------------------------------------

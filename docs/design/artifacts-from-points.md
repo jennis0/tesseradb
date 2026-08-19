@@ -1,9 +1,11 @@
 # Artifacts declared by the points that belong to them — design
 
 **Date:** 2026-08-19
-**Status:** Draft — owner-ruled in discussion, unbuilt. ⊘ **Nothing in this document is
-built.** Today a layer's artifacts come from a table or an inline array, a member key not on that
-roster is refused, a key column must be UTF-8, and a null key refuses the build. The rulings in §5
+**Status:** Draft — owner-ruled in discussion, **§2 and §3 built at build time**. The readers take
+an integer key and skip a noise one, and `value_set` decides whether a member key may create an
+artifact, at a build. ⊘ **§4 (lineage from a list column), §6 (the ingest half of `value_set`) and
+§5's write-path rulings are unbuilt**; a layer declared `open` therefore governs what a *build*
+mints and nothing at ingest, where an unknown key still has no route in. The rulings in §5
 are the owner's; the rest follows from them. Extends
 [`configuration.md`](configuration.md) (normative for the surface) and
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §6.1 (normative for artifact semantics).
@@ -84,6 +86,9 @@ an error.
 
 ## 4. A lineage list declares the edges
 
+⊘ **Unbuilt.** A list key column is refused as a type the reader cannot take; the scalar column of
+§2 is what builds today.
+
 Where the column is a list, its shape is checked against the hierarchy kind the layer already
 declares — the kind is declared as it is today, and the edges are read from the data the caller
 supplied:
@@ -129,6 +134,9 @@ second retirement route for suppressions, and if it ever ran ahead of the deleti
 the artifact would serve unsuppressed in the gap. One removal rule, as write-path §5.4 requires.
 
 ## 6. Build and ingest are one rule at two entry points
+
+⊘ **The ingest half is unbuilt.** `value_set` is carried on the layer declaration — which is what
+the write path reads, and why it is not on the acquisition block — and is consulted at a build only.
 
 Everything above holds identically whichever way a point arrives. At ingest a point may carry a
 cluster id, or a lineage naming clusters that do not exist yet; under `open` the chain is minted and
@@ -181,6 +189,18 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-08-19 — r2. §2 and §3 are built at build time, and §2's first claim was already true.** The
+membership route needed no code: a `[layer.members]` block pointed at the points file, with
+`fields = { key = "cluster_id", entity = "id" }`, already built the same bundle as the same layer
+declared with a member table — asserted byte for byte, which is how the other input spellings are
+held. What the stage added is the two readers (an integer key canonicalised to its decimal string,
+converted once per artifact and never per point; a null key and exactly `-1` skipped and counted)
+and `value_set` on `[[layer]]`, carried on the layer declaration so the write path has the same key
+to read when §6 is built. One refusal was lifted rather than added: a member source with no
+artifacts source is legal under `open`, which is the bare clustering of §1's table. The count of
+skipped rows is printed and reaches the build report; the join-coverage report of §7 remains
+unbuilt.
 
 **2026-08-19 — r1.** Written from a discussion that reversed several of its own conclusions, and
 the reversals are worth recording because each was a wrong instinct with a recognisable shape.

@@ -322,6 +322,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
 | `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }` |
+| `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. ⊘ The build half mints; the ingest half is specified and unbuilt |
 | `hierarchy` | R | `{ kind = flat \| nested \| stacked \| tiered, prune_children = bool }` — see below |
 | `visibility` | R | an access label, or `public` |
 | `artifact_visibility` | R | `{ field, default }`; `default` may be `inherited` |
@@ -377,8 +378,15 @@ repaired, and nothing here changes that.
 | `fields` | D | canonical `key`, `entity`, `rank` — a null `rank` is the artifact's own membership, `k` the generating set of `contents[k]` |
 
 A member source without the layer's own artifacts — its `source` or its inline `artifacts` — is
-refused: they are the roster a member row's key resolves against, and without one a mistyped key
-would publish a phantom artifact rather than fail to find one.
+refused **while the layer's value set is closed**: they are the roster a member row's key resolves
+against, and without one a mistyped key would publish a phantom artifact rather than fail to find
+one. Under `value_set = "open"` that is the declaration rather than the mistake — a bare clustering
+has no artifact table and its clusters exist because its points name them.
+
+**A member source's `key` may be text or an integer**, and an integer is read as its decimal
+spelling, so `3` and `"3"` name one artifact. A **null** key, and exactly `-1`, mean *this point is
+in no artifact*: the row is skipped and counted, never refused, noise being a fifth to a quarter of
+the points at each split of a condensed tree. The count is printed and reaches the build report.
 
 **The four hierarchy kinds, and which of them carry levels.** The kind is declared and never
 inferred from the edges, and the levels rule follows from it:
@@ -1016,6 +1024,19 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-19 — `value_set` reaches a layer, and a key column may be an integer.** A clusterer emits
+one integer per point and no artifact table, which the surface could not express: membership had to
+be a roster plus a member table, a key had to be UTF-8, and a null key — the ordinary output of
+every clusterer, at a fifth to a quarter of the points — refused the build. The declaration gains
+one key, `value_set`, which is the word this document already uses for *is an unknown key refused or
+minted* on a vocabulary, asked of a layer's artifacts; the readers gained two types and one skip
+rule, neither of which is a surface change. `[layer.members]` itself needed nothing at all — a point
+table with a cluster column already is one row per `(artifact, entity)`, asserted by a build from a
+points file and a build from a member table producing the same bundle byte for byte. The key sits on
+`[[layer]]` rather than on `[layer.members]` because ingest has no member block and the same key must
+govern the write path. Full argument in
+[`artifacts-from-points.md`](artifacts-from-points.md).
 
 **2026-08-19 — a vocabulary keeps one visibility key, and the contradiction with decision 0088 is
 closed** ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)). 0088 declared

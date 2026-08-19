@@ -383,6 +383,7 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
             title: Some("registered against the running node".into()),
             views: vec!["s0".into()],
             membership: tessera_types::layer::MembershipSource::Enumerated,
+            value_set: Default::default(),
             visibility: None,
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: None,

@@ -77,13 +77,13 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 17 |
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r48 | 35 |
-| `artifacts-from-points.md` | Draft | 2 |
+| `artifacts-from-points.md` | Draft | 4 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 22 |
+| `configuration.md` | Normative for the build-time configurati | 23 |
 | `conformance.md` | Normative — r13 | 16 |
 | `contracts.md` | Normative — r35 | 22 |
 | `core-access-expressions.md` | Provisional — under review | 1 |

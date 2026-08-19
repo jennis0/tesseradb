@@ -72,6 +72,28 @@ pub enum MembershipSource {
     Attribute(String),
 }
 
+/// Whether a key nothing declares is refused, or creates the object it names
+/// (`artifacts-from-points.md` §3, `per-point-attributes.md` §3.4).
+///
+/// **Closed**: an unknown key is refused — declare-then-use. On a layer that is the roster rule a
+/// member source has always had: a mistyped id would otherwise publish a phantom artifact carrying
+/// the members it stole from a real one, whose masked count then goes quietly short.
+///
+/// **Open**: an unknown key creates the object, carrying nothing but its name. On a layer that is
+/// *a cluster exists because points say it does*: the artifacts source becomes enrichment — titles,
+/// parents, contents for the clusters somebody knows something about — rather than the roster, and
+/// a cluster it omits exists without a title.
+///
+/// One type for a layer and for a vocabulary because it is one question, asked of two objects that
+/// both mint identities from keys arriving in data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueSet {
+    #[default]
+    Closed,
+    Open,
+}
+
 /// Where each artifact's own access label is, and what one carrying none gets.
 /// **The register watches this** (C27).
 ///
@@ -388,6 +410,17 @@ pub struct LayerDeclaration {
     /// Which views this layer appears in.
     pub views: Vec<String>,
     pub membership: MembershipSource,
+    /// Whether a member key no artifact declares is refused, or creates one
+    /// (`artifacts-from-points.md` §3). Defaults to [`ValueSet::Closed`], which is the roster rule
+    /// the build has always had.
+    ///
+    /// **On the layer rather than on the acquisition block**, because ingest has no member block: a
+    /// key living in a build-only block could not govern what the write path does with an unknown
+    /// id, and governing both entry points is the point of it. ⊘ The build half is implemented; the
+    /// ingest half — minting an artifact for a key a point carries — is specified and unbuilt
+    /// (`artifacts-from-points.md` §6), so today an open layer means only that a build mints.
+    #[serde(default)]
+    pub value_set: ValueSet,
     /// The access label a viewer must hold to know this layer exists at all, independent of any
     /// member. `None` is the config's `visibility = "public"` — reachable by every principal.
     ///
@@ -752,6 +785,7 @@ mod tests {
             title: Some("X".into()),
             views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
             visibility: None,
             artifact_visibility: ArtifactVisibility::inherited(),
             require_member_visibility: None,

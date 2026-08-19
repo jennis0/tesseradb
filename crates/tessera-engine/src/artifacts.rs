@@ -570,6 +570,7 @@ mod tests {
             title: Some("A".into()),
             views: vec!["s0".into()],
             membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
             visibility: None,
             artifact_visibility: if carries_own_labels {
                 ArtifactVisibility::carried("visibility")

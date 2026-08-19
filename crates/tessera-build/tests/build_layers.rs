@@ -963,12 +963,30 @@ fn build_spelling(
     layers: &str,
     write_sources: impl FnOnce(&Inputs),
 ) -> (PathBuf, tempfile::TempDir) {
+    let (out, tmp, _) = build_spelling_reported(layers, write_sources);
+    (out, tmp)
+}
+
+/// The same, keeping the build's own report — what it counted as well as what it wrote.
+fn build_spelling_reported(
+    layers: &str,
+    write_sources: impl FnOnce(&Inputs),
+) -> (PathBuf, tempfile::TempDir, tessera_build::BuildReport) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{layers}")).unwrap();
     write_sources(&inputs);
     let out = inputs.dir.join("spelled");
-    run(&inputs, &out).expect("the spelling builds");
-    (out, inputs._tmp)
+    let report = run(&inputs, &out).expect("the spelling builds");
+    (out, inputs._tmp, report)
+}
+
+/// The same, for a declaration expected to be refused.
+fn refuse_spelling(layers: &str, write_sources: impl FnOnce(&Inputs)) -> String {
+    let inputs = inputs();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{layers}")).unwrap();
+    write_sources(&inputs);
+    let out = inputs.dir.join("spelled");
+    format!("{}", run(&inputs, &out).expect_err("the spelling is refused"))
 }
 
 /// Every file of two bundles, compared byte for byte — `MANIFEST.json` with its wall-clock
@@ -1421,5 +1439,300 @@ fn the_label_sugar_and_the_layer_written_out_build_the_same_bundle() {
             .iter()
             .map(|l| &l.declaration.name)
             .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Membership from a point table (`artifacts-from-points.md` §2, §3)
+// ---------------------------------------------------------------------------------------------
+
+/// The points file every case below is built from, carrying a cluster column beside the geometry.
+///
+/// **The same file the build reads its geometry from**, which is the whole of §2's claim: a point
+/// table with a cluster column already *is* one row per `(artifact, entity)`, so the geometry and
+/// the membership come out of one file and no producer has to write a second.
+///
+/// `clusters[e]` is entity `e`'s cluster, `None` a null cell. Written as text or as `int64` — the
+/// two spellings of one key.
+fn write_clustered_points(path: &Path, clusters: &[Option<i64>], as_text: bool) {
+    let column: ArrayRef = if as_text {
+        Arc::new(StringArray::from(
+            clusters
+                .iter()
+                .map(|c| c.map(|c| c.to_string()))
+                .collect::<Vec<_>>(),
+        ))
+    } else {
+        Arc::new(arrow::array::Int64Array::from(clusters.to_vec()))
+    };
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new(
+            "cluster_id",
+            if as_text {
+                DataType::Utf8
+            } else {
+                DataType::Int64
+            },
+            true,
+        ),
+    ]));
+    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)) as ArrayRef,
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            column,
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// The roster: one row per cluster, keyed by the cluster id's decimal spelling.
+fn write_cluster_roster(path: &Path, keys: &[i64]) {
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(
+            keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+        )) as ArrayRef],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// The member table the point column is being asserted equal to: one row per `(artifact, entity)`,
+/// on the canonical names.
+fn write_cluster_members(path: &Path, clusters: &[Option<i64>]) {
+    let rows: Vec<(String, u64)> = clusters
+        .iter()
+        .enumerate()
+        .filter_map(|(entity, cluster)| {
+            cluster
+                .filter(|&c| c != -1)
+                .map(|c| (c.to_string(), entity as u64))
+        })
+        .collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("entity", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|(_, e)| *e).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// A `[layer.members]` block reading the point table's own columns.
+const FROM_POINTS: &str = r#"
+  [layer.members]
+  source = "points.parquet"
+  fields = { key = "cluster_id", entity = "entity_id" }
+"#;
+
+const FROM_MEMBER_TABLE: &str = r#"
+  [layer.members]
+  source = "cluster_members.parquet"
+"#;
+
+/// Every point clustered, so the case turns on nothing but where the membership was read from.
+fn every_point_clustered() -> Vec<Option<i64>> {
+    (0..N_ITEMS).map(|e| Some((e % 3) as i64)).collect()
+}
+
+/// **§2: membership from a point table needs no new surface.** `[layer.members]` already means one
+/// row per `(artifact, entity)`, and a point table with a cluster column is that shape — so the
+/// same layer read from the points and read from a member table build the same bundle, byte for
+/// byte.
+#[test]
+fn a_cluster_column_on_the_points_is_a_member_source() {
+    let clusters = every_point_clustered();
+    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let (from_points, _a) = build_spelling(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, true);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+    });
+    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_MEMBER_TABLE}");
+    let (from_table, _b) = build_spelling(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, true);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+        write_cluster_members(&inputs.at("cluster_members.parquet"), &clusters);
+    });
+    assert_bundles_identical(&from_points, &from_table, "a point column against a member table");
+}
+
+/// **§2's two reader changes, against the member table they must agree with.** Cluster ids are
+/// integers, so the key column is one — canonicalised to its decimal spelling, and converted once
+/// per artifact rather than once per point. A null cell, and exactly `-1`, mean the point is in no
+/// artifact: a condensed tree drops a fifth to a quarter of its points as noise at each split, so
+/// refusing them would fail the build on every clusterer's ordinary output.
+#[test]
+fn an_integer_cluster_column_skips_its_noise_and_matches_a_member_table() {
+    let mut clusters = every_point_clustered();
+    for point in clusters.iter_mut().take(225).skip(200) {
+        *point = Some(-1);
+    }
+    for point in clusters.iter_mut().skip(225) {
+        *point = None;
+    }
+
+    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let (from_points, _a, report) = build_spelling_reported(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+    });
+    // Counted and reported, never silent: a clustering that skipped *every* row named the wrong
+    // column, and only the number says so.
+    assert_eq!(report.unclustered_member_rows, 50);
+
+    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_MEMBER_TABLE}");
+    let (from_table, _b) = build_spelling(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+        write_cluster_members(&inputs.at("cluster_members.parquet"), &clusters);
+    });
+    assert_bundles_identical(&from_points, &from_table, "an integer column against a member table");
+}
+
+/// **`3` and `"3"` name one artifact.** The roster is text and the points are integers, which is
+/// the ordinary case — a producer writes cluster names and a clusterer writes cluster ids — so the
+/// two spellings must resolve to one address rather than to an artifact each.
+#[test]
+fn an_integer_key_and_its_decimal_spelling_are_one_artifact() {
+    let clusters = every_point_clustered();
+    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let (from_integers, _a) = build_spelling(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+    });
+    let (from_text, _b) = build_spelling(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, true);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+    });
+    assert_bundles_identical(&from_integers, &from_text, "an integer key against its spelling");
+}
+
+/// **A key the artifacts omit is still a refusal by default.** `value_set` defaults to `closed`,
+/// which is the roster rule the build has always had — the phantom-artifact refusal is not
+/// something a points column quietly escapes.
+#[test]
+fn a_closed_layer_still_refuses_a_cluster_no_artifact_declares() {
+    let clusters = every_point_clustered();
+    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let message = refuse_spelling(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+        // Cluster 2 is on the points and not on the roster.
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1]);
+    });
+    assert!(message.contains("do not declare"), "{message}");
+    assert!(message.contains("value_set"), "{message}");
+}
+
+/// **§3: under `value_set = "open"` a cluster exists because points say it does.** The artifacts
+/// source becomes enrichment — so a cluster the points name and the table omits exists with no
+/// title, a cluster the table carries and no point names is an artifact with no members, and
+/// neither is an error.
+#[test]
+fn an_open_layer_mints_the_clusters_its_points_name() {
+    let clusters = every_point_clustered();
+    let layer = format!(
+        "{CURATED_LAYER}value_set = \"open\"\nsource = \"roster.parquet\"\n{FROM_POINTS}"
+    );
+    let (out, _tmp, _) = build_spelling_reported(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+        // The table knows about cluster 0 and about a cluster 9 that no point is in; the points
+        // name 1 and 2, which it has never heard of.
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 9]);
+    });
+    let manifest = manifest_of(&out);
+    let counts: Vec<u32> = manifest
+        .membership_extents
+        .iter()
+        .map(|e| e.count)
+        .collect();
+    assert_eq!(counts, vec![4], "clusters 0, 1 and 2 from the points, and 9 from the table");
+}
+
+/// **A bare clustering declares no artifacts at all.** The roster refusal is the closed set's
+/// alone, so an open layer may name a member source and nothing else — which is the whole of what
+/// a clusterer's output is.
+#[test]
+fn an_open_layer_needs_no_artifacts_source() {
+    let clusters = every_point_clustered();
+    let layer = format!("{CURATED_LAYER}value_set = \"open\"\n{FROM_POINTS}");
+    let (out, _tmp, _) = build_spelling_reported(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, true);
+    });
+    let manifest = manifest_of(&out);
+    assert_eq!(
+        manifest
+            .membership_extents
+            .iter()
+            .map(|e| e.count)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+}
+
+/// **A minted artifact and a declared one are the same artifact.** Minting is where an artifact
+/// came from, not what it is — so an open layer built from the points alone publishes the same
+/// memberships, on the same entities, as the roster and member table that describe the same
+/// clustering. The two bundles' manifests differ by one field and only one: the `value_set` that
+/// produced them.
+#[test]
+fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
+    let clusters = every_point_clustered();
+    let minted = format!("{CURATED_LAYER}value_set = \"open\"\n{FROM_POINTS}");
+    let (from_points, _a) = build_spelling(&minted, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+    });
+    let declared = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_MEMBER_TABLE}");
+    let (from_table, _b) = build_spelling(&declared, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, false);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+        write_cluster_members(&inputs.at("cluster_members.parquet"), &clusters);
+    });
+
+    let (minted, declared) = (manifest_of(&from_points), manifest_of(&from_table));
+    assert_eq!(minted.membership_extents, declared.membership_extents);
+    assert_eq!(minted.entity_id_low_water, declared.entity_id_low_water);
+    assert_eq!(
+        minted.layers.iter().map(|l| &l.runs).collect::<Vec<_>>(),
+        declared.layers.iter().map(|l| &l.runs).collect::<Vec<_>>()
+    );
+    // **The bytes, not only the descriptors**: an extent carries no digest, so two builds that put
+    // one member on a different entity would agree on every field above.
+    assert!(!minted.membership_extents.is_empty());
+    for extent in &minted.membership_extents {
+        assert_eq!(
+            std::fs::read(from_points.join("v00000").join(&extent.path)).unwrap(),
+            std::fs::read(from_table.join("v00000").join(&extent.path)).unwrap(),
+            "the packed memberships of {} differ",
+            extent.layer
+        );
+    }
+    assert_eq!(
+        minted.layers[0].declaration.value_set,
+        tessera_types::layer::ValueSet::Open
+    );
+    assert_eq!(
+        declared.layers[0].declaration.value_set,
+        tessera_types::layer::ValueSet::Closed
     );
 }

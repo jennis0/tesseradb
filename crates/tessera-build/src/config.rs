@@ -385,6 +385,10 @@ struct LayerBlock {
     /// matched* ([`compile_membership`]).
     #[serde(default)]
     membership: Option<toml::Value>,
+    /// `"closed"` (the default) or `"open"` — whether a member key no artifact declares is refused
+    /// or creates one (`artifacts-from-points.md` §3).
+    #[serde(default)]
+    value_set: Option<String>,
     #[serde(default)]
     hierarchy: Option<HierarchyBlock>,
     #[serde(default)]
@@ -1135,22 +1139,16 @@ pub struct Attribute {
     pub render: bool,
 }
 
-/// Whether an unknown key at ingest is refused or minted (`per-point-attributes.md` §3.4).
+/// Whether an unknown key is refused or minted — [`tessera_types::layer::ValueSet`], one type for
+/// a vocabulary and for a layer, re-exported so a compiled declaration reads under one name here.
 ///
-/// **Closed**: an unknown key at build (or ingest) is refused — declare-then-use, because a
-/// category carries properties and, through its postings, a visibility consequence, so a typo must
-/// not create one.
-///
-/// **Open**: an unknown key is minted a fresh code, drawn at random from the declared width's
-/// unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same routine ingest uses,
-/// so exhaustion is one predicate. Declared values still pin or assign codes exactly as a closed
-/// vocabulary's do; the build mints only for keys the declaration does not carry, and an open
-/// vocabulary given no values at all is legal and starts empty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueSet {
-    Closed,
-    Open,
-}
+/// On a **vocabulary** open means an unknown key is minted a fresh code, drawn at random from the
+/// declared width's unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same
+/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or assign codes
+/// exactly as a closed vocabulary's do; the build mints only for keys the declaration does not
+/// carry, and an open vocabulary given no values at all is legal and starts empty. On a **layer**
+/// it means an unknown member key mints an artifact (`artifacts-from-points.md` §3).
+pub use tessera_types::layer::ValueSet;
 
 /// A named value set: keys, their codes, and per-value presentation.
 #[derive(Debug, Clone)]
@@ -1784,6 +1782,9 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
             fields: labels.fields.clone(),
             artifacts: None,
             membership: labels.membership.clone(),
+            // A label is written out, one row per label, so its artifacts *are* the roster: there
+            // is no `value_set` in the sugar's key set and nothing for an open one to mint from.
+            value_set: None,
             hierarchy: Some(HierarchyBlock {
                 kind: Some("flat".to_string()),
                 prune_children: false,
@@ -2881,6 +2882,22 @@ fn compile_layers(
             )));
         }
         let enumerated = membership == MembershipSource::Enumerated;
+        // **`value_set` decides whether a member key may create an artifact**
+        // (`artifacts-from-points.md` §3). `closed` is the default and is the roster rule: the
+        // artifacts source says which artifacts exist, and a key not on it is refused. `open` makes
+        // that source enrichment instead — a cluster exists because points say it does.
+        let value_set = match block.value_set.as_deref() {
+            None | Some("closed") => ValueSet::Closed,
+            Some("open") => ValueSet::Open,
+            Some(other) => {
+                return Err(declaration_error(format!(
+                    "{object}: `value_set = \"{other}\"` is neither \"closed\" nor \"open\". \
+                     Closed is the default: the layer's artifacts are the roster, and a member key \
+                     not on it is refused. Open makes an unknown key create an artifact carrying \
+                     nothing but its name"
+                )));
+            }
+        };
         for artifact in block.artifacts.iter().flatten() {
             if artifact.members.is_some() && artifact.excluding.is_some() {
                 return Err(declaration_error(format!(
@@ -2963,13 +2980,21 @@ fn compile_layers(
                 };
                 // **The artifacts are the roster** (`layers`): a member row names an artifact, and
                 // without them there is nothing for the name to resolve against — a mistyped key
-                // would publish a phantom artifact rather than fail.
-                if path.is_some() && source.is_none() && block.artifacts.is_none() {
+                // would publish a phantom artifact rather than fail. Under `value_set = "open"`
+                // that is exactly what the caller asked for, so the refusal is the closed set's
+                // alone (`artifacts-from-points.md` §3): a bare clustering declares no artifacts
+                // and its clusters exist because its points name them.
+                if value_set == ValueSet::Closed
+                    && path.is_some()
+                    && source.is_none()
+                    && block.artifacts.is_none()
+                {
                     return Err(declaration_error(format!(
                         "{object}: a member source without the layer's own artifacts. The layer's \
                          `source` — or its inline `artifacts` list — is the roster a member row \
                          names, so members with no roster would make every key its own artifact \
-                         rather than a refusal"
+                         rather than a refusal. Declare `value_set = \"open\"` on the layer to \
+                         have exactly that: an artifact per key the points name"
                     )));
                 }
                 let fields = check_fields(
@@ -3011,6 +3036,7 @@ fn compile_layers(
             title: block.title.clone(),
             views: declared_views.clone(),
             membership,
+            value_set,
             visibility,
             artifact_visibility,
             require_member_visibility,

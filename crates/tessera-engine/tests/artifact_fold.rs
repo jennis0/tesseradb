@@ -33,6 +33,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
         visibility: None,
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         // **No criterion**, deliberately: these cases are about what the membership *is* after a
@@ -888,7 +889,6 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
         .accept_change(deleted, ChangeOp::Delete)
         .expect("an artifact takes a deletion like any other entity");
     assert_eq!(artifacts_of(&engine).len(), 2, "hidden at the ack");
-
     fold(&engine);
 
     assert_eq!(artifacts_of(&engine).len(), 2, "and still hidden after it");

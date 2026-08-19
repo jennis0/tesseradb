@@ -103,6 +103,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
         visibility: None,
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         // **No criterion on the layer**, so every published artifact is served and the census is a

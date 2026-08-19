@@ -51,11 +51,15 @@
 //! artifacts and members, the publication order, and the hierarchy checks that need every artifact
 //! in hand.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, ListArray, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, StringArray, UInt16Array,
+    UInt32Array, UInt64Array, UInt8Array,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
@@ -65,7 +69,7 @@ use tessera_lifecycle::membership::{
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::LayerDeclaration;
+use tessera_types::layer::{LayerDeclaration, ValueSet};
 use tessera_types::EntityId;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
@@ -131,6 +135,22 @@ pub struct LayerPlan {
     /// Keyed `(layer, level, key)`, which is also the publication order — see the module doc on
     /// determinism.
     artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
+    /// Member rows whose key said *this point is in no artifact*, per source.
+    unclustered: Vec<UnclusteredRows>,
+}
+
+/// How many rows of one member source named no artifact.
+///
+/// **Skipped, counted and printed** (`artifacts-from-points.md` §2, §7). A condensed tree drops a
+/// fifth to a quarter of its points as noise at each split, so refusing a null or `-1` key would
+/// fail the build on the ordinary output of every clusterer — and dropping them silently is the
+/// failure this build has shipped once already. The number is the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnclusteredRows {
+    pub layer: String,
+    pub source: PathBuf,
+    /// Rows carrying a null key, or exactly `-1`.
+    pub rows: u64,
 }
 
 /// One parent/child edge whose child holds a member its parent does not.
@@ -196,6 +216,9 @@ pub struct PublishedLayers {
     /// Every file written here, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
     pub paths: Vec<PathBuf>,
+    /// Member rows that named no artifact, per source — carried out of the plan so the build's own
+    /// report can state the number rather than leaving it on stderr alone.
+    pub unclustered: Vec<UnclusteredRows>,
 }
 
 impl Default for PublishedLayers {
@@ -208,6 +231,7 @@ impl Default for PublishedLayers {
             membership_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             paths: Vec::new(),
+            unclustered: Vec::new(),
         }
     }
 }
@@ -222,6 +246,7 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
     let mut plan = LayerPlan {
         declarations: declarations.to_vec(),
         artifacts: BTreeMap::new(),
+        unclustered: Vec::new(),
     };
     for input in inputs {
         // An artifact source names artifacts *in a layer*, and a layer this build does not
@@ -242,23 +267,53 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
                 read_artifacts(&input.name, path, fields, enumerated, &mut plan)?
             }
             Some(ArtifactSource::Inline(rows)) => plan_inline(&input.name, rows, &mut plan)?,
-            // **Which artifacts exist is the layer's own artifact source's to say.** Without it a
-            // member source would be both the roster and the population, and a mistyped key would
-            // publish an artifact rather than fail to find one.
+            // **Which artifacts exist is the layer's own artifact source's to say** — while the
+            // layer's value set is closed. Without one a member source would be both the roster and
+            // the population, and a mistyped key would publish an artifact rather than fail to find
+            // one. An **open** layer asks for exactly that: a cluster exists because points say it
+            // does, and a bare clustering declares no artifacts at all
+            // (`artifacts-from-points.md` §3).
             None => {
                 if let Some(members) = &input.members {
-                    return Err(BuildError::Invalid(format!(
-                        "{}: layer '{}' binds members with no artifacts of its own, which is what \
-                         declares the artifacts they belong to; a key with no artifact behind it \
-                         must be a refusal rather than a new artifact",
-                        members.path.display(),
-                        input.name
-                    )));
+                    if declaration.value_set == ValueSet::Closed {
+                        return Err(BuildError::Invalid(format!(
+                            "{}: layer '{}' binds members with no artifacts of its own, which is \
+                             what declares the artifacts they belong to; a key with no artifact \
+                             behind it must be a refusal rather than a new artifact. Declare \
+                             `value_set = \"open\"` on the layer to have every key its points \
+                             name be an artifact",
+                            members.path.display(),
+                            input.name
+                        )));
+                    }
                 }
             }
         }
         if let Some(members) = &input.members {
-            read_members(&input.name, &members.path, &members.fields, &mut plan)?;
+            let (rows, read) = read_members(
+                &input.name,
+                &members.path,
+                &members.fields,
+                declaration.value_set,
+                &mut plan,
+            )?;
+            if rows > 0 {
+                // Printed here, where the source and its layer are both in hand, on §7's posture:
+                // the operator is present, the numbers are what tell a noisy clustering from a
+                // wrong column, and neither is a reason to block a build. **Against the rows read**,
+                // because that is the denominator that separates the two: a quarter is a condensed
+                // tree's noise and all of them is the wrong column.
+                eprintln!(
+                    "layer '{}': {rows} of {read} rows in {} are in no artifact (a null key, or -1)",
+                    input.name,
+                    members.path.display()
+                );
+                plan.unclustered.push(UnclusteredRows {
+                    layer: input.name.clone(),
+                    source: members.path.clone(),
+                    rows,
+                });
+            }
         }
     }
     Ok(plan)
@@ -283,7 +338,7 @@ fn read_artifacts(
 ) -> Result<()> {
     for batch in batches(path)? {
         let batch = batch?;
-        let key = utf8(path, &batch, fields, "key")?;
+        let key = key_column(path, &batch, fields, "key")?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
         let members = optional_u64_list(path, &batch, fields, "members")?;
@@ -321,7 +376,7 @@ fn read_artifacts(
         }
 
         for row in 0..batch.num_rows() {
-            let address = address(path, layer, &level, key, row)?;
+            let address = address(path, layer, &level, &key, row)?;
             if plan.artifacts.contains_key(&address) {
                 return Err(BuildError::Invalid(format!(
                     "{}: artifact {} is declared on more than one row. One row is one artifact, so \
@@ -447,30 +502,81 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
 /// is served to them. It is a source of its own rather than a cell on the artifact row because a
 /// condensed tree's root holds the whole corpus, which one cell can neither stream nor be
 /// materialised by a producer.
-fn read_members(layer: &str, path: &Path, fields: &Fields, plan: &mut LayerPlan) -> Result<()> {
+///
+/// **A point table with a cluster column is this shape already**, which is why membership from a
+/// clusterer needed no surface of its own (`artifacts-from-points.md` §2): `fields` names the
+/// cluster column as `key` and the id column as `entity`, and the file the build reads its geometry
+/// from is also the file it reads its memberships from.
+///
+/// Returns the rows that named no artifact, and the rows read — the numerator and the denominator
+/// the caller prints.
+fn read_members(
+    layer: &str,
+    path: &Path,
+    fields: &Fields,
+    value_set: ValueSet,
+    plan: &mut LayerPlan,
+) -> Result<(u64, u64)> {
+    let (mut unclustered, mut read) = (0u64, 0u64);
+    // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
+    // layer of 10⁷ artifacts pays once rather than per point.
+    let mut roster: Option<IntegerRoster> = None;
     for batch in batches(path)? {
         let batch = batch?;
-        let key = utf8(path, &batch, fields, "key")?;
+        let key = key_column(path, &batch, fields, "key")?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
         let entity = u64s(path, &batch, fields, "entity")?;
+        read += batch.num_rows() as u64;
 
         for row in 0..batch.num_rows() {
-            let address = address(path, layer, &level, key, row)?;
-            // **The artifacts are the roster, and a key not on them is a refusal.** A
-            // mistyped key would otherwise publish a phantom artifact carrying the members it
-            // stole from a real one — an extra cluster nobody wrote, beside a real cluster
-            // whose masked count is quietly short and which may fall below its own criterion
-            // and vanish. Neither has an error anywhere to notice.
-            let Some(entry) = plan.artifacts.get_mut(&address) else {
-                return Err(BuildError::Invalid(format!(
-                    "{}: names {} in level {} of {}, which the layer's artifacts do not declare",
-                    path.display(),
-                    address.2,
-                    address.1,
-                    address.0
-                )));
+            // **The artifacts are the roster, and a key not on them is a refusal** — while the
+            // layer's value set is closed. A mistyped key would otherwise publish a phantom
+            // artifact carrying the members it stole from a real one: an extra cluster nobody
+            // wrote, beside a real cluster whose masked count is quietly short and which may fall
+            // below its own criterion and vanish. Neither has an error anywhere to notice.
+            //
+            // **Open lifts exactly that refusal** (`artifacts-from-points.md` §3): the key creates
+            // an artifact carrying no title, no parent and no contents — the cluster exists because
+            // a point says it does, and the artifacts source, if there is one, is enrichment.
+            let address: Cow<Address> = match key.read_at(row) {
+                KeyRead::Unclustered => {
+                    unclustered += 1;
+                    continue;
+                }
+                KeyRead::Named(name) => {
+                    let at_level = level.map_or(0, |c| number_at(c, row));
+                    let address = (layer.to_string(), at_level, name.to_string());
+                    if !plan.artifacts.contains_key(&address) {
+                        if value_set == ValueSet::Closed {
+                            return Err(undeclared_key(path, &address));
+                        }
+                        plan.artifacts.insert(address.clone(), PlannedArtifact::default());
+                    }
+                    Cow::Owned(address)
+                }
+                KeyRead::Numbered(value) => {
+                    let at_level = level.map_or(0, |c| number_at(c, row));
+                    let roster = roster.get_or_insert_with(|| IntegerRoster::of_layer(layer, plan));
+                    if roster.get(at_level, value).is_none() {
+                        // The one decimal string an integer key ever costs: once per artifact
+                        // minted, never once per point.
+                        let address = (layer.to_string(), at_level, value.to_string());
+                        if value_set == ValueSet::Closed {
+                            return Err(undeclared_key(path, &address));
+                        }
+                        plan.artifacts.insert(address.clone(), PlannedArtifact::default());
+                        roster.insert(at_level, value, address);
+                    }
+                    Cow::Borrowed(
+                        roster.get(at_level, value).expect("on the roster, or minted onto it"),
+                    )
+                }
             };
+            let entry = plan
+                .artifacts
+                .get_mut(address.as_ref())
+                .expect("resolved against the plan, or minted into it");
             // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the values
             // buffer whatever the validity bitmap says, and a Parquet writer leaves a zero
             // there — so a producer whose join missed a row would publish the corpus's
@@ -507,7 +613,7 @@ fn read_members(layer: &str, path: &Path, fields: &Fields, plan: &mut LayerPlan)
             }
         }
     }
-    Ok(())
+    Ok((unclustered, read))
 }
 
 /// The content at `rank`, growing the ranking to reach it.
@@ -635,6 +741,7 @@ pub fn publish(
         containment_violations: violations,
         split_coverage: coverage,
         low_water: alloc.low_water(),
+        unclustered: plan.unclustered.clone(),
         ..PublishedLayers::default()
     };
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
@@ -1208,19 +1315,6 @@ fn typed<'a, T: 'static>(path: &Path, array: &'a std::sync::Arc<dyn Array>, name
     })
 }
 
-fn utf8<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    canonical: &str,
-) -> Result<&'a StringArray> {
-    typed(
-        path,
-        required(path, batch, fields, canonical)?,
-        fields.of(canonical),
-    )
-}
-
 fn optional_utf8<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
@@ -1423,6 +1517,180 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
         .collect()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Key columns: text, or an integer spelling one
+// ---------------------------------------------------------------------------------------------
+
+/// A `key` column at the two types a producer has — UTF-8, or an integer canonicalised to its
+/// decimal string, so `3` and `"3"` name one artifact.
+///
+/// **A key is one type below this reader**: the plan, the store and the manifest all hold a string,
+/// so an integer column is converted rather than carried. *Where* the conversion happens is the
+/// whole of this type's design — **once per artifact, never once per point.** Formatting a member
+/// row's key costs ~54 s at 10⁹ against ~15 s for an integer hash and ~0.5 s where the value is
+/// already an interned code (measured, 10⁵ distinct ids, single-threaded), and cluster ids are
+/// integers, so the common case would pay the worst of the three. The member pass therefore
+/// converts the **roster** once into [`IntegerRoster`] and looks each point up by the integer it
+/// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
+/// the only decimal string an open layer writes is the one it mints an artifact under, once per
+/// cluster.
+#[derive(Clone, Copy)]
+enum KeyColumn<'a> {
+    Text(&'a StringArray),
+    I8(&'a Int8Array),
+    I16(&'a Int16Array),
+    I32(&'a Int32Array),
+    I64(&'a Int64Array),
+    U8(&'a UInt8Array),
+    U16(&'a UInt16Array),
+    U32(&'a UInt32Array),
+    U64(&'a UInt64Array),
+}
+
+/// What one **member** row's key says.
+enum KeyRead<'a> {
+    /// **This point is in no artifact** — a null key, or exactly `-1`, the sentinel every clusterer
+    /// emits for noise (`artifacts-from-points.md` §2). Exactly `-1` and not any negative: a
+    /// negative id is otherwise unusual enough that swallowing `-7` would more likely be eating
+    /// data than handling noise. For a text column, null only.
+    Unclustered,
+    Named(&'a str),
+    Numbered(i128),
+}
+
+impl<'a> KeyColumn<'a> {
+    fn array(&self) -> &dyn Array {
+        match self {
+            KeyColumn::Text(a) => *a as &dyn Array,
+            KeyColumn::I8(a) => *a as &dyn Array,
+            KeyColumn::I16(a) => *a as &dyn Array,
+            KeyColumn::I32(a) => *a as &dyn Array,
+            KeyColumn::I64(a) => *a as &dyn Array,
+            KeyColumn::U8(a) => *a as &dyn Array,
+            KeyColumn::U16(a) => *a as &dyn Array,
+            KeyColumn::U32(a) => *a as &dyn Array,
+            KeyColumn::U64(a) => *a as &dyn Array,
+        }
+    }
+
+    fn integer_at(&self, row: usize) -> Option<i128> {
+        match self {
+            KeyColumn::Text(_) => None,
+            KeyColumn::I8(a) => Some(a.value(row) as i128),
+            KeyColumn::I16(a) => Some(a.value(row) as i128),
+            KeyColumn::I32(a) => Some(a.value(row) as i128),
+            KeyColumn::I64(a) => Some(a.value(row) as i128),
+            KeyColumn::U8(a) => Some(a.value(row) as i128),
+            KeyColumn::U16(a) => Some(a.value(row) as i128),
+            KeyColumn::U32(a) => Some(a.value(row) as i128),
+            KeyColumn::U64(a) => Some(a.value(row) as i128),
+        }
+    }
+
+    /// The canonical key at `row` — **the allocating read, for one row per artifact.**
+    fn key_at(&self, row: usize) -> Option<String> {
+        if self.array().is_null(row) {
+            return None;
+        }
+        Some(match self {
+            KeyColumn::Text(a) => a.value(row).to_string(),
+            _ => self.integer_at(row).expect("an integer column").to_string(),
+        })
+    }
+
+    /// What one member row's key says — **the non-allocating read, for one row per point.**
+    fn read_at(&self, row: usize) -> KeyRead<'a> {
+        if self.array().is_null(row) {
+            return KeyRead::Unclustered;
+        }
+        match self {
+            KeyColumn::Text(a) => KeyRead::Named(a.value(row)),
+            _ => match self.integer_at(row).expect("an integer column") {
+                -1 => KeyRead::Unclustered,
+                value => KeyRead::Numbered(value),
+            },
+        }
+    }
+}
+
+fn key_column<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<KeyColumn<'a>> {
+    let name = fields.of(canonical);
+    let array = required(path, batch, fields, canonical)?;
+    Ok(match array.data_type() {
+        arrow::datatypes::DataType::Utf8 => KeyColumn::Text(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int8 => KeyColumn::I8(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int16 => KeyColumn::I16(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int32 => KeyColumn::I32(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int64 => KeyColumn::I64(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt8 => KeyColumn::U8(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt16 => KeyColumn::U16(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt32 => KeyColumn::U32(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt64 => KeyColumn::U64(typed(path, array, name)?),
+        other => {
+            return Err(BuildError::Invalid(format!(
+                "{}: column {name} is {other:?}, and a key is text or an integer — an integer key \
+                 is read as its decimal spelling, so `3` and \"3\" name one artifact",
+                path.display()
+            )))
+        }
+    })
+}
+
+/// The layer's artifacts, indexed by the integer their keys spell.
+///
+/// **Built once, before the first member row is read**, which is what keeps the per-point path free
+/// of formatting: a point's integer key is looked up as an integer, and the address it finds is the
+/// one the roster was planned under.
+struct IntegerRoster {
+    by_key: BTreeMap<(u32, i128), Address>,
+}
+
+impl IntegerRoster {
+    fn of_layer(layer: &str, plan: &LayerPlan) -> IntegerRoster {
+        let mut by_key = BTreeMap::new();
+        for address in plan.artifacts.keys().filter(|a| a.0 == layer) {
+            if let Some(value) = canonical_integer(&address.2) {
+                by_key.insert((address.1, value), address.clone());
+            }
+        }
+        IntegerRoster { by_key }
+    }
+
+    fn get(&self, level: u32, value: i128) -> Option<&Address> {
+        self.by_key.get(&(level, value))
+    }
+
+    fn insert(&mut self, level: u32, value: i128, address: Address) {
+        self.by_key.insert((level, value), address);
+    }
+}
+
+/// The integer a key spells, where it spells one **exactly**.
+///
+/// `007` and ` 7` are keys that no integer column can produce, so they index nothing here and are
+/// matched by nothing — which is the property that keeps one artifact from having two addresses.
+fn canonical_integer(key: &str) -> Option<i128> {
+    let value: i128 = key.parse().ok()?;
+    (value.to_string() == key).then_some(value)
+}
+
+/// A member key the layer's artifacts do not declare, under a closed value set.
+fn undeclared_key(path: &Path, address: &Address) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: names {} in level {} of {}, which the layer's artifacts do not declare. Declare \
+         `value_set = \"open\"` on the layer for a key the artifacts omit to create one",
+        path.display(),
+        address.2,
+        address.1,
+        address.0
+    ))
+}
+
 /// One row's `(layer, level, key)`.
 ///
 /// **The layer is the source's own**, never a column: one file holds one layer, which is what
@@ -1435,19 +1703,15 @@ fn address(
     path: &Path,
     layer: &str,
     level: &Option<&UInt32Array>,
-    key: &StringArray,
+    key: &KeyColumn,
     row: usize,
 ) -> Result<Address> {
-    if key.is_null(row) {
+    let Some(key) = key.key_at(row) else {
         return Err(BuildError::Invalid(format!(
             "{}: row {row} names no key; a build-published artifact carries the caller's own name \
              for it, which is what an edge into it names",
             path.display()
         )));
-    }
-    Ok((
-        layer.to_string(),
-        level.map_or(0, |c| number_at(c, row)),
-        key.value(row).to_string(),
-    ))
+    };
+    Ok((layer.to_string(), level.map_or(0, |c| number_at(c, row)), key))
 }

@@ -233,6 +233,11 @@ pub struct BuildReport {
     pub bundle_bytes: u64,
     /// How much of the frame's resolution the points actually used.
     pub occupancy: Occupancy,
+    /// Member rows whose key said *this point is in no artifact* — a null key, or exactly `-1`
+    /// (`artifacts-from-points.md` §2). Noise is a quarter of the points at each split of a
+    /// condensed tree, so this is an ordinary number rather than a fault; it is here because a
+    /// clustering that skipped *every* row named the wrong column, and only the count says so.
+    pub unclustered_member_rows: u64,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -1283,6 +1288,7 @@ fn write_manifests(
         pairs: pair_count,
         bundle_bytes,
         occupancy,
+        unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
     })
 }
 

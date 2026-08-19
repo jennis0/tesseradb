@@ -512,6 +512,7 @@ mod tests {
                 title: Some("l".into()),
                 views: Vec::new(),
                 membership: MembershipSource::Enumerated,
+                value_set: Default::default(),
                 visibility: None,
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
                 require_member_visibility: None,

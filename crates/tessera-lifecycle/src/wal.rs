@@ -521,8 +521,12 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// otherwise read out of the bytes of whatever record follows, so the bump is the whole guard.
 /// Version 13 gives it `attached_to`, on the same rule — and here the guard is load-bearing twice
 /// over, because an attachment is a *visibility* term: a log read on version 12's rules restores
-/// the label of a suppressed cluster as an unattached artifact, and serves it.
-const WAL_VERSION: u16 = 13;
+/// the label of a suppressed cluster as an unattached artifact, and serves it. Version 14 gives
+/// [`tessera_types::layer::LayerDeclaration`] its `value_set` — an *inserted* struct field, so
+/// every field after it decodes from the wrong bytes on version 13's rules, and the fields after it
+/// are the gate and the membership requirement. A registration whose criterion decoded out of
+/// alignment is a disclosure control read from whatever follows it.
+const WAL_VERSION: u16 = 14;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1739,6 +1743,7 @@ mod tests {
                 title: Some("UK administrative boundaries".into()),
                 views: vec!["geographic".into()],
                 membership: MembershipSource::Spatial,
+                value_set: Default::default(),
                 visibility: Some("public".into()),
             artifact_visibility: tessera_types::layer::ArtifactVisibility::carried("visibility"),
                 require_member_visibility: Some(ExistenceCriterion::Count(25)),

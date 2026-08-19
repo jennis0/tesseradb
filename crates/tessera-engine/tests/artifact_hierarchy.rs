@@ -50,6 +50,7 @@ fn declaration(
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
         visibility: None,
             artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
