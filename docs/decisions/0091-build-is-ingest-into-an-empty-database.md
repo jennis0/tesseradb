@@ -13,10 +13,13 @@ What may differ is *cost and acquisition*: a build reads files, batches, sorts a
 pass because it knows the corpus is empty and nothing is being served. Those are properties of how
 the work is scheduled, never of what can be said.
 
-**The test is the one already in use.** Two spellings of one input must produce a byte-identical
-bundle — the property inline artifacts, sourced artifacts, `excluding`, member tables and point
-columns are each held to. This decision extends it across the two entry points: the same corpus
-built, or ingested into an empty database, is the same bundle.
+**The test is the one already in use, applied to meaning rather than to bytes.** Two spellings of
+one input produce a byte-identical bundle — the property inline artifacts, sourced artifacts,
+`excluding`, member tables and point columns are each held to. Across the two entry points the
+claim is one step weaker and no less binding: the same corpus built, or ingested into an empty
+database, is the same database *to every client* — same memberships, same counts, same content,
+same gates. Not the same bytes, because ids are assigned differently and nothing a client holds
+exposes that.
 
 ## What this rules
 
