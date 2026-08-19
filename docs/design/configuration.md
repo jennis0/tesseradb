@@ -370,13 +370,23 @@ same views, flat, `depends_on` the parent, content wrapper supplied.
 | `membership` | R | written out: a label's members are its generating set, which the build cannot derive |
 | `require_member_visibility` | R | the **layer** grain: how much of a label's membership a viewer must see for the label to appear |
 | `artifact_visibility` | R | as `[[layer]]`; declared, never supplied |
-| `[layer.labels.content]` | R | one key, `require_member_visibility` — the **content** grain: `all` where the label text was generated from the documents it names, `inherited` where it is true whether or not any of them exists |
+| `[layer.labels.content]` | R | one key, `require_member_visibility` — **where the text came from**: `all` if it was generated from the documents it names, `inherited` if it is true whether or not any of them exists |
 | `visibility` | D | the parent layer's; narrower is admitted, and only one widening is checkable — see below |
 
-**The two requirements are separate keys because they are separate grains**, and no single key can
-carry both: the layer's admits `{ fraction = p }` and `{ count = n }`, and the content's admits
-exactly `all` or `inherited`. A caller may well want *show the topic to anyone who can see a
-twentieth of its documents, but only serve its text to someone who can see all of them*.
+**The two requirements are not one dial at two grains, and that is why they are two keys.** The
+layer's is a threshold — *how much of this set must a viewer already see for the label to appear at
+all* — and admits `{ fraction = p }` and `{ count = n }`. The content's is a **provenance
+declaration** and admits exactly two words: `all` says the text is a synthesis of the members, so a
+viewer reads it only where it can already read every document that went into it; `inherited` says
+the text is true whether or not any of those documents exists — a name a person wrote — and so adds
+no requirement beyond the artifact's own gate.
+
+**On a `text` label the two normally agree at `all`**, and a threshold looser than the content's is
+usually a mistake rather than a subtlety: the sugar supplies no computed properties, so an artifact
+whose text is withheld has nothing left to draw. The case for their differing is `inherited`
+content — a curated region whose name was authored rather than derived, which a viewer may read
+having seen only part of the set. Where both grains genuinely need different thresholds, that is
+past what the sugar is for: write the second `[[layer]]` out.
 
 **The expansion is textual, and that is the whole claim**: the block above becomes a `[[layer]]`
 block before anything compiles, so it meets every refusal and every reader a hand-written layer
@@ -674,10 +684,13 @@ content                   = { computed = ["centroid", "box"] }
   type                      = "text"
   membership                = "enumerated"
   artifact_visibility       = { default = "inherited" }
-  require_member_visibility = { fraction = 0.05 }   # show the topic at a twentieth …
+  require_member_visibility = "all"
 
+    # The topic text is a synthesis of the abstracts it was drawn from, so it is read
+    # only by a viewer who can already read all of them. A hand-authored name would be
+    # `inherited` here, and the threshold above could then be looser than `all`.
     [layer.labels.content]
-    require_member_visibility = "all"                # … but its text only in full
+    require_member_visibility = "all"
 
     # A label's members are the documents it was generated from, and a ranked content's
     # are the documents that rank was generated from — one row per (artifact, rank, entity).

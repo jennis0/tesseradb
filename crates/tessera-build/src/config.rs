@@ -469,16 +469,16 @@ struct LabelsBlock {
     /// work out from the parent which entities a synthesis was drawn from.
     #[serde(default)]
     membership: Option<toml::Value>,
-    /// The **layer** grain: how much of a label's membership a viewer must already see for the
-    /// label itself to appear. The content grain is `[layer.labels.content]`, and the two cannot
-    /// be one key — this one admits `{ fraction = p }` and `{ count = n }`, and the content's
-    /// admits exactly `all` or `inherited`.
+    /// A **threshold**: how much of a label's membership a viewer must already see for the label
+    /// to appear at all. `[layer.labels.content]`'s key is not the same dial at a second grain —
+    /// it is a provenance declaration — which is why neither can carry the other.
     #[serde(default)]
     require_member_visibility: Option<toml::Value>,
-    /// `[layer.labels.content]` — the supplied content's own requirement, declared and never
-    /// supplied. Whether a label's text was generated from the documents it names (`all`) or is
-    /// true whether or not any of them exists (`inherited`) is a fact only the caller knows, and
-    /// the expansion fixing it at `all` decided a disclosure control on the caller's behalf.
+    /// `[layer.labels.content]` — where the text came from, declared and never supplied. `all`
+    /// says it is a synthesis of the members, so it is read only where every document behind it
+    /// can be; `inherited` says it is true whether or not any of them exists — a name a person
+    /// wrote — and adds no requirement beyond the artifact's gate. Only the caller knows which,
+    /// and the expansion fixing it at `all` decided a disclosure control on their behalf.
     #[serde(default)]
     content: Option<LabelsContentBlock>,
     /// Declared, never supplied. It is a disclosure control, so it has no default: the value an

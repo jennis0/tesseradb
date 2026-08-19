@@ -1813,8 +1813,9 @@ fn an_access_label_spelled_inherited_is_refused_in_the_sugar_too() {
 /// layer gate is the single defaulted key in the surface because the value it takes is the
 /// parent's own.
 ///
-/// The two requirements are separate keys at separate grains and cannot be one: this one admits
-/// `{ fraction = p }`, and the content's admits exactly `all` or `inherited`.
+/// The two requirements are separate keys because they ask different questions — a threshold on
+/// how much of the set a viewer must see, and a declaration of where the text came from — which is
+/// why neither can carry the other.
 #[test]
 fn the_sugar_supplies_the_mechanical_keys_and_no_disclosure_control() {
     for (removed, expected) in [
