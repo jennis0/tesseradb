@@ -256,6 +256,23 @@ they touch are exactly `index.candidates(overlay_rows)` — **the same hierarchi
 "which artifacts does this suppression touch"**. Patch those and leave the rest. ⊘ Modelled, not
 measured.
 
+**5.4 What the request allocates after the verdict, which is the next thing anyone would hit.**
+The serving loop collects `passing: Vec<(u32, EntityId, u64, Option<u32>)>` — every artifact that
+cleared the predicate — and hands its ordinals to the cut. At 10⁷ passing that is **~240 MB
+allocated and freed per request**, on top of the verdict this memo is about, and it is not in any
+figure here: the probe measures the predicate and stops.
+
+It is not the same problem, and it has a different answer. The routes in §3 leave the passing set as
+a **bitmap**, so the materialisation is a choice rather than a consequence — and what actually has
+to be materialised is bounded by `artifact_budget`, not by the population. The cut is what stands in
+the way: it takes `&[u32]` and computes a frontier over the whole set. Whether it can take a bitmap
+instead is an ordinary question about `cut.rs` and is not a disclosure one — the cut is a rendering
+choice ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)) and every
+artifact in either set already cleared its own test.
+
+⊘ **Unmeasured.** Named here because a reader who takes §3 and stops would find it, and because it
+is the reason the 131 ms figure is a *verdict* cost and not a *response* cost.
+
 ## 6. Three things a reader will ask that the numbers already answer
 
 **A hierarchy of levels does not multiply the cost.** The serving loop runs every level of a treed
