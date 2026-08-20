@@ -48,11 +48,26 @@ normally published at. A bound is about how much a client gets back; caching is 
 server spends getting it. ⊘ The bound itself stays unspecified (delivery §2) — but the measurement
 fixes two things about its form.
 
-*It has to bite well below a million artifacts.* At 10⁶ predicate artifacts over 10⁷ points the
-cached route costs **476 ms per request** over the whole map and **15.5 s per generation move**, and
-the cut reduces neither — it runs after the verdicts, so it serves fewer and evaluates exactly as
-many. A few thousand is comfortable: 25 ms at 1 024, 109 ms at 10 000. Memory is the one resource
-that behaves, 108 MB for that million.
+*It has to bite well below a million artifacts — unless the counts come from the column.* At 10⁶
+predicate artifacts over 10⁷ points the per-artifact loop costs **455 ms per request** over the
+whole map and **15.8 s per generation move**, and the cut reduces neither — it runs after the
+verdicts, so it serves fewer and evaluates exactly as many. A few thousand is comfortable: 23 ms at
+1 024, 108 ms at 10 000. Memory behaves, 108 MB for that million.
+
+*And a third route removes the artifact count from the request path, with no new storage.* A
+single-valued attribute predicate **partitions** the corpus — the column's distinct values are its
+artifacts and every point carries one — so the column the predicate names is already the
+row→artifact map. One masked pass over the visible rows answers every artifact at once:
+**35–37 ms over the whole map at every layer size from 64 to a million**, measured, and asserted
+against the per-artifact loop's own answers rather than assumed equal. Two passes with different
+domains, and that is a disclosure rule rather than an optimisation — a masked count is over the
+whole membership (`annotations.md` §4.2) so its pass walks the mask, while candidacy is against the
+viewport. A **route choice with a crossover near 3 000 artifacts**, the same shape the filter
+surface already has, and a latency choice with no disclosure content on either side. ⊘ Two further
+reductions are modelled, not measured: the counting pass is a function of `M_auth` and the layer
+rather than of the request, so it can be held per session on the mask fragment's cadence; and with
+counts from the column, row forms are needed only for the artifacts actually served, which the
+budget bounds — so the move cost becomes a handful of lazy projections.
 
 *And it must refuse on the layer's declared artifact count, before any evaluation* — never on the
 principal's visible count, which needs the evaluation the bound exists to avoid, and which would
