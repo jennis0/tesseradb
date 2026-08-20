@@ -248,22 +248,24 @@ console.log('--- panels ---');
 console.log(panelText.split('\n').map((l) => `  ${l}`).join('\n'));
 console.log('--- canvas ---');
 console.log(' ', JSON.stringify(canvasPixels));
-// A refusal the contract *requires* still makes the browser log "Failed to load resource", so the
-// two are separated rather than one hiding the other. `/v1/categories` answers 500 for a
-// `derived` column by design (contracts §3.2: the visibility predicate is ⊘ unbuilt, and
-// serving the set empty would be indistinguishable from a computed empty answer), so the viewer
-// exercising that column is the instrument working, not breaking. Only the *unexplained* ones fail
-// the run — and the explained ones are still printed, or this becomes a place to hide a real 500.
-const expectedRefusals = requests.filter(
+// **`/v1/categories` no longer refuses a `derived` column, so a 500 here is breakage.** This block
+// used to tolerate them, and to excuse the browser's "Failed to load resource" beside them, on the
+// grounds that the visibility predicate was ⊘ unbuilt and serving the set empty would be
+// indistinguishable from a computed empty answer. The predicate is built: a `derived` vocabulary's
+// values are derived from inside `M_auth` per request (`Engine::categories`), and the route answers
+// 200 for a `derived` column and a `public` one alike. What a 500 means now is that the column's
+// membership could not be read at all — a real fault with nothing contractual behind it.
+//
+// So there is nothing left to excuse, and every console error counts. The 500s are still listed
+// separately, because a run that fails wants to say *which* of the two it was.
+const categoryFaults = requests.filter(
   (r) => r.path.startsWith('/v1/categories/') && r.status === 500
 );
-const unexplained = consoleErrors.filter(
-  (e) => !(/Failed to load resource/.test(e) && expectedRefusals.length > 0)
-);
-console.log('--- expected refusals (contract, not breakage) ---');
+const unexplained = consoleErrors;
+console.log('--- category route faults (none expected) ---');
 console.log(
-  expectedRefusals.length
-    ? expectedRefusals.map((r) => `  ${r.status} ${r.path}`).join('\n')
+  categoryFaults.length
+    ? categoryFaults.map((r) => `  ${r.status} ${r.path}`).join('\n')
     : '  none'
 );
 console.log('--- console errors ---');
@@ -280,7 +282,9 @@ const failures = [];
 if (!viewportOk) failures.push('no successful /v1/viewport');
 if (!drewSomething) failures.push('nothing drawn on the canvas');
 if (!maskingVisible) failures.push('every principal reported the same visible count');
-if (unexplained.length) failures.push(`${unexplained.length} unexplained console error(s)`);
+if (categoryFaults.length)
+  failures.push(`${categoryFaults.length} 500(s) from /v1/categories — the derived predicate is built, so this is a fault`);
+if (unexplained.length) failures.push(`${unexplained.length} console error(s)`);
 // Colour is presentation. If either of these moves, the encoding has become a selection rule.
 const servedAcrossEncodings = new Set(colourSeries.map((c) => c.counts?.served));
 if (servedAcrossEncodings.size > 1) failures.push('changing the colour column changed the mark count');

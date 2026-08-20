@@ -290,14 +290,21 @@ Things deliberately left, so you neither rediscover them nor assume they are don
   a mismatch. A bundle can verify clean and still be one this process must refuse to serve.
 - ⊘ **`point_visibility`'s `source` route fills no default** where the `field` route does. Not
   filling is the narrow half, so it cannot leak.
-- **`level` and `attached_level` cannot be moved by a `fields` map** — §1's tables do not name them,
-  so a producer must spell those columns as declared. A real gap for stacked and tiered layers.
-- **Conformance reasons were corrected, no coverage row moved** (`7ab0839`). I3, I8 and I12's
-  frontier half are **untested machinery**, not machinery that does not exist — the annotation
-  machinery they need is built. `conformance.md` r13 carries per-row reasons and names the tests
-  that would move them; **I3 containment is the strongest candidate** and is squarely artifact work:
-  two principals, one published label, the one missing exactly one generating-set member served
-  *nothing* rather than the artifact without its description.
+- **`level` and `attached_level` cannot be moved by a `fields` map**, and that is the decision
+  rather than a gap *(corrected 2026-08-20; this line read "a real gap for stacked and tiered
+  layers")*. [`design/configuration.md`](design/configuration.md) settles it and gives the reason: a
+  layer's `fields` map is closed, and a level is an **address** rather than a value — it is what
+  makes `(layer, level, key)` an artifact's identity. A producer whose source spells it otherwise
+  renames the column.
+- **Conformance reasons were corrected, and then one row moved.** r13 recorded that I3, I8 and
+  I12's frontier half are **untested machinery** rather than machinery that does not exist
+  (`7ab0839`), and named I3 containment as the strongest candidate. **I3 is now covered**
+  (`conformance.md` r14, `conformance/tests/test_label_containment.py`); I8 and I12's frontier half
+  stand where r13 left them. Two things turned up in the writing and are recorded in `conformance.md`
+  §0 rather than fixed: the suite could not spawn a server at all — `tessera serve` takes
+  `--deployment` and the harness passed `-c`, which is this rework's own doing — and with that
+  fixed, 27 of 432 tests fail because `public` at term `0` and decision 0073's Morton tiebreak have
+  moved the mask catalogue out from under its oracle.
 - **`clients/ts/viewer/smoke.mjs`** carries a stale assurance that `/v1/categories` answers 500 for a
   `derived` column "because the predicate is ⊘ unbuilt". The predicate is built; the test tolerates
   those 500s. Wants a look, and changing what it tolerates is behaviour rather than a rename.

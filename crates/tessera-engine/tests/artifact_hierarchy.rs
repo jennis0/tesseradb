@@ -15,6 +15,7 @@ mod common;
 
 use common::*;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_lifecycle::membership::IncomingAttachment;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
@@ -909,4 +910,199 @@ fn a_levelled_layer_may_carry_one_key_at_two_levels() {
         .find(|a| a.tessera_id == child.parent_id.unwrap())
         .expect("and the parent is in the response");
     assert_ne!(child.tessera_id, parent.tessera_id, "two artifacts, one name");
+}
+
+// ---------------------------------------------------------------------------------------------
+// What the cut owes a dependent
+// ---------------------------------------------------------------------------------------------
+
+/// A flat layer of labels, each one hanging from an artifact of `target`.
+///
+/// It declares no content of its own: every withholding below has to come from the dependency,
+/// or the test would pass with the drop deleted.
+fn labels_on(name: &str, target: &str) -> LayerDeclaration {
+    let mut d = declaration(name, None, false);
+    d.hierarchy.kind = HierarchyKind::Flat;
+    d.content.computed = Vec::new();
+    d.depends_on = vec![target.into()];
+    d
+}
+
+/// One label, over the same documents as the artifact it describes.
+fn label(
+    fx: &Fixture,
+    key: &str,
+    target_layer: &str,
+    target_key: &str,
+    sources: impl Iterator<Item = u64>,
+) -> IncomingArtifact {
+    IncomingArtifact::attached(
+        Some(key.into()),
+        fx.members(sources),
+        Vec::new(),
+        IncomingAttachment {
+            layer: target_layer.into(),
+            level: 0,
+            key: target_key.into(),
+        },
+    )
+}
+
+fn keys_in(served: &[ArtifactOut], layer: &str) -> Vec<String> {
+    let mut names: Vec<String> = served
+        .iter()
+        .filter(|a| a.layer == layer)
+        .filter_map(|a| a.key.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The tree of `a_budget_climbs_the_tree_rather_than_sampling_it`, with one label hanging from
+/// each of three nodes at three different depths — so that whatever the budget resolves to, some
+/// label's subject is in the response and the other two labels' subjects are not.
+fn a_tree_and_labels_at_three_depths(engine: &Engine, fx: &Fixture) {
+    engine.register_layer(treed("clusters/tree", None)).unwrap();
+    engine
+        .register_layer(labels_on("topics/x", "clusters/tree"))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                node(fx, "root", None, 0..400),
+                node(fx, "a", Some("root"), 0..200),
+                node(fx, "b", Some("root"), 200..400),
+                node(fx, "a1", Some("a"), 0..100),
+                node(fx, "a2", Some("a"), 100..200),
+                node(fx, "b1", Some("b"), 200..300),
+                node(fx, "b2", Some("b"), 300..400),
+            ],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "topics/x".into(),
+            0,
+            vec![
+                label(fx, "on-root", "clusters/tree", "root", 0..400),
+                label(fx, "on-a", "clusters/tree", "a", 0..200),
+                label(fx, "on-a1", "clusters/tree", "a1", 0..100),
+            ],
+        )
+        .unwrap();
+}
+
+/// **The headline: one response never describes a cluster it does not contain.**
+///
+/// Every one of these three labels passes its own test at every budget — the cut runs *after* the
+/// verdicts, so it serves fewer artifacts and never evaluates fewer, and the dependency
+/// prerequisite of [decision 0089](../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)
+/// was satisfied by a cluster the same response then removed. Without the drop, a client asking
+/// for a budget of one is answered with a root and three labels, two of them naming clusters that
+/// are not there and cannot be asked for.
+///
+/// The budgets are the same three the cut's own test uses, so the cluster half of each assertion
+/// is that test's expected frontier, unchanged.
+#[test]
+fn a_label_goes_when_the_cut_removes_what_it_describes() {
+    let fx = fixture();
+    let engine = fx.open();
+    a_tree_and_labels_at_three_depths(&engine, &fx);
+    let credential = full_coverage_credential();
+
+    for (budget, clusters, labels) in [
+        (None, vec!["a1", "a2", "b1", "b2"], vec!["on-a1"]),
+        (Some(3), vec!["a", "b"], vec!["on-a"]),
+        (Some(1), vec!["root"], vec!["on-root"]),
+    ] {
+        let served = artifacts_of(&engine, &credential, budget);
+        assert_eq!(
+            keys_in(&served, "clusters/tree"),
+            clusters,
+            "the frontier at {budget:?}"
+        );
+        assert_eq!(
+            keys_in(&served, "topics/x"),
+            labels,
+            "only the label whose subject this cut serves is drawn, at {budget:?}"
+        );
+    }
+}
+
+/// **A request naming the label layer alone is answered exactly as it was before the drop
+/// existed.** The response looked at no cluster, so it removed none, and a lookup that could not
+/// tell those two apart would blank every label a client asked for on its own.
+///
+/// This is a legitimate call and refusing it is outside the disclosure surface. Nothing is
+/// disclosed by answering it: each label was gated on its own target's `verdict`, which is the
+/// whole of what 0089 requires and is unchanged by which layers a request happens to name.
+#[test]
+fn a_request_for_the_labels_alone_keeps_every_label_it_would_have_had() {
+    let fx = fixture();
+    let engine = fx.open();
+    a_tree_and_labels_at_three_depths(&engine, &fx);
+
+    let served = levelled_artifacts_of(&engine, &full_coverage_credential(), Some(1), "topics/x");
+    assert_eq!(
+        keys_in(&served, "topics/x"),
+        vec!["on-a", "on-a1", "on-root"],
+        "a budget of one takes nothing from a flat layer, and no cluster was cut from a response \
+         that walked no clusters"
+    );
+}
+
+/// **A chain cascades.** A note on a label goes when the label goes, which goes when the cluster
+/// it describes is cut — and the note never named the label on the wire, so it cannot be asked to
+/// filter for itself.
+#[test]
+fn a_dependent_of_a_dropped_dependent_goes_with_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(treed("clusters/tree", None)).unwrap();
+    engine
+        .register_layer(labels_on("topics/x", "clusters/tree"))
+        .unwrap();
+    engine
+        .register_layer(labels_on("notes/y", "topics/x"))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![
+                node(&fx, "root", None, 0..300),
+                node(&fx, "leaf", Some("root"), 0..100),
+                node(&fx, "other", Some("root"), 100..200),
+            ],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "topics/x".into(),
+            0,
+            vec![label(&fx, "on-leaf", "clusters/tree", "leaf", 0..100)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "notes/y".into(),
+            0,
+            vec![label(&fx, "note", "topics/x", "on-leaf", 0..100)],
+        )
+        .unwrap();
+
+    let credential = full_coverage_credential();
+    let whole = artifacts_of(&engine, &credential, None);
+    assert_eq!(keys(&whole), vec!["leaf", "note", "on-leaf", "other"]);
+
+    // Two leaves do not fit in one, so the cut climbs to the root — which the label does not
+    // describe.
+    let cut = artifacts_of(&engine, &credential, Some(1));
+    assert_eq!(
+        keys(&cut),
+        vec!["root"],
+        "the label goes with its cluster and the note goes with the label"
+    );
 }

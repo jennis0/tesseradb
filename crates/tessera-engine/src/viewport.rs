@@ -573,8 +573,6 @@ pub struct ArtifactOut {
     /// it safe beside a gate that may have admitted the artifact on its own terms: such an artifact
     /// is authorised to *exist*, not to describe members the viewer cannot see.
     pub derived: crate::derived::DerivedContent,
-    /// The publisher's supplied content — one value per kind the layer declares, positionally.
-    ///
     /// This artifact's parent, **and only ever one that is also in this response**.
     ///
     /// The structure a client needs to nest what it draws, or to filter to one subtree while still
@@ -3464,12 +3462,17 @@ impl Engine {
             generation.bundle.manifest.identity.shard_id,
         );
 
+        // **The layers this response walks**, which is what makes the dependent drop below
+        // decidable. A target missing from a response that never looked at its layer was not
+        // removed from anything — see [`orphaned_dependents`].
+        let in_request: std::collections::BTreeSet<String> = names.iter().cloned().collect();
+
         let mut out = Vec::new();
-        // Where each served artifact ended up, and what each names as its parent — both collected
-        // during the walk and reconciled after it.
+        // Where each served artifact ended up, and what each points at — collected during the walk
+        // and reconciled after it.
         let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
             std::collections::BTreeMap::new();
-        let mut parent_of: Vec<Option<(String, u32, u32)>> = Vec::new();
+        let mut placed: Vec<Placement> = Vec::new();
         for name in names {
             let Some(layer) = self.write.registered_layer(&name) else {
                 // Dropped between the resolution and here. Absent is the right answer and the same
@@ -3636,10 +3639,16 @@ impl Engine {
                         }
                     });
                     // Recorded, not resolved: which artifacts this response holds is not known
-                    // until every layer and level has been walked, and a parent may sit in a level
-                    // this loop has not reached.
+                    // until every layer and level has been walked, and a parent — or the artifact
+                    // a dependent hangs from — may sit in a level this loop has not reached.
                     served_at.insert((name.clone(), level, ordinal), tessera_id);
-                    parent_of.push(parent.map(|p| (name.clone(), p.level, p.ordinal)));
+                    placed.push(Placement {
+                        at: (name.clone(), level, ordinal),
+                        parent: parent.map(|p| (name.clone(), p.level, p.ordinal)),
+                        attached_to: rows
+                            .attachment(ordinal)
+                            .map(|a| (a.layer.clone(), a.level, a.ordinal)),
+                    });
                     out.push(ArtifactOut {
                         content,
                         layer: name.clone(),
@@ -3653,17 +3662,118 @@ impl Engine {
                 }
             }
         }
+        // **The cut ran after the verdicts, so a dependent may have passed on a target this
+        // response then removed.** Dropping it here — before the parents are resolved, so a
+        // dependent that goes takes its own name out of `served_at` with it — is what keeps one
+        // response from describing a cluster it does not contain (decision 0089).
+        let dropped = orphaned_dependents(&placed, &in_request, &mut served_at);
+
         // **A parent is named only where it is also in this response**, which is the whole of the
         // disclosure rule for this field. An artifact whose parent exists but was withheld — below
         // its own criterion for this viewer, suppressed, or dropped by the frontier — carries a
         // null here, indistinguishable from a root. Naming it would tell the viewer that a coarser
         // grouping exists which they are not cleared to see, which is a disclosure the rest of this
         // pass takes care to avoid making.
-        for (artifact, parent) in out.iter_mut().zip(&parent_of) {
-            artifact.parent_id = parent.as_ref().and_then(|key| served_at.get(key)).copied();
+        let mut served = Vec::with_capacity(out.len());
+        for ((mut artifact, place), dropped) in out.into_iter().zip(&placed).zip(dropped) {
+            if dropped {
+                continue;
+            }
+            artifact.parent_id = place
+                .parent
+                .as_ref()
+                .and_then(|key| served_at.get(key))
+                .copied();
+            served.push(artifact);
         }
-        Ok(out)
+        Ok(served)
     }
+}
+
+/// Where one served artifact sits, and what it points at.
+///
+/// Both edges are recorded during the walk and resolved after it, because whether either end is in
+/// the response is not known until every layer and level has been walked.
+struct Placement {
+    /// Its own address — `(layer, level, ordinal)`, the triple an [`Attachment`] carries.
+    at: (String, u32, u32),
+    /// The address of its parent, where it names one. Within its own layer by construction.
+    parent: Option<(String, u32, u32)>,
+    /// The address of the artifact it depends on, where its layer declares a dependency.
+    attached_to: Option<(String, u32, u32)>,
+}
+
+/// **A dependent whose target this response does not contain, and everything hanging from it.**
+///
+/// [Decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)
+/// makes a dependent visible exactly where its target is, and `Engine::dependency_served` enforces
+/// that by asking the target's own `verdict`. **The cut runs after the verdicts** — it serves fewer
+/// artifacts and never evaluates fewer — so a request carrying an `artifact_budget` over a treed
+/// layer, alongside a layer depending on it, would otherwise be answered with labels describing
+/// clusters that same response does not hold. One response never contradicts itself.
+///
+/// **Server-side, and the attachment identifier never reaches the wire.** Publishing it so a client
+/// could filter for itself was declined for the reason `parent_id` carries a null rather than a
+/// withheld parent's name: handing over the identifier names an artifact the response does not
+/// contain. A client never told the relationship cannot notice what is missing from it.
+///
+/// **The target's layer must be in this request.** A request naming the dependent layer *alone* —
+/// "give me just the labels" — finds no target here, and a naive lookup would drop every label.
+/// That is a legitimate call and refusing it is outside the disclosure surface; such a request
+/// behaves exactly as it did before this pass existed. What the condition catches is a response
+/// that walked the target's layer and did not serve the target: cut to a budget, pruned in favour
+/// of a child, or withheld at the emit step. A target outside this viewport falls under the same
+/// rule and is dropped with them — its label is describing something this response does not draw,
+/// and separating the two cases would mean carrying a reason per absent candidate through a pass
+/// that deliberately collapses reasons.
+///
+/// **This does not make the budget a disclosure control**
+/// ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md) stands).
+/// The pass can only remove, and everything it removes already passed its own test. It decides what
+/// is *drawn*, and a label describing something not drawn is not drawn either.
+///
+/// Chains cascade: a label on a label goes when the label it hangs from goes. The worklist walks
+/// the edges the response holds rather than rescanning it per drop, and terminates because each
+/// index is dropped at most once — a chain deeper than `DEPENDENCY_CHAIN_MAX` was already refused
+/// by the prerequisite that admitted these artifacts in the first place.
+///
+/// Returns one flag per placement, positionally, and removes what it drops from `served_at` so a
+/// dropped artifact cannot be named as anything's parent.
+fn orphaned_dependents(
+    placed: &[Placement],
+    in_request: &std::collections::BTreeSet<String>,
+    served_at: &mut std::collections::BTreeMap<(String, u32, u32), TesseraId>,
+) -> Vec<bool> {
+    let mut dependents_of: std::collections::BTreeMap<(&str, u32, u32), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    let mut queue: Vec<usize> = Vec::new();
+    for (i, place) in placed.iter().enumerate() {
+        let Some(target) = &place.attached_to else {
+            continue;
+        };
+        dependents_of
+            .entry((target.0.as_str(), target.1, target.2))
+            .or_default()
+            .push(i);
+        if in_request.contains(&target.0) && !served_at.contains_key(target) {
+            queue.push(i);
+        }
+    }
+    let mut dropped = vec![false; placed.len()];
+    while let Some(i) = queue.pop() {
+        if dropped[i] {
+            continue;
+        }
+        dropped[i] = true;
+        served_at.remove(&placed[i].at);
+        // Whatever hung from it goes too, and its target's layer is in this request by
+        // construction — this response walked the layer, which is how the artifact reached `out`.
+        let at = &placed[i].at;
+        if let Some(hanging) = dependents_of.get(&(at.0.as_str(), at.1, at.2)) {
+            queue.extend(hanging.iter().copied());
+        }
+    }
+    dropped
 }
 
 /// Test every row of `domain` against `entities`, giving the rows that matched.

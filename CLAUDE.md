@@ -70,18 +70,21 @@ broken by a plausible-looking change:
   suppression applies to every request the moment it is accepted, whatever stamp was presented.
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
-machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Six
-of the thirteen invariants are currently covered as designed; five have no coverage, and **only
-one of those five — I6 — is uncovered for want of an implementation to test**. There is no
-wasmtime host, so nothing can be asked of a guest plugin. The rest are a testing gap: the
-annotation machinery I3 and I8 need is built and enforced, and I12's frontier half is built in the
-form that replaced the frontier (every artifact tested on its own — decisions 0080, 0082, 0083).
-I5 and I13b sit between the two, each needing a second partition or a genuinely divergent plugin
-before an oracle could disagree at all.
+machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Seven
+rows of the matrix are covered; **five have no coverage — I5, I6, I8, I11 and I13b — and only one
+of them, I6, is uncovered for want of an implementation to test**. There is no wasmtime host, so
+nothing can be asked of a guest plugin. The rest are a testing gap: the annotation machinery I8
+needs is built and enforced, I12's frontier half is built in the form that replaced the frontier
+(every artifact tested on its own — decisions 0080, 0082, 0083), and I11's cover was deleted with
+the pin that carried it. I5 and I13b sit between the two, each needing a second partition or a
+genuinely divergent plugin before an oracle could disagree at all.
 
 *We cannot test this* and *we have not tested this* are different claims, and only the first is an
 excuse — a register that records built machinery as absent understates its own gap. Corrected
-2026-08-19; `conformance.md` r13 carries the per-row reasons.
+2026-08-19; **I3 then moved to covered 2026-08-20**, the first row to move because a test was
+written rather than because machinery arrived. `conformance.md` r14 carries the per-row reasons —
+and its §0 carries the other half of that day's news: **the suite does not run green**, 27 of 432
+failing, for two causes outside the row that moved.
 
 ## What the strictness is for
 

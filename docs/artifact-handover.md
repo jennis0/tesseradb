@@ -1,71 +1,21 @@
-# Handover — artifact work, after Stage 5 and the configuration rework
+# Handover — artifact work, after Stage 5's tail and the I3 conformance row
 
-**Date:** 2026-08-20 · **Status:** Stage 5 closed; one tail owed and ruled. Branch
-`artifacts/stage-4`.
+**Date:** 2026-08-20 · **Status:** Stage 5 fully closed. **One item left on the list and it opens
+with a discussion, not with code.** Branch `artifacts/stage-4`.
 
-Two large bodies of work landed on this branch in the same week and met at a rebase: **Stage 5 —
-trees, levels and the cut**, and the **configuration rework** with **artifacts from points** on top
-of it. Both are done and gate-green. This document is the map for whoever goes next.
+Two of the three items this document carried on 2026-08-20 are done. The cut's owed tail is built —
+a dependent is dropped when the response does not contain what it depends on — and I3 containment
+has moved from *untested machinery* to a covered conformance row. What is left is Stage 6, and the
+owner has ruled that it does not start by writing code.
 
 **Read [`artifact-delivery.md`](artifact-delivery.md) first** — it is the status record for all
 artifact work by owner direction, not GitHub issues, and it wins over this document wherever they
 differ. [`artifact-config-handover.md`](artifact-config-handover.md) is the configuration rework's
 own handover and is still accurate about its surface; this one does not repeat it.
 
-## 1. Your work list, in order
+## 1. What is left
 
-Three items, and the ordering is the owner's (2026-08-20).
-
-### 1.1 The dependent drop — Stage 5's owed tail
-
-**Ruled, not built.** This is the whole of what Stage 5 still owes, and it is small.
-
-[Decision 0089](decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md) makes a
-dependent artifact visible exactly when the artifact it depends on passes its own test.
-`Engine::dependency_served` implements that by calling the same `verdict` every serving route calls.
-**The cut runs after the verdicts**, and removes artifacts that passed. So a request carrying an
-`artifact_budget` over a treed layer, alongside a layer that depends on it, is answered with labels
-describing clusters that same response does not contain.
-
-**What to build:** once the response's membership is settled, drop any dependent whose target was
-cut. Chains cascade; `DEPENDENCY_CHAIN_MAX` already bounds the recursion.
-
-**Where it goes.** `serve_artifacts` already holds the whole response before resolving parents, in a
-`served_at` map keyed by `(layer, level, ordinal)` — which is exactly the triple an `Attachment`
-carries. The pass exists because `parent_id` needed it; this rides it.
-
-**The ruling you must not reverse.** The drop happens **server-side and the attachment identifier
-never reaches the wire.** Publishing it so a client could filter for itself was considered and
-declined, for the same reason `parent_id` carries a null rather than a withheld parent's name:
-handing over the identifier names an artifact that is not in the response. A client never told the
-relationship cannot notice what is missing from it.
-
-**The trap.** A request naming the dependent layer *alone* — "give me just the labels" — finds no
-target in `served_at`, and a naive lookup drops every label. That is a legitimate call and refusing
-it is outside the disclosure surface. The condition is: the target's layer **is in this request**
-and its target is **not in the response**. One response never contradicts itself; a request for
-labels alone behaves exactly as it does today.
-
-**Why this does not make the budget a disclosure control.**
-[Decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md) stands. The pass can only
-remove, and everything it removes already passed its own test. It decides what is *drawn* — and a
-label describing something not drawn is not drawn either.
-
-### 1.2 I3 containment — the conformance gap
-
-Named by the configuration handover as the strongest candidate, and it is squarely artifact work.
-The machinery I3 needs **is built**; what is missing is a test, which is a different claim from
-*we cannot test this* and only the second is an excuse (`conformance.md` r13 carries the per-row
-reasons).
-
-The shape: two principals, one published label, the one missing **exactly one** generating-set
-member served *nothing* — not the artifact stripped of its description. Stage 3 proved the
-behaviour on the 2.4M corpus; what does not exist is the conformance row asserting it.
-
-Moving this row is the cheapest real improvement available, and it corrects a register that
-currently understates itself.
-
-### 1.3 Stage 6 — and it opens with a discussion
+### 1.1 Stage 6 — and it opens with a discussion
 
 **Do not start Stage 6 by writing code** (owner, 2026-08-20).
 
@@ -85,9 +35,69 @@ fail-closed state to start from.
 Also still open at Stage 6 and unchanged: ⊘ the proportional criterion's denominator, since *"the
 points inside this shape"* declares no member set and its size moves at every write.
 
-## 2. What Stage 5 built, so you do not rediscover it
+### 1.2 Not artifact work, and larger than it looks: the conformance suite is red
 
-Its handover is deleted; this is the residue worth carrying.
+Found while writing the I3 row, recorded in [`design/conformance.md`](design/conformance.md) §0 and
+Appendix R r14, and **not fixed**. Whoever picks it up is not picking up artifact work.
+
+The suite could not spawn a server at all: `tessera serve` has taken `--deployment` in place of `-c`
+since the configuration rework, and `oracle/harness.py` still passed the old spelling, so every
+server-backed module died at startup. That one line is fixed. With it fixed, **27 of 432 tests fail
+in seven modules**, for two causes, neither a defect and neither a leak:
+
+- **`public` is interned at term `0`**, so every mask-catalogue descriptor's dictionary id is one
+  higher than `oracle/catalogue.py` assumes.
+- **[Decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) made the
+  within-signature tiebreak the Morton code**, and the mask catalogue is designed so that
+  `entity_id == source_id` — which held only while the tiebreak was the source id.
+
+`verify()` does not catch the second, and the reason is worth carrying: its block check compares
+posting **sets**, and a within-block permutation preserves a set. The check whose comment says it
+proves the identity does not test it at all. A fix needs a real source↔entity bridge in the oracle —
+`fx_key` is the one the corpus already plants — and a `verify()` check a set comparison cannot pass
+vacuously.
+
+`conformance/tests/test_label_containment.py` builds its own fixture and is unaffected, which is why
+the I3 row moves while the suite stays red. **A coverage row is not claimed on a green suite**, and
+§0 says so at the site.
+
+## 2. What was built on 2026-08-20, so you do not rediscover it
+
+**The dependent drop.** `serve_artifacts` collects a `Placement` per served artifact — its own
+address, its parent's, and the address of what it depends on — and `orphaned_dependents` removes any
+dependent whose target's layer is in **this** request and whose target is not in the response. It
+runs **before** the parents resolve, so a dropped dependent takes its own name out of `served_at`
+and cannot be named as anything's parent. Chains cascade through a worklist over the edges the
+response holds. The attachment identifier never reaches the wire, and that is the ruling: handing a
+client the identifier names an artifact the response does not contain, which is `parent_id`'s null
+rule at the other grain.
+
+**The trap is tested, and it is what stops a naive fix.** A request naming the dependent layer alone
+— "give me just the labels" — finds no target and a naive lookup drops every label. That is a
+legitimate call, refusing it is outside the disclosure surface, and
+`a_request_for_the_labels_alone_keeps_every_label_it_would_have_had` is the guard. Deleting the drop
+turns the other two red and leaves that one green, which is what it is for.
+
+**A target outside the viewport is dropped by the same rule.** Rare by construction — a label's
+members are the documents it was drawn from — and separating it from the cut case would mean
+carrying a reason per absent candidate through a pass that deliberately collapses reasons. Recorded
+because it is the one behaviour here that is not the budget.
+
+**The I3 fixture is built backwards from the property's edge**, and that is the whole of why it is
+not the mask catalogue's. `oracle/label_fixture.py` plants one entity carrying a term one principal
+holds and the other does not, inside the widest generating set and nowhere else — so "one member
+short" is a fact about the corpus rather than a hope, and it is asserted from the masked counts
+before anything rests on it. Three artifacts of one layer over one membership differ only in which
+generating sets their contents were drawn from, so **the same response carries an absence and its
+control**: without the control, deleting containment altogether would still leave the narrower
+principal seeing nothing and the test reading green.
+
+**The pin is not re-presented in the cache half**, and §4.4 asked for it. Decision 0041 made a
+geometry stamp advisory and never authorisation, so presenting one is an ordinary request with an
+ordinary answer and could not hold a suppression out either way. What carries session state across
+an overlay change is the token, and that is what the test holds fixed.
+
+## 3. What Stage 5 built, so you do not rediscover it either
 
 **The hierarchy is in the edges, and only the parent direction is durable.** Children are derived by
 inverting parent edges per level at serve time, so no deletion has to keep two copies of one fact
@@ -125,20 +135,6 @@ treats an unresolved link as no link.
 branches is the honest general case; the agreement property two budgets rest on is written for the
 single-depth form, so do not add it casually.
 
-## 3. Two corrections owed to documents you will read
-
-**The configuration handover's §8 calls `level` / `attached_level` remapping "a real gap for stacked
-and tiered layers".** [`design/configuration.md`](design/configuration.md) decides the opposite, and
-gives the reason: a layer's `fields` map is closed, a level is an **address** rather than a value —
-it is what makes `(layer, level, key)` an artifact's identity — and a producer whose source spells
-it otherwise renames the column. The normative document wins. Correct the handover line rather than
-the code.
-
-**`clients/ts/viewer/smoke.mjs`** still carries a stale assurance that `/v1/categories` answers 500
-for a `derived` column "because the predicate is ⊘ unbuilt". The predicate is built and the test
-tolerates those 500s. Changing what it tolerates is behaviour rather than a rename, so it wants a
-look rather than a sed.
-
 ## 4. Things that will bite
 
 **The demo corpus is the fixture, and it is re-derivable.**
@@ -156,7 +152,8 @@ every count was still correct. Do not reintroduce a scale factor anywhere.
 **`--carry-id-key-from` does not carry the term dictionary.** Term ids are assigned by first
 appearance, so a new term appearing earlier renumbers the dictionary, changes the signature sort,
 changes permanent entity ids, and changes every `tessera_id`. **Do not rebuild a bundle you intend
-to keep identities across.**
+to keep identities across.** §1.2 is that warning arriving from the inside rather than from a
+rebuild, over a fixture that assumed the numbering would hold.
 
 **⊘ The artifact's own-terms gate is unbuilt.** No per-artifact term is stored, and a layer
 declaring `artifact_visibility = { field = … }` withholds — fail-closed. Comments in the serving
@@ -181,11 +178,15 @@ python3 scripts/check-doc-links.py
 python3 scripts/check-corpus-integrity.py
 ```
 
-Baseline **1816 Rust tests, 0 failing, 11 ignored**, plus **216 client tests** (5 + 152 + 59, of which 6 are skipped live-service cases).
+Baseline **1819 Rust tests, 0 failing, 11 ignored**, plus **216 client tests** (5 + 152 + 59, of which 6 are skipped live-service cases).
 
 **`--no-fail-fast`, and read the count.** Without it cargo stops at the first failing binary and
 skips the rest, so a run reporting no failures beside a *smaller* passing total reads as success.
 That has been mistaken for a green gate here.
+
+**The conformance suite is not in this gate and is red** (§1.2). It runs in CI, where it has been
+failing since the configuration rework. `python3 -m pytest conformance/tests -q` is how to see it;
+405 pass, 27 fail, and `conformance/tests/test_label_containment.py` is 16 of the 405.
 
 ## 6. Where authority lives
 
@@ -196,6 +197,7 @@ That has been mistaken for a green gate here.
 | [`design/artifacts-from-points.md`](design/artifacts-from-points.md) | artifacts declared by their points — readers, `value_set`, lineage, growth, the wire column, minting, and §8's open items |
 | [`design/annotation-write-cycle.md`](design/annotation-write-cycle.md) | artifact-side write semantics (§6.1); §3.4 is the timing table |
 | [`design/annotation-representation.md`](design/annotation-representation.md) | the representation, and §5.0.4 on edges constraining write order |
+| [`design/conformance.md`](design/conformance.md) | the invariant matrix (§4.6) and, at r14, the suite's own state |
 | `decisions/0080`, `0082`, `0083`, `0087` | the per-artifact test; hierarchy in edges; the request-time budget; the two edge shapes and their uses |
 | `decisions/0088`–`0091` | the two visibility axes; the dependency edge; a vocabulary's single axis; build is ingest |
 | [`artifact-config-handover.md`](artifact-config-handover.md) | the configuration rework's own map — renames, the input shape, and its open items |

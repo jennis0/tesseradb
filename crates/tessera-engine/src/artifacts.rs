@@ -180,7 +180,7 @@ impl ArtifactRows {
     }
 
     /// What the artifact at `ordinal` hangs from, if it hangs from anything.
-    fn attachment(&self, ordinal: u32) -> Option<&Attachment> {
+    pub(crate) fn attachment(&self, ordinal: u32) -> Option<&Attachment> {
         self.attachments
             .get(ordinal as usize)
             .and_then(Option::as_ref)

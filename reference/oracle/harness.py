@@ -794,7 +794,11 @@ def spawn_server(
         stderr_target = subprocess.STDOUT
 
     proc = subprocess.Popen(
-        [str(CLI_BIN), "serve", "-c", str(config_path)],
+        # `--deployment`, not `-c`: the configuration rework made `tessera.toml` the one document
+        # both entry points read, and `serve` takes the same flag `build` does
+        # (`configuration.md` §3). The old spelling was refused at argument parsing, so every
+        # spawn here failed at startup rather than in a test's own assertion.
+        [str(CLI_BIN), "serve", "--deployment", str(config_path)],
         cwd=REPO_ROOT,
         env=env,
         stdout=stdout_target,
