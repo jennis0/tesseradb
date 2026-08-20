@@ -137,10 +137,12 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     write_pairs(&pairs, N);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &HashMap::new())
+        .expect("the text schema parses")
+        .schema;
     build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
@@ -158,7 +160,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Config::parse(&schema_path, &HashMap::new()).expect("the text schema parses").schema,
+        schema,
     })
     .expect("a bundle with an indexed text column builds");
 }

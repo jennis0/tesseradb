@@ -23,9 +23,9 @@ govern; where they differ on *spelling*, this does.
 all — finds `tessera.toml`, reads the declaration it names, compiles the blocks below with every
 refusal §7 states, and reads each object's source under the names its `fields` map resolved.
 `tessera check` is the same resolution against Parquet schemas alone, in seconds, and emits the
-control-plane payloads (§2, §3). Every
-`source` is a path relative to the declaring document; `--file KEY=PATH` overrides one, keyed by
-the object. `--extent`, `--id-key`, `--id-key-file`, `--points`, `--pairs`, `--values`,
+control-plane payloads (§2, §3). Every `source` **names a key of `[sources]`**, which is where the
+paths live, each relative to the declaring document; `--file NAME=PATH` overrides one path, keyed
+by the source's own name. `--extent`, `--id-key`, `--id-key-file`, `--points`, `--pairs`, `--values`,
 `--artifacts`, `--artifact-members`, `--schema`, `--layers`, `schema.toml` as a fixed name and
 `layers.toml` are all gone. What is **not** built, and is refused rather than accepted and ignored,
 each naming what is absent per
@@ -47,17 +47,65 @@ value it does not list is refused. That closure is what the leak register rests 
 exhaustive *because* the surface is enumerable, and a key added without an entry here is a control
 nobody has reasoned about.
 
-Ten blocks. `R` = required, `D` = defaulted, `O` = optional with no default and no fallback.
+Eleven blocks. `R` = required, `D` = defaulted, `O` = optional with no default and no fallback.
 **`source`, `fields` and inline data are acquisition keys** — a build reads them and a deployment
 writing through the service omits them entirely (§2), so an `R` on one of those means *required to
 build from a file*, never *required to declare*.
 
-**`[corpus]`** — entity space: identity and attributes, shared by every view.
+**`[sources]`** — the caller's own names for the files this declaration reads. Free-form keys, one
+path each, relative to this document (§3). Every `source` below names one of them.
+
+```toml
+[sources]
+points   = "papers.parquet"
+geometry = "umap.parquet"
+scores   = "sentiment.parquet"
+```
+
+**`[defaults]`** — what a block takes when it names neither of these itself.
 
 | Key | | Value |
 |---|---|---|
-| `source` | R | a path, relative to this document (§3) |
-| `fields` | D | override map; canonical name is `entity_id` |
+| `source` | O | a `[sources]` key, taken by a `[[view]]` or an `[[attribute]]` that names none |
+| `entity_id_field` | D `entity_id` | the column an entity id is read from, wherever one is read |
+
+**A `source` names a key, never a path, and there is no fallback between the two.** A name
+`[sources]` does not carry is refused, listing the names that do exist. Reading an unmatched name
+as a relative path instead would make a typo a *missing file* rather than a *declaration that does
+not resolve*, and the message would come from a Parquet reader rather than from the document — the
+same ambiguity this surface refuses everywhere else. It is also what lets `--file` key an override
+by the source rather than by the object (§8): staging one file that three blocks read is one
+override, where keying by the object made it three and left the one you missed quietly reading the
+old file.
+
+**`[defaults]` replaces `[corpus]`, and nothing is lost.** `[corpus]` named the one file every
+attribute was read from and the one column its identity sat in, and no attribute could say
+otherwise. Both are now defaults: a column may name its own `source` and its own `entity_id_field`,
+because a file that carries entity ids can be joined whatever it calls them. What `[corpus]`
+guaranteed — that every attribute lands in one entity space — is guaranteed by the entity id and
+never was by the file.
+
+```toml
+[[attribute]]
+name            = "sentiment"
+field           = "score"
+source          = "scores"
+entity_id_field = "doc_id"
+```
+
+**`[defaults].source` reaches a `[[view]]` and an `[[attribute]]` and nothing else**, and the line
+is where an absent source means *nothing* against where it means *something*. A view's geometry and
+a column's values have to be read from somewhere, so a default fills them in. A vocabulary with no
+source is one that **mints** rather than reads; a `[[layer]]` with no source is declared and empty;
+a `[layer.members]` block is a membership that is not stored; a `point_visibility` with no source
+reads the points' own column or takes its default. Filling any of those in would turn a declaration
+into an acquisition nobody wrote.
+
+**`[defaults].entity_id_field` reaches every source read under the canonical `entity_id`, and each
+one may say otherwise** — a view through its own `fields.entity_id`, an attribute through its own
+`entity_id_field`. The one it does not reach is `point_visibility`'s exploded relation, which takes
+no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)` under those names
+(§8). A default a block could not override would be a constraint rather than a default.
 
 **`[[view]]`** — one named coordinate system. Repeatable.
 
@@ -65,8 +113,8 @@ build from a file*, never *required to declare*.
 |---|---|---|
 | `name` | R | identity; tombstoned on drop, never reused |
 | `title` | O | human-readable, served on `/v1/meta` |
-| `source` | R | a path, relative to this document (§3) |
-| `fields` | D | canonical `entity_id`, `x`, `y`, or `morton` + `residual` — the geometry shapes are mutually exclusive (§8) |
+| `source` | D | a `[sources]` key; `[defaults].source` where absent |
+| `fields` | D | canonical `entity_id`, `x`, `y`, or `morton` + `residual` — the geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
 | `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
 | `visibility` | ⊘ | the view's own gate; specified, not implemented (views §3) |
@@ -80,18 +128,20 @@ build from a file*, never *required to declare*.
 | `width` | R | `u8` \| `u16` \| `u32` — the **code space's** width (`per-point-attributes.md` §3.6, `per-point-attributes.md` §3.9) |
 | `value_set` | R | `closed` \| `open` — is an unknown key at ingest refused, or minted? |
 | `visibility` | R | `public` \| `derived` — one axis, two settings; the slot takes no label ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)) |
-| `source` | R for `closed`, unless inline | a path, relative to this document (§3) |
+| `source` | R for `closed`, unless inline | a `[sources]` key. **`[defaults].source` does not reach here** — an absent vocabulary source is a set that mints rather than reads (§8) |
 | `fields` | D | canonical `key`, `code`, `title`; `code` may be absent — see below |
 | `values` | R for `closed`, unless sourced | inline: an array of keys, or a `key = code` table |
 | `reserved` | O | retired codes, never reassigned |
 
-**`[[attribute]]`** — one per-point column, read from `[corpus]`'s source. Repeatable.
+**`[[attribute]]`** — one per-point column, read from the source it names. Repeatable.
 
 | Key | | Value |
 |---|---|---|
 | `name` | R | the served name, and the manifest's |
 | `title` | O | human-readable |
 | `field` | D | the source field, when it differs from `name` |
+| `source` | D | a `[sources]` key; `[defaults].source` where absent |
+| `entity_id_field` | D | the column this source spells the entity id in; `[defaults].entity_id_field` where absent |
 | `type` | R | `bool`, `u8`…`u64`, `i8`…`i64`, `f32`, `f64`, `timestamp_us`, `text`, `keyword`, `category` |
 | `vocabulary` | R for `category` | names a `[[vocabulary]]`; refused if undeclared |
 | `render` | D `false` | a fixed-width slot in every row of `columns.arrow` |
@@ -318,7 +368,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `name` | R | identity; tombstoned on drop |
 | `title` | O | human-readable; absent is served as absent |
 | `views` | R | the views this layer's artifacts are drawn on |
-| `source` | R unless inline | one file per layer, so no discriminator field exists. Declaring it beside `artifacts` is refused |
+| `source` | R unless inline | a `[sources]` key: one file per layer, so no discriminator field exists. Declaring it beside `artifacts` is refused. **`[defaults].source` does not reach here** — a layer with no source is declared and empty (§8) |
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
 | `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }` |
@@ -374,7 +424,7 @@ repaired, and nothing here changes that.
 
 | Key | | Value |
 |---|---|---|
-| `source` | R | a path, relative to this document; one row per `(artifact, entity)` |
+| `source` | R | a `[sources]` key; one row per `(artifact, entity)`. **`[defaults].source` does not reach here** either |
 | `fields` | D | canonical `key`, `entity`, `rank` — a null `rank` is the artifact's own membership, `k` the generating set of `contents[k]` |
 
 A member source without the layer's own artifacts — its `source` or its inline `artifacts` — is
@@ -582,8 +632,8 @@ no sources is a legal config rather than a special mode.
 - **Views.** A view is created online by a control verb carrying `{name, gate, projection
   provenance}`, or declared here and compiled. Same object either way.
 
-**What differs is only what a missing source means.** At build, a declared source that resolves to
-no path is a refusal naming the object (§8). With no source declared at all, the object is declared
+**What differs is only what a missing source means.** At build, a `source` naming no key in
+`[sources]` is a refusal listing the names that exist (§8). With no source declared at all, the object is declared
 and empty — a layer with no artifacts yet, a vocabulary with no minted values yet — which is a
 legal state and the normal one for a write-path deployment. An empty *closed* vocabulary is still
 refused, because closed means the set is authored and an authored set of nothing refuses every
@@ -711,13 +761,16 @@ relative `bundle.path` that moved with the shell's working directory would make 
 tessera serve` open a different bundle from the one `tessera build` had just written. Both
 `[build]` and `[identity]` default entire, so the ordinary file writes neither.
 
-**Sources are paths relative to the declaring file.** An earlier revision forbade every path here
-and bound each source on the command line, which produced an invocation naming five files and a
-config that could not be read without it. The rule it was protecting is narrower than it was
-written: what must not appear is an **absolute or machine-specific** path, and a path relative to
-the config is neither — it travels in git with the file that describes it and is exactly as
-reproducible as the declaration around it. `--file KEY=PATH` survives as an **override**, for the
-deployment that stages one source elsewhere.
+**Sources are paths relative to the declaring file, written once in `[sources]`.** An earlier
+revision forbade every path here and bound each source on the command line, which produced an
+invocation naming five files and a config that could not be read without it. The rule it was
+protecting is narrower than it was written: what must not appear is an **absolute or
+machine-specific** path, and a path relative to the config is neither — it travels in git with the
+file that describes it and is exactly as reproducible as the declaration around it. A later
+revision then wrote that path at every block that read the file, so one file read by three blocks
+was three paths to keep in step; `[sources]` is that table pulled out, and every `source` elsewhere
+names one of its keys. `--file NAME=PATH` survives as an **override**, for the deployment that
+stages one source elsewhere, and it now moves every reader of that source at once.
 
 **The identity key never appears in either file.** It is sixteen bytes keying the bijection that
 turns an internal entity id into the `tessera_id` a client sees
@@ -746,9 +799,9 @@ a reader should never need to understand intent to know what to load.
 
 **One file, named by `tessera.toml`.** Attributes, vocabularies, views and layers are declared
 together; `build.schema` names it, defaulting to `schema.toml` beside the deployment file, and
-`--config` overrides that. Corollary: **no absolute or machine-specific paths in it** — a `source`
-is written relative to the document, an absolute one is refused at parse, and `--file KEY=PATH` is
-where a staged path goes (§3, §8).
+`--config` overrides that. Corollary: **no absolute or machine-specific paths in it** — every path
+sits in `[sources]`, written relative to the document, an absolute one is refused at parse, and
+`--file NAME=PATH` is where a staged path goes (§3, §8).
 
 ## 5. Two axes, and only two
 
@@ -794,13 +847,23 @@ union of posting lists — so any label added to a point can only widen it.
 ## 6. The declaration
 
 ```toml
-[corpus]
-source = "corpus"                    # entity space: identity and attributes
+[sources]                            # every file this declaration reads, named once
+corpus            = "corpus.parquet"
+geometry          = "umap.parquet"
+sentiment         = "sentiment.parquet"
+hdbscan           = "hdbscan.parquet"
+hdbscan_members   = "hdbscan_members.parquet"
+hdbscan_topics    = "hdbscan_topics.parquet"
+hdbscan_topic_members = "hdbscan_topic_members.parquet"
+
+[defaults]
+source          = "corpus"           # entity space: what a block that names none reads
+entity_id_field = "id"               # how this corpus spells identity, wherever one is read
 
 [[view]]
 name             = "s0"
 title            = "arXiv, August 2026"
-source           = "geometry"
+source           = "geometry"        # this one is a different file, so it says so
 fields           = { x = "x", y = "y" }
 point_visibility = { field = "categories", default = "public" }
 
@@ -827,6 +890,15 @@ index      = true
 [[attribute]]
 name  = "notes"
 type  = "keyword"                    # neither flag: blob-resident, drill-down alone
+
+# A column from somewhere else, joined on a column that file calls something else. Neither is a
+# second corpus: the entity id is what puts it in this entity space, and the file never was.
+[[attribute]]
+name            = "sentiment"
+field           = "score"
+type            = "f32"
+source          = "sentiment"
+entity_id_field = "doc_id"
 
 [[layer]]
 source     = "hdbscan"               # one row per artifact
@@ -872,6 +944,10 @@ content                   = { computed = ["centroid", "box"] }
 **Every block of that example builds**, `[layer.labels]` included: it expands to a
 `topics/hdbscan` layer drawn on `s0`, flat, depending on `clusters/hdbscan`, carrying one supplied
 `text` content, and gated `public` because that is what its parent declared.
+
+**One file's path is written once, and moving it is one flag.** `--file corpus=/mnt/staged/corpus.parquet`
+moves the view's geometry, every attribute reading it and any relation named on it together; there
+is no per-block key to miss.
 
 **A vocabulary is an object, not three attribute fields.** `name` is the identity, so attributes
 share one by naming it; `source` or an inline `[vocabulary.values]` table is where the values come
@@ -956,11 +1032,15 @@ decision 0048's shape, replaced rather than carried.
 
 ## 8. Sources, fields and the binding
 
-**Every object that has data declares its own source**, and column names default to the canonical
-ones:
+**Every object that has data names its own source, and the name is a `[sources]` key**; column
+names default to the canonical ones:
 
 ```toml
-source = "hdbscan"                                       # a key bound on the command line
+[sources]
+hdbscan = "hdbscan.parquet"                              # the path, written once
+
+[[layer]]
+source = "hdbscan"                                       # the name, wherever it is read
 fields = { members = "members", parent = "parent_id" }   # only where the source disagrees
 ```
 
@@ -996,39 +1076,72 @@ thing — the entities a membership leaves out, complemented once at build
 **Or the data sits inline**, as a vocabulary's values may — for what a person authors, a dozen
 curated regions rather than a corpus.
 
-**A source is a path relative to this document** (§3), so the ordinary build names no files at
-all. An **absolute** path is refused at parse: it is the one shape that cannot travel with the
-document, and the refusal names where an absolute path does belong.
+**Every path sits in `[sources]`, relative to this document** (§3), so the ordinary build names no
+files at all. An **absolute** path there is refused at parse: it is the one shape that cannot
+travel with the document, and the refusal names where an absolute path does belong. A `source`
+naming a key `[sources]` does not carry is refused too, listing the names that exist — the one
+refusal this arrangement adds, and it exists because there is no correct output: a name is not a
+path, so an unmatched name resolves to nothing at all rather than to some file.
 
-`--file KEY=PATH` **overrides** one source, for the deployment that stages one elsewhere, and
-`KEY` is the **object** whose source it replaces — the source string being a path now rather than
-a name:
+`--file NAME=PATH` **overrides one source's path**, for the deployment that stages one elsewhere,
+and `NAME` is the source's own name in `[sources]`:
 
-| Declared at | Override key |
-|---|---|
-| `[corpus].source` | `corpus` |
-| `[[view]].source` | `view:<name>` |
-| `[[view]].point_visibility.source` | `view:<name>:point_visibility` |
-| `[[vocabulary]].source` | `vocabulary:<name>` |
-| `[[layer]].source` | `layer:<name>` |
-| `[layer.members].source` | `layer:<name>:members` |
+```
+tessera build --file points=/mnt/staged/papers.parquet
+```
 
-Three rules, all fail-closed: a source with no path from anywhere is a refusal naming the object;
-an override no object declares is an error listing the keys that exist, or the declaration's own
-path stays quietly in force under a command line asking for another corpus; and an override
-**never creates** a source, so a closed vocabulary cannot be opened, nor a view given geometry,
-from the command line alone. One key overrides one path — two of one key is a refusal rather than
-a last-one-wins, the two paths being two corpora.
+**The key is the source, and that is the whole of why it moved.** It used to be the *object* whose
+source was being replaced — `corpus`, `view:s0`, `view:s0:point_visibility`, `vocabulary:severity`,
+`layer:clusters/a`, `layer:clusters/a:members` — a path synthesised by the parser rather than a
+word the caller wrote, and one per block. Staging a file that three blocks read meant three
+overrides, and missing one left that block quietly reading the old file while the build reported
+success. Keying by the source moves every reader of it at once, and there is no key to miss.
+
+Three rules, all fail-closed and unchanged in substance: a `source` naming no `[sources]` key is a
+refusal listing the names that exist; an override naming no `[sources]` key is a refusal too, or
+the declaration's own path stays quietly in force under a command line asking for another corpus;
+and an override **never creates** a source — it replaces a path `[sources]` already writes, so a
+closed vocabulary cannot be opened, nor a view given geometry, from the command line alone. One
+name overrides one path — two of one name is a refusal rather than a last-one-wins, the two paths
+being two corpora.
 
 **A build materialises one view**, named by `--view` or — where the declaration has exactly one —
 by there being only one. A declaration with several and no `--view` is refused listing them, and a
 `--view` no `[[view]]` block declares is refused: two views quantise the same corpus differently,
 so choosing would produce a bundle that is well-formed and not the one asked for.
 
-**The identity field is `entity_id`**, declared once on `[corpus]` and defaulting to that name.
-Not `entity`, which names the object rather than the value, and not `id`, which collides with
-`tessera_id` and with an external id. It is entity-space and shared: a point has one identity
-across every view it appears in, and it is what a member row names.
+**The identity field is `entity_id`**, or whatever `[defaults].entity_id_field` says this
+declaration spells it. The canonical name is not `entity`, which names the object rather than the
+value, and not `id`, which collides with `tessera_id` and with an external id. It is entity-space
+and shared: a point has one identity across every view it appears in, and it is what a member row
+names — so a source that spells the column differently is joined by naming the column, never by
+being a second entity space.
+
+**The exploded label relation is `(entity_id, term_id)` under those names.** It takes no `fields`
+map and `[defaults].entity_id_field` does not reach it: a default a block has no way to override
+would be a constraint rather than a default, and this is the one reader with nowhere to write one.
+
+**Coverage is reported at every build, per attribute source, and never refused.** Each source's
+pass counts the entities that came away with a value and the rows that named an entity this build
+did not load:
+
+```
+attribute 'sentiment': 49,812 of 50,000 entities have a value
+        1,950,188 source row(s) named entities this build did not load
+```
+
+**Entities covered is the denominator, and rows dropped is not.** A legitimate superset and a
+broken join both drop an overwhelming fraction of their rows — a sentiment table covering every
+paper arXiv ever published, against a 50,000-paper build, drops 97% of itself and is exactly
+right — so the number that separates the two is how much of *this* corpus came away with a value.
+Both are printed; only the first is the measure.
+
+**An unmatched row is ignored, which is what a join does**, and it is fail-closed in both
+directions that matter: an absent attribute matches fewer points in a filter, and an absent access
+label leaves a point visible to nobody. **Zero coverage says so emphatically and still builds** —
+the ids may simply be another corpus's, and only the operator knows which; a refusal here would
+block the legitimate superset as loudly as the broken join, and this is build input, recoverable,
+disclosing nothing.
 
 ## 9. What is stolen, and from where
 
@@ -1046,6 +1159,40 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-20 — `[sources]` names the files, `[defaults]` replaces `[corpus]`, and an attribute may
+read from its own.** Two shapes went, and both were arbitrary. A `source` was a path, so a file
+three blocks read was three paths to keep in step and three `--file` keys to remember; it is now a
+**name**, and `[sources]` is where the paths live — one entry per file, still relative to this
+document, still no absolute path. Every `source` in the declaration names one of those keys, and a
+name the table does not carry is refused listing the ones it does: the one refusal this adds, and
+it exists because a name that resolves to nothing has no correct reading, where reading it as a
+relative path would turn a typo into a missing file rather than a declaration that does not
+resolve. `--file` follows the same key, so `--file points=/mnt/staged/papers.parquet` moves
+everything reading that source at once — where the object-keyed form left the block you missed
+quietly reading the old file.
+
+`[corpus]` is deleted and `[defaults]` takes its place, with the constraint removed rather than
+renamed: `source` and `entity_id_field` are now defaults any block may write over, so a column may
+name its own file and its own identity column and a file carrying entity ids joins whatever it
+calls them. Nothing is lost — what `[corpus]` guaranteed, that every attribute lands in one entity
+space, is guaranteed by the entity id and never was by the file. The default `source` reaches a
+`[[view]]` and an `[[attribute]]` and deliberately nothing else, because elsewhere an absent source
+is itself a declaration (a vocabulary that mints, a layer declared empty, a membership that is not
+stored, labels riding the points' own column); `entity_id_field` reaches every reader that can say
+otherwise, and not the exploded label relation, which takes no `fields` map and so has nowhere to.
+
+The attribute pass is now **grouped by source** — one merge sweep per `(source, identity column)`
+against this build's ordinals, where before it was one pass over one corpus file. The sweep itself
+is unchanged, its measured cost and the correction to an earlier overstatement of it intact. What
+changed is what an unmatched row means: it was `input_changed`, on the reasoning that the file
+could only be the points file having moved under the build, and it is now **counted and reported**,
+because a source covering a superset of this build's entities is the ordinary case for a column
+that lives elsewhere. Every build prints, per source, how many entities came away with a value and
+how many rows named entities it did not load — **entities covered is the denominator**, since a
+legitimate superset and a broken join both drop an overwhelming fraction and only the first number
+separates them. Zero coverage says so emphatically and still builds: recoverable, disclosing
+nothing, and the operator is the one who knows whose ids those were.
 
 **2026-08-20 — `value_set` now governs both entry points, and its row loses its marker.** No key is
 added and none changes meaning: `open` said *a key no artifact declares creates one*, and until now

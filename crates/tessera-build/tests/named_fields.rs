@@ -82,17 +82,25 @@ fn write_pairs(path: &Path) {
 }
 
 /// One view, one open vocabulary and one category over it, all read from moved names.
+///
+/// **The identity column is moved once, in `[defaults]`.** The points file spells it `id`, so the
+/// view and the attribute both join on `id` without either saying so — which is what
+/// `entity_id_field` is for. The exploded relation is not reached by it and keeps the canonical
+/// `(entity_id, term_id)` (`configuration.md` §8), which is what the pairs file here carries.
 const MOVED: &str = r#"
-[corpus]
-source = "points.parquet"
-fields = { entity_id = "id" }
+[sources]
+points = "points.parquet"
+pairs  = "pairs.parquet"
+
+[defaults]
+source          = "points"
+entity_id_field = "id"
 
 [[view]]
 name             = "s0"
-source           = "points.parquet"
-fields           = { entity_id = "id", x = "u", y = "v" }
+fields           = { x = "u", y = "v" }
 extent           = { min = 0.0, max = 1000.0 }
-point_visibility = { source = "pairs.parquet", default = "public" }
+point_visibility = { source = "pairs", default = "public" }
 
 [[vocabulary]]
 name       = "departments"
@@ -114,8 +122,7 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
     BuildArgs {
         points: acquired.points,
         point_fields: acquired.point_fields,
-        corpus: acquired.corpus,
-        corpus_fields: acquired.corpus_fields,
+        attribute_sources: acquired.attribute_sources,
         access: acquired.access,
         out,
         extent: extent(),

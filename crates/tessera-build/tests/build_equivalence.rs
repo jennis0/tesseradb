@@ -178,20 +178,24 @@ fn write_pairs(path: &Path) {
 /// items — and a keyed postings file that disagreed on code order or on which empty postings it
 /// dropped would still open and still answer, just not the same set.
 const ATTRIBUTED_SCHEMA: &str = r#"
+[sources]
+archive_values    = "archive-values.parquet"
+department_values = "department-values.parquet"
+
 [[vocabulary]]
 name       = "archive"
 width      = "u8"
 value_set  = "closed"
 # `public` is only what a closed set can safely publish (§3.8), so this fixture covers both.
 visibility = "public"
-source     = "archive-values.parquet"
+source     = "archive_values"
 
 [[vocabulary]]
 name       = "department"
 width      = "u16"
 value_set  = "open"
 visibility = "derived"
-source     = "department-values.parquet"
+source     = "department_values"
 
 [[attribute]]
 name       = "archive"
@@ -354,9 +358,8 @@ fn write_attributed_points(path: &Path) {
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.to_path_buf(),
-        corpus: Some(points.to_path_buf()),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: extent(),
@@ -487,7 +490,6 @@ fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
     write_field_sourced_points(&points);
 
     let mut reference_args = args_for(&points, &points, temp.path().join("reference"));
-    reference_args.corpus = None;
     reference_args.access = tessera_build::config::AccessInput {
         source: tessera_build::config::AccessSource::Field("categories".to_string()),
         default: "public".to_string(),
@@ -590,6 +592,8 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
     let make_args = |out: PathBuf, batch: Option<u64>| {
         let mut args = args_for(&points, &pairs, out);
         args.schema = attributed_schema(temp.path());
+        args.attribute_sources =
+            tessera_build::config::AttributeSource::over(points.clone(), &args.schema);
         args.batch_items = batch;
         args
     };
@@ -1010,9 +1014,8 @@ fn reference_build_at_scale() {
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: PathBuf::from("data/scaled/geometry.parquet"),
-        corpus: Some(PathBuf::from("data/scaled/geometry.parquet")),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
         out,
         extent: Bounds {

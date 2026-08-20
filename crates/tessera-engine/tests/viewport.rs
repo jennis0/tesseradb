@@ -784,9 +784,8 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: tmp.path().join("points.parquet"),
-        corpus: Some(tmp.path().join("points.parquet")),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
         out: bundle_root.clone(),
         extent: extent(),
@@ -1293,9 +1292,8 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
             point_fields: Default::default(),
-            corpus_fields: Default::default(),
             points: PathBuf::from("data/scaled/geometry.parquet"),
-            corpus: Some(PathBuf::from("data/scaled/geometry.parquet")),
+            attribute_sources: Vec::new(),
             access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
             // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not

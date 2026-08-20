@@ -177,9 +177,8 @@ fn no_blob_schema() -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.to_path_buf(),
-        corpus: Some(points.to_path_buf()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: Bounds {

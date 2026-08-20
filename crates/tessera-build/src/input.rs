@@ -1394,9 +1394,15 @@ pub fn read_vocabulary_file(
     Ok(set)
 }
 
-/// Stream the declared attribute columns, calling `visit(entity_id, values)` once per selected
-/// row with the values in **declared order** — the order `columns.arrow`'s tail is written and
-/// read back in.
+/// Stream one attribute source's columns, calling `visit(entity_id, values)` once per selected row
+/// with `columns`' values in the order `columns` gives them — a subsequence of declared order,
+/// which is the order `columns.arrow`'s tail is written and read back in.
+///
+/// **`columns` is one source's group, not the whole schema** (`configuration.md` §1's
+/// `[sources]`): each attribute names the file it is read from, so a declaration whose columns sit
+/// in three files calls this three times, each over the columns that named that file. `schema_decl`
+/// is still the whole schema, because a vocabulary is shared across sources and a category's key is
+/// resolved against the declaration rather than against the file it arrived in.
 ///
 /// **A second pass over the points file rather than a widening of [`scan_points`].** [`PointRow`]
 /// is a 16-byte `Copy` struct held one per entity by both builds, and its doc argues that width;
@@ -1424,11 +1430,12 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
     path: &Path,
     fields: &Fields,
     schema_decl: &crate::config::Schema,
+    columns: &[&crate::config::Attribute],
     minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
     mut visit: F,
 ) -> Result<()> {
-    if schema_decl.is_empty() {
+    if columns.is_empty() {
         return Ok(());
     }
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -1437,7 +1444,7 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
     let file_schema = builder.schema().clone();
 
     let mut roots = vec![field_index(path, &file_schema, fields, ENTITY_ID)?];
-    for attribute in &schema_decl.attributes {
+    for attribute in columns {
         roots.push(
             file_schema
                 .column_with_name(attribute.column())
@@ -1446,7 +1453,7 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
                     path: path.to_path_buf(),
                     detail: format!(
                         "the schema declares attribute '{}', read from a column named '{}', which \
-                         this corpus file has no column for. Its columns are: {}. A declared \
+                         this attribute source has no column for. Its columns are: {}. A declared \
                          column the data lacks would otherwise be written as the absent sentinel \
                          for every row — a column that cost its width to say nothing",
                         attribute.name,
@@ -1464,13 +1471,12 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
     let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
-    let attribute_idx: Vec<usize> = schema_decl
-        .attributes
+    let attribute_idx: Vec<usize> = columns
         .iter()
         .map(|a| column_index(path, &projected, a.column()))
         .collect::<Result<_>>()?;
 
-    let mut row_values: Vec<ScalarValue> = Vec::with_capacity(schema_decl.attributes.len());
+    let mut row_values: Vec<ScalarValue> = Vec::with_capacity(columns.len());
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
@@ -1480,8 +1486,8 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
         // integer columns 65,536 times — quadratic in the batch size, and invisible at the scale
         // a test uses. A discovered category's mint pre-pass rides the same discipline: minting
         // is per distinct key in the batch, decided here, not per row.
-        let mut decoded: Vec<BatchColumn> = Vec::with_capacity(schema_decl.attributes.len());
-        for (attribute, &idx) in schema_decl.attributes.iter().zip(&attribute_idx) {
+        let mut decoded: Vec<BatchColumn> = Vec::with_capacity(columns.len());
+        for (attribute, &idx) in columns.iter().zip(&attribute_idx) {
             decoded.push(BatchColumn::decode(
                 path,
                 batch.column(idx),
@@ -1495,7 +1501,7 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
                 continue;
             }
             row_values.clear();
-            for (attribute, column) in schema_decl.attributes.iter().zip(&decoded) {
+            for (attribute, column) in columns.iter().zip(&decoded) {
                 row_values.push(column.value(row, attribute, schema_decl)?);
             }
             visit(entity_id, &row_values);
@@ -1930,7 +1936,7 @@ fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
     })
 }
 
-/// Whether `[corpus]`'s column of type `found` can carry `attribute` — see
+/// Whether an attribute source's column of type `found` can carry `attribute` — see
 /// [`BatchColumn::carries`], whose rule this is.
 pub fn column_carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
     BatchColumn::carries(attribute, found)

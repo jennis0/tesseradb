@@ -42,9 +42,9 @@ stops before serving.
 ## One declaration, and the frame it carries
 
 The notebook writes a single `schema.toml` — the corpus, the view, the vocabularies, the attribute
-columns and the five layers, every `source` a path relative to itself. `run-corpus.sh` writes the
-`tessera.toml` beside it that says where the bundle goes, and the build is then `tessera build`
-with no flags but the identity decision.
+columns and the five layers, with a `[sources]` table naming every file it reads and each path
+relative to itself. `run-corpus.sh` writes the `tessera.toml` beside it that says where the bundle
+goes, and the build is then `tessera build` with no flags but the identity decision.
 
 **The extent lives in that declaration, as `extent = "auto"`, and this is the failure the whole
 arrangement exists to prevent.** The notebook writes raw UMAP coordinates, spanning about −17…18,

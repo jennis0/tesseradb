@@ -173,12 +173,17 @@ fn write_clusters(path: &Path, column: &str) {
 }
 
 const DECLARATION: &str = r#"
-[corpus]
-source = "points.parquet"
+[sources]
+points        = "points.parquet"
+clusters      = "clusters.parquet"
+topics        = "topics.parquet"
+topic_members = "topic_members.parquet"
+
+[defaults]
+source = "points"
 
 [[view]]
 name             = "s0"
-source           = "points.parquet"
 extent           = "auto"
 point_visibility = { field = "categories", default = "public" }
 
@@ -200,7 +205,7 @@ render     = true
 name       = "clusters/a"
 title      = "Clusters"
 views      = ["s0"]
-source     = "clusters.parquet"
+source     = "clusters"
 fields     = { members = "members" }
 membership = "enumerated"
 hierarchy  = { kind = "flat" }
@@ -211,7 +216,7 @@ require_member_visibility = { fraction = 0.05 }
 content                   = { computed = ["centroid", "box"] }
 
   [layer.labels]
-  source                    = "topics.parquet"
+  source                    = "topics"
   name                      = "topics/a"
   type                      = "text"
   membership                = "enumerated"
@@ -223,7 +228,7 @@ content                   = { computed = ["centroid", "box"] }
     require_member_visibility = "all"
 
     [layer.labels.members]
-    source = "topic_members.parquet"
+    source = "topic_members"
 "#;
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
@@ -516,7 +521,8 @@ fn a_declaration_that_decides_nothing_writes_no_report() {
     project(tmp.path());
     std::fs::write(
         tmp.path().join("schema.toml"),
-        "[[view]]\nname = \"s0\"\nextent = \"auto\"\nsource = \"points.parquet\"\n\
+        "[sources]\npoints = \"points.parquet\"\n\
+         [[view]]\nname = \"s0\"\nextent = \"auto\"\nsource = \"points\"\n\
          point_visibility = { field = \"categories\", default = \"public\" }\n",
     )
     .unwrap();

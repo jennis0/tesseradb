@@ -104,8 +104,7 @@ fn flushed_bundle(root: &Path) {
     write_pairs(&pairs);
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),

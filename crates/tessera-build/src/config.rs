@@ -65,24 +65,33 @@
 //! a previous build's manifest yet, so **reordering a bare key list today reassigns its codes**.
 //! Pin the codes to hold them still.
 //!
-//! ## Acquisition: sources, fields and the override
+//! ## Acquisition: sources, defaults, fields and the override
 //!
-//! **Every object that has data names its own file, as a path relative to this document**
-//! (`configuration.md` §3, §8). A relative path travels in git with the file describing it and is
-//! exactly as reproducible as the declaration around it, which an invocation naming five files was
-//! not. What must not appear is an **absolute or machine-specific** path, so an absolute `source`
-//! is refused here and `--file KEY=PATH` is where one goes instead.
+//! **`[sources]` names every file this declaration reads, one path each, relative to this
+//! document** (`configuration.md` §3, §8). A relative path travels in git with the file describing
+//! it and is exactly as reproducible as the declaration around it, which an invocation naming five
+//! files was not; an **absolute or machine-specific** path is refused there, and `--file NAME=PATH`
+//! is where one goes instead. Every `source` elsewhere in the document **names one of those keys**,
+//! so a file three blocks read is one path rather than three to keep in step. There is no
+//! name-or-path fallback: a name `[sources]` does not carry is refused listing the names that do
+//! exist, because reading it as a relative path would turn a typo into a missing file rather than
+//! a declaration that does not resolve.
 //!
-//! **`--file` is an override, never a binding.** Its key is the *object* whose source it replaces
-//! — `corpus`, `view:s0`, `view:s0:point_visibility`, `vocabulary:severity`, `layer:clusters/a`,
-//! `layer:clusters/a:members` — and every one of them is registered by the declaration that owns
-//! it, in [`Sources`]. Three rules, all fail-closed and unchanged in substance:
+//! **`[defaults]` is what `[corpus]` was, with the constraint removed** ([`Defaults`]). It carries
+//! a `source` and an `entity_id_field`, and any block that reads either may write its own — so an
+//! attribute may name its own file and its own identity column, because a file that carries entity
+//! ids can be joined whatever it calls them. What `[corpus]` guaranteed, that every attribute lands
+//! in one entity space, is guaranteed by the entity id and never was by the file.
 //!
-//! - a source with **no path from anywhere** is a refusal naming the object;
-//! - an override **no object declares** is a refusal too, listing the keys that exist — otherwise
-//!   a typo in the key leaves the config's own path quietly in force under a command line that
-//!   says otherwise;
-//! - an override **never creates** a source. It replaces one the declaration already made, so a
+//! **`--file` is an override, never a binding.** Its key is the *source's own name*, so one
+//! override moves every block reading that file at once — where the previous object-keyed form
+//! (`corpus`, `view:s0`, `view:s0:point_visibility`, …) needed one per block and left the one you
+//! missed quietly reading the old file. Three rules, all fail-closed and unchanged in substance:
+//!
+//! - a `source` naming **no `[sources]` key** is a refusal listing the names that exist;
+//! - an override naming **no `[sources]` key** is a refusal too — otherwise a typo in the name
+//!   leaves the config's own path quietly in force under a command line that says otherwise;
+//! - an override **never creates** a source. It replaces a path `[sources]` already writes, so a
 //!   closed vocabulary cannot be opened, and a view cannot acquire geometry, from the command line
 //!   alone.
 //!
@@ -168,11 +177,10 @@ const PUBLIC: &str = "public";
 /// The word that means *the container's gate is the whole of it*. It occupies a slot that otherwise
 /// takes a caller's label, so a label spelled this way is refused (§4).
 const INHERITED: &str = "inherited";
-/// **The identity field, declared once on `[corpus]` and defaulting to that name**
-/// (`configuration.md` §7). It is entity-space and shared: a point has one identity across every
-/// view it appears in, and it is what a member row names.
-/// The identity field, declared once on `[corpus]` and shared by every view
-/// (`configuration.md` §8). Not `entity`, which names the object rather than the value, and not
+/// **The canonical identity field** (`configuration.md` §8), which
+/// `[defaults].entity_id_field` moves for this declaration and each reader of one may move again.
+/// It is entity-space and shared: a point has one identity across every view it appears in, and it
+/// is what a member row names. Not `entity`, which names the object rather than the value, and not
 /// `id`, which collides with `tessera_id` and with an external id.
 pub const ENTITY_ID: &str = "entity_id";
 
@@ -183,8 +191,12 @@ pub const ENTITY_ID: &str = "entity_id";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    /// `[sources]` — the caller's own names for the files this declaration reads.
     #[serde(default)]
-    corpus: Option<CorpusBlock>,
+    sources: Option<BTreeMap<String, String>>,
+    /// `[defaults]` — what a block takes when it names neither of these itself.
+    #[serde(default)]
+    defaults: Option<DefaultsBlock>,
     #[serde(default)]
     view: Vec<ViewBlock>,
     #[serde(default)]
@@ -195,18 +207,22 @@ struct ConfigFile {
     layer: Vec<LayerBlock>,
 }
 
-/// `[corpus]` — entity space: identity and attributes, shared by every view.
+/// `[defaults]` — the source and the identity column a block takes when it names neither.
 ///
-/// Its source is where the declared attribute columns are read from, joined to the view's geometry
-/// by the identity field. The two are separate keys and may bind one file: that is the shape every
-/// fixture here uses, and it is why the attribute pass is a second pass over the same rows.
+/// **This is what `[corpus]` was, minus the constraint that made it a block.** `[corpus]` named
+/// the one file every attribute was read from and the one column its identity sat in, and nothing
+/// could say otherwise; here both are defaults and any block that reads a source or an entity id
+/// may write its own. What `[corpus]` guaranteed — that every attribute lands in one entity space
+/// — is guaranteed by the entity id and never was by the file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CorpusBlock {
+struct DefaultsBlock {
+    /// A name in `[sources]`, taken by a `[[view]]` or an `[[attribute]]` that names none.
     #[serde(default)]
     source: Option<String>,
+    /// The column an entity id is read from, wherever one is read under the canonical name.
     #[serde(default)]
-    fields: Option<BTreeMap<String, String>>,
+    entity_id_field: Option<String>,
 }
 
 /// `[[view]]` — one named coordinate system.
@@ -317,7 +333,8 @@ struct VocabularyBlock {
     reserved: Option<Vec<i64>>,
 }
 
-/// `[[attribute]]` — one per-point column, read from `[corpus]`'s source.
+/// `[[attribute]]` — one per-point column, read from the source it names or from
+/// `[defaults].source`.
 ///
 /// `deny_unknown_fields` throughout: a mistyped key in a disclosure control is the one class of
 /// typo that must not read as a default. `vocabluary = "severity"` under a serde that ignores
@@ -331,6 +348,14 @@ struct AttributeBlock {
     title: Option<String>,
     #[serde(default)]
     field: Option<String>,
+    /// The `[sources]` name this column is read from. Absent takes `[defaults].source`, and a
+    /// declaration with neither is refused: a column has to be read from somewhere.
+    #[serde(default)]
+    source: Option<String>,
+    /// The column this source spells the entity id in. Absent takes `[defaults].entity_id_field`,
+    /// which defaults to `entity_id` — a file carrying entity ids joins whatever it calls them.
+    #[serde(default)]
+    entity_id_field: Option<String>,
     #[serde(rename = "type", default)]
     ty: Option<String>,
     #[serde(default)]
@@ -572,8 +597,9 @@ struct SuppliedBlock {
 pub struct Config {
     /// Entity space: the attributes and the vocabularies they draw on.
     pub schema: Schema,
-    /// `[corpus]`: where the declared attribute columns are read from, once bound.
-    pub corpus: Corpus,
+    /// The declared attributes **grouped by the source they are read from**, in the order each
+    /// group's first attribute was declared. One group is one pass over one file.
+    pub attribute_sources: Vec<AttributeSource>,
     pub views: Vec<View>,
     /// In declaration order, which is registration order: a layer must be declared after every
     /// layer it names in `depends_on`.
@@ -596,16 +622,46 @@ pub struct Config {
     pub layer_sources: Vec<LayerSources>,
 }
 
-/// `[corpus]` — entity space, once its source is bound.
-#[derive(Debug, Clone, Default)]
-pub struct Corpus {
-    /// The file the declared attribute columns are read from, joined to the view's geometry by the
-    /// identity field. `None` when the config declares no source, which is legal and means the
-    /// object is declared and empty (`configuration.md` §2) — refused at a build that has
-    /// attributes to fill.
-    pub source: Option<PathBuf>,
-    /// Where the identity field sits in that file. Canonical is `entity_id`.
+/// One file the attribute pass reads, and which declared columns it carries.
+///
+/// **The grouping is the join.** Every attribute naming one source is read in one merge sweep
+/// over that file against this build's assigned ordinals, so a declaration whose columns sit in
+/// three files pays three passes rather than one impossible one. Two attributes sharing a file but
+/// joining on different identity columns are two groups, because the join key is half of what a
+/// group is.
+#[derive(Debug, Clone)]
+pub struct AttributeSource {
+    /// The caller's own name for the file, from `[sources]` — what a refusal and the coverage
+    /// report quote, because it is the word the caller wrote.
+    pub name: String,
+    /// The file itself, resolved against the declaring document and after any `--file` override.
+    pub path: PathBuf,
+    /// Where this source's identity field sits. Canonical is `entity_id`; `[defaults]` and each
+    /// attribute's own `entity_id_field` move it.
     pub fields: Fields,
+    /// Which of [`Schema::attributes`] this file carries, by index, in declaration order. Indices
+    /// rather than names because the scalar tail is stored positionally: the declaration's order
+    /// is the column order, and a group is a subset of it rather than a reordering.
+    pub attributes: Vec<usize>,
+}
+
+impl AttributeSource {
+    /// One group over every declared attribute, read from one file under canonical names.
+    ///
+    /// For a caller building arguments programmatically — the benches, the fixtures and the
+    /// correctness corpus — where the declaration would have been `[defaults].source` and nothing
+    /// else. Empty for an empty schema, which is the whole of what such a build acquires.
+    pub fn over(path: impl Into<PathBuf>, schema: &Schema) -> Vec<AttributeSource> {
+        if schema.is_empty() {
+            return Vec::new();
+        }
+        vec![AttributeSource {
+            name: "corpus".to_string(),
+            path: path.into(),
+            fields: Fields::canonical("the attribute source"),
+            attributes: (0..schema.attributes.len()).collect(),
+        }]
+    }
 }
 
 /// One layer's bound acquisition keys.
@@ -1200,7 +1256,7 @@ pub struct DeclaredValues {
 pub use tessera_store::manifest::Visibility;
 
 impl Attribute {
-    /// The column in `[corpus]`'s source this attribute's values are read from: the declared
+    /// The column in this attribute's source it is read from: the declared
     /// `field` where the declaration moved it, and the served `name` otherwise.
     ///
     /// **The served name and the source column are two different things**, which is the whole of
@@ -1223,12 +1279,12 @@ impl Vocabulary {
 }
 
 impl Config {
-    /// Parse `path`. Every `source` it declares resolves **relative to `path`'s own directory**,
-    /// and `overrides` — the `--file KEY=PATH` pairs, keyed by object — replaces one at a time
-    /// (`configuration.md` §3, §8).
+    /// Parse `path`. Every path `[sources]` writes resolves **relative to `path`'s own
+    /// directory**, and `overrides` — the `--file NAME=PATH` pairs, keyed by the source's own
+    /// name — replace one at a time (`configuration.md` §3, §8).
     ///
-    /// The fail-closed rules are §8's: a source with no path from anywhere is a refusal naming
-    /// the object, an override no object declares is a refusal too, and an override never
+    /// The fail-closed rules are §8's: a `source` naming no `[sources]` key is a refusal listing
+    /// the names that exist, an override naming no key is a refusal too, and an override never
     /// *creates* a source — so a closed vocabulary cannot be opened from the command line.
     pub fn parse(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
         let text = std::fs::read_to_string(path).map_err(|e| BuildError::io(path, e))?;
@@ -1238,21 +1294,22 @@ impl Config {
         // `path` has a parent unless it is a bare file name, where the document's own directory is
         // the working directory — which is what `Path::new("")` joins to.
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
-        let mut sources = Sources::new(base, overrides);
-        let corpus = compile_corpus(file.corpus.as_ref(), &mut sources)?;
-        let views = compile_views(&file.view, &mut sources)?;
-        let vocabularies = compile_vocabularies(&file.vocabulary, &mut sources)?;
+        let sources = Sources::compile(&base, file.sources.as_ref(), overrides)?;
+        let defaults = Defaults::compile(file.defaults.as_ref(), &sources)?;
+        let views = compile_views(&file.view, &sources, &defaults)?;
+        let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
         let attributes = compile_attributes(&file.attribute, &vocabularies)?;
+        let attribute_sources =
+            compile_attribute_sources(&file.attribute, &sources, &defaults)?;
         let (layers, layer_sources, label_layers) =
-            compile_layers(&file.layer, &views, &attributes, &mut sources)?;
-        sources.every_override_is_claimed()?;
+            compile_layers(&file.layer, &views, &attributes, &sources)?;
 
         Ok(Config {
             schema: Schema {
                 attributes,
                 vocabularies,
             },
-            corpus,
+            attribute_sources,
             views,
             layers,
             layer_sources,
@@ -1320,19 +1377,35 @@ impl Config {
             },
             default: declared.point_visibility.default.clone(),
         };
-        if !self.schema.is_empty() && self.corpus.source.is_none() {
+        // **Every declared column must have a file by now.** Declaring one with no source is
+        // legal (§2) and is the write-path deployment's normal state; a build that would have to
+        // read it is where the absence becomes a refusal, naming the columns rather than the block
+        // — which is what `[corpus]` could not do, there being one file for all of them.
+        let mut carried: Vec<usize> = self
+            .attribute_sources
+            .iter()
+            .flat_map(|s| s.attributes.iter().copied())
+            .collect();
+        carried.sort_unstable();
+        let unsourced: Vec<&str> = (0..self.schema.attributes.len())
+            .filter(|i| carried.binary_search(i).is_err())
+            .map(|i| self.schema.attributes[i].name.as_str())
+            .collect();
+        if !unsourced.is_empty() {
             return Err(declaration_error(format!(
-                "{} attribute(s) are declared and `[corpus]` names no `source`. The attribute pass \
-                 reads its columns from entity space, joined to the view's geometry by \
-                 `entity_id`, so there is no file for it to read. Write `[corpus]` with \
-                 `source = \"<path>\"` — usually the view's own file, where one file carries \
-                 identity, geometry and attributes together",
-                self.schema.attributes.len()
+                "{} attribute(s) name no `source` and `[defaults]` declares none: {}. The \
+                 attribute pass reads each column from the file its source names, joined to the \
+                 view's geometry by the entity id, so there is no file for these to be read from. \
+                 Name a `[sources]` key on each, or write `[defaults]` with `source = \"<name>\"` \
+                 for every column that does not. ⊘ Declaring a column with no source is legal and \
+                 means the schema is declared and empty, which is a bundle with no rows in it (§2) \
+                 and is not built",
+                unsourced.len(),
+                names(unsourced.iter().copied())
             )));
         }
         Ok(Acquisition {
-            corpus: self.corpus.source.clone(),
-            corpus_fields: self.corpus.fields.clone(),
+            attribute_sources: self.attribute_sources.clone(),
             extent: declared.extent,
             points,
             point_fields: declared.fields.clone(),
@@ -1349,12 +1422,10 @@ pub struct Acquisition {
     /// The built view's `extent`, as declared. [`resolve_extent`] turns [`Extent::Auto`] into
     /// [`Bounds`] by reading [`Acquisition::points`]; every other spelling is already the answer.
     pub extent: Extent,
-    /// `[corpus].source`: identity and the declared attribute columns. `None` where the config
-    /// declares no corpus source, which is legal only for an empty schema — a declared attribute
-    /// with no file to read it from is refused above.
-    pub corpus: Option<PathBuf>,
-    /// Where `[corpus]`'s identity field sits in that file.
-    pub corpus_fields: Fields,
+    /// The declared attributes grouped by the file each is read from — one pass per group, joined
+    /// to the view's geometry by the identity column each group names. Empty for an empty schema;
+    /// an attribute with no file to read it from is refused at parse.
+    pub attribute_sources: Vec<AttributeSource>,
     /// The built view's `source`: identity and geometry.
     pub points: PathBuf,
     /// Where the view's identity and geometry fields sit in that file.
@@ -1440,97 +1511,161 @@ impl Schema {
 // Acquisition, refused rather than ignored
 // ---------------------------------------------------------------------------------------------
 
-/// Every source in the document, resolved against the directory that declares them, with
-/// `--file KEY=PATH` overriding one at a time (`configuration.md` §3, §8).
+/// `[sources]` — the caller's own names for the files this declaration reads, each resolved
+/// against the directory that declares them and each overridable by `--file NAME=PATH`
+/// (`configuration.md` §3, §8).
 ///
-/// **A path relative to the config, not a logical key.** The rule the earlier binding-only shape
-/// was protecting is narrower than it was written: what must not appear is an **absolute or
-/// machine-specific** path, and a relative one is neither — it travels in git with the file that
-/// describes it. So the ordinary invocation names no files at all, and `--file` is what a
-/// deployment staging one source elsewhere reaches for.
+/// **A name, not a path repeated.** Every `source` elsewhere in the document names one of these
+/// keys, so a file three blocks read is written once and moved once. The keys are the caller's own
+/// words rather than an object path the parser synthesises: `points`, `geometry`, `scores` are
+/// what the declaration is about, and `view:s0:point_visibility` was what the parser happened to
+/// call one of its readers.
 ///
-/// **The override key is the object, not the file.** `corpus`, `view:s0`,
-/// `view:s0:point_visibility`, `vocabulary:severity`, `layer:clusters/a`,
-/// `layer:clusters/a:members` — registered by whichever declaration owns the source, which is
-/// what makes an override naming nothing detectable. Without that check a mistyped key would
-/// leave the config's own path quietly in force under a command line that says otherwise, which
-/// is the one failure an override must not have.
-struct Sources<'a> {
-    /// The declaring document's directory. Every relative `source` resolves against it, so the
-    /// same config describes the same corpus from any working directory.
-    base: PathBuf,
-    /// `--file KEY=PATH`, keyed by object.
-    overrides: &'a HashMap<String, PathBuf>,
-    /// Which override key each declared source registered, and the object that declared it — the
-    /// second half is the message when an override names nothing.
-    claimed: BTreeMap<String, String>,
+/// **There is no name-or-path fallback.** A `source` that names no key here is a refusal listing
+/// the names that exist, because the alternative — reading an unmatched name as a relative path —
+/// makes a typo a file that does not exist rather than a declaration that does not resolve, and
+/// the message then comes from a file reader instead of from the declaration.
+///
+/// **A path relative to the document, and an absolute one refused.** What must not appear is a
+/// machine-specific path: a config carrying `/mnt/scratch/…` describes a corpus that exists on one
+/// machine, and `--file` is where that path belongs — on the command line that knows about the
+/// machine.
+///
+/// **`--file NAME=PATH` moves everything reading that source at once**, which is the point of
+/// naming them: the previous shape keyed an override by the *object*, so staging one file that
+/// three objects read meant three overrides and missing one left that object quietly reading the
+/// old file. Two rules survive from it, both fail-closed: an override naming no key in `[sources]`
+/// is a refusal listing the keys that exist, and an override never *creates* a source — it
+/// replaces a path the declaration already wrote.
+struct Sources {
+    /// Every declared name, resolved: the override where one was given, otherwise the declared
+    /// path joined to the document's own directory.
+    paths: BTreeMap<String, PathBuf>,
 }
 
-impl<'a> Sources<'a> {
-    fn new(base: PathBuf, overrides: &'a HashMap<String, PathBuf>) -> Self {
-        Sources {
-            base,
-            overrides,
-            claimed: BTreeMap::new(),
-        }
-    }
-
-    /// Resolve one declared `source`. `key` is the override key this object registers; `object`
-    /// is how the object is named in a refusal.
-    fn resolve(&mut self, key: &str, object: &str, source: &str) -> Result<PathBuf> {
-        if source.trim().is_empty() {
-            return Err(declaration_error(format!(
-                "{object}: `source` is empty. It is a path to this object's data, relative to \
-                 this config; omit it to declare the object with no data"
-            )));
-        }
-        let declared = Path::new(source);
-        // **An absolute path is refused rather than honoured** (`configuration.md` §3, §4). It is
-        // the one shape that cannot travel with the document: a config carrying `/mnt/scratch/…`
-        // describes a corpus that exists on one machine, and the next reader of the repository
-        // gets a refusal from the file reader rather than from the declaration. `--file` is where
-        // a machine-specific path belongs, on the command line that knows about the machine.
-        if declared.is_absolute() {
-            return Err(declaration_error(format!(
-                "{object}: `source = \"{source}\"` is an absolute path. A source is written \
-                 relative to this config so it travels in git with the declaration around it. \
-                 Move the file beside the config and name it relatively, or override this one on \
-                 the command line: `--file {key}={source}`"
-            )));
-        }
-        if let Some(already) = self.claimed.insert(key.to_string(), object.to_string()) {
-            // Reachable only if two objects would answer to one override key — a view literally
-            // named `s0:point_visibility` beside a view named `s0`. Refused rather than resolved
-            // by order: `--file` would otherwise replace whichever of the two registered last.
-            return Err(declaration_error(format!(
-                "{object} and {already} would both answer to the override key '{key}', so \
-                 `--file {key}=<path>` could not say which source it replaces. Rename one of them"
-            )));
-        }
-        if let Some(path) = self.overrides.get(key) {
-            return Ok(path.clone());
-        }
-        Ok(self.base.join(declared))
-    }
-
-    /// Every `--file` override replaces a source some object declares.
-    ///
-    /// **The check that makes an override safe.** A binding that matches nothing would otherwise
-    /// leave the declaration's own path in force — the build would read the file the config names
-    /// and report success, under a command line asking for a different corpus.
-    fn every_override_is_claimed(&self) -> Result<()> {
-        for key in self.overrides.keys() {
-            if !self.claimed.contains_key(key) {
+impl Sources {
+    /// Resolve `[sources]` against the declaring document's directory and the `--file` overrides.
+    fn compile(
+        base: &Path,
+        declared: Option<&BTreeMap<String, String>>,
+        overrides: &HashMap<String, PathBuf>,
+    ) -> Result<Sources> {
+        let mut paths = BTreeMap::new();
+        for (name, source) in declared.into_iter().flatten() {
+            if name.trim().is_empty() {
+                return Err(declaration_error(
+                    "[sources]: a source with an empty name. The key is the name every `source` \
+                     in this declaration writes to reach the file",
+                ));
+            }
+            if source.trim().is_empty() {
                 return Err(declaration_error(format!(
-                    "--file '{key}=…' names no source in this config. `--file` overrides a source \
-                     an object already declares, keyed by the object: {}. It never creates one — \
-                     a source that exists only on the command line would be a corpus the \
-                     declaration does not describe",
-                    names(self.claimed.keys().map(String::as_str))
+                    "[sources].{name} is empty, so it names no file. It is a path to the file, \
+                     relative to this config; drop the entry if nothing reads it"
                 )));
             }
+            let declared = Path::new(source);
+            if declared.is_absolute() {
+                return Err(declaration_error(format!(
+                    "[sources].{name} = \"{source}\" is an absolute path. A source is written \
+                     relative to this config so it travels in git with the declaration around it. \
+                     Move the file beside the config and name it relatively, or override this one \
+                     on the command line: `--file {name}={source}`"
+                )));
+            }
+            paths.insert(name.clone(), base.join(declared));
         }
-        Ok(())
+        // Sorted, so a command line with two unmatched names refuses on the same one every time:
+        // a message that varies with a hash order is a message an operator cannot compare.
+        let mut given: Vec<(&String, &PathBuf)> = overrides.iter().collect();
+        given.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (name, path) in given {
+            // **An override replaces a path; it never writes a new name.** A key `[sources]` does
+            // not declare would otherwise leave every `source` in the document pointing where it
+            // always did, under a command line asking for a different file — the one failure an
+            // override must not have.
+            if !paths.contains_key(name) {
+                return Err(declaration_error(format!(
+                    "--file '{name}=…' names no source in this declaration. `--file` overrides a \
+                     path `[sources]` already writes, keyed by the source's own name: {}. It never \
+                     creates one — a source that exists only on the command line would be a corpus \
+                     the declaration does not describe",
+                    names(paths.keys().map(String::as_str))
+                )));
+            }
+            paths.insert(name.clone(), path.clone());
+        }
+        Ok(Sources { paths })
+    }
+
+    /// The file `source` names, or a refusal listing the names that exist. `object` is how the
+    /// declaration that named it is quoted back.
+    fn path(&self, object: &str, source: &str) -> Result<PathBuf> {
+        if source.trim().is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: `source` is empty. It names a key of `[sources]`, which is where the \
+                 path lives; omit it to declare the object with no data"
+            )));
+        }
+        self.paths.get(source).cloned().ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `source = \"{source}\"` names no key in `[sources]`. Declared: {}. A \
+                 source is a name rather than a path — a name this table does not carry is refused \
+                 rather than read as a relative path, which would turn a typo into a missing file \
+                 instead of a declaration that does not resolve",
+                names(self.paths.keys().map(String::as_str))
+            ))
+        })
+    }
+}
+
+/// `[defaults]` — the source and the identity column a block takes when it names neither.
+///
+/// **Two defaults, and they reach different blocks on purpose.** `entity_id_field` reaches every
+/// source read under the canonical `entity_id`: it says how this caller spells identity, and a
+/// corpus does not spell it three ways across three files. `source` reaches only the two blocks
+/// whose absent source is *nothing at all* — a `[[view]]`'s geometry and an `[[attribute]]`'s
+/// column, each of which a build has to read from somewhere. It deliberately does **not** reach a
+/// vocabulary, a layer, a `[layer.members]` block or a `point_visibility`, because there an absent
+/// source is itself a declaration: a vocabulary that mints rather than reads, a layer declared and
+/// empty, a membership that is not stored, labels that ride the points' own column. Filling one of
+/// those in would turn a declaration into an acquisition nobody wrote.
+#[derive(Debug, Clone)]
+struct Defaults {
+    /// The `[sources]` name, already checked to exist.
+    source: Option<String>,
+    /// The column an entity id is read from. `entity_id` where the declaration says nothing.
+    entity_id_field: String,
+}
+
+impl Defaults {
+    fn compile(block: Option<&DefaultsBlock>, sources: &Sources) -> Result<Defaults> {
+        let Some(block) = block else {
+            return Ok(Defaults {
+                source: None,
+                entity_id_field: ENTITY_ID.to_string(),
+            });
+        };
+        if let Some(source) = &block.source {
+            // Checked here rather than where it is taken, so a `[defaults]` naming nothing is one
+            // refusal quoting `[defaults]` instead of the same refusal quoting every block that
+            // took it.
+            sources.path("[defaults]", source)?;
+        }
+        let entity_id_field = match block.entity_id_field.as_deref() {
+            None => ENTITY_ID.to_string(),
+            Some(field) if field.trim().is_empty() => {
+                return Err(declaration_error(
+                    "[defaults]: `entity_id_field` is empty, so it names no column. Omit it to \
+                     read the entity id under its own name, `entity_id`",
+                ))
+            }
+            Some(field) => field.to_string(),
+        };
+        Ok(Defaults {
+            source: block.source.clone(),
+            entity_id_field,
+        })
     }
 }
 
@@ -1635,14 +1770,25 @@ impl Fields {
 }
 
 /// Check one object's `fields` map — every name known, every name declared — and resolve it.
+///
+/// `entity_id` is where this declaration spells the identity column — `[defaults]`'s, or the
+/// canonical name. **Folded into the resolved map rather than consulted by the reader**, so an
+/// object whose own map moves `entity_id` keeps its own answer and every reader below this asks
+/// one question instead of two.
 fn check_fields(
     object: &str,
     source: Option<&PathBuf>,
     known: &[KnownField],
     map: Option<&BTreeMap<String, String>>,
+    entity_id: &str,
 ) -> Result<Fields> {
+    let takes_entity_id = known.iter().any(|f| f.name == ENTITY_ID);
     let Some(map) = map else {
-        return Ok(Fields::canonical(object));
+        let mut fields = Fields::canonical(object);
+        if takes_entity_id && entity_id != ENTITY_ID {
+            fields.map.insert(ENTITY_ID.to_string(), entity_id.to_string());
+        }
+        return Ok(fields);
     };
     // A map with no source names the fields of nothing. Refused rather than kept for a source that
     // may arrive later: the object reads no file at all, so every entry in it is inert.
@@ -1676,9 +1822,17 @@ fn check_fields(
             )));
         }
     }
+    let mut resolved = map.clone();
+    if takes_entity_id && entity_id != ENTITY_ID {
+        // The object's own map wins: `[defaults]` says how this declaration usually spells
+        // identity, and a block naming its own column has said otherwise.
+        resolved
+            .entry(ENTITY_ID.to_string())
+            .or_insert_with(|| entity_id.to_string());
+    }
     Ok(Fields {
         object: object.to_string(),
-        map: map.clone(),
+        map: resolved,
     })
 }
 
@@ -1815,37 +1969,78 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
 }
 
 // ---------------------------------------------------------------------------------------------
-// The corpus
+// Attribute sources
 // ---------------------------------------------------------------------------------------------
 
-/// `[corpus]` — entity space: identity and the declared attribute columns.
+/// Group the declared attributes by the file each is read from, and the column each joins on.
 ///
-/// **One identity field, declared once and shared by every view** (`configuration.md` §7). Not
-/// `entity`, which names the object rather than the value, and not `id`, which collides with
-/// `tessera_id` and with an external id. A point has one identity across every view it appears in,
-/// and it is what a member row names.
-fn compile_corpus(block: Option<&CorpusBlock>, sources: &mut Sources) -> Result<Corpus> {
-    let Some(block) = block else {
-        return Ok(Corpus::default());
-    };
-    let source = match &block.source {
-        Some(declared) => Some(sources.resolve("corpus", "[corpus]", declared)?),
-        None => None,
-    };
-    let fields = check_fields(
-        "[corpus]",
-        source.as_ref(),
-        &[KnownField::always(ENTITY_ID)],
-        block.fields.as_ref(),
-    )?;
-    Ok(Corpus { source, fields })
+/// **The grouping is what replaced `[corpus]`.** That block named one file every attribute was
+/// read from, and the constraint was arbitrary: what it guaranteed — that every attribute lands in
+/// one entity space — is guaranteed by the entity id and never was by the file. So a column may
+/// name its own `source` and its own `entity_id_field`, and the build runs the attribute pass once
+/// per `(source, identity column)` pair rather than once over one file.
+///
+/// Groups come out in the order each group's **first** attribute was declared, and each group's
+/// indices ascend. That order is not cosmetic anywhere it is read: the scalar tail is stored
+/// positionally, so a group is a subset of the declaration order rather than a reordering of it.
+fn compile_attribute_sources(
+    blocks: &[AttributeBlock],
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<Vec<AttributeSource>> {
+    let mut groups: Vec<AttributeSource> = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let object = format!("attribute '{}'", block.name);
+        // **An attribute with no source at all is legal to *declare*** (`configuration.md` §2):
+        // a deployment that writes through the service declares its columns and acquires nothing,
+        // and the empty bundle is what carries the schema. A build that has to read the column is
+        // where that becomes a refusal ([`Config::acquire`]), naming the columns with nowhere to
+        // read from.
+        let name = match (&block.source, &defaults.source) {
+            (Some(declared), _) => declared.clone(),
+            (None, Some(fallback)) => fallback.clone(),
+            (None, None) => continue,
+        };
+        let path = sources.path(&object, &name)?;
+        let entity_id = match block.entity_id_field.as_deref() {
+            None => defaults.entity_id_field.clone(),
+            Some(field) if field.trim().is_empty() => {
+                return Err(declaration_error(format!(
+                    "{object}: `entity_id_field` is empty, so it names no column. Omit it to join \
+                     on '{}', which is what this declaration spells the entity id",
+                    defaults.entity_id_field
+                )))
+            }
+            Some(field) => field.to_string(),
+        };
+        match groups
+            .iter_mut()
+            .find(|g| g.name == name && g.fields.of(ENTITY_ID) == entity_id)
+        {
+            Some(group) => group.attributes.push(index),
+            None => groups.push(AttributeSource {
+                name: name.clone(),
+                path,
+                fields: Fields::moved(
+                    format!("source '{name}'"),
+                    [(ENTITY_ID.to_string(), entity_id)],
+                ),
+                attributes: vec![index],
+            }),
+        }
+    }
+    Ok(groups)
 }
 
 // ---------------------------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------------------------
 
-fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View>> {
+fn compile_views(
+    blocks: &[ViewBlock],
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<Vec<View>> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut views = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -1861,10 +2056,16 @@ fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View
             )));
         }
         let object = format!("view '{}'", block.name);
-        let key = format!("view:{}", block.name);
+        // **A view with no `source` takes `[defaults].source`**, and a declaration with neither is
+        // still legal here: a view declared and empty is the normal state for a deployment that
+        // writes through the service (`configuration.md` §2). It becomes a refusal at
+        // [`Config::acquire`], where a build asks for the file.
         let source = match &block.source {
-            Some(declared) => Some(sources.resolve(&key, &object, declared)?),
-            None => None,
+            Some(declared) => Some(sources.path(&object, declared)?),
+            None => match &defaults.source {
+                Some(name) => Some(sources.path(&object, name)?),
+                None => None,
+            },
         };
         // **The two geometry shapes are mutually exclusive** (§1): a row carries `x`/`y` or
         // `morton`/`residual`, and a map naming one of each says the file carries both — which the
@@ -1881,6 +2082,7 @@ fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View
                 KnownField::always("residual"),
             ],
             block.fields.as_ref(),
+            &defaults.entity_id_field,
         )?;
         if let Some(fields) = &block.fields {
             let quantised = fields.contains_key("x") || fields.contains_key("y");
@@ -1947,11 +2149,9 @@ fn compile_views(blocks: &[ViewBlock], sources: &mut Sources) -> Result<Vec<View
             )));
         }
         let labels = match &point.source {
-            Some(declared) => Some(sources.resolve(
-                &format!("{key}:point_visibility"),
-                &format!("{object} point_visibility"),
-                declared,
-            )?),
+            Some(declared) => {
+                Some(sources.path(&format!("{object} point_visibility"), declared)?)
+            }
             None => None,
         };
         let default = point.default.as_deref().ok_or_else(|| {
@@ -2018,7 +2218,7 @@ fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
 
 fn compile_vocabularies(
     blocks: &[VocabularyBlock],
-    sources: &mut Sources,
+    sources: &Sources,
 ) -> Result<HashMap<String, Vocabulary>> {
     let mut compiled: HashMap<String, Vocabulary> = HashMap::new();
     for block in blocks {
@@ -2035,12 +2235,10 @@ fn compile_vocabularies(
             )));
         }
         let object = format!("vocabulary '{}'", block.name);
+        // **No `[defaults].source` here**: a vocabulary with no source is one that mints rather
+        // than reads, and supplying it a file would open a value set nobody opened.
         let source = match &block.source {
-            Some(declared) => Some(sources.resolve(
-                &format!("vocabulary:{}", block.name),
-                &object,
-                declared,
-            )?),
+            Some(declared) => Some(sources.path(&object, declared)?),
             None => None,
         };
         // A `code` field pins the codes and its absence assigns them, which is why it is *always*
@@ -2055,6 +2253,7 @@ fn compile_vocabularies(
                 KnownField::always("title"),
             ],
             block.fields.as_ref(),
+            ENTITY_ID,
         )?;
 
         let width_name = block.width.as_deref().ok_or_else(|| {
@@ -2678,7 +2877,7 @@ fn compile_layers(
     declared: &[LayerBlock],
     views: &[View],
     attributes: &[Attribute],
-    sources: &mut Sources,
+    sources: &Sources,
 ) -> Result<CompiledLayers> {
     // Sugar first, so nothing below this line knows a label layer from a layer.
     let (blocks, from_labels) = expand_labels(declared)?;
@@ -2830,10 +3029,10 @@ fn compile_layers(
                  question"
             )));
         }
+        // **No `[defaults].source` here either**: a layer with no source is declared and empty,
+        // which is the normal state for a deployment that writes its artifacts through the service.
         let source = match &block.source {
-            Some(declared) => {
-                Some(sources.resolve(&format!("layer:{}", block.name), &object, declared)?)
-            }
+            Some(declared) => Some(sources.path(&object, declared)?),
             None => None,
         };
         // **An inline row is already the canonical spelling**, so there is nothing for a map to
@@ -2957,6 +3156,7 @@ fn compile_layers(
                 ),
             ],
             block.fields.as_ref(),
+            ENTITY_ID,
         )?;
 
         let members = match members_block {
@@ -2971,11 +3171,7 @@ fn compile_layers(
                     )));
                 }
                 let path = match &members.source {
-                    Some(declared) => Some(sources.resolve(
-                        &format!("layer:{}:members", block.name),
-                        &object,
-                        declared,
-                    )?),
+                    Some(declared) => Some(sources.path(&object, declared)?),
                     None => None,
                 };
                 // **The artifacts are the roster** (`layers`): a member row names an artifact, and
@@ -3011,6 +3207,7 @@ fn compile_layers(
                         ),
                     ],
                     members.fields.as_ref(),
+                    ENTITY_ID,
                 )?;
                 path.map(|path| MemberSource { path, fields })
             }

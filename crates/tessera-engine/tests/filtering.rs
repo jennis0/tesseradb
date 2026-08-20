@@ -273,9 +273,8 @@ fn fixture() -> Fixture {
 
     build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.clone(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: bundle.clone(),
         extent: extent(),

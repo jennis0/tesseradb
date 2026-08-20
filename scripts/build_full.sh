@@ -53,16 +53,20 @@ fi
 
 # The declaration this build compiles: one view over the scaled geometry, its points' labels in the
 # exploded relation beside it, and the identity extent the Morton branch requires. No attributes —
-# the geometry file carries none — so no `[corpus]`. Written into `data/scaled/` rather than
-# checked in because the sources it names sit there, and a `source` is a path relative to the
-# document declaring it (configuration.md §3).
+# the geometry file carries none, so nothing declares a `[[attribute]]`. Written into
+# `data/scaled/` rather than checked in because the paths `[sources]` writes sit there, and a path
+# there is relative to the document declaring it (configuration.md §3).
 CONFIG="$ROOT/data/scaled/build-full.config.toml"
 cat > "$CONFIG" <<'TOML'
+[sources]
+geometry = "geometry.parquet"
+labels   = "pairs/categories-subclass.pairs.parquet"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 65536.0 }
-source           = "geometry.parquet"
-point_visibility = { source = "pairs/categories-subclass.pairs.parquet", default = "public" }
+source           = "geometry"
+point_visibility = { source = "labels", default = "public" }
 TOML
 
 # The deployment file both verbs read. Generated per machine and never committed, so its paths are

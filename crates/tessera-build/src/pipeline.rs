@@ -1253,8 +1253,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // pins; the scan mints into it for every novel key, and its final state — carried past this
     // call — is what step 11 below records into `MANIFEST.vocabularies`.
     let mut minters = args.schema.open_minters();
-    let attributes_by_entity =
+    let (attributes_by_entity, coverage) =
         read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
+    // **Printed here, where the join has just happened and the numbers are the join's own.** The
+    // linear build reports the identical figures from its own pass, so the two builds agree about
+    // coverage exactly as they agree about bytes.
+    crate::report_attribute_coverage(&coverage);
 
     // Layers and their artifacts, resolved here for the reason the attribute tail is: this is
     // where the two structures that turn a source id into the entity this build assigned it are
@@ -1484,22 +1488,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     Ok(report)
 }
 
-/// Read the declared attribute columns into **entity-major** vectors, one per declared attribute.
-///
-/// Resolved through `source_ids` → ordinal → `entity_of_ordinal`, exactly as the geometry pass
-/// above resolves its own rows, and for the same reason: entity ids are assigned in
-/// signature-sorted order (§11.1), so a source id is not its own entity id and a direct index
-/// hands every item another item's attributes. That is a defect with no symptom — every value is
-/// present, every value is well-typed, and every value belongs to a different item.
-///
-/// Returns an empty vector when the schema declares nothing, which is what keeps a schema-less
-/// build's `columns.arrow` byte-identical to the one it wrote before this existed.
-///
-/// **Every entity must be visited.** A source row this pass misses would leave its entity's slot
-/// at the type's zero — indistinguishable from a legitimately absent value, in a column that
-/// reports no error. The count is checked rather than trusted: this is a *third* pass over the
-/// points file, and a file that changed under the build is exactly what the geometry pass's own
-/// anchor check exists to catch.
 /// One attribute's values in entity order: a typed column, with presence beside it.
 ///
 /// **This replaced a `Vec<ScalarValue>` per column, and the difference is the whole reason a build
@@ -1622,15 +1610,34 @@ impl EntityColumn {
     }
 }
 
+/// Read the declared attribute columns into **entity-major** vectors, one per declared attribute,
+/// with one pass per attribute source.
+///
+/// Resolved through `source_ids` → ordinal → `entity_of_ordinal`, exactly as the geometry pass
+/// above resolves its own rows, and for the same reason: entity ids are assigned in
+/// signature-sorted order (§11.1), so a source id is not its own entity id and a direct index
+/// hands every item another item's attributes. That is a defect with no symptom — every value is
+/// present, every value is well-typed, and every value belongs to a different item.
+///
+/// Returns an empty vector when the schema declares nothing, which is what keeps a schema-less
+/// build's `columns.arrow` byte-identical to the one it wrote before this existed.
+///
+/// **An entity this pass never reaches keeps an absent slot, and that is a report rather than a
+/// failure** (`configuration.md` §1). The columns are filled absent before a row is read, so a
+/// column no source names for an entity is *absent* — the same state the source's own null
+/// produces, and the one every consumer already reads. Which entities came away with a value, and
+/// how many rows named entities this build never loaded, are counted per source and printed:
+/// a source covering a subset is a column that is simply absent for the rest, and a source
+/// covering a superset is the ordinary shape of a table that lives elsewhere.
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
-) -> Result<Vec<EntityColumn>> {
+) -> Result<(Vec<EntityColumn>, Vec<crate::AttributeCoverage>)> {
     if args.schema.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let attributes = &args.schema.attributes;
     // One typed column per attribute, indexed by entity — see [`EntityColumn`] for why this is not
@@ -1639,8 +1646,50 @@ fn read_attributes_by_entity(
         .iter()
         .map(|a| EntityColumn::filled(a.ty, n as usize))
         .collect();
-    let mut seen = 0u64;
-    let mut unknown: Option<u64> = None;
+    // **One sweep per source, not one over a single corpus file.** Each declared attribute names
+    // the file it is read from, so the groups are the passes; a build whose columns sit in three
+    // files reads three files, and each one joins on the identity column its own group declared.
+    let mut coverage = Vec::with_capacity(args.attribute_sources.len());
+    for group in &args.attribute_sources {
+        read_one_attribute_source(
+            args,
+            group,
+            n,
+            source_ids,
+            entity_of_ordinal,
+            minters,
+            &mut by_entity,
+            &mut coverage,
+        )?;
+    }
+    Ok((by_entity, coverage))
+}
+
+/// One attribute source's merge sweep into the entity-major columns.
+#[allow(clippy::too_many_arguments)]
+fn read_one_attribute_source(
+    args: &BuildArgs,
+    group: &crate::config::AttributeSource,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    by_entity: &mut [EntityColumn],
+    coverage: &mut Vec<crate::AttributeCoverage>,
+) -> Result<()> {
+    let columns: Vec<&crate::config::Attribute> = group
+        .attributes
+        .iter()
+        .map(|&i| &args.schema.attributes[i])
+        .collect();
+    let attributes = &columns;
+    let mut matched_rows = 0u64;
+    // **Counted, not refused** (`configuration.md` §1). A row naming an entity this build did not
+    // load is what a join does with a source that covers a superset — which every legitimate
+    // attribute table over a limited build is — and ignoring it is fail-closed in both directions
+    // that matter: an absent attribute matches fewer points in a filter, and an absent access
+    // label leaves a point visible to nobody.
+    let mut unknown_rows = 0u64;
     // A value whose tag is not its column's is a build defect, not an input one, and `set` is the
     // only place that can see it. Captured rather than unwrapped: the scan's callback cannot fail,
     // and a panic here would report the row rather than the column that is wrong.
@@ -1674,39 +1723,51 @@ fn read_attributes_by_entity(
         .collect();
     let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
 
+    // How many entities came away with a value in each of this group's columns — counted where the
+    // value is moved across, which is the only place presence is known without a second scan.
+    let mut present = vec![0u64; attributes.len()];
+
     // Everything mutable is a parameter rather than a capture, so the scan's callback and this can
     // both hold it — the shape the geometry pass's `resolve` uses, and for the same borrow reason.
     let resolve = |chunk: &mut Vec<(u64, u32)>,
                    staged: &mut [EntityColumn],
                    by_entity: &mut [EntityColumn],
-                   seen: &mut u64,
-                   unknown: &mut Option<u64>| {
-        join_chunk(chunk, source_ids, |ordinal, source_id, pos| {
+                   matched: &mut u64,
+                   unknown: &mut u64,
+                   present: &mut [u64]| {
+        join_chunk(chunk, source_ids, |ordinal, _source_id, pos| {
             let Some(ordinal) = ordinal else {
-                unknown.get_or_insert(source_id);
+                *unknown += 1;
                 return Ok(());
             };
             let entity = entity_of_ordinal[ordinal as usize] as usize;
-            *seen += 1;
-            for ((column, src), attribute) in by_entity
-                .iter_mut()
+            *matched += 1;
+            // **Indexed rather than zipped**, because a group's columns are a subsequence of the
+            // declaration: the staged buffer is this group's, and each of its columns lands in the
+            // slot the declaration gave that attribute.
+            for ((&column, src), count) in group
+                .attributes
+                .iter()
                 .zip(staged.iter_mut())
-                .zip(attributes.iter())
+                .zip(present.iter_mut())
             {
-                column
-                    .take_from(entity, src, pos as usize, &attribute.name)
-                    .map_err(|e| {
-                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                    })?;
+                if src.is_present(pos as usize) {
+                    *count += 1;
+                }
+                let name = &args.schema.attributes[column].name;
+                by_entity[column]
+                    .take_from(entity, src, pos as usize, name)
+                    .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?;
             }
             Ok(())
         })
     };
 
     input::scan_attributes(
-        crate::corpus_source(args)?,
-        &args.corpus_fields,
+        &group.path,
+        &group.fields,
         &args.schema,
+        attributes,
         minters,
         args.limit,
         |source_id, values| {
@@ -1723,9 +1784,10 @@ fn read_attributes_by_entity(
                 if let Err(e) = resolve(
                     &mut chunk,
                     &mut staged,
-                    &mut by_entity,
-                    &mut seen,
-                    &mut unknown,
+                    by_entity,
+                    &mut matched_rows,
+                    &mut unknown_rows,
+                    &mut present,
                 ) {
                     failure = Some(e);
                 }
@@ -1736,9 +1798,10 @@ fn read_attributes_by_entity(
         if let Err(e) = resolve(
             &mut chunk,
             &mut staged,
-            &mut by_entity,
-            &mut seen,
-            &mut unknown,
+            by_entity,
+            &mut matched_rows,
+            &mut unknown_rows,
+            &mut present,
         ) {
             failure = Some(e);
         }
@@ -1751,19 +1814,18 @@ fn read_attributes_by_entity(
     if let Some(message) = mistyped {
         return Err(BuildError::Invalid(message));
     }
-    if let Some(source_id) = unknown {
-        return Err(input_changed(&format!(
-            "the points file's attribute pass names entity {source_id}, which its first pass did \
-             not"
-        )));
-    }
-    if seen != n {
-        return Err(input_changed(&format!(
-            "the points file's attribute pass yielded {seen} rows, but its first pass selected \
-             {n} — some row would carry a value that is absent only because it was never read"
-        )));
-    }
-    Ok(by_entity)
+    coverage.push(crate::AttributeCoverage {
+        source: group.name.clone(),
+        entities: n,
+        matched_rows,
+        unknown_rows,
+        columns: attributes
+            .iter()
+            .zip(&present)
+            .map(|(a, &count)| (a.name.clone(), count))
+            .collect(),
+    });
+    Ok(())
 }
 
 /// Write the entity-space filter postings for every column declared `index = true`, and

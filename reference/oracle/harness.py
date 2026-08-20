@@ -324,9 +324,10 @@ def _fixture_config_text(view_id: str, extent: str) -> str:
     cell wrong, and the bundle well-formed.
     """
     return (
+        '[sources]\npoints = "points.parquet"\npairs = "pairs.parquet"\n\n'
         f'[[view]]\nname = "{view_id}"\n{_extent_toml(extent)}\n'
-        'source = "points.parquet"\n'
-        'point_visibility = { source = "pairs.parquet", default = "public" }\n'
+        'source = "points"\n'
+        'point_visibility = { source = "pairs", default = "public" }\n'
     )
 
 
@@ -352,9 +353,9 @@ def _fixture_build_argv(
         "--deployment",
         str(_fixture_deployment_path(bundle_root)),
         "--file",
-        f"view:{view_id}={points}",
+        f"points={points}",
         "--file",
-        f"view:{view_id}:point_visibility={pairs}",
+        f"pairs={pairs}",
         "--out",
         str(bundle_root),
     ]

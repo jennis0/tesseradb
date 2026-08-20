@@ -85,6 +85,21 @@ fn write_pairs(path: &Path) {
 /// The coordinate system every fixture layer here is drawn on. Held apart from the layer blocks
 /// so a test can reorder or rewrite those without disturbing the view they all name.
 const VIEW_TOML: &str = r#"
+[sources]
+points            = "points.parquet"
+clusters          = "clusters.parquet"
+clusters_members  = "clusters_members.parquet"
+cluster_members   = "cluster_members.parquet"
+topics            = "topics.parquet"
+topics_members    = "topics_members.parquet"
+tree              = "tree.parquet"
+tree_members      = "tree_members.parquet"
+admin             = "admin.parquet"
+admin_members     = "admin_members.parquet"
+curated           = "curated.parquet"
+curated_members   = "curated_members.parquet"
+roster            = "roster.parquet"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
@@ -97,7 +112,7 @@ const LAYERS_TOML: &str = r#"
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
-source = "clusters.parquet"
+source = "clusters"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -106,13 +121,13 @@ hierarchy = { kind = "flat", prune_children = false }
 content = { computed = ["centroid"] }
 
   [layer.members]
-  source = "clusters_members.parquet"
+  source = "clusters_members"
 
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
-source = "topics.parquet"
+source = "topics"
 membership = "enumerated"
 visibility = "public"
 artifact_visibility = { default = "inherited" }
@@ -121,7 +136,7 @@ hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
   [layer.members]
-  source = "topics_members.parquet"
+  source = "topics_members"
 
   [[layer.content.supplied]]
   name = "topic"
@@ -280,9 +295,8 @@ fn inputs() -> Inputs {
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: inputs.points.clone(),
-        corpus: Some(inputs.points.clone()),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
         out: out.to_path_buf(),
         extent: extent(),
@@ -578,7 +592,7 @@ const TREED_LAYERS_TOML: &str = r#"
 name = "clusters/tree"
 title = "a hierarchy"
 views = ["s0"]
-source = "tree.parquet"
+source = "tree"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -587,7 +601,7 @@ hierarchy = { kind = "nested", prune_children = false }
 content = { computed = ["centroid"] }
 
   [layer.members]
-  source = "tree_members.parquet"
+  source = "tree_members"
 "#;
 
 /// A three-node tree: one root and two children, written with `parent` on each child.
@@ -796,7 +810,7 @@ const TIERED_LAYERS_TOML: &str = r#"
 name = "admin/boundaries"
 title = "administrative boundaries"
 views = ["s0"]
-source = "admin.parquet"
+source = "admin"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -805,7 +819,7 @@ hierarchy = { kind = "tiered", prune_children = false }
 content = { computed = ["centroid"] }
 
   [layer.members]
-  source = "admin_members.parquet"
+  source = "admin_members"
 
 [[layer.levels]]
 level = 0
@@ -1095,7 +1109,7 @@ fn curated() -> Vec<(&'static str, Vec<u64>)> {
 /// is a spelling, and a spelling that produced a different bundle would be a second kind of layer.
 #[test]
 fn an_inline_layer_and_a_sourced_layer_build_the_same_bundle() {
-    let sourced = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let sourced = format!("{CURATED_LAYER}source = \"curated\"\n");
     let (from_file, _a) = build_spelling(&sourced, |inputs| {
         write_curated_with_members(&inputs.at("curated.parquet"), &curated())
     });
@@ -1122,11 +1136,11 @@ fn an_excluded_membership_and_its_complement_build_the_same_bundle() {
     let excluded: Vec<u64> = vec![5, 7, 9];
     let included: Vec<u64> = (0..N_ITEMS).filter(|e| !excluded.contains(e)).collect();
 
-    let by_inclusion = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let by_inclusion = format!("{CURATED_LAYER}source = \"curated\"\n");
     let (from_members, _a) = build_spelling(&by_inclusion, |inputs| {
         write_curated_with_members(&inputs.at("curated.parquet"), &[("c-0", included)])
     });
-    let by_exclusion = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let by_exclusion = format!("{CURATED_LAYER}source = \"curated\"\n");
     let (from_excluding, _b) = build_spelling(&by_exclusion, |inputs| {
         write_curated_column(
             &inputs.at("curated.parquet"),
@@ -1142,12 +1156,12 @@ fn an_excluded_membership_and_its_complement_build_the_same_bundle() {
 /// — a condensed tree's root — and not to mean anything different.
 #[test]
 fn a_row_membership_and_a_member_source_build_the_same_bundle() {
-    let on_the_row = format!("{CURATED_LAYER}source = \"curated.parquet\"\n");
+    let on_the_row = format!("{CURATED_LAYER}source = \"curated\"\n");
     let (from_row, _a) = build_spelling(&on_the_row, |inputs| {
         write_curated_with_members(&inputs.at("curated.parquet"), &curated())
     });
     let in_a_source = format!(
-        "{CURATED_LAYER}source = \"curated.parquet\"\n  [layer.members]\n  source = \"curated_members.parquet\"\n"
+        "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n"
     );
     let (from_source, _b) = build_spelling(&in_a_source, |inputs| {
         let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
@@ -1176,7 +1190,7 @@ fn an_exclusion_naming_nothing_this_build_assigned_refuses_it() {
     let inputs = inputs();
     std::fs::write(
         &inputs.config,
-        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated.parquet\"\n"),
+        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated\"\n"),
     )
     .unwrap();
     write_curated_column(
@@ -1199,7 +1213,7 @@ fn a_source_carrying_both_members_and_excluding_is_refused() {
     let inputs = inputs();
     std::fs::write(
         &inputs.config,
-        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated.parquet\"\n"),
+        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated\"\n"),
     )
     .unwrap();
     let schema = Arc::new(Schema::new(vec![
@@ -1244,7 +1258,7 @@ fn an_artifact_written_on_two_rows_is_refused() {
     let inputs = inputs();
     std::fs::write(
         &inputs.config,
-        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated.parquet\"\n"),
+        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated\"\n"),
     )
     .unwrap();
     write_curated_with_members(
@@ -1270,7 +1284,7 @@ const SUGARED_TOML: &str = r#"
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
-source = "clusters.parquet"
+source = "clusters"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -1279,12 +1293,12 @@ hierarchy = { kind = "flat", prune_children = false }
 content = { computed = ["centroid"] }
 
   [layer.members]
-  source = "clusters_members.parquet"
+  source = "clusters_members"
 
   [layer.labels]
   name = "topics/x"
   title = "topics"
-  source = "topics.parquet"
+  source = "topics"
   type = "text"
   membership = "enumerated"
   require_member_visibility = "none"
@@ -1294,7 +1308,7 @@ content = { computed = ["centroid"] }
     require_member_visibility = "all"
 
     [layer.labels.members]
-    source = "topics_members.parquet"
+    source = "topics_members"
 "#;
 
 /// The same thing, written out: every key the expansion supplies, spelled by hand.
@@ -1303,7 +1317,7 @@ const WRITTEN_OUT_TOML: &str = r#"
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
-source = "clusters.parquet"
+source = "clusters"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -1312,13 +1326,13 @@ hierarchy = { kind = "flat", prune_children = false }
 content = { computed = ["centroid"] }
 
   [layer.members]
-  source = "clusters_members.parquet"
+  source = "clusters_members"
 
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
-source = "topics.parquet"
+source = "topics"
 membership = "enumerated"
 visibility = "0"
 artifact_visibility = { default = "inherited" }
@@ -1327,7 +1341,7 @@ hierarchy = { kind = "flat", prune_children = false }
 depends_on = ["clusters/a"]
 
   [layer.members]
-  source = "topics_members.parquet"
+  source = "topics_members"
 
   [[layer.content.supplied]]
   name = "topics/x"
@@ -1544,13 +1558,13 @@ fn write_cluster_members(path: &Path, clusters: &[Option<i64>]) {
 /// A `[layer.members]` block reading the point table's own columns.
 const FROM_POINTS: &str = r#"
   [layer.members]
-  source = "points.parquet"
+  source = "points"
   fields = { key = "cluster_id", entity = "entity_id" }
 "#;
 
 const FROM_MEMBER_TABLE: &str = r#"
   [layer.members]
-  source = "cluster_members.parquet"
+  source = "cluster_members"
 "#;
 
 /// Every point clustered, so the case turns on nothing but where the membership was read from.
@@ -1565,12 +1579,12 @@ fn every_point_clustered() -> Vec<Option<i64>> {
 #[test]
 fn a_cluster_column_on_the_points_is_a_member_source() {
     let clusters = every_point_clustered();
-    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}");
     let (from_points, _a) = build_spelling(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, true);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
     });
-    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_MEMBER_TABLE}");
+    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_MEMBER_TABLE}");
     let (from_table, _b) = build_spelling(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, true);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
@@ -1594,7 +1608,7 @@ fn an_integer_cluster_column_skips_its_noise_and_matches_a_member_table() {
         *point = None;
     }
 
-    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}");
     let (from_points, _a, report) = build_spelling_reported(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
@@ -1603,7 +1617,7 @@ fn an_integer_cluster_column_skips_its_noise_and_matches_a_member_table() {
     // column, and only the number says so.
     assert_eq!(report.unclustered_member_rows, 50);
 
-    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_MEMBER_TABLE}");
+    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_MEMBER_TABLE}");
     let (from_table, _b) = build_spelling(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
@@ -1618,7 +1632,7 @@ fn an_integer_cluster_column_skips_its_noise_and_matches_a_member_table() {
 #[test]
 fn an_integer_key_and_its_decimal_spelling_are_one_artifact() {
     let clusters = every_point_clustered();
-    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}");
     let (from_integers, _a) = build_spelling(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
@@ -1636,7 +1650,7 @@ fn an_integer_key_and_its_decimal_spelling_are_one_artifact() {
 #[test]
 fn a_closed_layer_still_refuses_a_cluster_no_artifact_declares() {
     let clusters = every_point_clustered();
-    let layer = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_POINTS}");
+    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}");
     let message = refuse_spelling(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         // Cluster 2 is on the points and not on the roster.
@@ -1654,7 +1668,7 @@ fn a_closed_layer_still_refuses_a_cluster_no_artifact_declares() {
 fn an_open_layer_mints_the_clusters_its_points_name() {
     let clusters = every_point_clustered();
     let layer = format!(
-        "{CURATED_LAYER}value_set = \"open\"\nsource = \"roster.parquet\"\n{FROM_POINTS}"
+        "{CURATED_LAYER}value_set = \"open\"\nsource = \"roster\"\n{FROM_POINTS}"
     );
     let (out, _tmp, report) = build_spelling_reported(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
@@ -1708,7 +1722,7 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
     let (from_points, _a) = build_spelling(&minted, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
     });
-    let declared = format!("{CURATED_LAYER}source = \"roster.parquet\"\n{FROM_MEMBER_TABLE}");
+    let declared = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_MEMBER_TABLE}");
     let (from_table, _b) = build_spelling(&declared, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
@@ -1818,20 +1832,20 @@ fn layer_of_kind(kind: &str) -> String {
 /// A `[layer.members]` block reading the point table's list column.
 const FROM_LINEAGE: &str = r#"
   [layer.members]
-  source = "points.parquet"
+  source = "points"
   fields = { key = "lineage", entity = "entity_id" }
 "#;
 
 /// The equivalent enumeration: an artifact table carrying the edges, and a member table carrying
 /// one row per `(artifact, entity)`.
-const FROM_TREE_TABLES: &str = r#"source = "tree.parquet"
+const FROM_TREE_TABLES: &str = r#"source = "tree"
   [layer.members]
-  source = "tree_members.parquet"
+  source = "tree_members"
 "#;
 
-const FROM_LEVELLED_TABLES: &str = r#"source = "admin.parquet"
+const FROM_LEVELLED_TABLES: &str = r#"source = "admin"
   [layer.members]
-  source = "admin_members.parquet"
+  source = "admin_members"
 "#;
 
 /// Three levels, which is what a fixed-length list of three entries must agree with.
@@ -2173,7 +2187,7 @@ fn null_and_noise_entries_place_a_point_at_the_levels_it_named() {
 fn an_open_layer_mints_the_interior_parents_a_lineage_names() {
     let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
     let layer = format!(
-        "{}value_set = \"open\"\nsource = \"roster.parquet\"\n{FROM_LINEAGE}",
+        "{}value_set = \"open\"\nsource = \"roster\"\n{FROM_LINEAGE}",
         layer_of_kind("nested")
     );
     let (out, _tmp, _) = build_spelling_reported(&layer, |inputs| {

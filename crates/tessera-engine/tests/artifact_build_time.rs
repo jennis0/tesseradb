@@ -30,6 +30,12 @@ const MEMBERS: std::ops::Range<u64> = 0..150;
 
 /// Two layers: a `public` clustering, and labels attached into it carrying corpus-derived text.
 const CONFIG_TOML: &str = r#"
+[sources]
+clusters         = "clusters.parquet"
+clusters_members = "clusters_members.parquet"
+topics           = "topics.parquet"
+topics_members   = "topics_members.parquet"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
@@ -39,7 +45,7 @@ point_visibility = { default = "public" }
 name = "clusters/a"
 title = "clusters"
 views = ["s0"]
-source = "clusters.parquet"
+source = "clusters"
 membership = "enumerated"
 visibility = "public"
 artifact_visibility = { default = "inherited" }
@@ -48,13 +54,13 @@ hierarchy = { kind = "flat" }
 content = { computed = ["centroid"] }
 
   [layer.members]
-  source = "clusters_members.parquet"
+  source = "clusters_members"
 
 [[layer]]
 name = "topics/x"
 title = "topics"
 views = ["s0"]
-source = "topics.parquet"
+source = "topics"
 membership = "enumerated"
 visibility = "public"
 artifact_visibility = { default = "inherited" }
@@ -63,7 +69,7 @@ hierarchy = { kind = "flat" }
 depends_on = ["clusters/a"]
 
   [layer.members]
-  source = "topics_members.parquet"
+  source = "topics_members"
 
   [[layer.content.supplied]]
   name = "topic"
@@ -199,8 +205,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
 
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),

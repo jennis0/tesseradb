@@ -73,17 +73,21 @@ def corpus_dir(tmp_path_factory) -> Path:
 
 
 # Every case's schema declares the same corpus, the same view and the same frame; only the
-# attribute half differs. The points file carries identity, geometry and the one column, so
-# `[corpus]` and the view name one file, relative to the declaration (configuration.md §3).
+# attribute half differs. The points file carries identity, geometry and the one column, so the
+# view and every attribute name one source; `[sources]` writes each path once, relative to the
+# declaration (configuration.md §3).
 SCHEMA_HEAD = """\
-[corpus]
-source = "points.parquet"
+[sources]
+points = "points.parquet"
+pairs  = "pairs.parquet"
+
+[defaults]
+source = "points"
 
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 100.0 }
-source           = "points.parquet"
-point_visibility = { source = "pairs.parquet", default = "public" }
+point_visibility = { source = "pairs", default = "public" }
 
 """
 

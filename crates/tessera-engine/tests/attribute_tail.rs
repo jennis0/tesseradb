@@ -154,10 +154,10 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     let pairs = tmp.join("pairs.parquet");
     write_points_with_attributes(&points, n);
     write_pairs_n(&pairs, n);
+    let schema = parse_schema(tmp);
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
@@ -175,7 +175,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: parse_schema(tmp),
+        schema,
     };
     build(&args).expect("a build with a declared schema should succeed");
 }
@@ -373,11 +373,14 @@ fn both_build_implementations_write_the_same_tail() {
     let pairs = tmp.path().join("pairs.parquet");
     write_points_with_attributes(&points, 2_000);
     write_pairs_n(&pairs, 2_000);
+    let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.clone(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.clone(),
+            &schema,
+        ),
         access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.to_path_buf(),
         extent: extent(),
@@ -394,7 +397,7 @@ fn both_build_implementations_write_the_same_tail() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: parse_schema(tmp.path()),
+        schema: schema.clone(),
     };
 
     let streamed = tmp.path().join("streamed");
@@ -852,10 +855,12 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, NON_PREFIX_SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
@@ -873,8 +878,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Config::parse(&schema_path, &std::collections::HashMap::new()).map(|c| c.schema)
-            .expect("the non-prefix fixture schema parses"),
+        schema,
     };
     build(&args).expect("a build whose render set is not a declaration prefix succeeds");
 }
@@ -1245,10 +1249,12 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, RECORD_SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the record fixture schema parses");
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
@@ -1266,8 +1272,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Config::parse(&schema_path, &std::collections::HashMap::new()).map(|c| c.schema)
-            .expect("the record fixture schema parses"),
+        schema,
     };
     build(&args).expect("a build with blob-resident columns succeeds");
 }

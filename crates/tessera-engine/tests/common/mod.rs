@@ -170,9 +170,8 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points_path.to_path_buf(),
-        corpus: Some(points_path.to_path_buf()),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
@@ -221,9 +220,8 @@ pub fn build_corpus_fixture(
         .expect("the generator's config parses");
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points_path.to_path_buf(),
-        corpus: Some(points_path.to_path_buf()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &config.schema),
         access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: corpus.extent(),

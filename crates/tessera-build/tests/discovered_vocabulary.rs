@@ -120,9 +120,8 @@ fn parse_schema(text: &str, values: &HashMap<String, PathBuf>) -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.to_path_buf(),
-        corpus: Some(points.to_path_buf()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: extent(),
@@ -367,12 +366,15 @@ fn a_vocabulary_source_pins_codes_and_mints_only_the_rest() {
     write_empty_pairs(&pairs);
 
     let text = r#"
+[sources]
+dept_seed = "dept-seed.parquet"
+
 [[vocabulary]]
 name       = "dept_seed"
 width      = "u16"
 value_set  = "open"
 visibility = "derived"
-source     = "dept-seed.parquet"
+source     = "dept_seed"
 
 [[attribute]]
 name = "department"
@@ -381,9 +383,10 @@ render = true
 vocabulary = "dept_seed"
 "#;
     // The seed file is staged outside the schema's own directory, which is exactly what
-    // `--file` is for: an override keyed by the object whose source it replaces.
+    // `--file` is for: an override keyed by the source's own name, which moves everything reading
+    // it at once.
     let mut values = HashMap::new();
-    values.insert("vocabulary:dept_seed".to_string(), seed_path);
+    values.insert("dept_seed".to_string(), seed_path);
     let schema = parse_schema(text, &values);
     build(&args(&points, &pairs, out.clone(), schema)).expect("build succeeds");
 

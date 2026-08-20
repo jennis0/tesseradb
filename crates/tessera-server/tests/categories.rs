@@ -154,11 +154,13 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
     write_pairs_n(pairs, N);
     let schema_path = points.with_file_name("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .unwrap()
+        .schema;
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.to_path_buf(),
-        corpus: Some(points.to_path_buf()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
@@ -175,7 +177,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: tessera_build::config::Config::parse(&schema_path, &Default::default()).unwrap().schema,
+        schema,
     };
     build(&args).expect("fixture build should succeed");
 }

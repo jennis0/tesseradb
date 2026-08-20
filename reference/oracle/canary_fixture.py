@@ -170,14 +170,15 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
 
     # One view, its frame, its geometry and the relation its labels are in — the whole declaration
     # this fixture needs. Three corpora share it, so each build overrides the two sources by their
-    # object keys (`configuration.md` §8); the declaration itself is written once.
+    # own names (`configuration.md` §8); the declaration itself is written once.
     config_path = work_dir / "canary-config.toml"
     x_min, x_max, y_min, y_max = EXTENT.split(",")
     config_path.write_text(
+        '[sources]\npoints = "points.parquet"\npairs = "pairs.parquet"\n\n'
         f'[[view]]\nname = "{VIEW_ID}"\n'
         f"extent = {{ x = [{x_min}, {x_max}], y = [{y_min}, {y_max}] }}\n"
-        'source = "points.parquet"\n'
-        'point_visibility = { source = "pairs.parquet", default = "public" }\n'
+        'source = "points"\n'
+        'point_visibility = { source = "pairs", default = "public" }\n'
     )
 
     for points_path, pairs_path, out_dir in (
@@ -195,9 +196,9 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 "--deployment",
                 str(deployment),
                 "--file",
-                f"view:{VIEW_ID}={points_path}",
+                f"points={points_path}",
                 "--file",
-                f"view:{VIEW_ID}:point_visibility={pairs_path}",
+                f"pairs={pairs_path}",
                 "--out",
                 str(out_dir),
                 # Contracts r6 refuses to build unless a human names the identity key's lineage.

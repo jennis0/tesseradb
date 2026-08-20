@@ -158,11 +158,14 @@ fn schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
+    let schema = schema();
     BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.to_path_buf(),
-        corpus: Some(points.to_path_buf()),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: Bounds {
@@ -184,7 +187,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: schema(),
+        schema,
     }
 }
 

@@ -101,9 +101,10 @@ control = "127.0.0.1:45721"
     .unwrap();
     std::fs::write(
         dir.join("schema.toml"),
-        "[[view]]\nname = \"s0\"\nextent = { min = 0.0, max = 10.0 }\n\
-         source = \"points.parquet\"\n\
-         point_visibility = { source = \"pairs.parquet\", default = \"public\" }\n",
+        "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[view]]\nname = \"s0\"\nextent = { min = 0.0, max = 10.0 }\n\
+         source = \"points\"\n\
+         point_visibility = { source = \"pairs\", default = \"public\" }\n",
     )
     .unwrap();
     tiny_points(dir);

@@ -242,10 +242,12 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the every-home fixture schema parses");
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
@@ -263,8 +265,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Config::parse(&schema_path, &std::collections::HashMap::new()).map(|c| c.schema)
-            .expect("the every-home fixture schema parses"),
+        schema,
     };
     build(&args).expect("a build carrying all three homes succeeds");
 }

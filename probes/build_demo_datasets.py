@@ -165,22 +165,28 @@ SCHEMA_HEAD = '''# The demo bundle's declaration — {scale}, {rows:,} items. Ge
 # derived postings so the same predicate is answered in entity space rather than by scanning the
 # request's rows. Declaring both is what lets decision 0068 route on cost.
 
-# Every source is a path **relative to this file**, which sits in `data/demo/` beside the files it
-# names (configuration.md §3). The points file carries identity, geometry and every declared
-# column, so `[corpus]` and the view name one file; the exploded `(entity_id, term_id)` relation is
-# the shared one two directories over, and the two vocabularies name their own.
+# `[sources]` writes each path once, **relative to this file**, which sits in `data/demo/` beside
+# the files it names (configuration.md §3). The points file carries identity, geometry and every
+# declared column, so the view and every attribute name one source; the exploded
+# `(entity_id, term_id)` relation is the shared one two directories over, and the two vocabularies
+# name their own.
 #
 # `extent`: the points file stores Morton codes rather than coordinates, and codes are exact only
 # against the grid's own extent (contracts §2.5).
-[corpus]
-source = "points-{scale}.parquet"
+[sources]
+points           = "points-{scale}.parquet"
+labels           = "../scaled/pairs/categories-subclass.pairs.parquet"
+archive          = "archive.parquet"
+primary_category = "primary_category.parquet"
+
+[defaults]
+source = "points"
 
 [[view]]
 name             = "s0"
 title            = "arXiv"
 extent           = {{ min = 0.0, max = 65536.0 }}
-source           = "points-{scale}.parquet"
-point_visibility = {{ source = "../scaled/pairs/categories-subclass.pairs.parquet", default = "public" }}
+point_visibility = {{ source = "labels", default = "public" }}
 
 # `visibility = "public"`: arXiv's archive names are published taxonomy, so their existence
 # discloses nothing about this corpus's contents. It is safe here because the set is `closed` —
@@ -191,7 +197,7 @@ title      = "Archive"
 width      = "u8"
 value_set  = "closed"
 visibility = "public"
-source     = "archive.parquet"
+source     = "archive"
 
 [[vocabulary]]
 name       = "primary_category"
@@ -199,7 +205,7 @@ title      = "Primary category"
 width      = "u16"
 value_set  = "closed"
 visibility = "public"
-source     = "primary_category.parquet"
+source     = "primary_category"
 
 [[attribute]]
 name       = "archive"

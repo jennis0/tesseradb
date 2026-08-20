@@ -4406,10 +4406,12 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
 
     let schema_path = tmp.join("scalar-tail-schema.toml");
     std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
+    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .unwrap()
+        .schema;
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
@@ -4427,7 +4429,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: tessera_build::config::Config::parse(&schema_path, &Default::default()).unwrap().schema,
+        schema,
     };
     build(&args).expect("the scalar-tail fixture build should succeed");
 }

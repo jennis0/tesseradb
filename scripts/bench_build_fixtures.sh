@@ -107,16 +107,20 @@ mkdir -p "$FIXTURES" "$LOG_DIR"
 
 # One declaration for every fixture: one view over the scaled geometry, its points' labels in the
 # exploded relation each label set supplies, and the identity extent the Morton branch requires.
-# The label set differs per build, so that source is overridden on the command line by the object
-# it belongs to (`--file view:s0:point_visibility=…`, configuration.md §8); the geometry is the
-# same file every time and is named here.
+# The label set differs per build, so that source is overridden on the command line by its own
+# name (`--file labels=…`, configuration.md §8); the geometry is the same file every time and its
+# path is written here.
 CONFIG="$ROOT/data/scaled/bench-fixtures.config.toml"
 cat > "$CONFIG" <<'TOML'
+[sources]
+geometry = "geometry.parquet"
+labels   = "pairs/categories-subclass.pairs.parquet"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 65536.0 }
-source           = "geometry.parquet"
-point_visibility = { source = "pairs/categories-subclass.pairs.parquet", default = "public" }
+source           = "geometry"
+point_visibility = { source = "labels", default = "public" }
 TOML
 
 # The deployment file each build is invoked against. `[bundle].path` is rewritten per fixture
@@ -199,7 +203,7 @@ for scale in "${SCALES[@]}"; do
     # (memo 2026-07-30 §3.2 D1 — the default build is now spec-conformant and writes none).
     if "$TESSERA" build \
         --deployment "$DEPLOYMENT" \
-        --file "view:s0:point_visibility=$pairs" --out "$out" \
+        --file "labels=$pairs" --out "$out" \
         --limit "$scale" \
         --mint-external-ids --idset 1 >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))

@@ -116,8 +116,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     let out = dir.path().join("bundle");
     build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out,

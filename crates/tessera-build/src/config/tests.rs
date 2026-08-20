@@ -40,7 +40,18 @@ fn err(text: &str) -> String {
 }
 
 /// One view, one closed vocabulary, one category over it.
+///
+/// **`[sources]` names files nothing here reads**, and that is what a source table is: the paths
+/// live in one place and the blocks that want one name it. `LAYER` and `SUGAR` below are appended
+/// to this fixture and name these.
 const SEVERITY: &str = r#"
+[sources]
+hdbscan         = "hdbscan.parquet"
+hdbscan_members = "hdbscan_members.parquet"
+topics          = "topics.parquet"
+topic_members   = "topic_members.parquet"
+other           = "other.parquet"
+
 [[view]]
 name             = "s0"
 extent           = "auto"
@@ -149,12 +160,12 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "nonesuch = 1\n",
         "the document",
-        &["corpus", "view", "vocabulary", "attribute", "layer"],
+        &["sources", "defaults", "view", "vocabulary", "attribute", "layer"],
     );
     expect_keys(
-        "[corpus]\nnonesuch = 1\n",
-        "[corpus]",
-        &["source", "fields"],
+        "[defaults]\nnonesuch = 1\n",
+        "[defaults]",
+        &["source", "entity_id_field"],
     );
     expect_keys(
         "[[view]]\nname = \"s0\"\nnonesuch = 1\n",
@@ -201,6 +212,8 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "name",
             "title",
             "field",
+            "source",
+            "entity_id_field",
             "type",
             "vocabulary",
             "render",
@@ -1320,17 +1333,29 @@ fn an_unknown_computed_property_is_refused() {
 
 /// `SEVERITY`'s corpus with every source it can carry declared, for the acquisition cases.
 ///
-/// Every path is **relative to the declaring document** (`configuration.md` §3), which is what
-/// lets one file describe a corpus on a laptop and in CI without an invocation naming five files.
+/// **Every `source` is a name and every path is written once**, in `[sources]`, relative to the
+/// declaring document (`configuration.md` §3) — which is what lets one file describe a corpus on a
+/// laptop and in CI without an invocation naming five files.
 const ACQUIRED: &str = r#"
-[corpus]
-source = "corpus.parquet"
+[sources]
+corpus   = "corpus.parquet"
+geometry = "geometry.parquet"
+pairs    = "pairs.parquet"
+hdbscan  = "hdbscan.parquet"
+hdbscan_members = "hdbscan_members.parquet"
+topics   = "topics.parquet"
+topic_members = "topic_members.parquet"
+severity_values = "severity.parquet"
+other    = "other.parquet"
+
+[defaults]
+source = "corpus"
 
 [[view]]
 name             = "s0"
 extent           = "auto"
-source           = "geometry.parquet"
-point_visibility = { source = "pairs.parquet", default = "public" }
+source           = "geometry"
+point_visibility = { source = "pairs", default = "public" }
 
 [[vocabulary]]
 name       = "severity"
@@ -1345,9 +1370,9 @@ type       = "category"
 vocabulary = "severity"
 "#;
 
-/// `--file KEY=PATH`, as the CLI hands it over: an override keyed by the **object** whose source
-/// it replaces. The paths need not exist — every case here is refused, or answered, before a data
-/// file is opened.
+/// `--file NAME=PATH`, as the CLI hands it over: an override keyed by the **source's own name**,
+/// so one of them moves every block reading that file. The paths need not exist — every case here
+/// is refused, or answered, before a data file is opened.
 fn files(keys: &[&str]) -> HashMap<String, PathBuf> {
     keys.iter()
         .map(|key| {
@@ -1378,7 +1403,8 @@ fn a_source_is_a_path_relative_to_the_declaring_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = parse_at(dir.path(), ACQUIRED, &HashMap::new())
         .expect("a declaration naming its own files needs no bindings");
-    assert_eq!(config.corpus.source, Some(dir.path().join("corpus.parquet")));
+    assert_eq!(config.attribute_sources.len(), 1);
+    assert_eq!(config.attribute_sources[0].path, dir.path().join("corpus.parquet"));
     assert_eq!(config.views[0].source, Some(dir.path().join("geometry.parquet")));
     assert_eq!(
         config.views[0].point_visibility.source,
@@ -1391,12 +1417,15 @@ fn a_source_is_a_path_relative_to_the_declaring_file() {
 /// repository gets a file-not-found rather than a declaration they can act on.
 #[test]
 fn an_absolute_source_is_refused_and_names_the_override() {
-    let text = ACQUIRED.replace("source           = \"geometry.parquet\"", "source           = \"/mnt/scratch/geometry.parquet\"");
+    let text = ACQUIRED.replace(
+        "geometry = \"geometry.parquet\"",
+        "geometry = \"/mnt/scratch/geometry.parquet\"",
+    );
     let message = bound_err(&text, &[]);
     assert!(message.contains("is an absolute path"), "{message}");
     assert!(message.contains("relative to this config"), "{message}");
     assert!(
-        message.contains("--file view:s0=/mnt/scratch/geometry.parquet"),
+        message.contains("--file geometry=/mnt/scratch/geometry.parquet"),
         "the refusal must name where an absolute path does belong: {message}"
     );
 }
@@ -1405,26 +1434,29 @@ fn an_absolute_source_is_refused_and_names_the_override() {
 #[test]
 fn an_override_replaces_one_objects_source() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = parse_at(dir.path(), ACQUIRED, &files(&["view:s0"]))
+    let config = parse_at(dir.path(), ACQUIRED, &files(&["geometry"]))
         .expect("an override of a declared source");
     assert_eq!(
         config.views[0].source,
-        Some(PathBuf::from("/elsewhere/view-s0.parquet"))
+        Some(PathBuf::from("/elsewhere/geometry.parquet"))
     );
     // Everything it did not name is still the declaration's own path.
-    assert_eq!(config.corpus.source, Some(dir.path().join("corpus.parquet")));
+    assert_eq!(config.attribute_sources[0].path, dir.path().join("corpus.parquet"));
 }
 
 /// **An override that names nothing is a refusal**, listing the keys that exist. Without this the
 /// declaration's own path stays quietly in force under a command line asking for another corpus.
 #[test]
 fn an_override_no_object_declares_is_refused() {
-    let message = bound_err(ACQUIRED, &["view:s9"]);
-    assert!(message.contains("'view:s9=…'"), "{message}");
-    assert!(message.contains("names no source in this config"), "{message}");
+    let message = bound_err(ACQUIRED, &["geomtery"]);
+    assert!(message.contains("'geomtery=…'"), "{message}");
     assert!(
-        message.contains("view:s0") && message.contains("corpus"),
-        "the refusal must list the keys that exist: {message}"
+        message.contains("names no source in this declaration"),
+        "{message}"
+    );
+    assert!(
+        message.contains("geometry") && message.contains("corpus"),
+        "the refusal must list the names that exist: {message}"
     );
 }
 
@@ -1432,14 +1464,188 @@ fn an_override_no_object_declares_is_refused() {
 /// command line — the fall-through §8 forbids, arriving through an invocation instead of a typo.
 #[test]
 fn an_override_is_never_a_fall_through_to_minting() {
-    // The vocabulary declares its values inline and names no source at all, so there is no
-    // `vocabulary:severity` key to override.
+    // `severity_values` is a declared path that the vocabulary does not name, so overriding it
+    // moves a file nothing reads: the vocabulary still declares its values inline and is still
+    // closed. An override moves a path; it never gives an object a `source` it did not write.
+    let config = bound_ok(ACQUIRED, &["severity_values"]);
+    let severity = &config.schema.vocabularies["severity"];
+    assert_eq!(severity.value_set, ValueSet::Closed);
+    assert_eq!(severity.codes.len(), 2, "still the two inline values");
+
+    // …and a name `[sources]` does not carry is a refusal listing the ones it does.
     let message = bound_err(ACQUIRED, &["vocabulary:severity"]);
-    assert!(message.contains("names no source in this config"), "{message}");
+    assert!(
+        message.contains("names no source in this declaration"),
+        "{message}"
+    );
     assert!(
         message.contains("never creates one"),
         "the refusal must say why an override cannot stand alone: {message}"
     );
+}
+
+/// **A `source` names a key of `[sources]`, and a name that table does not carry is refused** —
+/// listing the names that do exist. There is no name-or-path fallback: an unmatched name read as a
+/// relative path makes a typo a missing file rather than a declaration that does not resolve, and
+/// the message then comes from a Parquet reader instead of from the document.
+#[test]
+fn a_source_naming_no_key_is_refused_listing_the_names_that_exist() {
+    let text = ACQUIRED.replace("source           = \"geometry\"", "source           = \"geomtery\"");
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("`source = \"geomtery\"`"), "{message}");
+    assert!(message.contains("names no key in `[sources]`"), "{message}");
+    assert!(
+        message.contains("geometry") && message.contains("pairs"),
+        "the refusal must list the names that exist: {message}"
+    );
+    // …and the same for a name that happens to look like the path it used to be.
+    let text = ACQUIRED.replace("source           = \"geometry\"", "source           = \"geometry.parquet\"");
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("names no key in `[sources]`"), "{message}");
+}
+
+/// An **absolute** path is refused where paths live — `[sources]` — rather than at each block that
+/// names the source, which is the same rule at the one place it can now be stated.
+#[test]
+fn an_absolute_path_in_sources_names_the_override() {
+    let text = ACQUIRED.replace("pairs    = \"pairs.parquet\"", "pairs    = \"/mnt/staged/pairs.parquet\"");
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("`[sources].pairs`") || message.contains("[sources].pairs"), "{message}");
+    assert!(message.contains("is an absolute path"), "{message}");
+    assert!(message.contains("--file pairs=/mnt/staged/pairs.parquet"), "{message}");
+}
+
+/// **One override moves every reader of a source at once**, which is the whole reason the key is
+/// the source rather than the object: the object-keyed form needed one override per block and left
+/// the one you missed quietly reading the old file.
+#[test]
+fn one_override_moves_every_reader_of_that_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The view and the attributes are made to read one source, as an ordinary corpus does.
+    let text = ACQUIRED.replace("source           = \"geometry\"\n", "");
+    let config = parse_at(dir.path(), &text, &files(&["corpus"]))
+        .expect("an override of a source two blocks read");
+    assert_eq!(
+        config.views[0].source,
+        Some(PathBuf::from("/elsewhere/corpus.parquet")),
+        "the view took `[defaults].source` and moved with it"
+    );
+    assert_eq!(
+        config.attribute_sources[0].path,
+        PathBuf::from("/elsewhere/corpus.parquet"),
+        "and so did every column reading it"
+    );
+}
+
+/// **`[defaults]` supplies a source to a view and to a column, and nothing else** — because
+/// elsewhere an absent source is itself a declaration.
+#[test]
+fn defaults_reach_a_view_and_a_column_and_no_other_block() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text = ACQUIRED.replace("source           = \"geometry\"\n", "");
+    let config = parse_at(dir.path(), &text, &HashMap::new()).expect("a parse");
+    assert_eq!(config.views[0].source, Some(dir.path().join("corpus.parquet")));
+    assert_eq!(config.attribute_sources[0].path, dir.path().join("corpus.parquet"));
+
+    // A vocabulary with no source mints rather than reads, and the default does not make it read.
+    let open = text.replace(
+        "value_set  = \"closed\"\nvisibility = \"public\"\nvalues     = [\"low\", \"high\"]",
+        "value_set  = \"open\"\nvisibility = \"derived\"",
+    );
+    let config = parse_at(dir.path(), &open, &HashMap::new()).expect("a parse");
+    assert!(
+        config.schema.vocabularies["severity"].codes.is_empty(),
+        "an open vocabulary with no source starts empty rather than reading the default file"
+    );
+
+    // A layer with no source is declared and empty, and stays so.
+    let layered = format!("{text}{}", LAYER.replace("  [layer.content]\n  computed = [\"centroid\", \"box\"]\n", ""));
+    let config = parse_at(dir.path(), &layered, &HashMap::new()).expect("a parse");
+    assert!(
+        config.layer_sources[0].artifacts.is_none(),
+        "a layer naming no source acquires none"
+    );
+}
+
+/// **A column may name its own source and its own identity column**, which is what `[corpus]`
+/// could not express: the entity id is what puts a value in this entity space, and the file it
+/// arrived in never was.
+#[test]
+fn an_attribute_may_name_its_own_source_and_identity_column() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text = format!(
+        "{ACQUIRED}\n[[attribute]]\nname            = \"sentiment\"\nfield           = \"score\"\n\
+         type            = \"f32\"\nsource          = \"other\"\nentity_id_field = \"doc_id\"\n"
+    );
+    let config = parse_at(dir.path(), &text, &HashMap::new()).expect("a parse");
+    assert_eq!(config.attribute_sources.len(), 2, "two files, two passes");
+    assert_eq!(config.attribute_sources[0].name, "corpus");
+    assert_eq!(config.attribute_sources[0].attributes, vec![0]);
+    assert_eq!(config.attribute_sources[1].name, "other");
+    assert_eq!(config.attribute_sources[1].attributes, vec![1]);
+    assert_eq!(config.attribute_sources[1].path, dir.path().join("other.parquet"));
+    assert_eq!(config.attribute_sources[1].fields.of("entity_id"), "doc_id");
+    // The first group joins on whatever this declaration spells identity, which is the canonical
+    // name here because `[defaults]` says nothing else.
+    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "entity_id");
+}
+
+/// **Columns sharing a source share a pass**, in declaration order — which is load-bearing, the
+/// scalar tail being stored positionally.
+#[test]
+fn columns_sharing_a_source_share_one_pass() {
+    let text = format!(
+        "{ACQUIRED}\n[[attribute]]\nname = \"a\"\ntype = \"u8\"\n\
+         \n[[attribute]]\nname = \"b\"\ntype = \"u8\"\nsource = \"other\"\n\
+         \n[[attribute]]\nname = \"c\"\ntype = \"u8\"\n"
+    );
+    let config = parse_str(&text).expect("a parse");
+    assert_eq!(config.attribute_sources.len(), 2);
+    assert_eq!(config.attribute_sources[0].name, "corpus");
+    assert_eq!(
+        config.attribute_sources[0].attributes,
+        vec![0, 1, 3],
+        "declaration order within the group, and a subsequence of it"
+    );
+    assert_eq!(config.attribute_sources[1].attributes, vec![2]);
+}
+
+/// **`[defaults].entity_id_field` says how this declaration spells identity**, and every block
+/// that reads one may say otherwise.
+#[test]
+fn the_identity_column_defaults_once_and_each_reader_may_override_it() {
+    let text = ACQUIRED.replace("[defaults]\nsource = \"corpus\"", "[defaults]\nsource = \"corpus\"\nentity_id_field = \"id\"");
+    let config = bound_ok(&text, &[]);
+    assert_eq!(config.views[0].fields.of("entity_id"), "id");
+    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
+
+    // The view says otherwise through its own map…
+    let moved = text.replace(
+        "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { entity_id = \"gid\" }",
+    );
+    let config = bound_ok(&moved, &[]);
+    assert_eq!(config.views[0].fields.of("entity_id"), "gid");
+    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
+
+    // …and a column through its own key.
+    let moved = text.replace(
+        "vocabulary = \"severity\"",
+        "vocabulary = \"severity\"\nentity_id_field = \"doc_id\"",
+    );
+    let config = bound_ok(&moved, &[]);
+    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "doc_id");
+    assert_eq!(config.views[0].fields.of("entity_id"), "id");
+}
+
+/// `[defaults].source` naming nothing is refused once, quoting `[defaults]`, rather than once per
+/// block that took it.
+#[test]
+fn a_default_source_naming_no_key_is_refused() {
+    let text = ACQUIRED.replace("[defaults]\nsource = \"corpus\"", "[defaults]\nsource = \"corpsu\"");
+    let message = bound_err(&text, &[]);
+    assert!(message.contains("[defaults]"), "{message}");
+    assert!(message.contains("names no key in `[sources]`"), "{message}");
 }
 
 /// A value set is inline **or** sourced: two spellings of one thing, so both is a parse error
@@ -1448,7 +1654,7 @@ fn an_override_is_never_a_fall_through_to_minting() {
 fn inline_values_and_a_source_together_are_refused() {
     let text = ACQUIRED.replace(
         "values     = [\"low\", \"high\"]",
-        "values     = [\"low\", \"high\"]\nsource     = \"severity.parquet\"",
+        "values     = [\"low\", \"high\"]\nsource     = \"severity_values\"",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("spellings of one thing"), "{message}");
@@ -1459,8 +1665,8 @@ fn inline_values_and_a_source_together_are_refused() {
 #[test]
 fn a_field_map_may_not_name_a_field_the_object_does_not_have() {
     let text = ACQUIRED.replace(
-        "source           = \"geometry.parquet\"",
-        "source           = \"geometry.parquet\"\nfields           = { nonesuch = \"nonesuch\" }",
+        "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { nonesuch = \"nonesuch\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("`fields.nonesuch`"), "{message}");
@@ -1475,7 +1681,7 @@ fn a_field_map_may_not_name_a_field_the_object_never_declared() {
     // `parent` on a flat layer: the hierarchy kind is what says there are lineage edges.
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { parent = \"parent\" }",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { parent = \"parent\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("never declared"), "{message}");
@@ -1484,7 +1690,7 @@ fn a_field_map_may_not_name_a_field_the_object_never_declared() {
     // `attached_key` with no `depends_on`: an edge points into a layer this one never named.
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { attached_key = \"attached_key\" }",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { attached_key = \"attached_key\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("depends_on"), "{message}");
@@ -1492,16 +1698,21 @@ fn a_field_map_may_not_name_a_field_the_object_never_declared() {
     // `contents` with no supplied content declared.
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { contents = \"contents\" }",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { contents = \"contents\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("layer.content.supplied"), "{message}");
 }
 
-/// A map with no source names the fields of nothing.
+/// A map with no source names the fields of nothing. A vocabulary, because `[defaults].source`
+/// deliberately does not reach one — an absent vocabulary source is a set that mints rather than
+/// reads, so there is genuinely no file for the map to locate anything in.
 #[test]
 fn a_field_map_without_a_source_is_refused() {
-    let text = ACQUIRED.replace("source = \"corpus.parquet\"", "fields = { entity_id = \"entity_id\" }");
+    let text = ACQUIRED.replace(
+        "values     = [\"low\", \"high\"]",
+        "values     = [\"low\", \"high\"]\nfields     = { key = \"k\" }",
+    );
     let message = bound_err(&text, &[]);
     assert!(message.contains("`fields` without a `source`"), "{message}");
 }
@@ -1510,11 +1721,11 @@ fn a_field_map_without_a_source_is_refused() {
 #[test]
 fn a_renamed_field_reaches_the_reader() {
     let text = ACQUIRED.replace(
-        "source = \"corpus.parquet\"",
-        "source = \"corpus.parquet\"\nfields = { entity_id = \"id\" }",
+        "vocabulary = \"severity\"",
+        "vocabulary = \"severity\"\nentity_id_field = \"id\"",
     );
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.corpus.fields.of("entity_id"), "id");
+    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
 
     // An attribute's own one-field map is the same rule, spelled for one field.
     let text = with_line(SEVERITY, "field = \"sev\"");
@@ -1534,8 +1745,8 @@ fn a_renamed_field_reaches_the_reader() {
 #[test]
 fn an_empty_field_name_is_refused() {
     let text = ACQUIRED.replace(
-        "source = \"corpus.parquet\"",
-        "source = \"corpus.parquet\"\nfields = { entity_id = \"\" }",
+        "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { entity_id = \"\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("names no column"), "{message}");
@@ -1551,7 +1762,7 @@ fn an_empty_field_name_is_refused() {
 fn a_layer_field_map_resolves_to_the_column_it_names() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { key = \"cluster_id\" }",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { key = \"cluster_id\" }",
     );
     let config = bound_ok(&text, &[]);
     let Some(crate::config::ArtifactSource::File { fields, .. }) = &config.layer_sources[0].artifacts
@@ -1569,7 +1780,7 @@ fn a_layer_field_map_resolves_to_the_column_it_names() {
 fn a_layer_naming_both_members_and_excluding_is_refused() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { members = \"m\", excluding = \"x\" }",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { members = \"m\", excluding = \"x\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("two spellings of one field"), "{message}");
@@ -1581,7 +1792,7 @@ fn a_layer_naming_both_members_and_excluding_is_refused() {
 fn a_layer_declaring_a_source_and_inline_artifacts_is_refused() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nartifacts                 = [{ key = \"c-0\" }]",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nartifacts                 = [{ key = \"c-0\" }]",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("two spellings of one thing"), "{message}");
@@ -1627,8 +1838,8 @@ fn an_access_label_may_contain_a_comma_and_is_one_term() {
 #[test]
 fn a_point_label_comes_from_a_field_or_a_source_never_both() {
     let text = ACQUIRED.replace(
-        "point_visibility = { source = \"pairs.parquet\", default = \"public\" }",
-        "point_visibility = { source = \"pairs.parquet\", field = \"categories\", default = \"public\" }",
+        "point_visibility = { source = \"pairs\", default = \"public\" }",
+        "point_visibility = { source = \"pairs\", field = \"categories\", default = \"public\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("both a `field` and a `source`"), "{message}");
@@ -1638,15 +1849,15 @@ fn a_point_label_comes_from_a_field_or_a_source_never_both() {
 #[test]
 fn the_two_geometry_shapes_may_not_both_be_located() {
     let text = ACQUIRED.replace(
-        "source           = \"geometry.parquet\"",
-        "source           = \"geometry.parquet\"\nfields           = { x = \"x\", morton = \"morton\" }",
+        "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { x = \"x\", morton = \"morton\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("mutually exclusive"), "{message}");
 
     let text = ACQUIRED.replace(
-        "source           = \"geometry.parquet\"",
-        "source           = \"geometry.parquet\"\nfields           = { residual = \"residual\" }",
+        "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { residual = \"residual\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("without `fields.morton`"), "{message}");
@@ -1655,9 +1866,9 @@ fn the_two_geometry_shapes_may_not_both_be_located() {
 /// A layer's membership has two shapes and it names whichever it uses — never both.
 #[test]
 fn membership_is_a_list_field_or_a_source_never_both() {
-    let text = with_layer("  [layer.members]\n  source = \"hdbscan_members.parquet\"\n").replace(
+    let text = with_layer("  [layer.members]\n  source = \"hdbscan_members\"\n").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"\nfields                    = { members = \"members\" }",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { members = \"members\" }",
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("membership is declared twice"), "{message}");
@@ -1666,7 +1877,7 @@ fn membership_is_a_list_field_or_a_source_never_both() {
 /// A member source with no roster would make every mistyped key its own artifact.
 #[test]
 fn a_member_source_needs_the_layers_own_source() {
-    let text = with_layer("  [layer.members]\n  source = \"hdbscan_members.parquet\"\n");
+    let text = with_layer("  [layer.members]\n  source = \"hdbscan_members\"\n");
     let message = bound_err(&text, &[]);
     assert!(message.contains("roster"), "{message}");
     // …and the refusal names the way to ask for exactly that.
@@ -1693,7 +1904,7 @@ fn a_layers_value_set_decides_whether_a_key_may_create_an_artifact() {
     };
     let open = parse_str(&declared(
         "open",
-        "\n  [layer.members]\n  source = \"hdbscan_members.parquet\"\n",
+        "\n  [layer.members]\n  source = \"hdbscan_members\"\n",
     ))
     .expect("an open layer needs no roster");
     assert_eq!(open.layers[0].value_set, ValueSet::Open);
@@ -1711,7 +1922,7 @@ const SUGAR: &str = r#"
   [layer.labels]
   name                      = "topics/a"
   title                     = "topics"
-  source                    = "topics.parquet"
+  source                    = "topics"
   fields                    = { members = "documents" }
   type                      = "text"
   membership                = "enumerated"
@@ -1728,7 +1939,7 @@ const WRITTEN_OUT: &str = r#"
 name                      = "topics/a"
 title                     = "topics"
 views                     = ["s0"]
-source                    = "topics.parquet"
+source                    = "topics"
 fields                    = { members = "documents" }
 membership                = "enumerated"
 hierarchy                 = { kind = "flat", prune_children = false }
@@ -1918,7 +2129,7 @@ fn acquisition_names_the_files_this_build_reads() {
         "{:?}",
         acquired.access
     );
-    assert_eq!(acquired.corpus, Some(dir.path().join("corpus.parquet")));
+    assert_eq!(acquired.attribute_sources[0].path, dir.path().join("corpus.parquet"));
     assert!(acquired.layers.is_empty());
     assert_eq!(
         acquired.extent,
@@ -1933,10 +2144,10 @@ fn acquisition_names_the_files_this_build_reads() {
 fn a_layer_names_its_artifacts_and_its_members() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!(
-        "{ACQUIRED}{}\n  [layer.members]\n  source = \"hdbscan_members.parquet\"\n",
+        "{ACQUIRED}{}\n  [layer.members]\n  source = \"hdbscan_members\"\n",
         LAYER.replace(
             "views                     = [\"s0\"]",
-            "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"",
+            "views                     = [\"s0\"]\nsource                    = \"hdbscan\"",
         )
     );
     let config = parse_at(dir.path(), &text, &HashMap::new())
@@ -1947,18 +2158,14 @@ fn a_layer_names_its_artifacts_and_its_members() {
         acquired.layers[0].members.as_ref().map(|m| m.path.clone()),
         Some(dir.path().join("hdbscan_members.parquet"))
     );
-    // And the members source is overridable on its own key, without disturbing the roster.
-    let config = parse_at(
-        dir.path(),
-        &text,
-        &files(&["layer:clusters/a:members"]),
-    )
-    .expect("one source staged elsewhere");
+    // And the members source is overridable on its own name, without disturbing the roster.
+    let config = parse_at(dir.path(), &text, &files(&["hdbscan_members"]))
+        .expect("one source staged elsewhere");
     let acquired = config.acquire("s0").unwrap();
     assert_eq!(artifact_path(&acquired.layers[0]), Some(dir.path().join("hdbscan.parquet")));
     assert_eq!(
         acquired.layers[0].members.as_ref().map(|m| m.path.clone()),
-        Some(PathBuf::from("/elsewhere/layer-clusters/a-members.parquet"))
+        Some(PathBuf::from("/elsewhere/hdbscan_members.parquet"))
     );
 }
 
@@ -1978,11 +2185,11 @@ fn two_layers_read_their_own_files() {
         .replace("clusters/a", "clusters/b")
         .replace(
             "views                     = [\"s0\"]",
-            "views                     = [\"s0\"]\nsource                    = \"other.parquet\"",
+            "views                     = [\"s0\"]\nsource                    = \"other\"",
         );
     let first = LAYER.replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nsource                    = \"hdbscan.parquet\"",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"",
     );
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!("{ACQUIRED}{first}{second}");
@@ -2008,11 +2215,13 @@ fn a_build_refuses_a_view_the_config_does_not_declare() {
     assert!(message.contains("s0"), "the refusal must list them: {message}");
 }
 
-/// ⊘ A view declaring no source is legal and means the view is declared and empty — a bundle with
-/// no rows in it, which is not built.
+/// ⊘ A view declaring no source **and reaching no `[defaults].source`** is legal and means the
+/// view is declared and empty — a bundle with no rows in it, which is not built.
 #[test]
 fn a_build_refuses_a_view_with_no_source() {
-    let text = ACQUIRED.replace("source           = \"geometry.parquet\"\n", "");
+    let text = ACQUIRED
+        .replace("source           = \"geometry\"\n", "")
+        .replace("[defaults]\nsource = \"corpus\"\n", "");
     let config = parse_bound(&text, &HashMap::new()).unwrap();
     let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
     assert!(message.contains("`source` is required to build"), "{message}");
@@ -2024,7 +2233,7 @@ fn a_build_refuses_a_view_with_no_source() {
 fn every_label_route_acquires() {
     use crate::config::AccessSource;
     let field = ACQUIRED.replace(
-        "{ source = \"pairs.parquet\", default = \"public\" }",
+        "{ source = \"pairs\", default = \"public\" }",
         "{ field = \"categories\", default = \"public\" }",
     );
     let config = parse_bound(&field, &HashMap::new()).unwrap();
@@ -2037,7 +2246,7 @@ fn every_label_route_acquires() {
     assert_eq!(acquired.access.default, "public");
 
     let only_default = ACQUIRED.replace(
-        "{ source = \"pairs.parquet\", default = \"public\" }",
+        "{ source = \"pairs\", default = \"public\" }",
         "{ default = \"ir:analyst\" }",
     );
     let config = parse_bound(&only_default, &HashMap::new()).unwrap();
@@ -2050,15 +2259,21 @@ fn every_label_route_acquires() {
     assert_eq!(acquired.access.default, "ir:analyst");
 }
 
-/// Attributes with no corpus source: the pass has no file to read its columns from, and every
-/// staged item must receive a value.
+/// An attribute with no source at all: legal to **declare** (§2), and refused at the build that
+/// would have to read the column — naming the columns rather than a block, which is what one
+/// corpus file for all of them could never do.
 #[test]
-fn a_build_refuses_attributes_with_no_corpus_source() {
-    let text = ACQUIRED.replace("[corpus]\nsource = \"corpus.parquet\"\n", "");
-    let config = parse_bound(&text, &HashMap::new()).unwrap();
+fn a_build_refuses_an_attribute_with_no_source() {
+    let text = ACQUIRED.replace("[defaults]\nsource = \"corpus\"\n", "");
+    let config = parse_bound(&text, &HashMap::new())
+        .expect("a column with no source is a legal declaration");
+    assert!(
+        config.attribute_sources.is_empty(),
+        "no source named, so no group to read"
+    );
     let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
-    assert!(message.contains("`[corpus]` names no `source`"), "{message}");
-    assert!(message.contains("attribute(s) are declared"), "{message}");
+    assert!(message.contains("name no `source`"), "{message}");
+    assert!(message.contains("severity"), "the refusal names the column: {message}");
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -189,21 +189,25 @@ DEPLOYMENT_NAME = "catalogue-tessera.toml"
 # absent from both (absent from has-row entirely).
 #: The acquisition half, built from this module's own constants rather than restated, so that
 #: `EXTENT`, `VIEW_ID` and the two file names stay the single statement of each. One points file
-#: carries identity, geometry and every declared column, so `[corpus]` and the view name one file;
-#: the exploded `(entity_id, term_id)` relation is the other. Both are paths **relative to this
-#: document**, which the generator writes beside them (`configuration.md` §3).
+#: carries identity, geometry and every declared column, so the view and every attribute name one
+#: source; the exploded `(entity_id, term_id)` relation is the other. `[sources]` writes each path
+#: once, **relative to this document**, which the generator writes beside them
+#: (`configuration.md` §3).
 #:
 #: The extent is the grid's own: the catalogue states its expected answers in cells, so a fitted
 #: box would move every one of them.
 _ACQUISITION_TOML = f"""\
-[corpus]
-source = "{POINTS_NAME}"
+[sources]
+points = "{POINTS_NAME}"
+pairs  = "{PAIRS_NAME}"
+
+[defaults]
+source = "points"
 
 [[view]]
 name             = "{VIEW_ID}"
 extent           = {{ x = [{EXTENT[0]}, {EXTENT[1]}], y = [{EXTENT[2]}, {EXTENT[3]}] }}
-source           = "{POINTS_NAME}"
-point_visibility = {{ source = "{PAIRS_NAME}", default = "public" }}
+point_visibility = {{ source = "pairs", default = "public" }}
 """
 
 SCHEMA_TOML = _ACQUISITION_TOML + """\

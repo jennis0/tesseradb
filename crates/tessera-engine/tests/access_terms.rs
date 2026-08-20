@@ -103,8 +103,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
     BuildArgs {
         points: points.to_path_buf(),
         point_fields: Default::default(),
-        corpus: None,
-        corpus_fields: Default::default(),
+        attribute_sources: Vec::new(),
         access: AccessInput {
             source: AccessSource::Field("categories".to_string()),
             default: default.to_string(),

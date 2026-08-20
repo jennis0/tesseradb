@@ -76,20 +76,24 @@ const SEG_ID: &str = "seg-0";
 pub struct BuildArgs {
     /// Parquet file of points: `entity_id` plus either `x`/`y` or `morton` (see [`input`]).
     ///
-    /// The built view's own `source` (`configuration.md` §1), bound by `--file KEY=PATH`.
+    /// The built view's own `source` (`configuration.md` §1), overridable by `--file NAME=PATH`.
     pub points: PathBuf,
     /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
     /// resolved. [`config::Fields::default`] is canonical names throughout.
     pub point_fields: crate::config::Fields,
-    /// Parquet file of entity space: `entity_id` and the declared attribute columns.
+    /// The declared attributes **grouped by the file each is read from**, and the identity column
+    /// each group joins on (`configuration.md` §1's `[sources]` and `[defaults]`).
     ///
-    /// `[corpus].source`, resolved. **A separate key from the view's**, and usually the
-    /// same file: identity and geometry are per view, attributes are shared by every view, and a
-    /// corpus whose geometry is recomputed does not rewrite its attributes to say so. `None` is
-    /// legal only for an empty [`BuildArgs::schema`], there being no column to read.
-    pub corpus: Option<PathBuf>,
-    /// Where `[corpus]`'s identity field sits in that file — its `fields` map, resolved.
-    pub corpus_fields: crate::config::Fields,
+    /// **A group is a pass.** Each one is a merge sweep over its own file against this build's
+    /// assigned ordinals, so a declaration whose columns sit in three files pays three passes and
+    /// no file has to carry a column it does not have. Empty for an empty schema, which is what
+    /// keeps a schema-less build's `columns.arrow` byte-identical to the one it wrote before this
+    /// existed.
+    ///
+    /// **Separate from the view's own source**, and usually the same file: identity and geometry
+    /// are per view, attributes are entity space, and a corpus whose geometry is recomputed does
+    /// not rewrite its attributes to say so.
+    pub attribute_sources: Vec<crate::config::AttributeSource>,
     /// Where each point's access terms come from, and what a point carrying none gets.
     ///
     /// The built view's `point_visibility`, resolved: an exploded `(entity_id, term_id)` relation,
@@ -195,7 +199,7 @@ impl std::fmt::Debug for BuildArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuildArgs")
             .field("points", &self.points)
-            .field("corpus", &self.corpus)
+            .field("attribute_sources", &self.attribute_sources)
             .field("access", &self.access)
             .field("out", &self.out)
             .field("extent", &self.extent)
@@ -493,6 +497,87 @@ pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
     );
 }
 
+/// What one attribute source's join actually met: how many of this build's entities came away with
+/// a value, and how many of the source's rows named an entity the build never loaded.
+///
+/// **Entities covered is the denominator, and rows dropped is not.** A legitimate superset and a
+/// broken join both drop an overwhelming fraction of their rows — a sentiment table covering every
+/// paper arXiv ever published against a 50,000-paper build drops 97% of itself and is perfectly
+/// correct — so the number that separates the two is how much of *this* corpus came away with a
+/// value. Both are printed, and only the first is the measure.
+#[derive(Debug, Clone)]
+pub struct AttributeCoverage {
+    /// The caller's own name for the source, from `[sources]`.
+    pub source: String,
+    /// Entities in this build — the denominator.
+    pub entities: u64,
+    /// Rows of this source that resolved to one of them.
+    pub matched_rows: u64,
+    /// Rows that named an entity this build did not load. **Ignored, never refused**: that is
+    /// what a join does, and it is fail-closed in both directions that matter — an absent
+    /// attribute matches fewer points in a filter, and an absent access label leaves a point
+    /// visible to nobody.
+    pub unknown_rows: u64,
+    /// Each declared column this source carries, and how many entities came away with a value in
+    /// it. Fewer than [`AttributeCoverage::matched_rows`] where the source itself holds nulls.
+    pub columns: Vec<(String, u64)>,
+}
+
+/// A count with thousands separators, because these are the numbers an operator compares by eye.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// **What each attribute source's join met, printed at every build** (`configuration.md` §1).
+///
+/// Reported and **never refused**, on the rule that separates a disclosure boundary from a build
+/// input: an unmatched row discloses nothing and costs a rerun, and refusing would block the
+/// legitimate case — a source covering a superset of this build's entities — as loudly as the
+/// broken one. Zero coverage says so emphatically and still builds, which is the owner's ruling
+/// twice over.
+pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
+    for source in coverage {
+        for (name, present) in &source.columns {
+            if *present == 0 && source.entities > 0 {
+                eprintln!(
+                    "attribute '{name}': NO ENTITY HAS A VALUE — 0 of {} entities matched",
+                    thousands(source.entities)
+                );
+            } else {
+                eprintln!(
+                    "attribute '{name}': {} of {} entities have a value",
+                    thousands(*present),
+                    thousands(source.entities)
+                );
+            }
+        }
+        eprintln!(
+            "        {} source row(s) named entities this build did not load",
+            thousands(source.unknown_rows)
+        );
+        // The join did not meet at all. Emphatic and not a refusal: the ids may simply be another
+        // corpus's, and only the operator knows which — but a build that says nothing here ships a
+        // bundle whose every declared column is empty.
+        if source.matched_rows == 0 && source.entities > 0 {
+            eprintln!(
+                "        source '{}' AND THIS BUILD'S ENTITY SPACE DO NOT MEET — not one of its \
+                 rows named an entity this build loaded. The join is on the entity id: check that \
+                 `entity_id_field` names the column carrying it, and that these are the same ids \
+                 the view's own source carries",
+                source.source
+            );
+        }
+    }
+}
+
 /// The access relation's own field names — canonical, and named for a refusal to quote.
 ///
 /// `point_visibility` takes no `fields` map of its own (`configuration.md` §1): the exploded
@@ -500,22 +585,6 @@ pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
 /// a file missing one of them is refused naming the view whose labels went unread.
 fn access_fields(args: &BuildArgs) -> crate::config::Fields {
     crate::config::Fields::canonical(format!("view '{}' point_visibility", args.view_id))
-}
-
-/// Entity space's file: where the declared attribute columns are read from.
-///
-/// Separate from the geometry deliberately (`configuration.md` §1's two `source` keys), and an
-/// error rather than a fall-back to the points file when the schema has columns and nothing is
-/// bound: a silent fall-through is what §7 forbids, and here it would read one file's columns
-/// under another file's identities.
-fn corpus_source(args: &BuildArgs) -> Result<&Path> {
-    args.corpus.as_deref().ok_or_else(|| {
-        BuildError::Invalid(
-            "the schema declares attributes and no corpus source is bound to read them from \
-             ([corpus] in configuration.md §1)"
-                .into(),
-        )
-    })
 }
 
 /// Argument and destination checks shared by both build implementations.
@@ -539,16 +608,32 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
                 .into(),
         ));
     }
-    // The config refuses this first, naming `[corpus]` (`config::Config::acquire`); this is the
-    // same rule for the callers that build these arguments directly. Every staged item must
-    // receive a value for every declared column, so a schema with no file to fill it from is a
-    // build that would fail at the segment writer with nothing to say about why.
-    if !args.schema.is_empty() && args.corpus.is_none() {
-        return Err(BuildError::Invalid(format!(
-            "the schema declares {} attribute(s) and no corpus source is bound to read them from \
-             ([corpus] in configuration.md §1)",
-            args.schema.attributes.len()
-        )));
+    // Every declared attribute must be read from somewhere, and the declaration refuses one that
+    // is not, naming the columns (`config::Config::acquire`, `configuration.md` §1's
+    // `[defaults]`); this is the same rule for the callers that build these arguments directly.
+    // A column no group carries would be written as the absent sentinel for every row — a column
+    // that cost its width to say nothing.
+    if !args.schema.is_empty() {
+        let mut carried: Vec<usize> = args
+            .attribute_sources
+            .iter()
+            .flat_map(|s| s.attributes.iter().copied())
+            .collect();
+        carried.sort_unstable();
+        let missing: Vec<&str> = (0..args.schema.attributes.len())
+            .filter(|i| carried.binary_search(i).is_err())
+            .map(|i| args.schema.attributes[i].name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(BuildError::Invalid(format!(
+                "the schema declares {} attribute(s) and no source is bound to read {} of them \
+                 from: {}. Every column names a `[sources]` key or takes `[defaults].source` \
+                 (configuration.md §1)",
+                args.schema.attributes.len(),
+                missing.len(),
+                missing.join(", ")
+            )));
+        }
     }
     for (what, value) in [("view id", args.view_id.as_str())] {
         if value.is_empty()
@@ -822,15 +907,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 6b. the declared attribute tail ---------------------------------------------
-    // A second pass over the points file, joined to the staged items **by source id**, because
+    // One pass **per attribute source**, joined to the staged items **by source id**, because
     // `scan_attributes` visits rows in file order and staging is in entity order. Skipped
     // entirely when the schema is empty, which is what keeps a schema-less build's `columns.arrow`
     // byte-identical to the one it wrote before this existed.
     //
-    // Every staged item must receive a value. A row the attribute pass never visits would keep an
-    // empty `scalars` vector, and the segment writer refuses that by name rather than padding it
-    // — padding would put every later row's value under the wrong identity in a column whose
-    // width says nothing is wrong.
+    // Every staged item must receive a *slot* for every declared column, which is what the absent
+    // pre-fill below is for: a row this pass never visits would otherwise keep an empty `scalars`
+    // vector, and the segment writer refuses that by name rather than padding it — padding would
+    // put every later row's value under the wrong identity in a column whose width says nothing is
+    // wrong. What it must **not** require is that every item be *matched*: an entity no source
+    // names is a column that is absent for it, which is what a join does and what the coverage
+    // report below states in numbers (`configuration.md` §1).
     //
     // `minters` seeds one live `VocabularyMinter` per discovered vocabulary from whatever the
     // schema already pins, and the scan mints into it for every novel key the corpus supplies.
@@ -844,28 +932,59 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .enumerate()
             .map(|(position, item)| (item.source_id, position))
             .collect();
-        let mut seen = 0usize;
-        input::scan_attributes(
-            corpus_source(args)?,
-            &args.corpus_fields,
-            &args.schema,
-            &mut minters,
-            args.limit,
-            |source_id, values| {
-                if let Some(&position) = position_of_source.get(&source_id) {
-                    tiler_items[position].scalars = values.to_vec();
-                    seen += 1;
-                }
-            },
-        )?;
-        if seen != staged.len() {
-            return Err(BuildError::Invalid(format!(
-                "the attribute pass matched {seen} of {} staged items. The points file's two \
-                 passes disagree about which entities it holds, so some row would be written \
-                 with another row's attribute values",
-                staged.len()
-            )));
+        // **Absent, then overwritten.** Every item starts with one absent value per declared
+        // column, so an entity no source names keeps a column of nothing rather than an empty
+        // `scalars` vector the segment writer would refuse. That is what makes coverage a report:
+        // an unmatched entity is a legitimate outcome of a join and is counted, not stopped.
+        for item in tiler_items.iter_mut() {
+            item.scalars = vec![ScalarValue::Null; args.schema.attributes.len()];
         }
+        let mut coverage = Vec::with_capacity(args.attribute_sources.len());
+        for group in &args.attribute_sources {
+            let columns: Vec<&crate::config::Attribute> = group
+                .attributes
+                .iter()
+                .map(|&i| &args.schema.attributes[i])
+                .collect();
+            let mut matched_rows = 0u64;
+            let mut unknown_rows = 0u64;
+            let mut present = vec![0u64; group.attributes.len()];
+            input::scan_attributes(
+                &group.path,
+                &group.fields,
+                &args.schema,
+                &columns,
+                &mut minters,
+                args.limit,
+                |source_id, values| {
+                    let Some(&position) = position_of_source.get(&source_id) else {
+                        unknown_rows += 1;
+                        return;
+                    };
+                    matched_rows += 1;
+                    for ((&column, value), count) in
+                        group.attributes.iter().zip(values).zip(present.iter_mut())
+                    {
+                        if !matches!(value, ScalarValue::Null) {
+                            *count += 1;
+                        }
+                        tiler_items[position].scalars[column] = value.clone();
+                    }
+                },
+            )?;
+            coverage.push(AttributeCoverage {
+                source: group.name.clone(),
+                entities: staged.len() as u64,
+                matched_rows,
+                unknown_rows,
+                columns: columns
+                    .iter()
+                    .zip(&present)
+                    .map(|(a, &n)| (a.name.clone(), n))
+                    .collect(),
+            });
+        }
+        report_attribute_coverage(&coverage);
     }
 
     // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
@@ -1842,9 +1961,8 @@ mod tests {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
             point_fields: Default::default(),
-            corpus_fields: Default::default(),
             points: PathBuf::from("points.parquet"),
-            corpus: Some(PathBuf::from("points.parquet")),
+            attribute_sources: Vec::new(),
             access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
             out: PathBuf::from("out"),
             extent: Bounds {

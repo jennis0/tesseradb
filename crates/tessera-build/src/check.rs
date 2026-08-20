@@ -36,7 +36,7 @@ use crate::input::{column_carries, TERM_ID};
 /// One thing wrong, named the way the reader that would have refused it names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// The declaration that owns it — `[corpus]`, `view 's0'`, `layer 'clusters/a'`.
+    /// The declaration that owns it — `source 'points'`, `view 's0'`, `layer 'clusters/a'`.
     pub object: String,
     pub detail: String,
 }
@@ -162,7 +162,7 @@ fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSche
 /// document alone.
 pub fn check(config: &Config) -> CheckReport {
     let mut report = CheckReport::default();
-    check_corpus(config, &mut report);
+    check_attribute_sources(config, &mut report);
     for view in &config.views {
         check_view(view, &mut report);
     }
@@ -170,61 +170,74 @@ pub fn check(config: &Config) -> CheckReport {
     report
 }
 
-fn check_corpus(config: &Config, report: &mut CheckReport) {
-    let object = "[corpus]";
-    let Some(path) = &config.corpus.source else {
-        report.sources.push(SourceChecked {
-            object: object.to_string(),
-            path: None,
-        });
-        if !config.schema.is_empty() {
+/// Every attribute source, and the declared columns each one carries.
+///
+/// **One group per file, exactly as the build reads them.** An attribute names its own `source` or
+/// takes `[defaults]`'s, so the columns a file must carry are the columns of the attributes that
+/// named it — and a column reported missing is reported against the file that was supposed to hold
+/// it rather than against a single corpus that no longer exists.
+fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
+    // A column with no file to read it from — legal to declare, and nothing a build could do
+    // (`configuration.md` §2). Reported here rather than refused, exactly as the build refuses it
+    // only when it comes to read.
+    let mut carried: Vec<usize> = config
+        .attribute_sources
+        .iter()
+        .flat_map(|s| s.attributes.iter().copied())
+        .collect();
+    carried.sort_unstable();
+    for (index, attribute) in config.schema.attributes.iter().enumerate() {
+        if carried.binary_search(&index).is_err() {
             report.note(
-                object,
-                format!(
-                    "{} attribute(s) are declared and `[corpus]` names no `source`, so there is \
-                     no file for the attribute pass to read",
-                    config.schema.attributes.len()
-                ),
+                format!("attribute '{}'", attribute.name),
+                "names no `source` and `[defaults]` declares none, so there is no file for the \
+                 attribute pass to read this column from"
+                    .to_string(),
             );
         }
-        return;
-    };
-    let Some(schema) = open(report, object, path) else {
-        return;
-    };
-    require(report, object, &schema, &config.corpus.fields, ENTITY_ID);
-    // **Every declared attribute against the field that must carry it.** Presence and family, not
-    // fit: a `u8` column whose data carries 300 is a per-row refusal no schema can anticipate.
-    for attribute in &config.schema.attributes {
-        let object = format!("attribute '{}'", attribute.name);
-        let Some((_, field)) = schema.column_with_name(attribute.column()) else {
-            report.note(
-                &object,
-                format!(
-                    "declared type '{}', read from a column named '{}', which `[corpus]`'s source \
-                     does not carry. Its columns are: {}",
-                    attribute.ty.arrow_type_name(),
-                    attribute.column(),
-                    columns(&schema)
-                ),
-            );
+    }
+    for group in &config.attribute_sources {
+        let object = format!("source '{}'", group.name);
+        let Some(schema) = open(report, &object, &group.path) else {
             continue;
         };
-        if !column_carries(attribute, field.data_type()) {
-            report.note(
-                &object,
-                format!(
-                    "declared '{}'{}, and the column '{}' holds {:?}. The width is baked into \
-                     every row, so it is taken from the declaration and the data must match it",
-                    attribute.ty.arrow_type_name(),
-                    match &attribute.vocabulary {
-                        Some(v) => format!(" over vocabulary '{v}', whose keys arrive as utf8"),
-                        None => String::new(),
-                    },
-                    attribute.column(),
-                    field.data_type()
-                ),
-            );
+        require(report, &object, &schema, &group.fields, ENTITY_ID);
+        // **Every declared attribute against the field that must carry it.** Presence and family,
+        // not fit: a `u8` column whose data carries 300 is a per-row refusal no schema can
+        // anticipate.
+        for &index in &group.attributes {
+            let attribute = &config.schema.attributes[index];
+            let object = format!("attribute '{}'", attribute.name);
+            let Some((_, field)) = schema.column_with_name(attribute.column()) else {
+                report.note(
+                    &object,
+                    format!(
+                        "declared type '{}', read from a column named '{}', which source '{}' \
+                         does not carry. Its columns are: {}",
+                        attribute.ty.arrow_type_name(),
+                        attribute.column(),
+                        group.name,
+                        columns(&schema)
+                    ),
+                );
+                continue;
+            };
+            if !column_carries(attribute, field.data_type()) {
+                report.note(
+                    &object,
+                    format!(
+                        "declared '{}'{}, and the column '{}' holds {:?}. The width is baked into \
+                         every row, so it is taken from the declaration and the data must match it",
+                        attribute.ty.arrow_type_name(),
+                        match &attribute.vocabulary {
+                            Some(v) => format!(" over vocabulary '{v}', whose keys arrive as utf8"),
+                            None => String::new(),
+                        },
+                        attribute.column(),
+                        field.data_type()
+                    ),
+                );
+            }
         }
     }
 }

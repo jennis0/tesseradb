@@ -55,23 +55,22 @@ enum Command {
         /// against a bundle whose columns disagree with a schema it holds.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Read one of the declaration's sources from somewhere else: `--file KEY=PATH`,
+        /// Read one of the declaration's sources from somewhere else: `--file NAME=PATH`,
         /// repeatable (configuration.md §8).
         ///
-        /// **An override, not a binding.** Every `source` in the declaration is already a path,
-        /// relative to the declaration itself, so the ordinary build names no files here at all.
-        /// This is for the deployment that stages one source elsewhere, and KEY is the *object*
-        /// whose source it replaces — `corpus`, `view:s0`, `view:s0:point_visibility`,
-        /// `vocabulary:severity`, `layer:clusters/a`, `layer:clusters/a:members`.
+        /// **An override, not a binding.** `[sources]` already writes every path, relative to the
+        /// declaration itself, so the ordinary build names no files here at all. This is for the
+        /// deployment that stages one source elsewhere, and NAME is the source's own name in
+        /// `[sources]` — so one override moves every block reading that file at once.
         ///
-        /// Fail-closed both ways: a key no object declares is a refusal listing the ones that
-        /// exist, and an override never *creates* a source — so a closed vocabulary cannot be
+        /// Fail-closed both ways: a name `[sources]` does not carry is a refusal listing the ones
+        /// it does, and an override never *creates* a source — so a closed vocabulary cannot be
         /// opened, nor a view given geometry, from the command line alone.
         ///
         /// Note the interaction with `--limit` for a member source: a member outside the limited
         /// prefix names nothing this build assigned, and refuses it. Limit the members file with
         /// the corpus.
-        #[arg(long = "file", value_name = "KEY=PATH", value_parser = parse_file_binding)]
+        #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
         /// Mint an external ID for every item from its source entity id, and write the
         /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
@@ -153,10 +152,10 @@ enum Command {
         /// The corpus declaration, overriding `tessera.toml`'s `build.schema`.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Read one of the declaration's sources from somewhere else: `--file KEY=PATH`,
+        /// Read one of the declaration's sources from somewhere else: `--file NAME=PATH`,
         /// repeatable — the same override `tessera build` takes, so a check and the build it
         /// guards see one set of files.
-        #[arg(long = "file", value_name = "KEY=PATH", value_parser = parse_file_binding)]
+        #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
         /// Write the control-plane payloads to stdout instead of the disclosure table: one JSON
         /// array of `PUT /control/layers` bodies, in declaration order.
@@ -790,17 +789,17 @@ fn collect_bindings(
     Ok(bindings)
 }
 
-/// `--file KEY=PATH`. Split at the **first** `=` so a path may contain one.
+/// `--file NAME=PATH`. Split at the **first** `=` so a path may contain one.
 fn parse_file_binding(raw: &str) -> Result<(String, PathBuf), String> {
     let (key, path) = raw.split_once('=').ok_or_else(|| {
         format!(
-            "--file expects KEY=PATH, got '{raw}' (no '=' — the key is the one a `source` in the \
-             config names, the path is the file it binds to)"
+            "--file expects NAME=PATH, got '{raw}' (no '=' — the name is a key of `[sources]`, the \
+             path is the file it should read instead)"
         )
     })?;
     if key.is_empty() || path.is_empty() {
         return Err(format!(
-            "--file '{raw}': both the key and the path must be non-empty"
+            "--file '{raw}': both the name and the path must be non-empty"
         ));
     }
     Ok((key.to_string(), PathBuf::from(path)))
@@ -1299,8 +1298,7 @@ fn main() -> ExitCode {
             let args = tessera_build::BuildArgs {
                 points: acquired.points,
                 point_fields: acquired.point_fields,
-                corpus: acquired.corpus,
-                corpus_fields: acquired.corpus_fields,
+                attribute_sources: acquired.attribute_sources,
                 access: acquired.access,
                 out: out.clone(),
                 extent,

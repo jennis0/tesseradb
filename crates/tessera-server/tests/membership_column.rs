@@ -108,6 +108,9 @@ fn lineage_keys_of(e: u64) -> Vec<i64> {
 // ---------------------------------------------------------------------------------------------
 
 const VIEW_TOML: &str = r#"
+[sources]
+points = "points.parquet"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
@@ -135,7 +138,7 @@ hierarchy = {{ kind = "{kind}", prune_children = false }}
 content = {{ computed = ["centroid", "box"] }}
 
   [layer.members]
-  source = "points.parquet"
+  source = "points"
   fields = {{ key = "{key_column}", entity = "entity_id" }}
 "#
     )
@@ -254,9 +257,8 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
     let root = dir.join("bundle");
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.clone(),
-        corpus: Some(points),
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
         access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
         extent: extent(),

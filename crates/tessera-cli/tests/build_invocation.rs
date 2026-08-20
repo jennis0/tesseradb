@@ -53,8 +53,9 @@ control = "127.0.0.1:45721"
     .unwrap();
     std::fs::write(
         dir.join("schema.toml"),
-        "[[view]]\nname = \"s0\"\nextent = \"auto\"\nsource = \"points.parquet\"\n\
-         point_visibility = { source = \"pairs.parquet\", default = \"public\" }\n",
+        "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[view]]\nname = \"s0\"\nextent = \"auto\"\nsource = \"points\"\n\
+         point_visibility = { source = \"pairs\", default = \"public\" }\n",
     )
     .unwrap();
     write_points(&dir.join("points.parquet"));
@@ -247,9 +248,10 @@ fn a_margin_is_a_fraction_of_the_data_span_on_each_side() {
     project(tmp.path());
     std::fs::write(
         tmp.path().join("schema.toml"),
-        "[[view]]\nname = \"s0\"\nextent = { auto = true, margin = 0.25 }\n\
-         source = \"points.parquet\"\n\
-         point_visibility = { source = \"pairs.parquet\", default = \"public\" }\n",
+        "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[view]]\nname = \"s0\"\nextent = { auto = true, margin = 0.25 }\n\
+         source = \"points\"\n\
+         point_visibility = { source = \"pairs\", default = \"public\" }\n",
     )
     .unwrap();
     let output = build_in(tmp.path(), &[]);
@@ -268,9 +270,10 @@ fn a_stated_extent_is_used_verbatim() {
     project(tmp.path());
     std::fs::write(
         tmp.path().join("schema.toml"),
-        "[[view]]\nname = \"s0\"\nextent = { min = -5.0, max = 2000.0 }\n\
-         source = \"points.parquet\"\n\
-         point_visibility = { source = \"pairs.parquet\", default = \"public\" }\n",
+        "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[view]]\nname = \"s0\"\nextent = { min = -5.0, max = 2000.0 }\n\
+         source = \"points\"\n\
+         point_visibility = { source = \"pairs\", default = \"public\" }\n",
     )
     .unwrap();
     let output = build_in(tmp.path(), &[]);
@@ -285,9 +288,11 @@ fn several_views_refuse_rather_than_choosing_one() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
     let schema = std::fs::read_to_string(tmp.path().join("schema.toml")).unwrap();
+    // `[sources]` is written once; the second view is the view block alone under another name.
+    let (sources, view) = schema.split_once("[[view]]").unwrap();
     std::fs::write(
         tmp.path().join("schema.toml"),
-        format!("{schema}{}", schema.replace("\"s0\"", "\"s1\"")),
+        format!("{sources}[[view]]{view}[[view]]{}", view.replace("\"s0\"", "\"s1\"")),
     )
     .unwrap();
     let stderr = refusal(tmp.path(), &[]);
@@ -332,8 +337,9 @@ fn declare_extent(dir: &Path, extent: &str) {
     std::fs::write(
         dir.join("schema.toml"),
         format!(
-            "[[view]]\nname = \"s0\"\nextent = {extent}\nsource = \"points.parquet\"\n\
-             point_visibility = {{ source = \"pairs.parquet\", default = \"public\" }}\n"
+            "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+             [[view]]\nname = \"s0\"\nextent = {extent}\nsource = \"points\"\n\
+             point_visibility = {{ source = \"pairs\", default = \"public\" }}\n"
         ),
     )
     .unwrap();
@@ -573,8 +579,9 @@ fn a_dense_cluster_behind_two_outliers_is_warned_about() {
 // `--file`, the override
 // -------------------------------------------------------------------------------------------
 
-/// `--file` replaces **one object's** source, keyed by the object. Everything it does not name is
-/// still the declaration's own path.
+/// `--file` replaces **one source's** path, keyed by the name `[sources]` gave it — so everything
+/// reading that source moves at once. Everything it does not name is still the declaration's own
+/// path.
 #[test]
 fn an_override_stages_one_source_elsewhere() {
     let tmp = tempfile::tempdir().unwrap();
@@ -585,7 +592,7 @@ fn an_override_stages_one_source_elsewhere() {
     std::fs::remove_file(tmp.path().join("points.parquet")).unwrap();
     let output = build_in(
         tmp.path(),
-        &["--file", &format!("view:s0={}", staged.display())],
+        &["--file", &format!("points={}", staged.display())],
     );
     assert!(output.status.success(), "{}", stderr(&output));
 }
@@ -598,8 +605,8 @@ fn an_override_naming_no_source_refuses_the_build() {
     project(tmp.path());
     let stderr = refusal(tmp.path(), &["--file", "pionts=/elsewhere/points.parquet"]);
     assert!(stderr.contains("'pionts=…'"), "{stderr}");
-    assert!(stderr.contains("names no source in this config"), "{stderr}");
-    assert!(stderr.contains("view:s0"), "{stderr}");
+    assert!(stderr.contains("names no source in this declaration"), "{stderr}");
+    assert!(stderr.contains("points"), "{stderr}");
     assert!(
         !tmp.path().join("bundles").exists(),
         "the refusal must happen before any output directory is created"
@@ -613,9 +620,9 @@ fn one_key_overridden_twice_refuses_the_build() {
     project(tmp.path());
     let stderr = refusal(
         tmp.path(),
-        &["--file", "view:s0=a.parquet", "--file", "view:s0=b.parquet"],
+        &["--file", "points=a.parquet", "--file", "points=b.parquet"],
     );
-    assert!(stderr.contains("bound 'view:s0' twice"), "{stderr}");
+    assert!(stderr.contains("bound 'points' twice"), "{stderr}");
 }
 
 /// The override's own shape, refused by the value parser rather than read as a path with no key.
@@ -626,7 +633,7 @@ fn an_override_without_a_key_is_refused() {
     let output = build_in(tmp.path(), &["--file", "points.parquet"]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("--file expects KEY=PATH"),
+        stderr(&output).contains("--file expects NAME=PATH"),
         "{}",
         stderr(&output)
     );

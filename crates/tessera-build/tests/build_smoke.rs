@@ -184,9 +184,8 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.clone(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.clone(),
         extent: extent(),
@@ -480,8 +479,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_pairs(&pairs);
     let args = BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
@@ -518,8 +516,7 @@ fn build_rejects_an_empty_selection() {
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
@@ -556,9 +553,8 @@ fn morton_input_requires_the_identity_extent() {
 
     let args = |extent| BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.clone(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: tmp
             .path()
@@ -605,8 +601,7 @@ fn morton_input_requires_the_identity_extent() {
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
@@ -653,8 +648,7 @@ fn build_rejects_an_unsafe_view_id() {
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
@@ -700,8 +694,7 @@ fn limit_filters_the_source_entity_id_prefix() {
 
     let report = build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
@@ -741,8 +734,7 @@ fn verify_accepts_a_freshly_built_bundle() {
 
     build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
@@ -785,8 +777,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
 
     let report = build(&BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
-        corpus: Some(points.clone()),
+        attribute_sources: Vec::new(),
         points,
         access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
@@ -1078,8 +1069,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
 
         let args = BuildArgs {
             point_fields: Default::default(),
-            corpus_fields: Default::default(),
-            corpus: Some(points.clone()),
+            attribute_sources: Vec::new(),
             points,
             access: tessera_build::config::AccessInput::relation(pairs),
             out: out.clone(),

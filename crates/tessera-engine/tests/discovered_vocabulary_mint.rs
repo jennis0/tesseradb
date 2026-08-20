@@ -128,9 +128,8 @@ fn write_points_with_absent_category(path: &Path, n: u64, column: &str) {
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     BuildArgs {
         point_fields: Default::default(),
-        corpus_fields: Default::default(),
         points: points.to_path_buf(),
-        corpus: Some(points.to_path_buf()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
